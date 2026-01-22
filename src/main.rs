@@ -36,10 +36,6 @@ enum Commands {
         #[arg(long, default_value = "./prd.json")]
         prd: PathBuf,
 
-        /// Maximum number of iterations
-        #[arg(long, default_value = "10")]
-        max_iterations: u32,
-
         /// Skip the review loop and go directly to committing
         #[arg(long)]
         skip_review: bool,
@@ -93,19 +89,12 @@ fn main() {
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (
-            None,
-            Some(Commands::Run {
-                prd,
-                max_iterations,
-                skip_review,
-            }),
-        ) => {
+        (None, Some(Commands::Run { prd, skip_review })) => {
             runner = runner.with_skip_review(*skip_review);
             print_header();
             match detect_input_type(prd) {
-                InputType::Prd => runner.run(prd, *max_iterations),
-                InputType::Spec => runner.run_from_spec(prd, *max_iterations),
+                InputType::Prd => runner.run(prd),
+                InputType::Spec => runner.run_from_spec(prd),
             }
         }
 
@@ -173,12 +162,10 @@ fn main() {
 }
 
 fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
-    const DEFAULT_MAX_ITERATIONS: u32 = 10;
-
     print_header();
     match detect_input_type(file) {
-        InputType::Prd => runner.run(file, DEFAULT_MAX_ITERATIONS),
-        InputType::Spec => runner.run_from_spec(file, DEFAULT_MAX_ITERATIONS),
+        InputType::Prd => runner.run(file),
+        InputType::Spec => runner.run_from_spec(file),
     }
 }
 
@@ -206,8 +193,6 @@ fn output_skill(name: &str) -> autom8::error::Result<()> {
 fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
     use autom8::prd::Prd;
     use autom8::state::StateManager;
-
-    const DEFAULT_MAX_ITERATIONS: u32 = 10;
 
     print_header();
     println!("{YELLOW}[detecting]{RESET} Scanning for PRD files...");
@@ -268,7 +253,7 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                     println!();
                     prompt::print_action(&format!("Resuming {}", prd.project));
                     println!();
-                    runner.run(path, DEFAULT_MAX_ITERATIONS)
+                    runner.run(path)
                 }
                 1 => {
                     fs::remove_file(path).ok();
@@ -318,7 +303,7 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
             println!();
             prompt::print_action(&format!("Resuming {}", prd.project));
             println!();
-            runner.run(path, DEFAULT_MAX_ITERATIONS)
+            runner.run(path)
         }
     }
     // Priority 2: Legacy ./prd.json (backwards compatibility)
@@ -350,7 +335,7 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                 println!();
                 prompt::print_action("Starting implementation from prd.json");
                 println!();
-                runner.run(prd_json, DEFAULT_MAX_ITERATIONS)
+                runner.run(prd_json)
             }
             "Migrate to .autom8/prds/ and continue" => {
                 println!();
@@ -363,14 +348,14 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                 println!();
                 prompt::print_action(&format!("Resuming {}", prd.project));
                 println!();
-                runner.run(&new_path, DEFAULT_MAX_ITERATIONS)
+                runner.run(&new_path)
             }
             "Regenerate from prd.md (start fresh)" => {
                 println!();
                 prompt::print_action("Regenerating from prd.md");
                 fs::remove_file(prd_json).ok();
                 println!();
-                runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
+                runner.run_from_spec(prd_md)
             }
             "Delete and start fresh" => {
                 clean_prd_files()?;
@@ -405,7 +390,7 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                 println!();
                 prompt::print_action("Converting prd.md and starting implementation");
                 println!();
-                runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
+                runner.run_from_spec(prd_md)
             }
             1 => {
                 fs::remove_file(prd_md).ok();

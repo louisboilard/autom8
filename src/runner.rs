@@ -1,16 +1,17 @@
 use crate::claude::{
-    run_claude, run_corrector, run_for_commit, run_for_prd_generation, run_reviewer, ClaudeResult,
-    CommitResult, CorrectorResult, ReviewResult,
+    run_claude, run_corrector, run_for_commit, run_for_prd_generation, run_reviewer, ClaudeOutcome,
+    ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
     print_all_complete, print_breadcrumb_trail, print_claude_output, print_error,
-    print_generating_prd, print_header, print_info, print_issues_found, print_iteration_complete,
-    print_iteration_start, print_max_review_iterations, print_phase_banner, print_prd_generated,
-    print_proceeding_to_implementation, print_project_info, print_review_passed, print_reviewing,
-    print_run_summary, print_skip_review, print_spec_loaded, print_state_transition,
-    print_story_complete, print_warning, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_full_progress, print_generating_prd, print_header, print_info, print_issues_found,
+    print_iteration_complete, print_iteration_start, print_max_review_iterations,
+    print_phase_banner, print_prd_generated, print_proceeding_to_implementation,
+    print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
+    print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
+    print_warning, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::prd::Prd;
 use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
@@ -45,7 +46,7 @@ impl Runner {
     }
 
     /// Run from a prd.md spec file - converts to JSON first, then implements
-    pub fn run_from_spec(&self, spec_path: &Path, max_iterations: u32) -> Result<()> {
+    pub fn run_from_spec(&self, spec_path: &Path) -> Result<()> {
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -67,7 +68,7 @@ impl Runner {
         let prd_path = prds_dir.join(format!("{}.json", stem));
 
         // Initialize state
-        let mut state = RunState::from_spec(spec_path.clone(), prd_path.clone(), max_iterations);
+        let mut state = RunState::from_spec(spec_path.clone(), prd_path.clone());
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -126,10 +127,10 @@ impl Runner {
         print_proceeding_to_implementation();
 
         // Continue with normal implementation flow
-        self.run_implementation_loop(state, &prd_path, max_iterations)
+        self.run_implementation_loop(state, &prd_path)
     }
 
-    pub fn run(&self, prd_path: &Path, max_iterations: u32) -> Result<()> {
+    pub fn run(&self, prd_path: &Path) -> Result<()> {
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -158,24 +159,15 @@ impl Runner {
         }
 
         // Initialize state
-        let state = RunState::new(
-            prd_path.to_path_buf(),
-            prd.branch_name.clone(),
-            max_iterations,
-        );
+        let state = RunState::new(prd_path.to_path_buf(), prd.branch_name.clone());
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
         print_project_info(&prd);
 
-        self.run_implementation_loop(state, &prd_path, max_iterations)
+        self.run_implementation_loop(state, &prd_path)
     }
 
-    fn run_implementation_loop(
-        &self,
-        mut state: RunState,
-        prd_path: &Path,
-        max_iterations: u32,
-    ) -> Result<()> {
+    fn run_implementation_loop(&self, mut state: RunState, prd_path: &Path) -> Result<()> {
         // Transition to PickingStory
         print_state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
@@ -302,6 +294,15 @@ impl Runner {
                         // Print breadcrumb trail after review phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
+                        // Show progress bar after review task completion
+                        print_full_progress(
+                            prd.completed_count(),
+                            prd.total_count(),
+                            state.review_iteration,
+                            MAX_REVIEW_ITERATIONS,
+                        );
+                        println!();
+
                         match review_result {
                             ReviewResult::Pass => {
                                 // Delete autom8_review.md if it exists
@@ -372,6 +373,15 @@ impl Runner {
 
                                 // Print breadcrumb trail after correct phase completion
                                 print_breadcrumb_trail(&breadcrumb);
+
+                                // Show progress bar after correct task completion
+                                print_full_progress(
+                                    prd.completed_count(),
+                                    prd.total_count(),
+                                    state.review_iteration,
+                                    MAX_REVIEW_ITERATIONS,
+                                );
+                                println!();
 
                                 match corrector_result {
                                     CorrectorResult::Complete => {
@@ -481,14 +491,6 @@ impl Runner {
                 return Ok(());
             }
 
-            // Check iteration limit
-            if state.iteration >= max_iterations {
-                state.transition_to(MachineState::Failed);
-                self.state_manager.save(&state)?;
-                print_summary(state.iteration, &story_results)?;
-                return Err(Autom8Error::MaxIterationsReached(max_iterations));
-            }
-
             // Pick next story
             let story = prd
                 .next_incomplete_story()
@@ -507,7 +509,7 @@ impl Runner {
             breadcrumb.enter_state(BreadcrumbState::Story);
 
             print_phase_banner("RUNNING", BannerColor::Cyan);
-            print_iteration_start(state.iteration, max_iterations, &story.id, &story.title);
+            print_iteration_start(state.iteration, &story.id, &story.title);
 
             // Run Claude with spinner or verbose output
             let story_start = Instant::now();
@@ -523,7 +525,7 @@ impl Runner {
             let result = if verbose {
                 let mut timer =
                     VerboseTimer::new_with_story_progress(&story.id, story_index, total_stories);
-                let res = run_claude(&prd, &story, prd_path, |line| {
+                let res = run_claude(&prd, &story, prd_path, &state.iterations, |line| {
                     print_claude_output(line);
                 });
                 match &res {
@@ -534,7 +536,7 @@ impl Runner {
             } else {
                 let mut spinner =
                     ClaudeSpinner::new_with_story_progress(&story.id, story_index, total_stories);
-                let res = run_claude(&prd, &story, prd_path, |line| {
+                let res = run_claude(&prd, &story, prd_path, &state.iterations, |line| {
                     spinner.update(line);
                 });
                 match &res {
@@ -545,8 +547,12 @@ impl Runner {
             };
 
             match result {
-                Ok(ClaudeResult::AllStoriesComplete) => {
+                Ok(ClaudeStoryResult {
+                    outcome: ClaudeOutcome::AllStoriesComplete,
+                    work_summary,
+                }) => {
                     state.finish_iteration(IterationStatus::Success, String::new());
+                    state.set_work_summary(work_summary);
 
                     let duration = state.current_iteration_duration();
                     story_results.push(StoryResult {
@@ -558,6 +564,12 @@ impl Runner {
 
                     // Print breadcrumb trail after story phase completion
                     print_breadcrumb_trail(&breadcrumb);
+
+                    // Show progress bar after story task completion
+                    // Reload PRD to get accurate count since all stories are now complete
+                    let updated_prd = Prd::load(prd_path)?;
+                    print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
+                    println!();
 
                     if verbose {
                         print_story_complete(&story.id, duration);
@@ -655,6 +667,16 @@ impl Runner {
                             // Print breadcrumb trail after review phase completion
                             print_breadcrumb_trail(&breadcrumb);
 
+                            // Show progress bar after review task completion
+                            // Use updated_prd which was loaded earlier in this block
+                            print_full_progress(
+                                updated_prd.completed_count(),
+                                updated_prd.total_count(),
+                                state.review_iteration,
+                                MAX_REVIEW_ITERATIONS,
+                            );
+                            println!();
+
                             match review_result {
                                 ReviewResult::Pass => {
                                     // Delete autom8_review.md if it exists
@@ -730,6 +752,15 @@ impl Runner {
 
                                     // Print breadcrumb trail after correct phase completion
                                     print_breadcrumb_trail(&breadcrumb);
+
+                                    // Show progress bar after correct task completion
+                                    print_full_progress(
+                                        updated_prd.completed_count(),
+                                        updated_prd.total_count(),
+                                        state.review_iteration,
+                                        MAX_REVIEW_ITERATIONS,
+                                    );
+                                    println!();
 
                                     match corrector_result {
                                         CorrectorResult::Complete => {
@@ -839,8 +870,12 @@ impl Runner {
                     self.archive_and_cleanup(&state)?;
                     return Ok(());
                 }
-                Ok(ClaudeResult::IterationComplete) => {
+                Ok(ClaudeStoryResult {
+                    outcome: ClaudeOutcome::IterationComplete,
+                    work_summary,
+                }) => {
                     state.finish_iteration(IterationStatus::Success, String::new());
+                    state.set_work_summary(work_summary);
                     self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
@@ -871,9 +906,16 @@ impl Runner {
                         }
                     }
 
+                    // Show progress bar after story task completion
+                    print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
+                    println!();
+
                     // Continue to next iteration
                 }
-                Ok(ClaudeResult::Error(msg)) => {
+                Ok(ClaudeStoryResult {
+                    outcome: ClaudeOutcome::Error(msg),
+                    ..
+                }) => {
                     state.finish_iteration(IterationStatus::Failed, msg.clone());
                     state.transition_to(MachineState::Failed);
                     self.state_manager.save(&state)?;
@@ -916,14 +958,13 @@ impl Runner {
                 || state.status == crate::state::RunStatus::Failed
             {
                 let prd_path = state.prd_path.clone();
-                let max_iterations = state.max_iterations;
 
                 // Archive the interrupted/failed run before starting fresh
                 self.state_manager.archive(&state)?;
                 self.state_manager.clear_current()?;
 
                 // Start a new run with the same parameters
-                return self.run(&prd_path, max_iterations);
+                return self.run(&prd_path);
             }
         }
 
@@ -934,8 +975,6 @@ impl Runner {
     /// Scan .autom8/prds/ for incomplete PRDs and offer to resume one
     fn smart_resume(&self) -> Result<()> {
         use crate::prompt;
-
-        const DEFAULT_MAX_ITERATIONS: u32 = 10;
 
         let prd_files = self.state_manager.list_prds()?;
         if prd_files.is_empty() {
@@ -977,7 +1016,7 @@ impl Runner {
             println!();
             prompt::print_action(&format!("Resuming {}", prd.project));
             println!();
-            return self.run(prd_path, DEFAULT_MAX_ITERATIONS);
+            return self.run(prd_path);
         }
 
         // Multiple incomplete PRDs - let user choose
@@ -1014,7 +1053,7 @@ impl Runner {
         println!();
         prompt::print_action(&format!("Resuming {}", prd.project));
         println!();
-        self.run(prd_path, DEFAULT_MAX_ITERATIONS)
+        self.run(prd_path)
     }
 
     fn archive_and_cleanup(&self, state: &RunState) -> Result<()> {

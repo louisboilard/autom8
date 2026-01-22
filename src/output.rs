@@ -120,16 +120,11 @@ pub fn print_project_info(prd: &Prd) {
     println!();
 }
 
-pub fn print_iteration_start(
-    iteration: u32,
-    max_iterations: u32,
-    story_id: &str,
-    story_title: &str,
-) {
+pub fn print_iteration_start(iteration: u32, story_id: &str, story_title: &str) {
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!(
-        "{YELLOW}Iteration {}/{}{RESET} - Running {BOLD}{}{RESET}: {}",
-        iteration, max_iterations, story_id, story_title
+        "{YELLOW}Task {}{RESET} - Running {BOLD}{}{RESET}: {}",
+        iteration, story_id, story_title
     );
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!();
@@ -155,7 +150,7 @@ pub fn print_story_complete(story_id: &str, duration_secs: u64) {
 pub fn print_iteration_complete(iteration: u32) {
     println!();
     println!("{GRAY}{}{RESET}", "-".repeat(57));
-    println!("{YELLOW}Iteration {} finished{RESET}", iteration);
+    println!("{YELLOW}Task {} finished{RESET}", iteration);
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!();
 }
@@ -186,15 +181,12 @@ pub fn print_status(state: &RunState) {
     if let Some(story) = &state.current_story {
         println!("{BLUE}Current:{RESET}   {}", story);
     }
-    println!(
-        "{BLUE}Iteration:{RESET} {}/{}",
-        state.iteration, state.max_iterations
-    );
+    println!("{BLUE}Task:{RESET}      {}", state.iteration);
     println!(
         "{BLUE}Started:{RESET}   {}",
         state.started_at.format("%Y-%m-%d %H:%M:%S")
     );
-    println!("{BLUE}Iterations run:{RESET} {}", state.iterations.len());
+    println!("{BLUE}Tasks run:{RESET}  {}", state.iterations.len());
 }
 
 pub fn print_history_entry(state: &RunState, index: usize) {
@@ -204,7 +196,7 @@ pub fn print_history_entry(state: &RunState, index: usize) {
         _ => YELLOW,
     };
     println!(
-        "{}. [{}{:?}{}] {} - {} ({} iterations)",
+        "{}. [{}{:?}{}] {} - {} ({} tasks)",
         index + 1,
         status_color,
         state.status,
@@ -298,7 +290,7 @@ pub fn print_reviewing(iteration: u32, max_iterations: u32) {
     println!();
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!(
-        "{YELLOW}Reviewing changes (iteration {}/{})...{RESET}",
+        "{YELLOW}Reviewing changes (review {}/{})...{RESET}",
         iteration, max_iterations
     );
     println!("{GRAY}{}{RESET}", "-".repeat(57));
@@ -325,7 +317,7 @@ pub fn print_issues_found(iteration: u32, max_iterations: u32) {
     println!();
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!(
-        "{YELLOW}Issues found. Running corrector (iteration {}/{})...{RESET}",
+        "{YELLOW}Issues found. Running corrector (attempt {}/{})...{RESET}",
         iteration, max_iterations
     );
     println!("{GRAY}{}{RESET}", "-".repeat(57));
@@ -335,9 +327,71 @@ pub fn print_issues_found(iteration: u32, max_iterations: u32) {
 pub fn print_max_review_iterations() {
     println!();
     println!("{GRAY}{}{RESET}", "-".repeat(57));
-    println!("{RED}{BOLD}Review failed after 3 iterations.{RESET}");
+    println!("{RED}{BOLD}Review failed after 3 attempts.{RESET}");
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!();
+}
+
+/// Print a progress bar showing task (story) completion status.
+///
+/// Format: `Tasks: [███░░░░░] 3/8 complete`
+///
+/// This should be called after each story task completes to show the user
+/// the current state of the run.
+///
+/// # Arguments
+/// * `completed` - Number of completed stories
+/// * `total` - Total number of stories
+pub fn print_tasks_progress(completed: usize, total: usize) {
+    let progress_bar = make_progress_bar(completed, total, 12);
+    println!(
+        "{BLUE}Tasks:{RESET}   [{}] {}/{} complete",
+        progress_bar, completed, total
+    );
+}
+
+/// Print a progress bar showing review iteration status.
+///
+/// Format: `Review: [██░░] 2/3`
+///
+/// This should be called after each review or correct task completes
+/// to show the user the current review iteration.
+///
+/// # Arguments
+/// * `current` - Current review iteration (1-indexed)
+/// * `max` - Maximum number of review iterations
+pub fn print_review_progress(current: u32, max: u32) {
+    let progress_bar = make_progress_bar(current as usize, max as usize, 8);
+    println!(
+        "{BLUE}Review:{RESET}  [{}] {}/{}",
+        progress_bar, current, max
+    );
+}
+
+/// Print both tasks progress and review progress.
+///
+/// This is a convenience function to show full progress context
+/// during review/correct phases.
+///
+/// Format:
+/// ```text
+/// Tasks:   [███░░░░░] 3/8 complete
+/// Review:  [██░░] 2/3
+/// ```
+///
+/// # Arguments
+/// * `tasks_completed` - Number of completed stories
+/// * `tasks_total` - Total number of stories
+/// * `review_current` - Current review iteration (1-indexed)
+/// * `review_max` - Maximum number of review iterations
+pub fn print_full_progress(
+    tasks_completed: usize,
+    tasks_total: usize,
+    review_current: u32,
+    review_max: u32,
+) {
+    print_tasks_progress(tasks_completed, tasks_total);
+    print_review_progress(review_current, review_max);
 }
 
 pub fn print_run_summary(
@@ -358,7 +412,7 @@ pub fn print_run_summary(
         "{BLUE}Stories:{RESET}    {}/{} completed",
         completed_stories, total_stories
     );
-    println!("{BLUE}Iterations:{RESET} {}", total_iterations);
+    println!("{BLUE}Tasks:{RESET}      {}", total_iterations);
     println!(
         "{BLUE}Total time:{RESET} {:02}:{:02}:{:02}",
         hours, mins, secs
@@ -473,5 +527,90 @@ mod tests {
     fn test_print_phase_banner_long_name() {
         // Should not panic with a very long name
         print_phase_banner("THIS_IS_A_VERY_LONG_PHASE_NAME_THAT_EXCEEDS_NORMAL_LENGTH", BannerColor::Cyan);
+    }
+
+    // ========================================================================
+    // US-004: Progress bar display tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_tasks_progress_no_panic() {
+        // Verify the function doesn't panic with various inputs
+        print_tasks_progress(0, 8);
+        print_tasks_progress(3, 8);
+        print_tasks_progress(8, 8);
+    }
+
+    #[test]
+    fn test_print_tasks_progress_zero_total() {
+        // Should not panic when total is zero
+        print_tasks_progress(0, 0);
+    }
+
+    #[test]
+    fn test_print_review_progress_no_panic() {
+        // Verify the function doesn't panic with various inputs
+        print_review_progress(1, 3);
+        print_review_progress(2, 3);
+        print_review_progress(3, 3);
+    }
+
+    #[test]
+    fn test_print_review_progress_zero() {
+        // Should not panic when values are zero
+        print_review_progress(0, 0);
+    }
+
+    #[test]
+    fn test_print_full_progress_no_panic() {
+        // Verify the function doesn't panic with various inputs
+        print_full_progress(3, 8, 1, 3);
+        print_full_progress(8, 8, 3, 3);
+        print_full_progress(0, 10, 1, 3);
+    }
+
+    #[test]
+    fn test_print_full_progress_zero_values() {
+        // Should not panic when values are zero
+        print_full_progress(0, 0, 0, 0);
+    }
+
+    #[test]
+    fn test_make_progress_bar_empty() {
+        let bar = make_progress_bar(0, 8, 12);
+        // Should have 12 chars (all empty)
+        assert!(bar.contains("░"));
+    }
+
+    #[test]
+    fn test_make_progress_bar_full() {
+        let bar = make_progress_bar(8, 8, 12);
+        // Should have 12 filled chars
+        assert!(bar.contains("█"));
+    }
+
+    #[test]
+    fn test_make_progress_bar_partial() {
+        let bar = make_progress_bar(4, 8, 12);
+        // Should have mix of filled and empty
+        assert!(bar.contains("█"));
+        assert!(bar.contains("░"));
+    }
+
+    #[test]
+    fn test_make_progress_bar_zero_total() {
+        let bar = make_progress_bar(0, 0, 12);
+        // Should return spaces when total is zero
+        assert_eq!(bar.len(), 12);
+    }
+
+    #[test]
+    fn test_make_progress_bar_width() {
+        // Test different widths
+        let bar_8 = make_progress_bar(4, 8, 8);
+        let bar_16 = make_progress_bar(8, 16, 16);
+        // Both should work without panic
+        assert!(!bar_8.is_empty());
+        assert!(!bar_16.is_empty());
     }
 }

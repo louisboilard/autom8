@@ -42,6 +42,9 @@ pub struct IterationRecord {
     pub finished_at: Option<DateTime<Utc>>,
     pub status: IterationStatus,
     pub output_snippet: String,
+    /// Summary of what was accomplished in this iteration, for cross-task context
+    #[serde(default)]
+    pub work_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -63,7 +66,6 @@ pub struct RunState {
     pub branch: String,
     pub current_story: Option<String>,
     pub iteration: u32,
-    pub max_iterations: u32,
     /// Tracks the current review cycle (1, 2, or 3) during the review loop
     #[serde(default)]
     pub review_iteration: u32,
@@ -73,7 +75,7 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new(prd_path: PathBuf, branch: String, max_iterations: u32) -> Self {
+    pub fn new(prd_path: PathBuf, branch: String) -> Self {
         Self {
             run_id: Uuid::new_v4().to_string(),
             status: RunStatus::Running,
@@ -83,7 +85,6 @@ impl RunState {
             branch,
             current_story: None,
             iteration: 0,
-            max_iterations,
             review_iteration: 0,
             started_at: Utc::now(),
             finished_at: None,
@@ -91,7 +92,7 @@ impl RunState {
         }
     }
 
-    pub fn from_spec(spec_path: PathBuf, prd_path: PathBuf, max_iterations: u32) -> Self {
+    pub fn from_spec(spec_path: PathBuf, prd_path: PathBuf) -> Self {
         Self {
             run_id: Uuid::new_v4().to_string(),
             status: RunStatus::Running,
@@ -101,7 +102,6 @@ impl RunState {
             branch: String::new(), // Will be set after PRD generation
             current_story: None,
             iteration: 0,
-            max_iterations,
             review_iteration: 0,
             started_at: Utc::now(),
             finished_at: None,
@@ -136,6 +136,7 @@ impl RunState {
             finished_at: None,
             status: IterationStatus::Running,
             output_snippet: String::new(),
+            work_summary: None,
         });
     }
 
@@ -146,6 +147,13 @@ impl RunState {
             iter.output_snippet = output_snippet;
         }
         self.machine_state = MachineState::PickingStory;
+    }
+
+    /// Set the work summary on the current (last) iteration
+    pub fn set_work_summary(&mut self, summary: Option<String>) {
+        if let Some(iter) = self.iterations.last_mut() {
+            iter.work_summary = summary;
+        }
     }
 
     pub fn current_iteration_duration(&self) -> u64 {
@@ -318,19 +326,19 @@ mod tests {
 
     #[test]
     fn test_run_state_has_review_iteration() {
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         assert_eq!(state.review_iteration, 0);
     }
 
     #[test]
     fn test_run_state_from_spec_has_review_iteration() {
-        let state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("prd.json"), 3);
+        let state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("prd.json"));
         assert_eq!(state.review_iteration, 0);
     }
 
     #[test]
     fn test_transition_to_reviewing() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         state.transition_to(MachineState::Reviewing);
         assert_eq!(state.machine_state, MachineState::Reviewing);
         assert_eq!(state.status, RunStatus::Running);
@@ -338,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_transition_to_correcting() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         state.transition_to(MachineState::Correcting);
         assert_eq!(state.machine_state, MachineState::Correcting);
         assert_eq!(state.status, RunStatus::Running);
@@ -346,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_review_loop_state_transitions() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
         // Simulate: PickingStory (all complete) → Reviewing → Correcting → Reviewing → Committing
         state.transition_to(MachineState::PickingStory);
@@ -390,8 +398,94 @@ mod tests {
 
     #[test]
     fn test_run_state_review_iteration_serialization() {
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"review_iteration\":0"));
+    }
+
+    #[test]
+    fn test_iteration_record_work_summary_initialized_as_none() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        assert!(state.iterations[0].work_summary.is_none());
+    }
+
+    #[test]
+    fn test_iteration_record_work_summary_can_be_set() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        state.iterations[0].work_summary = Some("Added authentication module".to_string());
+        assert_eq!(
+            state.iterations[0].work_summary,
+            Some("Added authentication module".to_string())
+        );
+    }
+
+    #[test]
+    fn test_iteration_record_work_summary_serialization() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        state.iterations[0].work_summary = Some("Implemented feature X".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"work_summary\":\"Implemented feature X\""));
+    }
+
+    #[test]
+    fn test_iteration_record_work_summary_none_serialization() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"work_summary\":null"));
+    }
+
+    #[test]
+    fn test_iteration_record_backwards_compatible_without_work_summary() {
+        // Simulate a legacy state.json that doesn't have the work_summary field
+        let legacy_json = r#"{
+            "number": 1,
+            "story_id": "US-001",
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "status": "running",
+            "output_snippet": ""
+        }"#;
+
+        let record: IterationRecord = serde_json::from_str(legacy_json).unwrap();
+        assert!(record.work_summary.is_none());
+        assert_eq!(record.story_id, "US-001");
+    }
+
+    #[test]
+    fn test_set_work_summary_on_current_iteration() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        assert!(state.iterations[0].work_summary.is_none());
+
+        state.set_work_summary(Some("Added new feature X".to_string()));
+        assert_eq!(
+            state.iterations[0].work_summary,
+            Some("Added new feature X".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_work_summary_none() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        state.iterations[0].work_summary = Some("Existing summary".to_string());
+
+        state.set_work_summary(None);
+        assert!(state.iterations[0].work_summary.is_none());
+    }
+
+    #[test]
+    fn test_set_work_summary_no_iterations() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        // No iterations started yet
+        state.set_work_summary(Some("Should not crash".to_string()));
+        // Should not panic, just do nothing
+        assert!(state.iterations.is_empty());
     }
 }

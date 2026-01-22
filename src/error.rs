@@ -18,9 +18,6 @@ pub enum Autom8Error {
     #[error("Claude process timed out after {0} seconds")]
     ClaudeTimeout(u64),
 
-    #[error("Maximum iterations ({0}) reached without completion")]
-    MaxIterationsReached(u32),
-
     #[error("State file error: {0}")]
     StateError(String),
 
