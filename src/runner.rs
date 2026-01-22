@@ -5,17 +5,18 @@ use crate::claude::{
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
-    print_all_complete, print_claude_output, print_error, print_generating_prd, print_info,
-    print_issues_found, print_iteration_complete, print_iteration_start,
+    print_all_complete, print_claude_output, print_error, print_generating_prd, print_header,
+    print_info, print_issues_found, print_iteration_complete, print_iteration_start,
     print_max_review_iterations, print_prd_generated, print_proceeding_to_implementation,
     print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_loaded, print_state_transition, print_story_complete, print_warning, StoryResult,
+    BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::prd::Prd;
 use crate::progress::{ClaudeSpinner, VerboseTimer};
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub struct Runner {
@@ -57,11 +58,13 @@ impl Runner {
             .canonicalize()
             .map_err(|_| Autom8Error::SpecNotFound(spec_path.to_path_buf()))?;
 
-        // Determine PRD output path (same directory as spec)
-        let prd_path = spec_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("prd.json");
+        // Determine PRD output path in .autom8/prds/ directory
+        let stem = spec_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("prd");
+        let prds_dir = self.state_manager.ensure_prds_dir()?;
+        let prd_path = prds_dir.join(format!("{}.json", stem));
 
         // Initialize state
         let mut state = RunState::from_spec(spec_path.clone(), prd_path.clone(), max_iterations);
@@ -232,10 +235,8 @@ impl Runner {
                         // Run reviewer
                         let verbose = self.verbose;
                         let review_result = if verbose {
-                            let mut timer = VerboseTimer::new(&format!(
-                                "review-{}",
-                                state.review_iteration
-                            ));
+                            let mut timer =
+                                VerboseTimer::new(&format!("review-{}", state.review_iteration));
                             let res = run_reviewer(
                                 &prd,
                                 state.review_iteration,
@@ -769,26 +770,111 @@ impl Runner {
     }
 
     pub fn resume(&self) -> Result<()> {
-        let state = self
-            .state_manager
-            .load_current()?
-            .ok_or(Autom8Error::NoActiveRun)?;
+        // First try: load from active state
+        if let Some(state) = self.state_manager.load_current()? {
+            if state.status == crate::state::RunStatus::Running
+                || state.status == crate::state::RunStatus::Failed
+            {
+                let prd_path = state.prd_path.clone();
+                let max_iterations = state.max_iterations;
 
-        if state.status != crate::state::RunStatus::Running
-            && state.status != crate::state::RunStatus::Failed
-        {
-            return Err(Autom8Error::NoActiveRun);
+                // Archive the interrupted/failed run before starting fresh
+                self.state_manager.archive(&state)?;
+                self.state_manager.clear_current()?;
+
+                // Start a new run with the same parameters
+                return self.run(&prd_path, max_iterations);
+            }
         }
 
-        let prd_path = state.prd_path.clone();
-        let max_iterations = state.max_iterations;
+        // Second try: smart resume - scan for incomplete PRDs
+        self.smart_resume()
+    }
 
-        // Archive the interrupted/failed run before starting fresh
-        self.state_manager.archive(&state)?;
-        self.state_manager.clear_current()?;
+    /// Scan .autom8/prds/ for incomplete PRDs and offer to resume one
+    fn smart_resume(&self) -> Result<()> {
+        use crate::prompt;
 
-        // Start a new run with the same parameters
-        self.run(&prd_path, max_iterations)
+        const DEFAULT_MAX_ITERATIONS: u32 = 10;
+
+        let prd_files = self.state_manager.list_prds()?;
+        if prd_files.is_empty() {
+            return Err(Autom8Error::NoPrdsToResume);
+        }
+
+        // Filter to incomplete PRDs
+        let incomplete_prds: Vec<(PathBuf, Prd)> = prd_files
+            .into_iter()
+            .filter_map(|path| {
+                Prd::load(&path).ok().and_then(|prd| {
+                    if prd.is_incomplete() {
+                        Some((path, prd))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        if incomplete_prds.is_empty() {
+            return Err(Autom8Error::NoPrdsToResume);
+        }
+
+        print_header();
+        println!("{YELLOW}[resume]{RESET} No active run found, scanning for incomplete PRDs...");
+        println!();
+
+        if incomplete_prds.len() == 1 {
+            // Auto-resume single incomplete PRD
+            let (prd_path, prd) = &incomplete_prds[0];
+            let (completed, total) = prd.progress();
+            println!(
+                "{CYAN}Found{RESET} {} {GRAY}({}/{}){RESET}",
+                prd_path.display(),
+                completed,
+                total
+            );
+            println!();
+            prompt::print_action(&format!("Resuming {}", prd.project));
+            println!();
+            return self.run(prd_path, DEFAULT_MAX_ITERATIONS);
+        }
+
+        // Multiple incomplete PRDs - let user choose
+        println!(
+            "{BOLD}Found {} incomplete PRDs:{RESET}",
+            incomplete_prds.len()
+        );
+        println!();
+
+        let options: Vec<String> = incomplete_prds
+            .iter()
+            .map(|(path, prd)| {
+                let (completed, total) = prd.progress();
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("prd.json");
+                format!("{} - {} ({}/{})", filename, prd.project, completed, total)
+            })
+            .chain(std::iter::once("Exit".to_string()))
+            .collect();
+
+        let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+        let choice = prompt::select("Which PRD would you like to resume?", &option_refs, 0);
+
+        // Handle Exit option
+        if choice >= incomplete_prds.len() {
+            println!();
+            println!("Exiting.");
+            return Err(Autom8Error::NoPrdsToResume);
+        }
+
+        let (prd_path, prd) = &incomplete_prds[choice];
+        println!();
+        prompt::print_action(&format!("Resuming {}", prd.project));
+        println!();
+        self.run(prd_path, DEFAULT_MAX_ITERATIONS)
     }
 
     fn archive_and_cleanup(&self, state: &RunState) -> Result<()> {

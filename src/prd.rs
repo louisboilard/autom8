@@ -86,6 +86,16 @@ impl Prd {
         self.user_stories.iter().all(|s| s.passes)
     }
 
+    /// Returns true if PRD has incomplete stories
+    pub fn is_incomplete(&self) -> bool {
+        !self.all_complete()
+    }
+
+    /// Returns (completed, total) story counts
+    pub fn progress(&self) -> (usize, usize) {
+        (self.completed_count(), self.total_count())
+    }
+
     pub fn mark_story_complete(&mut self, story_id: &str) {
         if let Some(story) = self.user_stories.iter_mut().find(|s| s.id == story_id) {
             story.passes = true;

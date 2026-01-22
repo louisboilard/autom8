@@ -189,10 +189,8 @@ impl ClaudeSpinner {
                     spinner_clone
                         .set_message(format!("PRD generation | {} [{}]", truncated, time_str));
                 } else {
-                    spinner_clone.set_message(format!(
-                        "{} | {} [{}]",
-                        story_id_owned, truncated, time_str
-                    ));
+                    spinner_clone
+                        .set_message(format!("{} | {} [{}]", story_id_owned, truncated, time_str));
                 }
             }
         });
@@ -562,7 +560,8 @@ mod tests {
     fn test_spinner_update_uses_terminal_width() {
         // Create a spinner and update with a long message
         let mut spinner = ClaudeSpinner::new("US-001");
-        let long_activity = "This is a very long activity message that should be truncated based on terminal width";
+        let long_activity =
+            "This is a very long activity message that should be truncated based on terminal width";
         spinner.update(long_activity);
 
         // The activity should be stored
@@ -693,7 +692,7 @@ mod tests {
         let mut spinner = ClaudeSpinner::new("US-006");
         // Should not panic and should cleanly finish
         spinner.finish_success(65); // 1m 5s
-        // Timer should be stopped
+                                    // Timer should be stopped
         assert!(spinner.stop_flag.load(Ordering::Relaxed));
         assert!(spinner.timer_thread.is_none());
     }

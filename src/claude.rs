@@ -279,24 +279,31 @@ where
         return Err(Autom8Error::PrdGenerationFailed(error_msg));
     }
 
-    // Extract JSON from response (handle potential markdown code blocks)
-    let json_str = extract_json(&full_output).ok_or_else(|| {
+    // Try to get JSON either from response or from file if Claude wrote it directly
+    let json_str = if let Some(json) = extract_json(&full_output) {
+        json
+    } else if output_path.exists() {
+        // Claude may have written the file directly using tools
+        std::fs::read_to_string(output_path).map_err(|e| {
+            Autom8Error::InvalidGeneratedPrd(format!("Failed to read generated file: {}", e))
+        })?
+    } else {
         let preview = if full_output.len() > 200 {
             format!("{}...", &full_output[..200])
         } else {
             full_output.clone()
         };
-        Autom8Error::InvalidGeneratedPrd(format!(
+        return Err(Autom8Error::InvalidGeneratedPrd(format!(
             "No valid JSON found in response. Response preview: {:?}",
             preview
-        ))
-    })?;
+        )));
+    };
 
     // Parse the JSON into Prd
     let prd: Prd = serde_json::from_str(&json_str)
         .map_err(|e| Autom8Error::InvalidGeneratedPrd(format!("JSON parse error: {}", e)))?;
 
-    // Save to output path
+    // Save to output path (may overwrite if Claude already wrote it, but ensures consistent format)
     prd.save(output_path)?;
 
     Ok(prd)
@@ -383,7 +390,9 @@ where
             accumulated_text.push_str(&text);
 
             if text.to_lowercase().contains("nothing to commit")
-                || accumulated_text.to_lowercase().contains("nothing to commit")
+                || accumulated_text
+                    .to_lowercase()
+                    .contains("nothing to commit")
             {
                 nothing_to_commit = true;
             }

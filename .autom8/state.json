@@ -1,0 +1,15 @@
+{
+  "run_id": "f937e16b-efd1-4d5d-b4ee-e55542173c23",
+  "status": "running",
+  "machine_state": "generating-prd",
+  "prd_path": "/Users/louis/projects/autom8/tasks/prd.json",
+  "spec_path": "/Users/louis/projects/autom8/tasks/prd-unified-agent-display.md",
+  "branch": "",
+  "current_story": null,
+  "iteration": 0,
+  "max_iterations": 10,
+  "review_iteration": 0,
+  "started_at": "2026-01-22T21:41:36.745480Z",
+  "finished_at": null,
+  "iterations": []
+}
