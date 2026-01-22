@@ -1,11 +1,15 @@
-use crate::claude::{run_claude, run_for_commit, run_for_prd_generation, ClaudeResult, CommitResult};
+use crate::claude::{
+    run_claude, run_corrector, run_for_commit, run_for_prd_generation, run_reviewer, ClaudeResult,
+    CommitResult, CorrectorResult, ReviewResult,
+};
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
     print_all_complete, print_claude_output, print_error, print_generating_prd, print_info,
-    print_iteration_complete, print_iteration_start, print_prd_generated,
-    print_proceeding_to_implementation, print_project_info, print_run_summary, print_spec_loaded,
-    print_state_transition, print_story_complete, print_warning, StoryResult,
+    print_issues_found, print_iteration_complete, print_iteration_start,
+    print_max_review_iterations, print_prd_generated, print_proceeding_to_implementation,
+    print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
+    print_spec_loaded, print_state_transition, print_story_complete, print_warning, StoryResult,
 };
 use crate::prd::Prd;
 use crate::progress::ClaudeSpinner;
@@ -17,6 +21,7 @@ use std::time::Instant;
 pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
+    skip_review: bool,
 }
 
 impl Runner {
@@ -24,11 +29,17 @@ impl Runner {
         Self {
             state_manager: StateManager::new(),
             verbose: false,
+            skip_review: false,
         }
     }
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    pub fn with_skip_review(mut self, skip_review: bool) -> Self {
+        self.skip_review = skip_review;
         self
     }
 
@@ -187,6 +198,131 @@ impl Runner {
             if prd.all_complete() {
                 print_all_complete();
 
+                // Skip review if --skip-review flag is set
+                if self.skip_review {
+                    print_skip_review();
+                } else {
+                    // Run review loop before committing
+                    const MAX_REVIEW_ITERATIONS: u32 = 3;
+                    state.review_iteration = 1;
+
+                    loop {
+                        // Check if we've exceeded max review iterations
+                        if state.review_iteration > MAX_REVIEW_ITERATIONS {
+                            state.transition_to(MachineState::Failed);
+                            self.state_manager.save(&state)?;
+                            print_max_review_iterations();
+                            print_summary(state.iteration, &story_results)?;
+                            return Err(Autom8Error::MaxReviewIterationsReached);
+                        }
+
+                        // Transition to Reviewing state
+                        print_state_transition(state.machine_state, MachineState::Reviewing);
+                        state.transition_to(MachineState::Reviewing);
+                        self.state_manager.save(&state)?;
+
+                        print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
+
+                        // Run reviewer
+                        let verbose = self.verbose;
+                        let review_result = if verbose {
+                            run_reviewer(&prd, state.review_iteration, MAX_REVIEW_ITERATIONS, |line| {
+                                print_claude_output(line);
+                            })?
+                        } else {
+                            let spinner =
+                                ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
+                            let res = run_reviewer(
+                                &prd,
+                                state.review_iteration,
+                                MAX_REVIEW_ITERATIONS,
+                                |line| {
+                                    spinner.update(line);
+                                },
+                            );
+                            match &res {
+                                Ok(ReviewResult::Pass) => spinner.finish_with_message("Review passed"),
+                                Ok(ReviewResult::IssuesFound) => {
+                                    spinner.finish_with_message("Issues found")
+                                }
+                                Ok(ReviewResult::Error(e)) => spinner.finish_error(e),
+                                Err(e) => spinner.finish_error(&e.to_string()),
+                            }
+                            res?
+                        };
+
+                        match review_result {
+                            ReviewResult::Pass => {
+                                // Delete autom8_review.md if it exists
+                                let review_path = std::path::Path::new("autom8_review.md");
+                                if review_path.exists() {
+                                    let _ = fs::remove_file(review_path);
+                                }
+                                print_review_passed();
+                                break; // Exit review loop, proceed to commit
+                            }
+                            ReviewResult::IssuesFound => {
+                                // Transition to Correcting state
+                                print_state_transition(
+                                    MachineState::Reviewing,
+                                    MachineState::Correcting,
+                                );
+                                state.transition_to(MachineState::Correcting);
+                                self.state_manager.save(&state)?;
+
+                                print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
+
+                                // Run corrector
+                                let corrector_result = if verbose {
+                                    run_corrector(&prd, state.review_iteration, |line| {
+                                        print_claude_output(line);
+                                    })?
+                                } else {
+                                    let spinner = ClaudeSpinner::new(&format!(
+                                        "correct-{}",
+                                        state.review_iteration
+                                    ));
+                                    let res = run_corrector(&prd, state.review_iteration, |line| {
+                                        spinner.update(line);
+                                    });
+                                    match &res {
+                                        Ok(CorrectorResult::Complete) => {
+                                            spinner.finish_with_message("Correction complete")
+                                        }
+                                        Ok(CorrectorResult::Error(e)) => spinner.finish_error(e),
+                                        Err(e) => spinner.finish_error(&e.to_string()),
+                                    }
+                                    res?
+                                };
+
+                                match corrector_result {
+                                    CorrectorResult::Complete => {
+                                        // Increment review iteration and loop back to Reviewing
+                                        state.review_iteration += 1;
+                                    }
+                                    CorrectorResult::Error(e) => {
+                                        state.transition_to(MachineState::Failed);
+                                        self.state_manager.save(&state)?;
+                                        print_error(&format!("Corrector failed: {}", e));
+                                        print_summary(state.iteration, &story_results)?;
+                                        return Err(Autom8Error::ClaudeError(format!(
+                                            "Corrector failed: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+                            ReviewResult::Error(e) => {
+                                state.transition_to(MachineState::Failed);
+                                self.state_manager.save(&state)?;
+                                print_error(&format!("Review failed: {}", e));
+                                print_summary(state.iteration, &story_results)?;
+                                return Err(Autom8Error::ClaudeError(format!("Review failed: {}", e)));
+                            }
+                        }
+                    }
+                }
+
                 // Commit changes if in git repo
                 if git::is_git_repo() {
                     print_state_transition(state.machine_state, MachineState::Committing);
@@ -292,9 +428,144 @@ impl Runner {
                     }
                     print_all_complete();
 
+                    // Skip review if --skip-review flag is set
+                    if self.skip_review {
+                        print_skip_review();
+                    } else {
+                        // Run review loop before committing
+                        const MAX_REVIEW_ITERATIONS: u32 = 3;
+                        state.review_iteration = 1;
+
+                        loop {
+                            // Check if we've exceeded max review iterations
+                            if state.review_iteration > MAX_REVIEW_ITERATIONS {
+                                state.transition_to(MachineState::Failed);
+                                self.state_manager.save(&state)?;
+                                print_max_review_iterations();
+                                print_summary(state.iteration, &story_results)?;
+                                return Err(Autom8Error::MaxReviewIterationsReached);
+                            }
+
+                            // Transition to Reviewing state
+                            print_state_transition(state.machine_state, MachineState::Reviewing);
+                            state.transition_to(MachineState::Reviewing);
+                            self.state_manager.save(&state)?;
+
+                            print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
+
+                            // Run reviewer
+                            let review_result = if verbose {
+                                run_reviewer(
+                                    &prd,
+                                    state.review_iteration,
+                                    MAX_REVIEW_ITERATIONS,
+                                    |line| {
+                                        print_claude_output(line);
+                                    },
+                                )?
+                            } else {
+                                let spinner =
+                                    ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
+                                let res = run_reviewer(
+                                    &prd,
+                                    state.review_iteration,
+                                    MAX_REVIEW_ITERATIONS,
+                                    |line| {
+                                        spinner.update(line);
+                                    },
+                                );
+                                match &res {
+                                    Ok(ReviewResult::Pass) => {
+                                        spinner.finish_with_message("Review passed")
+                                    }
+                                    Ok(ReviewResult::IssuesFound) => {
+                                        spinner.finish_with_message("Issues found")
+                                    }
+                                    Ok(ReviewResult::Error(e)) => spinner.finish_error(e),
+                                    Err(e) => spinner.finish_error(&e.to_string()),
+                                }
+                                res?
+                            };
+
+                            match review_result {
+                                ReviewResult::Pass => {
+                                    // Delete autom8_review.md if it exists
+                                    let review_path = std::path::Path::new("autom8_review.md");
+                                    if review_path.exists() {
+                                        let _ = fs::remove_file(review_path);
+                                    }
+                                    print_review_passed();
+                                    break; // Exit review loop, proceed to commit
+                                }
+                                ReviewResult::IssuesFound => {
+                                    // Transition to Correcting state
+                                    print_state_transition(
+                                        MachineState::Reviewing,
+                                        MachineState::Correcting,
+                                    );
+                                    state.transition_to(MachineState::Correcting);
+                                    self.state_manager.save(&state)?;
+
+                                    print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
+
+                                    // Run corrector
+                                    let corrector_result = if verbose {
+                                        run_corrector(&prd, state.review_iteration, |line| {
+                                            print_claude_output(line);
+                                        })?
+                                    } else {
+                                        let spinner = ClaudeSpinner::new(&format!(
+                                            "correct-{}",
+                                            state.review_iteration
+                                        ));
+                                        let res =
+                                            run_corrector(&prd, state.review_iteration, |line| {
+                                                spinner.update(line);
+                                            });
+                                        match &res {
+                                            Ok(CorrectorResult::Complete) => {
+                                                spinner.finish_with_message("Correction complete")
+                                            }
+                                            Ok(CorrectorResult::Error(e)) => spinner.finish_error(e),
+                                            Err(e) => spinner.finish_error(&e.to_string()),
+                                        }
+                                        res?
+                                    };
+
+                                    match corrector_result {
+                                        CorrectorResult::Complete => {
+                                            // Increment review iteration and loop back to Reviewing
+                                            state.review_iteration += 1;
+                                        }
+                                        CorrectorResult::Error(e) => {
+                                            state.transition_to(MachineState::Failed);
+                                            self.state_manager.save(&state)?;
+                                            print_error(&format!("Corrector failed: {}", e));
+                                            print_summary(state.iteration, &story_results)?;
+                                            return Err(Autom8Error::ClaudeError(format!(
+                                                "Corrector failed: {}",
+                                                e
+                                            )));
+                                        }
+                                    }
+                                }
+                                ReviewResult::Error(e) => {
+                                    state.transition_to(MachineState::Failed);
+                                    self.state_manager.save(&state)?;
+                                    print_error(&format!("Review failed: {}", e));
+                                    print_summary(state.iteration, &story_results)?;
+                                    return Err(Autom8Error::ClaudeError(format!(
+                                        "Review failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                    }
+
                     // Commit changes if in git repo
                     if git::is_git_repo() {
-                        print_state_transition(MachineState::RunningClaude, MachineState::Committing);
+                        print_state_transition(state.machine_state, MachineState::Committing);
                         state.transition_to(MachineState::Committing);
                         self.state_manager.save(&state)?;
 
@@ -330,7 +601,7 @@ impl Runner {
 
                         print_state_transition(MachineState::Committing, MachineState::Completed);
                     } else {
-                        print_state_transition(MachineState::RunningClaude, MachineState::Completed);
+                        print_state_transition(state.machine_state, MachineState::Completed);
                     }
 
                     state.transition_to(MachineState::Completed);
@@ -456,5 +727,35 @@ impl Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runner_skip_review_defaults_to_false() {
+        let runner = Runner::new();
+        assert!(!runner.skip_review);
+    }
+
+    #[test]
+    fn test_runner_with_skip_review_true() {
+        let runner = Runner::new().with_skip_review(true);
+        assert!(runner.skip_review);
+    }
+
+    #[test]
+    fn test_runner_with_skip_review_false() {
+        let runner = Runner::new().with_skip_review(false);
+        assert!(!runner.skip_review);
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_preserves_skip_review() {
+        let runner = Runner::new().with_verbose(true).with_skip_review(true);
+        assert!(runner.skip_review);
+        assert!(runner.verbose);
     }
 }
