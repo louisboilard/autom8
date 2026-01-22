@@ -1,6 +1,6 @@
 use crate::error::{Autom8Error, Result};
 use crate::prd::{Prd, UserStory};
-use crate::prompts::PRD_JSON_PROMPT;
+use crate::prompts::{COMMIT_PROMPT, PRD_JSON_PROMPT};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -170,6 +170,96 @@ where
     prd.save(output_path)?;
 
     Ok(prd)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommitResult {
+    Success,
+    NothingToCommit,
+    Error(String),
+}
+
+/// Run Claude to commit changes after all stories are complete
+pub fn run_for_commit<F>(prd: &Prd, mut on_output: F) -> Result<CommitResult>
+where
+    F: FnMut(&str),
+{
+    // Build stories summary for context
+    let stories_summary = prd
+        .user_stories
+        .iter()
+        .map(|s| format!("- {}: {}", s.id, s.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = COMMIT_PROMPT
+        .replace("{project}", &prd.project)
+        .replace("{feature_description}", &prd.description)
+        .replace("{stories_summary}", &stories_summary);
+
+    let mut child = Command::new("claude")
+        .args(["--dangerously-skip-permissions", "--print"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to spawn claude: {}", e)))?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+    }
+
+    // Take stderr handle before consuming stdout
+    let stderr = child.stderr.take();
+
+    // Stream stdout and check for "nothing to commit"
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
+
+    let reader = BufReader::new(stdout);
+    let mut nothing_to_commit = false;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
+
+        on_output(&line);
+
+        if line.to_lowercase().contains("nothing to commit") {
+            nothing_to_commit = true;
+        }
+    }
+
+    // Wait for process to complete
+    let status = child
+        .wait()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Wait error: {}", e)))?;
+
+    if !status.success() {
+        let stderr_content = stderr
+            .map(|s| std::io::read_to_string(s).unwrap_or_default())
+            .unwrap_or_default();
+        let error_msg = if stderr_content.is_empty() {
+            format!("Claude exited with status: {}", status)
+        } else {
+            format!(
+                "Claude exited with status {}: {}",
+                status,
+                stderr_content.trim()
+            )
+        };
+        return Ok(CommitResult::Error(error_msg));
+    }
+
+    if nothing_to_commit {
+        Ok(CommitResult::NothingToCommit)
+    } else {
+        Ok(CommitResult::Success)
+    }
 }
 
 /// Extract JSON from Claude's response, handling potential markdown code blocks

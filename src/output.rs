@@ -153,6 +153,7 @@ fn state_to_display(state: MachineState) -> &'static str {
         MachineState::Initializing => "initializing",
         MachineState::PickingStory => "picking-story",
         MachineState::RunningClaude => "running-claude",
+        MachineState::Committing => "committing",
         MachineState::Completed => "completed",
         MachineState::Failed => "failed",
     }

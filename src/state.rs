@@ -26,6 +26,7 @@ pub enum MachineState {
     Initializing,
     PickingStory,
     RunningClaude,
+    Committing,
     Completed,
     Failed,
 }

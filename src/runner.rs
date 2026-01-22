@@ -1,11 +1,11 @@
-use crate::claude::{run_claude, run_for_prd_generation, ClaudeResult};
+use crate::claude::{run_claude, run_for_commit, run_for_prd_generation, ClaudeResult, CommitResult};
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
     print_all_complete, print_claude_output, print_error, print_generating_prd, print_info,
     print_iteration_complete, print_iteration_start, print_prd_generated,
     print_proceeding_to_implementation, print_project_info, print_run_summary, print_spec_loaded,
-    print_state_transition, print_story_complete, StoryResult,
+    print_state_transition, print_story_complete, print_warning, StoryResult,
 };
 use crate::prd::Prd;
 use crate::progress::ClaudeSpinner;
@@ -185,10 +185,50 @@ impl Runner {
 
             // Check if all stories complete
             if prd.all_complete() {
-                print_state_transition(state.machine_state, MachineState::Completed);
+                print_all_complete();
+
+                // Commit changes if in git repo
+                if git::is_git_repo() {
+                    print_state_transition(state.machine_state, MachineState::Committing);
+                    state.transition_to(MachineState::Committing);
+                    self.state_manager.save(&state)?;
+
+                    let commit_start = Instant::now();
+                    let verbose = self.verbose;
+                    let commit_result = if verbose {
+                        run_for_commit(&prd, |line| {
+                            print_claude_output(line);
+                        })?
+                    } else {
+                        let spinner = ClaudeSpinner::new_for_commit();
+                        let res = run_for_commit(&prd, |line| {
+                            spinner.update(line);
+                        });
+                        let commit_duration = commit_start.elapsed().as_secs();
+                        match &res {
+                            Ok(CommitResult::Success) => spinner.finish_success(commit_duration),
+                            Ok(CommitResult::NothingToCommit) => {
+                                spinner.finish_with_message("Nothing to commit")
+                            }
+                            Ok(CommitResult::Error(e)) => spinner.finish_error(e),
+                            Err(e) => spinner.finish_error(&e.to_string()),
+                        }
+                        res?
+                    };
+
+                    match commit_result {
+                        CommitResult::Success => print_info("Changes committed successfully"),
+                        CommitResult::NothingToCommit => print_info("Nothing to commit"),
+                        CommitResult::Error(e) => print_warning(&format!("Commit failed: {}", e)),
+                    }
+
+                    print_state_transition(MachineState::Committing, MachineState::Completed);
+                } else {
+                    print_state_transition(state.machine_state, MachineState::Completed);
+                }
+
                 state.transition_to(MachineState::Completed);
                 self.state_manager.save(&state)?;
-                print_all_complete();
                 print_summary(state.iteration, &story_results)?;
                 self.archive_and_cleanup(&state)?;
                 return Ok(());
@@ -238,9 +278,6 @@ impl Runner {
             match result {
                 Ok(ClaudeResult::AllStoriesComplete) => {
                     state.finish_iteration(IterationStatus::Success, String::new());
-                    print_state_transition(MachineState::RunningClaude, MachineState::Completed);
-                    state.transition_to(MachineState::Completed);
-                    self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
                     story_results.push(StoryResult {
@@ -254,6 +291,50 @@ impl Runner {
                         print_story_complete(&story.id, duration);
                     }
                     print_all_complete();
+
+                    // Commit changes if in git repo
+                    if git::is_git_repo() {
+                        print_state_transition(MachineState::RunningClaude, MachineState::Committing);
+                        state.transition_to(MachineState::Committing);
+                        self.state_manager.save(&state)?;
+
+                        let commit_start = Instant::now();
+                        let commit_result = if verbose {
+                            run_for_commit(&prd, |line| {
+                                print_claude_output(line);
+                            })?
+                        } else {
+                            let spinner = ClaudeSpinner::new_for_commit();
+                            let res = run_for_commit(&prd, |line| {
+                                spinner.update(line);
+                            });
+                            let commit_duration = commit_start.elapsed().as_secs();
+                            match &res {
+                                Ok(CommitResult::Success) => spinner.finish_success(commit_duration),
+                                Ok(CommitResult::NothingToCommit) => {
+                                    spinner.finish_with_message("Nothing to commit")
+                                }
+                                Ok(CommitResult::Error(e)) => spinner.finish_error(e),
+                                Err(e) => spinner.finish_error(&e.to_string()),
+                            }
+                            res?
+                        };
+
+                        match commit_result {
+                            CommitResult::Success => print_info("Changes committed successfully"),
+                            CommitResult::NothingToCommit => print_info("Nothing to commit"),
+                            CommitResult::Error(e) => {
+                                print_warning(&format!("Commit failed: {}", e))
+                            }
+                        }
+
+                        print_state_transition(MachineState::Committing, MachineState::Completed);
+                    } else {
+                        print_state_transition(MachineState::RunningClaude, MachineState::Completed);
+                    }
+
+                    state.transition_to(MachineState::Completed);
+                    self.state_manager.save(&state)?;
                     print_summary(state.iteration, &story_results)?;
                     self.archive_and_cleanup(&state)?;
                     return Ok(());

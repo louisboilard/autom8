@@ -72,6 +72,7 @@ autom8 will:
 │    - Iterates through user stories                          │
 │    - Claude implements each story                           │
 │    - Marks stories complete when tests pass                 │
+│    - Commits all changes when feature is complete           │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -98,11 +99,13 @@ stateDiagram-v2
     Initializing --> PickingStory: Ready
 
     PickingStory --> RunningClaude: Story selected
-    PickingStory --> Completed: All stories pass
+    PickingStory --> Committing: All stories pass
 
     RunningClaude --> PickingStory: Iteration complete
-    RunningClaude --> Completed: All stories pass
+    RunningClaude --> Committing: All stories pass
     RunningClaude --> Failed: Error
+
+    Committing --> Completed: Commit done
 
     Completed --> [*]
     Failed --> [*]
@@ -118,6 +121,7 @@ stateDiagram-v2
 | `initializing` | Loading PRD, setting up git branch |
 | `picking-story` | Selecting next incomplete user story |
 | `running-claude` | Claude implementing current story |
+| `committing` | Claude committing changes for completed feature |
 | `completed` | All user stories pass |
 | `failed` | Error occurred, run stopped |
 
@@ -203,6 +207,8 @@ Description of what this story accomplishes.
 3. **Completion Detection**: Claude updates `prd.json` setting `passes: true` when a story's acceptance criteria are met
 
 4. **Iteration**: Process repeats until all stories pass or max iterations reached
+
+5. **Committing**: When all stories pass, Claude commits changes (only files it modified, excluding prd.json and .autom8/)
 
 ## State Persistence
 

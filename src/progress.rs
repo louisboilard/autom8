@@ -44,6 +44,23 @@ impl ClaudeSpinner {
         }
     }
 
+    pub fn new_for_commit() -> Self {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars(SPINNER_CHARS)
+                .template("{spinner:.cyan} Claude working on {msg}")
+                .expect("invalid template"),
+        );
+        spinner.set_message("Committing | Starting... [00:00:00]");
+        spinner.enable_steady_tick(Duration::from_millis(80));
+
+        Self {
+            spinner,
+            story_id: "Commit".to_string(),
+        }
+    }
+
     pub fn update(&self, activity: &str) {
         let elapsed = self.spinner.elapsed();
         let hours = elapsed.as_secs() / 3600;
@@ -77,6 +94,13 @@ impl ClaudeSpinner {
         self.spinner.finish_with_message(format!(
             "{RED}{} failed: {}{RESET}",
             self.story_id, truncated
+        ));
+    }
+
+    pub fn finish_with_message(&self, message: &str) {
+        self.spinner.finish_with_message(format!(
+            "{GREEN}{}: {}{RESET}",
+            self.story_id, message
         ));
     }
 }
