@@ -110,6 +110,7 @@ You MUST be extremely careful about which files you commit.
 ### NEVER commit these (always exclude):
 - `prd.json` - autom8 state file, not part of the feature
 - `prd.md` - autom8 spec file, not part of the feature
+- `autom8_review.md` - autom8 review file, not part of the feature
 - `.autom8/` - autom8 internal directory
 - `tasks/` - task tracking directory
 - `.env` or any credentials/secrets
@@ -169,7 +170,7 @@ Make **multiple logical commits**, not one big commit. Examples:
 
 Before each commit, verify:
 - [ ] Only feature-related files are staged
-- [ ] No prd.json, prd.md, or .autom8/ files staged
+- [ ] No prd.json, prd.md, autom8_review.md, or .autom8/ files staged
 - [ ] Commit message is clear and under 50 chars
 - [ ] Tests are in separate commits with [test] prefix
 "####;
@@ -222,3 +223,310 @@ Produce a JSON object with this exact structure:
 
 Return ONLY the JSON object, no markdown code fences, no explanation. The output must be valid JSON that can be parsed directly.
 "####;
+
+/// Prompt for the reviewer agent that checks completed work for issues.
+/// Placeholders: {project}, {feature_description}, {stories_context}, {iteration}, {max_iterations}
+pub const REVIEWER_PROMPT: &str = r####"You are a code reviewer checking completed feature work for quality issues.
+
+## Context
+
+**Project:** {project}
+**Feature:** {feature_description}
+
+**Review iteration {iteration}/{max_iterations}**
+
+You have a maximum of 3 review cycles. Focus on critical issues, not nitpicks.
+
+## PRD Context (All User Stories)
+
+{stories_context}
+
+## Review Strategy by Iteration
+
+Your review approach MUST vary based on the iteration:
+
+- **Iteration 1**: Thorough review - check everything comprehensively
+- **Iteration 2**: Only significant issues - skip minor style/naming concerns
+- **Iteration 3**: Only blocking bugs - things that would cause runtime errors or security issues
+
+## Your Task
+
+Review the changes made for this feature implementation.
+
+### Step 1: Run Automated Checks
+
+First, run any available automated checks:
+
+1. **Run tests** (if test suite exists):
+   - Rust: `cargo test`
+   - Node.js: `npm test` or `yarn test`
+   - Python: `pytest` or `python -m unittest`
+   - Go: `go test ./...`
+
+2. **Run typecheck/lint** (if available):
+   - Rust: `cargo check` and `cargo clippy`
+   - TypeScript: `npm run typecheck` or `npx tsc --noEmit`
+   - Python: `mypy .` or `pyright`
+   - Go: `go vet ./...`
+
+### Step 2: Manual Code Review
+
+Review the implementation for:
+
+1. **Bugs**: Logic errors, off-by-one errors, null/undefined handling, race conditions
+2. **Missing tests**: Features without test coverage, edge cases not tested
+3. **Code quality**: Dead code, overly complex logic, unclear naming
+4. **Pattern consistency**: Does the code follow existing patterns in the codebase?
+5. **Needless repetition**: DRY violations, copy-pasted code that should be abstracted
+
+### Step 3: Output Results
+
+Based on your findings:
+
+**If ALL checks pass** (tests pass, typecheck passes, no issues found):
+- Delete `autom8_review.md` if it exists
+- Output nothing to the file
+- The absence of this file signals success
+
+**If issues are found**:
+- Write issues to `autom8_review.md` (overwrite if exists)
+- Use this format:
+
+```markdown
+# Review Issues (Iteration {iteration}/{max_iterations})
+
+## Critical
+- [ ] Issue description with file and line reference
+
+## Significant
+- [ ] Issue description with file and line reference
+
+## Minor (iteration 1 only)
+- [ ] Issue description with file and line reference
+
+## Test Failures
+- [ ] Test name: failure reason
+
+## Typecheck/Lint Errors
+- [ ] Error message and location
+```
+
+## Important Rules
+
+1. Do NOT include nitpicks in iteration 2 or 3
+2. Be specific - include file paths and line numbers
+3. Focus on the changes made for THIS feature, not pre-existing issues
+4. If tests fail, include the failure output
+5. If typecheck/lint fails, include the errors
+"####;
+
+/// Prompt for the corrector agent that fixes issues found by the reviewer.
+/// Placeholders: {project}, {feature_description}, {stories_context}, {iteration}, {max_iterations}
+pub const CORRECTOR_PROMPT: &str = r####"You are a corrector agent fixing issues identified during code review.
+
+## Context
+
+**Project:** {project}
+**Feature:** {feature_description}
+
+**Correction iteration {iteration}/{max_iterations}**
+
+This is your chance to fix the issues. Focus on the most critical fixes first.
+
+## PRD Context (All User Stories)
+
+{stories_context}
+
+## Your Task
+
+Read the review file and fix the issues identified by the reviewer.
+
+### Step 1: Read the Review File
+
+Read `autom8_review.md` to see the list of issues to address.
+
+### Step 2: Triage Issues
+
+Not all issues need to be fixed. Use your judgment:
+
+- **Must fix**: Test failures, typecheck errors, bugs, security issues
+- **Should fix**: Missing tests for new code, code quality issues
+- **Optional**: Style suggestions, minor refactoring ideas
+
+If you disagree with an issue, you may skip it - but be judicious. The reviewer identified these for a reason.
+
+### Step 3: Fix Issues
+
+Work through the issues systematically:
+
+1. Start with critical/blocking issues (test failures, typecheck errors)
+2. Then address significant bugs or missing functionality
+3. Finally, handle minor issues if time permits
+
+For each issue you fix:
+- Make the necessary code changes
+- Verify the fix works (run relevant tests if applicable)
+
+### Step 4: Update the Review File
+
+After fixing issues, update `autom8_review.md` to annotate what you fixed:
+
+**Original:**
+```markdown
+- [ ] Missing null check in user_service.rs:42
+```
+
+**After fixing:**
+```markdown
+- [x] FIXED: Missing null check in user_service.rs:42
+```
+
+For issues you chose not to fix, add a note:
+```markdown
+- [ ] SKIPPED: Style suggestion - keeping current naming for consistency
+```
+
+### Step 5: Run Verification
+
+After making fixes, run the same checks the reviewer ran:
+
+1. **Run tests** (if test suite exists):
+   - Rust: `cargo test`
+   - Node.js: `npm test` or `yarn test`
+   - Python: `pytest` or `python -m unittest`
+   - Go: `go test ./...`
+
+2. **Run typecheck/lint** (if available):
+   - Rust: `cargo check` and `cargo clippy`
+   - TypeScript: `npm run typecheck` or `npx tsc --noEmit`
+   - Python: `mypy .` or `pyright`
+   - Go: `go vet ./...`
+
+## Prioritization Guidelines
+
+Since this is iteration {iteration}/{max_iterations}, prioritize accordingly:
+
+- **Iteration 1**: Fix all issues you can reasonably address
+- **Iteration 2**: Focus only on issues that would block the feature
+- **Iteration 3**: Fix ONLY test failures and typecheck errors - nothing else
+
+## Important Rules
+
+1. Always read `autom8_review.md` first - don't guess at issues
+2. Mark each fixed issue with "FIXED:" prefix in the review file
+3. Run tests after making changes to verify fixes
+4. Do NOT create new issues or expand scope - only fix what's listed
+5. If a fix would require significant refactoring, mark as SKIPPED with explanation
+"####;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reviewer_prompt_contains_placeholders() {
+        assert!(REVIEWER_PROMPT.contains("{project}"));
+        assert!(REVIEWER_PROMPT.contains("{feature_description}"));
+        assert!(REVIEWER_PROMPT.contains("{stories_context}"));
+        assert!(REVIEWER_PROMPT.contains("{iteration}"));
+        assert!(REVIEWER_PROMPT.contains("{max_iterations}"));
+    }
+
+    #[test]
+    fn reviewer_prompt_contains_iteration_display() {
+        assert!(REVIEWER_PROMPT.contains("Review iteration {iteration}/{max_iterations}"));
+    }
+
+    #[test]
+    fn reviewer_prompt_contains_max_cycles_warning() {
+        assert!(REVIEWER_PROMPT.contains("You have a maximum of 3 review cycles"));
+        assert!(REVIEWER_PROMPT.contains("Focus on critical issues, not nitpicks"));
+    }
+
+    #[test]
+    fn reviewer_prompt_contains_iteration_strategy() {
+        assert!(REVIEWER_PROMPT.contains("Iteration 1"));
+        assert!(REVIEWER_PROMPT.contains("Thorough review"));
+        assert!(REVIEWER_PROMPT.contains("Iteration 2"));
+        assert!(REVIEWER_PROMPT.contains("Only significant issues"));
+        assert!(REVIEWER_PROMPT.contains("Iteration 3"));
+        assert!(REVIEWER_PROMPT.contains("Only blocking bugs"));
+    }
+
+    #[test]
+    fn reviewer_prompt_instructs_write_to_review_file() {
+        assert!(REVIEWER_PROMPT.contains("autom8_review.md"));
+        assert!(REVIEWER_PROMPT.contains("overwrite if exists"));
+    }
+
+    #[test]
+    fn reviewer_prompt_instructs_delete_on_pass() {
+        assert!(REVIEWER_PROMPT.contains("Delete `autom8_review.md` if it exists"));
+        assert!(REVIEWER_PROMPT.contains("Output nothing to the file"));
+    }
+
+    #[test]
+    fn reviewer_prompt_contains_review_criteria() {
+        assert!(REVIEWER_PROMPT.contains("Bugs"));
+        assert!(REVIEWER_PROMPT.contains("Missing tests"));
+        assert!(REVIEWER_PROMPT.contains("Code quality"));
+        assert!(REVIEWER_PROMPT.contains("Pattern consistency"));
+        assert!(REVIEWER_PROMPT.contains("Needless repetition") || REVIEWER_PROMPT.contains("repetition"));
+    }
+
+    #[test]
+    fn reviewer_prompt_instructs_run_tests() {
+        assert!(REVIEWER_PROMPT.contains("Run tests"));
+        assert!(REVIEWER_PROMPT.contains("cargo test"));
+        assert!(REVIEWER_PROMPT.contains("npm test"));
+    }
+
+    #[test]
+    fn reviewer_prompt_instructs_run_typecheck() {
+        assert!(REVIEWER_PROMPT.contains("typecheck"));
+        assert!(REVIEWER_PROMPT.contains("cargo check"));
+        assert!(REVIEWER_PROMPT.contains("npm run typecheck") || REVIEWER_PROMPT.contains("tsc"));
+    }
+
+    #[test]
+    fn corrector_prompt_contains_placeholders() {
+        assert!(CORRECTOR_PROMPT.contains("{project}"));
+        assert!(CORRECTOR_PROMPT.contains("{feature_description}"));
+        assert!(CORRECTOR_PROMPT.contains("{stories_context}"));
+        assert!(CORRECTOR_PROMPT.contains("{iteration}"));
+        assert!(CORRECTOR_PROMPT.contains("{max_iterations}"));
+    }
+
+    #[test]
+    fn corrector_prompt_contains_iteration_display() {
+        assert!(CORRECTOR_PROMPT.contains("Correction iteration {iteration}/{max_iterations}"));
+    }
+
+    #[test]
+    fn corrector_prompt_instructs_read_review_file() {
+        assert!(CORRECTOR_PROMPT.contains("autom8_review.md"));
+        assert!(CORRECTOR_PROMPT.contains("Read the review file"));
+        assert!(CORRECTOR_PROMPT.contains("Read `autom8_review.md`"));
+    }
+
+    #[test]
+    fn corrector_prompt_instructs_use_judgment() {
+        assert!(CORRECTOR_PROMPT.contains("Use your judgment"));
+        assert!(CORRECTOR_PROMPT.contains("Not all issues need to be fixed"));
+    }
+
+    #[test]
+    fn corrector_prompt_instructs_fixed_prefix() {
+        assert!(CORRECTOR_PROMPT.contains("FIXED:"));
+        assert!(CORRECTOR_PROMPT.contains("annotate what you fixed"));
+    }
+
+    #[test]
+    fn corrector_prompt_contains_iteration_prioritization() {
+        assert!(CORRECTOR_PROMPT.contains("iteration {iteration}/{max_iterations}"));
+        assert!(CORRECTOR_PROMPT.contains("Iteration 1"));
+        assert!(CORRECTOR_PROMPT.contains("Iteration 2"));
+        assert!(CORRECTOR_PROMPT.contains("Iteration 3"));
+        assert!(CORRECTOR_PROMPT.contains("most critical fixes first"));
+    }
+}
