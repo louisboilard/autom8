@@ -2,12 +2,16 @@ use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::prd::{Prd, UserStory};
 use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, PRD_JSON_PROMPT, REVIEWER_PROMPT};
+use crate::state::IterationRecord;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 const COMPLETION_SIGNAL: &str = "<promise>COMPLETE</promise>";
+const WORK_SUMMARY_START: &str = "<work-summary>";
+const WORK_SUMMARY_END: &str = "</work-summary>";
+const MAX_WORK_SUMMARY_LENGTH: usize = 500;
 
 // ============================================================================
 // Stream JSON parsing types for Claude CLI output
@@ -97,6 +101,35 @@ fn extract_text_from_stream_line(line: &str) -> Option<String> {
     }
 }
 
+/// Extract work summary from Claude's output using <work-summary>...</work-summary> markers.
+/// Returns None if no valid summary is found, for graceful degradation.
+/// Truncates to MAX_WORK_SUMMARY_LENGTH chars to prevent prompt bloat.
+pub fn extract_work_summary(output: &str) -> Option<String> {
+    let start_idx = output.find(WORK_SUMMARY_START)?;
+    let content_start = start_idx + WORK_SUMMARY_START.len();
+    let end_idx = output[content_start..].find(WORK_SUMMARY_END)?;
+
+    let summary = output[content_start..content_start + end_idx].trim();
+
+    if summary.is_empty() {
+        return None;
+    }
+
+    // Truncate to max length to prevent prompt bloat
+    let truncated = if summary.len() > MAX_WORK_SUMMARY_LENGTH {
+        let mut end = MAX_WORK_SUMMARY_LENGTH;
+        // Try to truncate at a word boundary
+        if let Some(last_space) = summary[..end].rfind(' ') {
+            end = last_space;
+        }
+        format!("{}...", &summary[..end])
+    } else {
+        summary.to_string()
+    };
+
+    Some(truncated)
+}
+
 // STREAMING OUTPUT IMPLEMENTATION (US-002):
 // ==========================================
 // Fixed the streaming output issue by using `--output-format stream-json --verbose` instead
@@ -110,6 +143,22 @@ fn extract_text_from_stream_line(line: &str) -> Option<String> {
 // The extract_text_from_stream_line() function parses each JSON line and extracts text content,
 // which is then passed to the on_output callback for real-time display updates.
 
+/// Result from running Claude on a story task
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaudeStoryResult {
+    pub outcome: ClaudeOutcome,
+    /// Extracted work summary from Claude's output, if present
+    pub work_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaudeOutcome {
+    IterationComplete,
+    AllStoriesComplete,
+    Error(String),
+}
+
+/// Legacy enum for backwards compatibility - use ClaudeStoryResult for new code
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaudeResult {
     IterationComplete,
@@ -121,12 +170,14 @@ pub fn run_claude<F>(
     prd: &Prd,
     story: &UserStory,
     prd_path: &std::path::Path,
+    previous_iterations: &[IterationRecord],
     mut on_output: F,
-) -> Result<ClaudeResult>
+) -> Result<ClaudeStoryResult>
 where
     F: FnMut(&str),
 {
-    let prompt = build_prompt(prd, story, prd_path);
+    let previous_context = build_previous_context(previous_iterations);
+    let prompt = build_prompt(prd, story, prd_path, previous_context.as_deref());
 
     let mut child = Command::new("claude")
         .args([
@@ -198,11 +249,19 @@ where
         return Err(Autom8Error::ClaudeError(error_msg));
     }
 
-    if found_complete {
-        Ok(ClaudeResult::AllStoriesComplete)
+    // Extract work summary from accumulated output (graceful degradation if not found)
+    let work_summary = extract_work_summary(&accumulated_text);
+
+    let outcome = if found_complete {
+        ClaudeOutcome::AllStoriesComplete
     } else {
-        Ok(ClaudeResult::IterationComplete)
-    }
+        ClaudeOutcome::IterationComplete
+    };
+
+    Ok(ClaudeStoryResult {
+        outcome,
+        work_summary,
+    })
 }
 
 /// Run Claude to convert a prd.md spec into prd.json
@@ -704,7 +763,27 @@ fn extract_json(response: &str) -> Option<String> {
     None
 }
 
-fn build_prompt(prd: &Prd, story: &UserStory, prd_path: &Path) -> String {
+/// Build a context string from previous iteration work summaries.
+/// Returns None if there are no previous iterations with summaries.
+/// Format: "US-001: [summary]\nUS-002: [summary]"
+pub fn build_previous_context(iterations: &[IterationRecord]) -> Option<String> {
+    let summaries: Vec<String> = iterations
+        .iter()
+        .filter_map(|iter| {
+            iter.work_summary
+                .as_ref()
+                .map(|summary| format!("{}: {}", iter.story_id, summary))
+        })
+        .collect();
+
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(summaries.join("\n"))
+    }
+}
+
+fn build_prompt(prd: &Prd, story: &UserStory, prd_path: &Path, previous_context: Option<&str>) -> String {
     let acceptance_criteria = story
         .acceptance_criteria
         .iter()
@@ -713,6 +792,21 @@ fn build_prompt(prd: &Prd, story: &UserStory, prd_path: &Path) -> String {
         .join("\n");
 
     let prd_path_str = prd_path.display();
+
+    // Build the previous work section if we have context
+    let previous_work_section = match previous_context {
+        Some(context) => format!(
+            r#"
+## Previous Work
+
+The following user stories have already been completed:
+
+{}
+"#,
+            context
+        ),
+        None => String::new(),
+    };
 
     format!(
         r#"You are working on project: {project}
@@ -741,9 +835,19 @@ When ALL user stories in `{prd_path}` have `passes: true`, output exactly:
 
 This signals that the entire feature is done.
 
+## Work Summary
+
+After completing your implementation, output a brief summary (1-3 sentences) of what you accomplished in this format:
+
+<work-summary>
+Files changed: [list key files]. [Brief description of functionality added/changed].
+</work-summary>
+
+This helps provide context for subsequent tasks.
+
 ## Project Context
 
-{prd_description}
+{prd_description}{previous_work}
 
 ## Notes
 {notes}
@@ -755,6 +859,7 @@ This signals that the entire feature is done.
         acceptance_criteria = acceptance_criteria,
         prd_description = prd.description,
         prd_path = prd_path_str,
+        previous_work = previous_work_section,
         notes = if story.notes.is_empty() {
             "None"
         } else {
@@ -787,11 +892,13 @@ mod tests {
         };
         let prd_path = Path::new("/tmp/prd.json");
 
-        let prompt = build_prompt(&prd, &story, prd_path);
+        let prompt = build_prompt(&prd, &story, prd_path, None);
         assert!(prompt.contains("TestProject"));
         assert!(prompt.contains("US-001"));
         assert!(prompt.contains("Criterion 1"));
         assert!(prompt.contains("/tmp/prd.json"));
+        // No previous context, so no "Previous Work" section
+        assert!(!prompt.contains("Previous Work"));
     }
 
     #[test]
@@ -1091,5 +1198,293 @@ End of response"#;
             extract_text_from_stream_line(result_line),
             Some("Code flows like water".to_string())
         );
+    }
+
+    // ========================================================================
+    // Work summary extraction tests (US-006)
+    // ========================================================================
+
+    #[test]
+    fn test_extract_work_summary_basic() {
+        let output = r#"I made some changes.
+
+<work-summary>
+Files changed: src/main.rs, src/lib.rs. Added new authentication module with login and logout functions.
+</work-summary>
+
+Done!"#;
+        let summary = extract_work_summary(output);
+        assert_eq!(
+            summary,
+            Some("Files changed: src/main.rs, src/lib.rs. Added new authentication module with login and logout functions.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_work_summary_no_markers() {
+        let output = "I made some changes but didn't include a work summary.";
+        let summary = extract_work_summary(output);
+        assert_eq!(summary, None);
+    }
+
+    #[test]
+    fn test_extract_work_summary_empty_content() {
+        let output = "<work-summary>   </work-summary>";
+        let summary = extract_work_summary(output);
+        assert_eq!(summary, None);
+    }
+
+    #[test]
+    fn test_extract_work_summary_missing_end_marker() {
+        let output = "<work-summary>This summary has no end marker";
+        let summary = extract_work_summary(output);
+        assert_eq!(summary, None);
+    }
+
+    #[test]
+    fn test_extract_work_summary_truncates_long_content() {
+        // Create a string longer than 500 chars
+        let long_content = "a".repeat(600);
+        let output = format!("<work-summary>{}</work-summary>", long_content);
+        let summary = extract_work_summary(&output).unwrap();
+        // Should be truncated with "..." at the end
+        assert!(summary.ends_with("..."));
+        assert!(summary.len() <= 503); // 500 + "..."
+    }
+
+    #[test]
+    fn test_extract_work_summary_truncates_at_word_boundary() {
+        // Create content with spaces that's longer than 500 chars
+        let words = "word ".repeat(120); // 600 chars
+        let output = format!("<work-summary>{}</work-summary>", words);
+        let summary = extract_work_summary(&output).unwrap();
+        assert!(summary.ends_with("..."));
+        // Should truncate at a word boundary (space)
+        assert!(!summary.trim_end_matches("...").ends_with(' '));
+    }
+
+    #[test]
+    fn test_extract_work_summary_trims_whitespace() {
+        let output = "<work-summary>  \n  Files changed: test.rs. Fixed bug.  \n  </work-summary>";
+        let summary = extract_work_summary(output);
+        assert_eq!(
+            summary,
+            Some("Files changed: test.rs. Fixed bug.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_work_summary_multiline() {
+        let output = r#"<work-summary>
+Files changed: src/auth.rs, src/user.rs.
+Added user authentication with JWT tokens.
+Also updated the database schema.
+</work-summary>"#;
+        let summary = extract_work_summary(output).unwrap();
+        assert!(summary.contains("Files changed:"));
+        assert!(summary.contains("JWT tokens"));
+        assert!(summary.contains("database schema"));
+    }
+
+    #[test]
+    fn test_extract_work_summary_with_surrounding_text() {
+        let output = r#"I completed the implementation.
+
+Let me write a summary:
+
+<work-summary>
+Files changed: src/api.rs. Added REST endpoint for user registration.
+</work-summary>
+
+<promise>COMPLETE</promise>"#;
+        let summary = extract_work_summary(output);
+        assert_eq!(
+            summary,
+            Some("Files changed: src/api.rs. Added REST endpoint for user registration.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_work_summary_exactly_500_chars() {
+        // Create exactly 500 char content
+        let content = "x".repeat(500);
+        let output = format!("<work-summary>{}</work-summary>", content);
+        let summary = extract_work_summary(&output).unwrap();
+        // Should not be truncated
+        assert_eq!(summary.len(), 500);
+        assert!(!summary.ends_with("..."));
+    }
+
+    // ========================================================================
+    // Previous context building tests (US-007)
+    // ========================================================================
+
+    use crate::state::{IterationRecord, IterationStatus};
+    use chrono::Utc;
+
+    fn create_iteration_record(story_id: &str, work_summary: Option<&str>) -> IterationRecord {
+        IterationRecord {
+            number: 1,
+            story_id: story_id.to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: work_summary.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_build_previous_context_empty_iterations() {
+        let iterations: Vec<IterationRecord> = vec![];
+        let context = build_previous_context(&iterations);
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_build_previous_context_no_summaries() {
+        let iterations = vec![
+            create_iteration_record("US-001", None),
+            create_iteration_record("US-002", None),
+        ];
+        let context = build_previous_context(&iterations);
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_build_previous_context_single_summary() {
+        let iterations = vec![create_iteration_record(
+            "US-001",
+            Some("Files changed: src/main.rs. Added entry point."),
+        )];
+        let context = build_previous_context(&iterations).unwrap();
+        assert_eq!(
+            context,
+            "US-001: Files changed: src/main.rs. Added entry point."
+        );
+    }
+
+    #[test]
+    fn test_build_previous_context_multiple_summaries() {
+        let iterations = vec![
+            create_iteration_record(
+                "US-001",
+                Some("Files changed: src/main.rs. Added entry point."),
+            ),
+            create_iteration_record(
+                "US-002",
+                Some("Files changed: src/lib.rs. Added core functionality."),
+            ),
+        ];
+        let context = build_previous_context(&iterations).unwrap();
+        assert!(context.contains("US-001: Files changed: src/main.rs. Added entry point."));
+        assert!(context.contains("US-002: Files changed: src/lib.rs. Added core functionality."));
+        assert!(context.contains('\n'));
+    }
+
+    #[test]
+    fn test_build_previous_context_skips_none_summaries() {
+        let iterations = vec![
+            create_iteration_record(
+                "US-001",
+                Some("Files changed: src/main.rs. Added entry point."),
+            ),
+            create_iteration_record("US-002", None), // No summary
+            create_iteration_record(
+                "US-003",
+                Some("Files changed: src/lib.rs. Added core functionality."),
+            ),
+        ];
+        let context = build_previous_context(&iterations).unwrap();
+        assert!(context.contains("US-001"));
+        assert!(!context.contains("US-002"));
+        assert!(context.contains("US-003"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_previous_context() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-002".into(),
+            title: "Second Story".into(),
+            description: "A second story".into(),
+            acceptance_criteria: vec!["Criterion 1".into()],
+            priority: 2,
+            passes: false,
+            notes: String::new(),
+        };
+        let prd_path = Path::new("/tmp/prd.json");
+        let previous_context = Some("US-001: Files changed: src/main.rs. Added entry point.");
+
+        let prompt = build_prompt(&prd, &story, prd_path, previous_context);
+
+        // Should contain the Previous Work section
+        assert!(prompt.contains("## Previous Work"));
+        assert!(prompt.contains("The following user stories have already been completed:"));
+        assert!(prompt.contains("US-001: Files changed: src/main.rs. Added entry point."));
+    }
+
+    #[test]
+    fn test_build_prompt_without_previous_context() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "First Story".into(),
+            description: "A first story".into(),
+            acceptance_criteria: vec!["Criterion 1".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let prd_path = Path::new("/tmp/prd.json");
+
+        let prompt = build_prompt(&prd, &story, prd_path, None);
+
+        // Should NOT contain the Previous Work section for first story
+        assert!(!prompt.contains("## Previous Work"));
+        assert!(!prompt.contains("The following user stories have already been completed:"));
+    }
+
+    #[test]
+    fn test_build_prompt_integration_with_iteration_records() {
+        // Test the full integration: iterations -> build_previous_context -> build_prompt
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-003".into(),
+            title: "Third Story".into(),
+            description: "A third story".into(),
+            acceptance_criteria: vec!["Criterion 1".into()],
+            priority: 3,
+            passes: false,
+            notes: String::new(),
+        };
+        let prd_path = Path::new("/tmp/prd.json");
+
+        let iterations = vec![
+            create_iteration_record("US-001", Some("Added authentication module.")),
+            create_iteration_record("US-002", Some("Added user management.")),
+        ];
+
+        let previous_context = build_previous_context(&iterations);
+        let prompt = build_prompt(&prd, &story, prd_path, previous_context.as_deref());
+
+        assert!(prompt.contains("## Previous Work"));
+        assert!(prompt.contains("US-001: Added authentication module."));
+        assert!(prompt.contains("US-002: Added user management."));
     }
 }
