@@ -10,6 +10,8 @@ const SPINNER_CHARS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 // Spinner (2) + " Claude working on " (19) + " [HH:MM:SS]" (11) = 32 chars overhead
 const SPINNER_OVERHEAD: usize = 32;
+/// Fixed width for activity text to prevent timer position jumping (US-002)
+pub const ACTIVITY_TEXT_WIDTH: usize = 40;
 
 // ============================================================================
 // AgentDisplay: Unified trait/interface for all agent displays
@@ -575,9 +577,9 @@ impl ClaudeSpinner {
                 let activity = last_activity_clone.lock().unwrap().clone();
                 let iter_info = iteration_info_clone.lock().unwrap().clone();
                 let prefix = format_display_prefix(&story_id_owned, &iter_info);
-                let truncated = truncate_activity_for_display(&activity, &prefix);
+                let fixed_activity = fixed_width_activity(&activity);
 
-                spinner_clone.set_message(format!("{} | {} [{}]", prefix, truncated, time_str));
+                spinner_clone.set_message(format!("{} | {} [{}]", prefix, fixed_activity, time_str));
             }
         });
 
@@ -608,10 +610,10 @@ impl ClaudeSpinner {
 
         let iter_info = self.iteration_info_shared.lock().unwrap().clone();
         let prefix = format_display_prefix(&self.story_id, &iter_info);
-        let truncated = truncate_activity_for_display(activity, &prefix);
+        let fixed_activity = fixed_width_activity(activity);
 
         self.spinner
-            .set_message(format!("{} | {} [{}]", prefix, truncated, time_str));
+            .set_message(format!("{} | {} [{}]", prefix, fixed_activity, time_str));
     }
 
     fn stop_timer(&mut self) {
@@ -768,6 +770,28 @@ fn truncate_activity(activity: &str, max_len: usize) -> String {
             let truncated: String = cleaned.chars().take(max_len - 3).collect();
             format!("{}...", truncated)
         }
+    }
+}
+
+/// Create a fixed-width activity text string (US-002).
+///
+/// - Truncates text longer than ACTIVITY_TEXT_WIDTH with "..." suffix
+/// - Pads text shorter than ACTIVITY_TEXT_WIDTH with trailing spaces
+/// - This ensures the timer position remains fixed regardless of activity text content
+fn fixed_width_activity(activity: &str) -> String {
+    // Take first line only and clean it up
+    let first_line = activity.lines().next().unwrap_or(activity);
+    let cleaned = first_line.trim();
+
+    let char_count = cleaned.chars().count();
+
+    if char_count > ACTIVITY_TEXT_WIDTH {
+        // Truncate with "..." suffix
+        let truncated: String = cleaned.chars().take(ACTIVITY_TEXT_WIDTH - 3).collect();
+        format!("{}...", truncated)
+    } else {
+        // Pad with spaces to reach fixed width
+        format!("{:width$}", cleaned, width = ACTIVITY_TEXT_WIDTH)
     }
 }
 
@@ -2131,5 +2155,109 @@ mod tests {
 
         let result = ctx.format_dual_context(&iter_info);
         assert_eq!(result, Some("[US-001 2/5 | Commit]".to_string()));
+    }
+
+    // ========================================================================
+    // US-002: Fixed-width activity text display tests
+    // ========================================================================
+
+    #[test]
+    fn test_activity_text_width_constant() {
+        assert_eq!(ACTIVITY_TEXT_WIDTH, 40);
+    }
+
+    #[test]
+    fn test_fixed_width_activity_short_text() {
+        let result = fixed_width_activity("Working");
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(result.starts_with("Working"));
+        // Should be padded with spaces
+        assert!(result.ends_with(' '));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_exact_width() {
+        // Create a string exactly 40 chars
+        let exact = "a".repeat(ACTIVITY_TEXT_WIDTH);
+        let result = fixed_width_activity(&exact);
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert_eq!(result, exact);
+    }
+
+    #[test]
+    fn test_fixed_width_activity_long_text() {
+        let long_msg = "This is a very long message that should definitely be truncated because it exceeds forty characters";
+        let result = fixed_width_activity(long_msg);
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_multiline() {
+        let multiline = "First line\nSecond line\nThird line";
+        let result = fixed_width_activity(multiline);
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(!result.contains('\n'));
+        assert!(result.starts_with("First line"));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_utf8() {
+        // Should handle UTF-8 characters properly
+        let utf8_msg = "日本語テスト";
+        let result = fixed_width_activity(utf8_msg);
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(result.starts_with("日本語テスト"));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_empty() {
+        let result = fixed_width_activity("");
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        // Should be all spaces
+        assert!(result.chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_whitespace_trimmed() {
+        let result = fixed_width_activity("  Trimmed  ");
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(result.starts_with("Trimmed"));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_truncation_boundary() {
+        // 41 characters - should be truncated to 37 + "..."
+        let msg_41 = "a".repeat(41);
+        let result = fixed_width_activity(&msg_41);
+        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
+        assert!(result.ends_with("..."));
+        // First 37 chars should be 'a'
+        assert!(result[..result.len() - 3].chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn test_fixed_width_activity_consistent_output_width() {
+        // Verify that various inputs all produce the same width
+        let inputs = vec![
+            "Short",
+            "A medium length message",
+            "This is a very long message that exceeds the forty character limit",
+            "日本語",
+            "",
+            "   Whitespace   ",
+        ];
+
+        for input in inputs {
+            let result = fixed_width_activity(input);
+            assert_eq!(
+                result.chars().count(),
+                ACTIVITY_TEXT_WIDTH,
+                "Input '{}' produced width {} instead of {}",
+                input,
+                result.chars().count(),
+                ACTIVITY_TEXT_WIDTH
+            );
+        }
     }
 }
