@@ -24,60 +24,73 @@ Requires the `claude` CLI to be installed and configured.
 
 ## Quick Start
 
-### 1. Create your PRD
-
-Run `autom8 skill prd` to get the PRD creation prompt, then use it in a Claude session:
+### 1. Install skills (one-time setup)
 
 ```bash
-# Get the PRD creation prompt
-autom8 skill prd
-
-# Paste it into Claude and describe your feature
-# Save Claude's output as prd.md
+autom8 init
 ```
 
-### 2. Run autom8
+This installs the `/pdr` skill to `~/.claude/skills/` so Claude knows how to create PRDs.
+
+### 2. Create your PRD
 
 ```bash
-# Just run autom8 - it auto-detects prd.md or prd.json
-autom8
-
-# Or specify a file directly
-autom8 prd.md      # Converts to JSON and implements
-autom8 prd.json    # Implements directly
+claude
 ```
 
-### 3. Watch it work
+Then in the Claude session, use the skill:
+
+```
+/pdr
+```
+
+Claude will ask you questions about your feature and generate a `prd.md` file.
+
+### 3. Run autom8
+
+```bash
+autom8 prd.md
+```
+
+### 4. Watch it work
 
 autom8 will:
 1. Convert your `prd.md` to structured `prd.json`
 2. Pick the highest-priority incomplete story
 3. Run Claude to implement it
-4. Repeat until all stories pass
+4. Review the implementation and fix any issues
+5. Commit when all stories pass
 
 ## Workflow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. Create prd.md interactively with Claude                  │
-│    $ autom8 skill prd  →  paste into Claude  →  save output │
+│ 1. One-time setup                                           │
+│    $ autom8 init                                            │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 2. Run autom8                                               │
-│    $ autom8                                                 │
+│ 2. Create prd.md interactively with Claude                  │
+│    $ claude                                                 │
+│    > /pdr                                                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Run autom8                                               │
+│    $ autom8 prd.md                                          │
 │                                                             │
-│    - Detects prd.md → converts to prd.json                  │
+│    - Converts prd.md → prd.json                             │
 │    - Iterates through user stories                          │
 │    - Claude implements each story                           │
-│    - Marks stories complete when tests pass                 │
+│    - Reviews implementation, fixes issues                   │
 │    - Commits all changes when feature is complete           │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. Feature complete!                                        │
+│ 4. Feature complete!                                        │
 │    All user stories implemented and passing                 │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -99,13 +112,19 @@ stateDiagram-v2
     Initializing --> PickingStory: Ready
 
     PickingStory --> RunningClaude: Story selected
-    PickingStory --> Committing: All stories pass
+    PickingStory --> Reviewing: All stories pass
 
     RunningClaude --> PickingStory: Iteration complete
-    RunningClaude --> Committing: All stories pass
     RunningClaude --> Failed: Error
 
+    Reviewing --> Correcting: Issues found
+    Reviewing --> Committing: No issues
+    Reviewing --> Failed: Max review iterations
+
+    Correcting --> Reviewing: Corrections applied
+
     Committing --> Completed: Commit done
+    Committing --> Failed: Commit error
 
     Completed --> [*]
     Failed --> [*]
@@ -121,6 +140,8 @@ stateDiagram-v2
 | `initializing` | Loading PRD, setting up git branch |
 | `picking-story` | Selecting next incomplete user story |
 | `running-claude` | Claude implementing current story |
+| `reviewing` | Claude reviewing completed implementation |
+| `correcting` | Claude fixing issues found during review |
 | `committing` | Claude committing changes for completed feature |
 | `completed` | All user stories pass |
 | `failed` | Error occurred, run stopped |
@@ -128,9 +149,11 @@ stateDiagram-v2
 ## CLI Commands
 
 ```bash
+autom8 init               # Install skills to ~/.claude/skills/ (one-time setup)
 autom8                    # Auto-detect and run (interactive)
 autom8 <file>             # Run with specific prd.md or prd.json
 autom8 run --prd <file>   # Explicit run command
+autom8 run --skip-review  # Skip the review loop
 autom8 status             # Check current run status
 autom8 resume             # Resume a failed/interrupted run
 autom8 history            # List past runs
@@ -208,7 +231,12 @@ Description of what this story accomplishes.
 
 4. **Iteration**: Process repeats until all stories pass or max iterations reached
 
-5. **Committing**: When all stories pass, Claude commits changes (only files it modified, excluding prd.json and .autom8/)
+5. **Review Loop**: When all stories pass, Claude reviews the implementation:
+   - Checks for issues, edge cases, and code quality
+   - If issues are found, enters correction mode to fix them
+   - Review/correct cycles up to 3 times before failing
+
+6. **Committing**: When review passes, Claude commits changes (only files it modified, excluding prd.json and .autom8/)
 
 ## State Persistence
 
@@ -238,34 +266,18 @@ If running in a git repository, autom8 will:
 ## Example Session
 
 ```
-$ autom8
+$ autom8 prd.md
 
 +---------------------------------------------------------+
 |  autom8 v0.1.0                                          |
 +---------------------------------------------------------+
-
-[detecting] Scanning for PRD files...
-
-Found prd.md at ./prd.md
-
-? Found prd.md spec file. What would you like to do?
-
-  > 1. Convert to prd.json and start implementation
-    2. Delete and start fresh
-    3. Exit
-
-Enter choice [1]: 1
-
-→ Converting prd.md to prd.json and starting implementation
 
 [state] idle -> loading-spec
 Spec: ./prd.md (1.2 KB)
 
 [state] loading-spec -> generating-prd
 Converting to prd.json...
----------------------------------------------------------
 Claude is working...
-...
 
 PRD Generated Successfully
 Project: my-api
@@ -274,12 +286,10 @@ Stories: 3
   - US-002: Implement user endpoint
   - US-003: Add authentication
 
-Saved: ./prd.json
+Saved: .autom8/prds/prd.json
 
 [state] generating-prd -> initializing
----------------------------------------------------------
 Proceeding to implementation...
----------------------------------------------------------
 
 [state] initializing -> picking-story
 Project: my-api
@@ -287,12 +297,23 @@ Branch:  feature/my-api
 Stories: [░░░░░░░░░░░░] 0/3 complete
 
 [state] picking-story -> running-claude
----------------------------------------------------------
 Iteration 1/10 - Running US-001: Set up project structure
----------------------------------------------------------
-
 Claude is working...
-...
+
+[state] running-claude -> picking-story
+Story US-001 complete!
+
+... (more iterations) ...
+
+[state] picking-story -> reviewing
+All stories complete! Running review...
+Review 1/3 - Checking implementation...
+
+[state] reviewing -> committing
+Review passed! Committing changes...
+
+[state] committing -> completed
+Feature complete!
 ```
 
 ## License
