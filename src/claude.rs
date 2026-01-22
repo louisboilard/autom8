@@ -1,4 +1,5 @@
 use crate::error::{Autom8Error, Result};
+use crate::git;
 use crate::prd::{Prd, UserStory};
 use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, PRD_JSON_PROMPT, REVIEWER_PROMPT};
 use serde::Deserialize;
@@ -311,7 +312,8 @@ where
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitResult {
-    Success,
+    /// Commit succeeded, with short commit hash
+    Success(String),
     NothingToCommit,
     Error(String),
 }
@@ -423,7 +425,9 @@ where
     if nothing_to_commit {
         Ok(CommitResult::NothingToCommit)
     } else {
-        Ok(CommitResult::Success)
+        // Get the short commit hash after successful commit
+        let commit_hash = git::latest_commit_short().unwrap_or_else(|_| "unknown".to_string());
+        Ok(CommitResult::Success(commit_hash))
     }
 }
 

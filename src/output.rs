@@ -1,5 +1,7 @@
 use crate::prd::Prd;
+use crate::progress::Breadcrumb;
 use crate::state::{MachineState, RunState};
+use terminal_size::{terminal_size, Width};
 
 // ANSI color codes
 pub const RESET: &str = "\x1b[0m";
@@ -11,6 +13,87 @@ pub const BLUE: &str = "\x1b[34m";
 pub const CYAN: &str = "\x1b[36m";
 pub const RED: &str = "\x1b[31m";
 pub const GRAY: &str = "\x1b[90m";
+
+// ============================================================================
+// Phase banner display
+// ============================================================================
+
+/// Color options for phase banners
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BannerColor {
+    /// Cyan - used for starting a phase
+    Cyan,
+    /// Green - used for successful completion
+    Green,
+    /// Red - used for failure
+    Red,
+    /// Yellow - used for correction/warning phases
+    Yellow,
+}
+
+impl BannerColor {
+    /// Get the ANSI color code for this banner color
+    fn ansi_code(&self) -> &'static str {
+        match self {
+            BannerColor::Cyan => CYAN,
+            BannerColor::Green => GREEN,
+            BannerColor::Red => RED,
+            BannerColor::Yellow => YELLOW,
+        }
+    }
+}
+
+const DEFAULT_TERMINAL_WIDTH: u16 = 80;
+const MIN_BANNER_WIDTH: usize = 20;
+const MAX_BANNER_WIDTH: usize = 80;
+
+/// Get the current terminal width for banner display
+fn get_terminal_width_for_banner() -> usize {
+    terminal_size()
+        .map(|(Width(w), _)| w as usize)
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH as usize)
+}
+
+/// Print a color-coded phase banner.
+///
+/// Banner format: `━━━ PHASE_NAME ━━━` with appropriate color.
+/// The banner width adapts to terminal width (clamped between MIN and MAX).
+///
+/// # Arguments
+/// * `phase_name` - The name of the phase (e.g., "RUNNING", "REVIEWING")
+/// * `color` - The color to use for the banner
+///
+/// # Example
+/// ```ignore
+/// print_phase_banner("RUNNING", BannerColor::Cyan);
+/// // Output: ━━━━━━━━━━━━━━━━━ RUNNING ━━━━━━━━━━━━━━━━━
+/// ```
+pub fn print_phase_banner(phase_name: &str, color: BannerColor) {
+    let terminal_width = get_terminal_width_for_banner();
+
+    // Clamp banner width between MIN and MAX
+    let banner_width = terminal_width.clamp(MIN_BANNER_WIDTH, MAX_BANNER_WIDTH);
+
+    // Calculate padding: " PHASE_NAME " has phase_name.len() + 2 spaces
+    let phase_with_spaces = format!(" {} ", phase_name);
+    let phase_len = phase_with_spaces.chars().count();
+
+    // Calculate how many ━ characters we need on each side
+    let remaining = banner_width.saturating_sub(phase_len);
+    let left_padding = remaining / 2;
+    let right_padding = remaining - left_padding;
+
+    let color_code = color.ansi_code();
+
+    println!(
+        "{}{BOLD}{}{}{}{}",
+        color_code,
+        "━".repeat(left_padding),
+        phase_with_spaces,
+        "━".repeat(right_padding),
+        RESET
+    );
+}
 
 pub fn print_header() {
     println!("{CYAN}{BOLD}");
@@ -300,4 +383,95 @@ pub fn print_run_summary(
         println!();
     }
     println!("{GRAY}{}{RESET}", "-".repeat(57));
+}
+
+/// Print a breadcrumb trail showing the workflow journey.
+///
+/// This displays the trail of states the workflow has passed through,
+/// showing completed states in green and the current state in yellow.
+///
+/// Format: `Journey: Story → Review → Correct → Review`
+///
+/// The trail is automatically truncated if it's too long for the terminal.
+pub fn print_breadcrumb_trail(breadcrumb: &Breadcrumb) {
+    breadcrumb.print();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_banner_color_ansi_codes() {
+        assert_eq!(BannerColor::Cyan.ansi_code(), CYAN);
+        assert_eq!(BannerColor::Green.ansi_code(), GREEN);
+        assert_eq!(BannerColor::Red.ansi_code(), RED);
+        assert_eq!(BannerColor::Yellow.ansi_code(), YELLOW);
+    }
+
+    #[test]
+    fn test_banner_color_equality() {
+        assert_eq!(BannerColor::Cyan, BannerColor::Cyan);
+        assert_ne!(BannerColor::Cyan, BannerColor::Green);
+    }
+
+    #[test]
+    fn test_get_terminal_width_returns_valid_width() {
+        let width = get_terminal_width_for_banner();
+        // Should return something reasonable, either terminal width or default
+        assert!(width >= MIN_BANNER_WIDTH);
+    }
+
+    #[test]
+    fn test_banner_width_clamping() {
+        // Test that banner width is clamped correctly
+        // Since we can't easily mock terminal width, we test the constants
+        assert!(MIN_BANNER_WIDTH < MAX_BANNER_WIDTH);
+        assert_eq!(MIN_BANNER_WIDTH, 20);
+        assert_eq!(MAX_BANNER_WIDTH, 80);
+    }
+
+    // Test that print_phase_banner doesn't panic for various inputs
+    #[test]
+    fn test_print_phase_banner_running() {
+        // This test verifies the function doesn't panic
+        print_phase_banner("RUNNING", BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_banner_reviewing() {
+        print_phase_banner("REVIEWING", BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_banner_correcting() {
+        print_phase_banner("CORRECTING", BannerColor::Yellow);
+    }
+
+    #[test]
+    fn test_print_phase_banner_committing() {
+        print_phase_banner("COMMITTING", BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_banner_success() {
+        print_phase_banner("SUCCESS", BannerColor::Green);
+    }
+
+    #[test]
+    fn test_print_phase_banner_failure() {
+        print_phase_banner("FAILURE", BannerColor::Red);
+    }
+
+    #[test]
+    fn test_print_phase_banner_empty_name() {
+        // Should not panic even with empty name
+        print_phase_banner("", BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_banner_long_name() {
+        // Should not panic with a very long name
+        print_phase_banner("THIS_IS_A_VERY_LONG_PHASE_NAME_THAT_EXCEEDS_NORMAL_LENGTH", BannerColor::Cyan);
+    }
 }

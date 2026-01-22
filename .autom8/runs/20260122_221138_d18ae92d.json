@@ -1,0 +1,24 @@
+{
+  "run_id": "d18ae92d-b155-4f19-ac35-e122ae493bc6",
+  "status": "failed",
+  "machine_state": "failed",
+  "prd_path": "/Users/louis/projects/autom8/.autom8/prds/prd-unified-agent-display.json",
+  "spec_path": null,
+  "branch": "autom8/feature",
+  "current_story": "US-002",
+  "iteration": 1,
+  "max_iterations": 10,
+  "review_iteration": 0,
+  "started_at": "2026-01-22T22:11:38.748664Z",
+  "finished_at": "2026-01-22T22:11:40.760233Z",
+  "iterations": [
+    {
+      "number": 1,
+      "story_id": "US-002",
+      "started_at": "2026-01-22T22:11:38.748833Z",
+      "finished_at": "2026-01-22T22:11:40.760232Z",
+      "status": "failed",
+      "output_snippet": "Claude process failed: Claude exited with status: exit status: 1"
+    }
+  ]
+}

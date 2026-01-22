@@ -5,15 +5,15 @@ use crate::claude::{
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
-    print_all_complete, print_claude_output, print_error, print_generating_prd, print_header,
-    print_info, print_issues_found, print_iteration_complete, print_iteration_start,
-    print_max_review_iterations, print_prd_generated, print_proceeding_to_implementation,
-    print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
-    print_spec_loaded, print_state_transition, print_story_complete, print_warning, StoryResult,
-    BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error,
+    print_generating_prd, print_header, print_info, print_issues_found, print_iteration_complete,
+    print_iteration_start, print_max_review_iterations, print_phase_banner, print_prd_generated,
+    print_proceeding_to_implementation, print_project_info, print_review_passed, print_reviewing,
+    print_run_summary, print_skip_review, print_spec_loaded, print_state_transition,
+    print_story_complete, print_warning, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::prd::Prd;
-use crate::progress::{ClaudeSpinner, VerboseTimer};
+use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -185,6 +185,9 @@ impl Runner {
         let mut story_results: Vec<StoryResult> = Vec::new();
         let run_start = Instant::now();
 
+        // Breadcrumb trail for tracking workflow journey
+        let mut breadcrumb = Breadcrumb::new();
+
         // Helper to print run summary (loads PRD and prints)
         let print_summary = |iteration: u32, results: &[StoryResult]| -> Result<()> {
             let prd = Prd::load(prd_path)?;
@@ -230,13 +233,19 @@ impl Runner {
                         state.transition_to(MachineState::Reviewing);
                         self.state_manager.save(&state)?;
 
+                        // Update breadcrumb to enter Review state
+                        breadcrumb.enter_state(BreadcrumbState::Review);
+
+                        print_phase_banner("REVIEWING", BannerColor::Cyan);
                         print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
                         // Run reviewer
                         let verbose = self.verbose;
                         let review_result = if verbose {
-                            let mut timer =
-                                VerboseTimer::new(&format!("review-{}", state.review_iteration));
+                            let mut timer = VerboseTimer::new_for_review(
+                                state.review_iteration,
+                                MAX_REVIEW_ITERATIONS,
+                            );
                             let res = run_reviewer(
                                 &prd,
                                 state.review_iteration,
@@ -246,16 +255,25 @@ impl Runner {
                                 },
                             );
                             match &res {
-                                Ok(ReviewResult::Pass) | Ok(ReviewResult::IssuesFound) => {
-                                    timer.finish_success()
+                                Ok(ReviewResult::Pass) => {
+                                    timer.finish_with_outcome(Outcome::success("No issues found"))
                                 }
-                                Ok(ReviewResult::Error(e)) => timer.finish_error(e),
-                                Err(e) => timer.finish_error(&e.to_string()),
+                                Ok(ReviewResult::IssuesFound) => {
+                                    timer.finish_with_outcome(Outcome::success("Issues found"))
+                                }
+                                Ok(ReviewResult::Error(e)) => {
+                                    timer.finish_with_outcome(Outcome::failure(e.clone()))
+                                }
+                                Err(e) => {
+                                    timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                                }
                             }
                             res?
                         } else {
-                            let mut spinner =
-                                ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
+                            let mut spinner = ClaudeSpinner::new_for_review(
+                                state.review_iteration,
+                                MAX_REVIEW_ITERATIONS,
+                            );
                             let res = run_reviewer(
                                 &prd,
                                 state.review_iteration,
@@ -266,16 +284,23 @@ impl Runner {
                             );
                             match &res {
                                 Ok(ReviewResult::Pass) => {
-                                    spinner.finish_with_message("Review passed")
+                                    spinner.finish_with_outcome(Outcome::success("No issues found"))
                                 }
                                 Ok(ReviewResult::IssuesFound) => {
-                                    spinner.finish_with_message("Issues found")
+                                    spinner.finish_with_outcome(Outcome::success("Issues found"))
                                 }
-                                Ok(ReviewResult::Error(e)) => spinner.finish_error(e),
-                                Err(e) => spinner.finish_error(&e.to_string()),
+                                Ok(ReviewResult::Error(e)) => {
+                                    spinner.finish_with_outcome(Outcome::failure(e.clone()))
+                                }
+                                Err(e) => {
+                                    spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                                }
                             }
                             res?
                         };
+
+                        // Print breadcrumb trail after review phase completion
+                        print_breadcrumb_trail(&breadcrumb);
 
                         match review_result {
                             ReviewResult::Pass => {
@@ -296,40 +321,57 @@ impl Runner {
                                 state.transition_to(MachineState::Correcting);
                                 self.state_manager.save(&state)?;
 
+                                // Update breadcrumb to enter Correct state
+                                breadcrumb.enter_state(BreadcrumbState::Correct);
+
+                                print_phase_banner("CORRECTING", BannerColor::Yellow);
                                 print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
                                 // Run corrector
                                 let corrector_result = if verbose {
-                                    let mut timer = VerboseTimer::new(&format!(
-                                        "correct-{}",
-                                        state.review_iteration
-                                    ));
+                                    let mut timer = VerboseTimer::new_for_correct(
+                                        state.review_iteration,
+                                        MAX_REVIEW_ITERATIONS,
+                                    );
                                     let res = run_corrector(&prd, state.review_iteration, |line| {
                                         print_claude_output(line);
                                     });
                                     match &res {
-                                        Ok(CorrectorResult::Complete) => timer.finish_success(),
-                                        Ok(CorrectorResult::Error(e)) => timer.finish_error(e),
-                                        Err(e) => timer.finish_error(&e.to_string()),
+                                        Ok(CorrectorResult::Complete) => {
+                                            timer.finish_with_outcome(Outcome::success("Issues addressed"))
+                                        }
+                                        Ok(CorrectorResult::Error(e)) => {
+                                            timer.finish_with_outcome(Outcome::failure(e.clone()))
+                                        }
+                                        Err(e) => {
+                                            timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                                        }
                                     }
                                     res?
                                 } else {
-                                    let mut spinner = ClaudeSpinner::new(&format!(
-                                        "correct-{}",
-                                        state.review_iteration
-                                    ));
+                                    let mut spinner = ClaudeSpinner::new_for_correct(
+                                        state.review_iteration,
+                                        MAX_REVIEW_ITERATIONS,
+                                    );
                                     let res = run_corrector(&prd, state.review_iteration, |line| {
                                         spinner.update(line);
                                     });
                                     match &res {
                                         Ok(CorrectorResult::Complete) => {
-                                            spinner.finish_with_message("Correction complete")
+                                            spinner.finish_with_outcome(Outcome::success("Issues addressed"))
                                         }
-                                        Ok(CorrectorResult::Error(e)) => spinner.finish_error(e),
-                                        Err(e) => spinner.finish_error(&e.to_string()),
+                                        Ok(CorrectorResult::Error(e)) => {
+                                            spinner.finish_with_outcome(Outcome::failure(e.clone()))
+                                        }
+                                        Err(e) => {
+                                            spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                                        }
                                     }
                                     res?
                                 };
+
+                                // Print breadcrumb trail after correct phase completion
+                                print_breadcrumb_trail(&breadcrumb);
 
                                 match corrector_result {
                                     CorrectorResult::Complete => {
@@ -368,6 +410,11 @@ impl Runner {
                     state.transition_to(MachineState::Committing);
                     self.state_manager.save(&state)?;
 
+                    // Update breadcrumb to enter Commit state
+                    breadcrumb.enter_state(BreadcrumbState::Commit);
+
+                    print_phase_banner("COMMITTING", BannerColor::Cyan);
+
                     let verbose = self.verbose;
                     let commit_result = if verbose {
                         let mut timer = VerboseTimer::new_for_commit();
@@ -375,32 +422,49 @@ impl Runner {
                             print_claude_output(line);
                         });
                         match &res {
-                            Ok(CommitResult::Success) => timer.finish_success(),
-                            Ok(CommitResult::NothingToCommit) => timer.finish_success(),
-                            Ok(CommitResult::Error(e)) => timer.finish_error(e),
-                            Err(e) => timer.finish_error(&e.to_string()),
+                            Ok(CommitResult::Success(hash)) => {
+                                timer.finish_with_outcome(Outcome::success(hash.clone()))
+                            }
+                            Ok(CommitResult::NothingToCommit) => {
+                                timer.finish_with_outcome(Outcome::success("Nothing to commit"))
+                            }
+                            Ok(CommitResult::Error(e)) => {
+                                timer.finish_with_outcome(Outcome::failure(e.clone()))
+                            }
+                            Err(e) => {
+                                timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                            }
                         }
                         res?
                     } else {
-                        let commit_start = Instant::now();
                         let mut spinner = ClaudeSpinner::new_for_commit();
                         let res = run_for_commit(&prd, |line| {
                             spinner.update(line);
                         });
-                        let commit_duration = commit_start.elapsed().as_secs();
                         match &res {
-                            Ok(CommitResult::Success) => spinner.finish_success(commit_duration),
-                            Ok(CommitResult::NothingToCommit) => {
-                                spinner.finish_with_message("Nothing to commit")
+                            Ok(CommitResult::Success(hash)) => {
+                                spinner.finish_with_outcome(Outcome::success(hash.clone()))
                             }
-                            Ok(CommitResult::Error(e)) => spinner.finish_error(e),
-                            Err(e) => spinner.finish_error(&e.to_string()),
+                            Ok(CommitResult::NothingToCommit) => {
+                                spinner.finish_with_outcome(Outcome::success("Nothing to commit"))
+                            }
+                            Ok(CommitResult::Error(e)) => {
+                                spinner.finish_with_outcome(Outcome::failure(e.clone()))
+                            }
+                            Err(e) => {
+                                spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                            }
                         }
                         res?
                     };
 
+                    // Print breadcrumb trail after commit phase completion
+                    print_breadcrumb_trail(&breadcrumb);
+
                     match commit_result {
-                        CommitResult::Success => print_info("Changes committed successfully"),
+                        CommitResult::Success(hash) => {
+                            print_info(&format!("Changes committed successfully ({})", hash))
+                        }
                         CommitResult::NothingToCommit => print_info("Nothing to commit"),
                         CommitResult::Error(e) => print_warning(&format!("Commit failed: {}", e)),
                     }
@@ -431,35 +495,51 @@ impl Runner {
                 .ok_or(Autom8Error::NoIncompleteStories)?
                 .clone();
 
+            // Reset breadcrumb trail at start of each new story
+            breadcrumb.reset();
+
             // Start iteration
             print_state_transition(MachineState::PickingStory, MachineState::RunningClaude);
             state.start_iteration(&story.id);
             self.state_manager.save(&state)?;
 
+            // Update breadcrumb to enter Story state
+            breadcrumb.enter_state(BreadcrumbState::Story);
+
+            print_phase_banner("RUNNING", BannerColor::Cyan);
             print_iteration_start(state.iteration, max_iterations, &story.id, &story.title);
 
             // Run Claude with spinner or verbose output
             let story_start = Instant::now();
             let verbose = self.verbose;
+            // Calculate story progress for display: [US-001 2/5]
+            let story_index = prd
+                .user_stories
+                .iter()
+                .position(|s| s.id == story.id)
+                .map(|i| i as u32 + 1)
+                .unwrap_or(state.iteration);
+            let total_stories = prd.total_count() as u32;
             let result = if verbose {
-                let mut timer = VerboseTimer::new(&story.id);
+                let mut timer =
+                    VerboseTimer::new_with_story_progress(&story.id, story_index, total_stories);
                 let res = run_claude(&prd, &story, prd_path, |line| {
                     print_claude_output(line);
                 });
                 match &res {
-                    Ok(_) => timer.finish_success(),
-                    Err(e) => timer.finish_error(&e.to_string()),
+                    Ok(_) => timer.finish_with_outcome(Outcome::success("Implementation done")),
+                    Err(e) => timer.finish_with_outcome(Outcome::failure(e.to_string())),
                 }
                 res
             } else {
-                let mut spinner = ClaudeSpinner::new(&story.id);
+                let mut spinner =
+                    ClaudeSpinner::new_with_story_progress(&story.id, story_index, total_stories);
                 let res = run_claude(&prd, &story, prd_path, |line| {
                     spinner.update(line);
                 });
-                let story_duration = story_start.elapsed().as_secs();
                 match &res {
-                    Ok(_) => spinner.finish_success(story_duration),
-                    Err(e) => spinner.finish_error(&e.to_string()),
+                    Ok(_) => spinner.finish_with_outcome(Outcome::success("Implementation done")),
+                    Err(e) => spinner.finish_with_outcome(Outcome::failure(e.to_string())),
                 }
                 res
             };
@@ -475,6 +555,9 @@ impl Runner {
                         passed: true,
                         duration_secs: duration,
                     });
+
+                    // Print breadcrumb trail after story phase completion
+                    print_breadcrumb_trail(&breadcrumb);
 
                     if verbose {
                         print_story_complete(&story.id, duration);
@@ -504,14 +587,18 @@ impl Runner {
                             state.transition_to(MachineState::Reviewing);
                             self.state_manager.save(&state)?;
 
+                            // Update breadcrumb to enter Review state
+                            breadcrumb.enter_state(BreadcrumbState::Review);
+
+                            print_phase_banner("REVIEWING", BannerColor::Cyan);
                             print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
                             // Run reviewer
                             let review_result = if verbose {
-                                let mut timer = VerboseTimer::new(&format!(
-                                    "review-{}",
-                                    state.review_iteration
-                                ));
+                                let mut timer = VerboseTimer::new_for_review(
+                                    state.review_iteration,
+                                    MAX_REVIEW_ITERATIONS,
+                                );
                                 let res = run_reviewer(
                                     &prd,
                                     state.review_iteration,
@@ -521,18 +608,25 @@ impl Runner {
                                     },
                                 );
                                 match &res {
-                                    Ok(ReviewResult::Pass) | Ok(ReviewResult::IssuesFound) => {
-                                        timer.finish_success()
+                                    Ok(ReviewResult::Pass) => {
+                                        timer.finish_with_outcome(Outcome::success("No issues found"))
                                     }
-                                    Ok(ReviewResult::Error(e)) => timer.finish_error(e),
-                                    Err(e) => timer.finish_error(&e.to_string()),
+                                    Ok(ReviewResult::IssuesFound) => {
+                                        timer.finish_with_outcome(Outcome::success("Issues found"))
+                                    }
+                                    Ok(ReviewResult::Error(e)) => {
+                                        timer.finish_with_outcome(Outcome::failure(e.clone()))
+                                    }
+                                    Err(e) => {
+                                        timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                                    }
                                 }
                                 res?
                             } else {
-                                let mut spinner = ClaudeSpinner::new(&format!(
-                                    "review-{}",
-                                    state.review_iteration
-                                ));
+                                let mut spinner = ClaudeSpinner::new_for_review(
+                                    state.review_iteration,
+                                    MAX_REVIEW_ITERATIONS,
+                                );
                                 let res = run_reviewer(
                                     &prd,
                                     state.review_iteration,
@@ -543,16 +637,23 @@ impl Runner {
                                 );
                                 match &res {
                                     Ok(ReviewResult::Pass) => {
-                                        spinner.finish_with_message("Review passed")
+                                        spinner.finish_with_outcome(Outcome::success("No issues found"))
                                     }
                                     Ok(ReviewResult::IssuesFound) => {
-                                        spinner.finish_with_message("Issues found")
+                                        spinner.finish_with_outcome(Outcome::success("Issues found"))
                                     }
-                                    Ok(ReviewResult::Error(e)) => spinner.finish_error(e),
-                                    Err(e) => spinner.finish_error(&e.to_string()),
+                                    Ok(ReviewResult::Error(e)) => {
+                                        spinner.finish_with_outcome(Outcome::failure(e.clone()))
+                                    }
+                                    Err(e) => {
+                                        spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                                    }
                                 }
                                 res?
                             };
+
+                            // Print breadcrumb trail after review phase completion
+                            print_breadcrumb_trail(&breadcrumb);
 
                             match review_result {
                                 ReviewResult::Pass => {
@@ -573,6 +674,10 @@ impl Runner {
                                     state.transition_to(MachineState::Correcting);
                                     self.state_manager.save(&state)?;
 
+                                    // Update breadcrumb to enter Correct state
+                                    breadcrumb.enter_state(BreadcrumbState::Correct);
+
+                                    print_phase_banner("CORRECTING", BannerColor::Yellow);
                                     print_issues_found(
                                         state.review_iteration,
                                         MAX_REVIEW_ITERATIONS,
@@ -580,40 +685,51 @@ impl Runner {
 
                                     // Run corrector
                                     let corrector_result = if verbose {
-                                        let mut timer = VerboseTimer::new(&format!(
-                                            "correct-{}",
-                                            state.review_iteration
-                                        ));
+                                        let mut timer = VerboseTimer::new_for_correct(
+                                            state.review_iteration,
+                                            MAX_REVIEW_ITERATIONS,
+                                        );
                                         let res =
                                             run_corrector(&prd, state.review_iteration, |line| {
                                                 print_claude_output(line);
                                             });
                                         match &res {
-                                            Ok(CorrectorResult::Complete) => timer.finish_success(),
-                                            Ok(CorrectorResult::Error(e)) => timer.finish_error(e),
-                                            Err(e) => timer.finish_error(&e.to_string()),
+                                            Ok(CorrectorResult::Complete) => {
+                                                timer.finish_with_outcome(Outcome::success("Issues addressed"))
+                                            }
+                                            Ok(CorrectorResult::Error(e)) => {
+                                                timer.finish_with_outcome(Outcome::failure(e.clone()))
+                                            }
+                                            Err(e) => {
+                                                timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                                            }
                                         }
                                         res?
                                     } else {
-                                        let mut spinner = ClaudeSpinner::new(&format!(
-                                            "correct-{}",
-                                            state.review_iteration
-                                        ));
+                                        let mut spinner = ClaudeSpinner::new_for_correct(
+                                            state.review_iteration,
+                                            MAX_REVIEW_ITERATIONS,
+                                        );
                                         let res =
                                             run_corrector(&prd, state.review_iteration, |line| {
                                                 spinner.update(line);
                                             });
                                         match &res {
                                             Ok(CorrectorResult::Complete) => {
-                                                spinner.finish_with_message("Correction complete")
+                                                spinner.finish_with_outcome(Outcome::success("Issues addressed"))
                                             }
                                             Ok(CorrectorResult::Error(e)) => {
-                                                spinner.finish_error(e)
+                                                spinner.finish_with_outcome(Outcome::failure(e.clone()))
                                             }
-                                            Err(e) => spinner.finish_error(&e.to_string()),
+                                            Err(e) => {
+                                                spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                                            }
                                         }
                                         res?
                                     };
+
+                                    // Print breadcrumb trail after correct phase completion
+                                    print_breadcrumb_trail(&breadcrumb);
 
                                     match corrector_result {
                                         CorrectorResult::Complete => {
@@ -652,40 +768,60 @@ impl Runner {
                         state.transition_to(MachineState::Committing);
                         self.state_manager.save(&state)?;
 
+                        // Update breadcrumb to enter Commit state
+                        breadcrumb.enter_state(BreadcrumbState::Commit);
+
+                        print_phase_banner("COMMITTING", BannerColor::Cyan);
+
                         let commit_result = if verbose {
                             let mut timer = VerboseTimer::new_for_commit();
                             let res = run_for_commit(&prd, |line| {
                                 print_claude_output(line);
                             });
                             match &res {
-                                Ok(CommitResult::Success) => timer.finish_success(),
-                                Ok(CommitResult::NothingToCommit) => timer.finish_success(),
-                                Ok(CommitResult::Error(e)) => timer.finish_error(e),
-                                Err(e) => timer.finish_error(&e.to_string()),
+                                Ok(CommitResult::Success(hash)) => {
+                                    timer.finish_with_outcome(Outcome::success(hash.clone()))
+                                }
+                                Ok(CommitResult::NothingToCommit) => {
+                                    timer.finish_with_outcome(Outcome::success("Nothing to commit"))
+                                }
+                                Ok(CommitResult::Error(e)) => {
+                                    timer.finish_with_outcome(Outcome::failure(e.clone()))
+                                }
+                                Err(e) => {
+                                    timer.finish_with_outcome(Outcome::failure(e.to_string()))
+                                }
                             }
                             res?
                         } else {
-                            let commit_start = Instant::now();
                             let mut spinner = ClaudeSpinner::new_for_commit();
                             let res = run_for_commit(&prd, |line| {
                                 spinner.update(line);
                             });
-                            let commit_duration = commit_start.elapsed().as_secs();
                             match &res {
-                                Ok(CommitResult::Success) => {
-                                    spinner.finish_success(commit_duration)
+                                Ok(CommitResult::Success(hash)) => {
+                                    spinner.finish_with_outcome(Outcome::success(hash.clone()))
                                 }
                                 Ok(CommitResult::NothingToCommit) => {
-                                    spinner.finish_with_message("Nothing to commit")
+                                    spinner.finish_with_outcome(Outcome::success("Nothing to commit"))
                                 }
-                                Ok(CommitResult::Error(e)) => spinner.finish_error(e),
-                                Err(e) => spinner.finish_error(&e.to_string()),
+                                Ok(CommitResult::Error(e)) => {
+                                    spinner.finish_with_outcome(Outcome::failure(e.clone()))
+                                }
+                                Err(e) => {
+                                    spinner.finish_with_outcome(Outcome::failure(e.to_string()))
+                                }
                             }
                             res?
                         };
 
+                        // Print breadcrumb trail after commit phase completion
+                        print_breadcrumb_trail(&breadcrumb);
+
                         match commit_result {
-                            CommitResult::Success => print_info("Changes committed successfully"),
+                            CommitResult::Success(hash) => {
+                                print_info(&format!("Changes committed successfully ({})", hash))
+                            }
                             CommitResult::NothingToCommit => print_info("Nothing to commit"),
                             CommitResult::Error(e) => {
                                 print_warning(&format!("Commit failed: {}", e))
@@ -708,6 +844,10 @@ impl Runner {
                     self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
+
+                    // Print breadcrumb trail after story phase completion
+                    print_breadcrumb_trail(&breadcrumb);
+
                     print_state_transition(MachineState::RunningClaude, MachineState::PickingStory);
                     print_iteration_complete(state.iteration);
 

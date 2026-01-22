@@ -13,5 +13,6 @@ pub mod state;
 pub use archive::ArchiveManager;
 pub use error::{Autom8Error, Result};
 pub use prd::Prd;
+pub use progress::{Breadcrumb, BreadcrumbState, ProgressContext};
 pub use runner::Runner;
 pub use state::{MachineState, RunState, RunStatus, StateManager};
