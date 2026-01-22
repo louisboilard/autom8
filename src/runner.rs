@@ -2,25 +2,34 @@ use crate::claude::{run_claude, run_for_prd_generation, ClaudeResult};
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
-    print_all_complete, print_error, print_generating_prd, print_info,
+    print_all_complete, print_claude_output, print_error, print_generating_prd, print_info,
     print_iteration_complete, print_iteration_start, print_prd_generated,
-    print_proceeding_to_implementation, print_project_info, print_spec_loaded,
-    print_state_transition, print_story_complete,
+    print_proceeding_to_implementation, print_project_info, print_run_summary, print_spec_loaded,
+    print_state_transition, print_story_complete, StoryResult,
 };
 use crate::prd::Prd;
+use crate::progress::ClaudeSpinner;
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 pub struct Runner {
     state_manager: StateManager,
+    verbose: bool,
 }
 
 impl Runner {
     pub fn new() -> Self {
         Self {
             state_manager: StateManager::new(),
+            verbose: false,
         }
+    }
+
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 
     /// Run from a prd.md spec file - converts to JSON first, then implements
@@ -33,9 +42,9 @@ impl Runner {
         }
 
         // Canonicalize spec path
-        let spec_path = spec_path.canonicalize().map_err(|_| {
-            Autom8Error::SpecNotFound(spec_path.to_path_buf())
-        })?;
+        let spec_path = spec_path
+            .canonicalize()
+            .map_err(|_| Autom8Error::SpecNotFound(spec_path.to_path_buf()))?;
 
         // Determine PRD output path (same directory as spec)
         let prd_path = spec_path
@@ -44,11 +53,7 @@ impl Runner {
             .join("prd.json");
 
         // Initialize state
-        let mut state = RunState::from_spec(
-            spec_path.clone(),
-            prd_path.clone(),
-            max_iterations,
-        );
+        let mut state = RunState::from_spec(spec_path.clone(), prd_path.clone(), max_iterations);
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -72,7 +77,23 @@ impl Runner {
         print_generating_prd();
 
         // Run Claude to generate PRD
-        let prd = run_for_prd_generation(&spec_content, &prd_path)?;
+        let prd_start = Instant::now();
+        let verbose = self.verbose;
+        let prd = if verbose {
+            run_for_prd_generation(&spec_content, &prd_path, |line| {
+                print_claude_output(line);
+            })?
+        } else {
+            let spinner = ClaudeSpinner::new_for_prd();
+            let result = run_for_prd_generation(&spec_content, &prd_path, |line| {
+                spinner.update(line);
+            });
+            match &result {
+                Ok(_) => spinner.finish_success(prd_start.elapsed().as_secs()),
+                Err(e) => spinner.finish_error(&e.to_string()),
+            }
+            result?
+        };
 
         print_prd_generated(&prd, &prd_path);
 
@@ -97,9 +118,9 @@ impl Runner {
         }
 
         // Canonicalize path so resume works from any directory
-        let prd_path = prd_path.canonicalize().map_err(|_| {
-            Autom8Error::PrdNotFound(prd_path.to_path_buf())
-        })?;
+        let prd_path = prd_path
+            .canonicalize()
+            .map_err(|_| Autom8Error::PrdNotFound(prd_path.to_path_buf()))?;
 
         // Load and validate PRD
         let prd = Prd::load(&prd_path)?;
@@ -140,6 +161,23 @@ impl Runner {
         state.transition_to(MachineState::PickingStory);
         self.state_manager.save(&state)?;
 
+        // Track story results for summary
+        let mut story_results: Vec<StoryResult> = Vec::new();
+        let run_start = Instant::now();
+
+        // Helper to print run summary (loads PRD and prints)
+        let print_summary = |iteration: u32, results: &[StoryResult]| -> Result<()> {
+            let prd = Prd::load(prd_path)?;
+            print_run_summary(
+                prd.total_count(),
+                prd.completed_count(),
+                iteration,
+                run_start.elapsed().as_secs(),
+                results,
+            );
+            Ok(())
+        };
+
         // Main loop
         loop {
             // Reload PRD to get latest passes state
@@ -151,6 +189,7 @@ impl Runner {
                 state.transition_to(MachineState::Completed);
                 self.state_manager.save(&state)?;
                 print_all_complete();
+                print_summary(state.iteration, &story_results)?;
                 self.archive_and_cleanup(&state)?;
                 return Ok(());
             }
@@ -159,6 +198,7 @@ impl Runner {
             if state.iteration >= max_iterations {
                 state.transition_to(MachineState::Failed);
                 self.state_manager.save(&state)?;
+                print_summary(state.iteration, &story_results)?;
                 return Err(Autom8Error::MaxIterationsReached(max_iterations));
             }
 
@@ -175,8 +215,25 @@ impl Runner {
 
             print_iteration_start(state.iteration, max_iterations, &story.id, &story.title);
 
-            // Run Claude
-            let result = run_claude(&prd, &story, prd_path);
+            // Run Claude with spinner or verbose output
+            let story_start = Instant::now();
+            let verbose = self.verbose;
+            let result = if verbose {
+                run_claude(&prd, &story, prd_path, |line| {
+                    print_claude_output(line);
+                })
+            } else {
+                let spinner = ClaudeSpinner::new(&story.id);
+                let res = run_claude(&prd, &story, prd_path, |line| {
+                    spinner.update(line);
+                });
+                let story_duration = story_start.elapsed().as_secs();
+                match &res {
+                    Ok(_) => spinner.finish_success(story_duration),
+                    Err(e) => spinner.finish_error(&e.to_string()),
+                }
+                res
+            };
 
             match result {
                 Ok(ClaudeResult::AllStoriesComplete) => {
@@ -186,9 +243,18 @@ impl Runner {
                     self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
-                    print_story_complete(&story.id, duration);
-                    print_all_complete();
+                    story_results.push(StoryResult {
+                        id: story.id.clone(),
+                        title: story.title.clone(),
+                        passed: true,
+                        duration_secs: duration,
+                    });
 
+                    if verbose {
+                        print_story_complete(&story.id, duration);
+                    }
+                    print_all_complete();
+                    print_summary(state.iteration, &story_results)?;
                     self.archive_and_cleanup(&state)?;
                     return Ok(());
                 }
@@ -202,13 +268,22 @@ impl Runner {
 
                     // Reload PRD and check if current story passed
                     let updated_prd = Prd::load(prd_path)?;
-                    if updated_prd
+                    let story_passed = updated_prd
                         .user_stories
                         .iter()
                         .find(|s| s.id == story.id)
-                        .is_some_and(|s| s.passes)
-                    {
-                        print_story_complete(&story.id, duration);
+                        .is_some_and(|s| s.passes);
+
+                    if story_passed {
+                        story_results.push(StoryResult {
+                            id: story.id.clone(),
+                            title: story.title.clone(),
+                            passed: true,
+                            duration_secs: duration,
+                        });
+                        if verbose {
+                            print_story_complete(&story.id, duration);
+                        }
                     }
 
                     // Continue to next iteration
@@ -218,7 +293,15 @@ impl Runner {
                     state.transition_to(MachineState::Failed);
                     self.state_manager.save(&state)?;
 
+                    story_results.push(StoryResult {
+                        id: story.id.clone(),
+                        title: story.title.clone(),
+                        passed: false,
+                        duration_secs: story_start.elapsed().as_secs(),
+                    });
+
                     print_error(&msg);
+                    print_summary(state.iteration, &story_results)?;
                     return Err(Autom8Error::ClaudeError(msg));
                 }
                 Err(e) => {
@@ -226,7 +309,15 @@ impl Runner {
                     state.transition_to(MachineState::Failed);
                     self.state_manager.save(&state)?;
 
+                    story_results.push(StoryResult {
+                        id: story.id.clone(),
+                        title: story.title.clone(),
+                        passed: false,
+                        duration_secs: story_start.elapsed().as_secs(),
+                    });
+
                     print_error(&e.to_string());
+                    print_summary(state.iteration, &story_results)?;
                     return Err(e);
                 }
             }

@@ -58,7 +58,10 @@ pub fn select(question: &str, options: &[&str], default: usize) -> usize {
         match trimmed.parse::<usize>() {
             Ok(n) if n >= 1 && n <= options.len() => return n - 1,
             _ => {
-                println!("{YELLOW}Please enter a number between 1 and {}{RESET}", options.len());
+                println!(
+                    "{YELLOW}Please enter a number between 1 and {}{RESET}",
+                    options.len()
+                );
             }
         }
     }

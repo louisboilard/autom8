@@ -37,8 +37,8 @@ impl Prd {
         }
 
         let content = fs::read_to_string(path)?;
-        let prd: Prd = serde_json::from_str(&content)
-            .map_err(|e| Autom8Error::InvalidPrd(e.to_string()))?;
+        let prd: Prd =
+            serde_json::from_str(&content).map_err(|e| Autom8Error::InvalidPrd(e.to_string()))?;
 
         prd.validate()?;
         Ok(prd)
@@ -55,7 +55,9 @@ impl Prd {
             return Err(Autom8Error::InvalidPrd("project name is required".into()));
         }
         if self.user_stories.is_empty() {
-            return Err(Autom8Error::InvalidPrd("at least one user story is required".into()));
+            return Err(Autom8Error::InvalidPrd(
+                "at least one user story is required".into(),
+            ));
         }
         for story in &self.user_stories {
             if story.id.is_empty() {

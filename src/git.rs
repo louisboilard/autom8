@@ -29,7 +29,12 @@ pub fn current_branch() -> Result<String> {
 pub fn branch_exists(branch: &str) -> Result<bool> {
     // Check local branches
     let local = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", branch)])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", branch),
+        ])
         .output()?;
 
     if local.status.success() {
@@ -38,7 +43,12 @@ pub fn branch_exists(branch: &str) -> Result<bool> {
 
     // Check remote branches
     let remote = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{}", branch)])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{}", branch),
+        ])
         .output()?;
 
     Ok(remote.status.success())
@@ -65,9 +75,7 @@ pub fn ensure_branch(branch: &str) -> Result<()> {
 
 /// Checkout an existing branch
 fn checkout(branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["checkout", branch])
-        .output()?;
+    let output = Command::new("git").args(["checkout", branch]).output()?;
 
     if !output.status.success() {
         return Err(Autom8Error::GitError(format!(

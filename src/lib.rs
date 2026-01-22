@@ -4,6 +4,7 @@ pub mod error;
 pub mod git;
 pub mod output;
 pub mod prd;
+pub mod progress;
 pub mod prompt;
 pub mod prompts;
 pub mod runner;

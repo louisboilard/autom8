@@ -1,5 +1,4 @@
 use crate::error::{Autom8Error, Result};
-use crate::output::print_claude_output;
 use crate::prd::{Prd, UserStory};
 use crate::prompts::PRD_JSON_PROMPT;
 use std::io::{BufRead, BufReader, Write};
@@ -15,7 +14,15 @@ pub enum ClaudeResult {
     Error(String),
 }
 
-pub fn run_claude(prd: &Prd, story: &UserStory, prd_path: &std::path::Path) -> Result<ClaudeResult> {
+pub fn run_claude<F>(
+    prd: &Prd,
+    story: &UserStory,
+    prd_path: &std::path::Path,
+    mut on_output: F,
+) -> Result<ClaudeResult>
+where
+    F: FnMut(&str),
+{
     let prompt = build_prompt(prd, story, prd_path);
 
     let mut child = Command::new("claude")
@@ -44,17 +51,11 @@ pub fn run_claude(prd: &Prd, story: &UserStory, prd_path: &std::path::Path) -> R
 
     let reader = BufReader::new(stdout);
     let mut found_complete = false;
-    let mut output_snippet = String::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
-        print_claude_output(&line);
-
-        if output_snippet.len() < 500 {
-            output_snippet.push_str(&line);
-            output_snippet.push('\n');
-        }
+        on_output(&line);
 
         if line.contains(COMPLETION_SIGNAL) {
             found_complete = true;
@@ -74,7 +75,11 @@ pub fn run_claude(prd: &Prd, story: &UserStory, prd_path: &std::path::Path) -> R
         let error_msg = if stderr_content.is_empty() {
             format!("Claude exited with status: {}", status)
         } else {
-            format!("Claude exited with status {}: {}", status, stderr_content.trim())
+            format!(
+                "Claude exited with status {}: {}",
+                status,
+                stderr_content.trim()
+            )
         };
         return Err(Autom8Error::ClaudeError(error_msg));
     }
@@ -87,7 +92,14 @@ pub fn run_claude(prd: &Prd, story: &UserStory, prd_path: &std::path::Path) -> R
 }
 
 /// Run Claude to convert a prd.md spec into prd.json
-pub fn run_for_prd_generation(spec_content: &str, output_path: &Path) -> Result<Prd> {
+pub fn run_for_prd_generation<F>(
+    spec_content: &str,
+    output_path: &Path,
+    mut on_output: F,
+) -> Result<Prd>
+where
+    F: FnMut(&str),
+{
     let prompt = PRD_JSON_PROMPT.replace("{spec_content}", spec_content);
 
     let mut child = Command::new("claude")
@@ -119,7 +131,7 @@ pub fn run_for_prd_generation(spec_content: &str, output_path: &Path) -> Result<
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
-        print_claude_output(&line);
+        on_output(&line);
         full_output.push_str(&line);
         full_output.push('\n');
     }
@@ -136,14 +148,19 @@ pub fn run_for_prd_generation(spec_content: &str, output_path: &Path) -> Result<
         let error_msg = if stderr_content.is_empty() {
             format!("Claude exited with status: {}", status)
         } else {
-            format!("Claude exited with status {}: {}", status, stderr_content.trim())
+            format!(
+                "Claude exited with status {}: {}",
+                status,
+                stderr_content.trim()
+            )
         };
         return Err(Autom8Error::PrdGenerationFailed(error_msg));
     }
 
     // Extract JSON from response (handle potential markdown code blocks)
-    let json_str = extract_json(&full_output)
-        .ok_or_else(|| Autom8Error::InvalidGeneratedPrd("No valid JSON found in response".into()))?;
+    let json_str = extract_json(&full_output).ok_or_else(|| {
+        Autom8Error::InvalidGeneratedPrd("No valid JSON found in response".into())
+    })?;
 
     // Parse the JSON into Prd
     let prd: Prd = serde_json::from_str(&json_str)
@@ -163,7 +180,11 @@ fn extract_json(response: &str) -> Option<String> {
     if let Some(start) = trimmed.find("```json") {
         let content_start = start + 7;
         if let Some(end) = trimmed[content_start..].find("```") {
-            return Some(trimmed[content_start..content_start + end].trim().to_string());
+            return Some(
+                trimmed[content_start..content_start + end]
+                    .trim()
+                    .to_string(),
+            );
         }
     }
 
@@ -176,7 +197,11 @@ fn extract_json(response: &str) -> Option<String> {
             .map(|i| content_start + i + 1)
             .unwrap_or(content_start);
         if let Some(end) = trimmed[content_start..].find("```") {
-            return Some(trimmed[content_start..content_start + end].trim().to_string());
+            return Some(
+                trimmed[content_start..content_start + end]
+                    .trim()
+                    .to_string(),
+            );
         }
     }
 

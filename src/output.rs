@@ -15,7 +15,10 @@ pub const GRAY: &str = "\x1b[90m";
 pub fn print_header() {
     println!("{CYAN}{BOLD}");
     println!("+---------------------------------------------------------+");
-    println!("|  autom8 v{}                                          |", env!("CARGO_PKG_VERSION"));
+    println!(
+        "|  autom8 v{}                                          |",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("+---------------------------------------------------------+");
     println!("{RESET}");
 }
@@ -27,19 +30,25 @@ pub fn print_project_info(prd: &Prd) {
 
     println!("{BLUE}Project:{RESET} {}", prd.project);
     println!("{BLUE}Branch:{RESET}  {}", prd.branch_name);
-    println!("{BLUE}Stories:{RESET} [{}] {}/{} complete", progress_bar, completed, total);
+    println!(
+        "{BLUE}Stories:{RESET} [{}] {}/{} complete",
+        progress_bar, completed, total
+    );
     println!();
 }
 
-pub fn print_iteration_start(iteration: u32, max_iterations: u32, story_id: &str, story_title: &str) {
+pub fn print_iteration_start(
+    iteration: u32,
+    max_iterations: u32,
+    story_id: &str,
+    story_title: &str,
+) {
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!(
         "{YELLOW}Iteration {}/{}{RESET} - Running {BOLD}{}{RESET}: {}",
         iteration, max_iterations, story_id, story_title
     );
     println!("{GRAY}{}{RESET}", "-".repeat(57));
-    println!();
-    println!("{CYAN}Claude is working...{RESET}");
     println!();
 }
 
@@ -94,8 +103,14 @@ pub fn print_status(state: &RunState) {
     if let Some(story) = &state.current_story {
         println!("{BLUE}Current:{RESET}   {}", story);
     }
-    println!("{BLUE}Iteration:{RESET} {}/{}", state.iteration, state.max_iterations);
-    println!("{BLUE}Started:{RESET}   {}", state.started_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "{BLUE}Iteration:{RESET} {}/{}",
+        state.iteration, state.max_iterations
+    );
+    println!(
+        "{BLUE}Started:{RESET}   {}",
+        state.started_at.format("%Y-%m-%d %H:%M:%S")
+    );
     println!("{BLUE}Iterations run:{RESET} {}", state.iterations.len());
 }
 
@@ -163,7 +178,6 @@ pub fn print_spec_loaded(path: &std::path::Path, size_bytes: u64) {
 pub fn print_generating_prd() {
     println!("Converting to prd.json...");
     println!("{GRAY}{}{RESET}", "-".repeat(57));
-    println!("{CYAN}Claude is working...{RESET}");
 }
 
 pub fn print_prd_generated(prd: &Prd, output_path: &std::path::Path) {
@@ -185,4 +199,56 @@ pub fn print_proceeding_to_implementation() {
     println!("Proceeding to implementation...");
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!();
+}
+
+pub struct StoryResult {
+    pub id: String,
+    pub title: String,
+    pub passed: bool,
+    pub duration_secs: u64,
+}
+
+pub fn print_run_summary(
+    total_stories: usize,
+    completed_stories: usize,
+    total_iterations: u32,
+    total_duration_secs: u64,
+    story_results: &[StoryResult],
+) {
+    let hours = total_duration_secs / 3600;
+    let mins = (total_duration_secs % 3600) / 60;
+    let secs = total_duration_secs % 60;
+
+    println!();
+    println!("{CYAN}{BOLD}Run Summary{RESET}");
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!(
+        "{BLUE}Stories:{RESET}    {}/{} completed",
+        completed_stories, total_stories
+    );
+    println!("{BLUE}Iterations:{RESET} {}", total_iterations);
+    println!(
+        "{BLUE}Total time:{RESET} {:02}:{:02}:{:02}",
+        hours, mins, secs
+    );
+    println!();
+
+    if !story_results.is_empty() {
+        println!("{BOLD}Per-story breakdown:{RESET}");
+        for result in story_results {
+            let status = if result.passed {
+                format!("{GREEN}PASS{RESET}")
+            } else {
+                format!("{RED}FAIL{RESET}")
+            };
+            let story_mins = result.duration_secs / 60;
+            let story_secs = result.duration_secs % 60;
+            println!(
+                "  [{}] {}: {} ({}m {}s)",
+                status, result.id, result.title, story_mins, story_secs
+            );
+        }
+        println!();
+    }
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
 }

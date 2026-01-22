@@ -12,10 +12,17 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "autom8")]
-#[command(version, about = "CLI automation tool for orchestrating Claude-powered development")]
+#[command(
+    version,
+    about = "CLI automation tool for orchestrating Claude-powered development"
+)]
 struct Cli {
     /// Path to a prd.md or prd.json file (shorthand for `run --prd <file>`)
     file: Option<PathBuf>,
+
+    /// Show full Claude output instead of spinner (useful for debugging)
+    #[arg(short, long, global = true)]
+    verbose: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -72,14 +79,20 @@ fn detect_input_type(path: &Path) -> InputType {
 
 fn main() {
     let cli = Cli::parse();
-    let runner = Runner::new();
+    let runner = Runner::new().with_verbose(cli.verbose);
 
     let result = match (&cli.file, &cli.command) {
         // Positional file argument takes precedence
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (None, Some(Commands::Run { prd, max_iterations })) => {
+        (
+            None,
+            Some(Commands::Run {
+                prd,
+                max_iterations,
+            }),
+        ) => {
             print_header();
             match detect_input_type(prd) {
                 InputType::Prd => runner.run(prd, *max_iterations),
@@ -148,7 +161,7 @@ fn main() {
     }
 }
 
-fn run_with_file(runner: &Runner, file: &PathBuf) -> autom8::error::Result<()> {
+fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
     const DEFAULT_MAX_ITERATIONS: u32 = 10;
 
     print_header();
@@ -246,11 +259,7 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
 
             let choice = prompt::select(
                 "Found existing prd.json. What would you like to do?",
-                &[
-                    "Continue implementation",
-                    "Delete and start fresh",
-                    "Exit",
-                ],
+                &["Continue implementation", "Delete and start fresh", "Exit"],
                 0,
             );
 
@@ -295,7 +304,9 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
             match choice {
                 0 => {
                     println!();
-                    prompt::print_action("Converting prd.md to prd.json and starting implementation");
+                    prompt::print_action(
+                        "Converting prd.md to prd.json and starting implementation",
+                    );
                     println!();
                     runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
                 }
