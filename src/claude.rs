@@ -1,6 +1,6 @@
 use crate::error::{Autom8Error, Result};
 use crate::prd::{Prd, UserStory};
-use crate::prompts::{COMMIT_PROMPT, PRD_JSON_PROMPT};
+use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, PRD_JSON_PROMPT, REVIEWER_PROMPT};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -179,6 +179,19 @@ pub enum CommitResult {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReviewResult {
+    Pass,
+    IssuesFound,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CorrectorResult {
+    Complete,
+    Error(String),
+}
+
 /// Run Claude to commit changes after all stories are complete
 pub fn run_for_commit<F>(prd: &Prd, mut on_output: F) -> Result<CommitResult>
 where
@@ -260,6 +273,214 @@ where
     } else {
         Ok(CommitResult::Success)
     }
+}
+
+const REVIEW_FILE: &str = "autom8_review.md";
+
+/// Run the reviewer agent to check completed work for quality issues.
+/// Returns ReviewResult::Pass if autom8_review.md does not exist after run.
+/// Returns ReviewResult::IssuesFound if autom8_review.md exists and has content.
+/// Returns ReviewResult::Error(String) on failure.
+pub fn run_reviewer<F>(
+    prd: &Prd,
+    iteration: u32,
+    max_iterations: u32,
+    mut on_output: F,
+) -> Result<ReviewResult>
+where
+    F: FnMut(&str),
+{
+    let prompt = build_reviewer_prompt(prd, iteration, max_iterations);
+
+    let mut child = Command::new("claude")
+        .args(["--dangerously-skip-permissions", "--print"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to spawn claude: {}", e)))?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+    }
+
+    // Take stderr handle before consuming stdout
+    let stderr = child.stderr.take();
+
+    // Stream stdout
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
+
+    let reader = BufReader::new(stdout);
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
+        on_output(&line);
+    }
+
+    // Wait for process to complete
+    let status = child
+        .wait()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Wait error: {}", e)))?;
+
+    if !status.success() {
+        let stderr_content = stderr
+            .map(|s| std::io::read_to_string(s).unwrap_or_default())
+            .unwrap_or_default();
+        let error_msg = if stderr_content.is_empty() {
+            format!("Claude exited with status: {}", status)
+        } else {
+            format!(
+                "Claude exited with status {}: {}",
+                status,
+                stderr_content.trim()
+            )
+        };
+        return Ok(ReviewResult::Error(error_msg));
+    }
+
+    // Check if autom8_review.md exists and has content
+    let review_path = Path::new(REVIEW_FILE);
+    if review_path.exists() {
+        match std::fs::read_to_string(review_path) {
+            Ok(content) if !content.trim().is_empty() => Ok(ReviewResult::IssuesFound),
+            Ok(_) => Ok(ReviewResult::Pass), // File exists but is empty
+            Err(e) => Ok(ReviewResult::Error(format!(
+                "Failed to read review file: {}",
+                e
+            ))),
+        }
+    } else {
+        Ok(ReviewResult::Pass)
+    }
+}
+
+/// Run the corrector agent to fix issues identified by the reviewer.
+/// Returns CorrectorResult::Complete when Claude finishes successfully.
+/// Returns CorrectorResult::Error(String) on failure.
+pub fn run_corrector<F>(prd: &Prd, iteration: u32, mut on_output: F) -> Result<CorrectorResult>
+where
+    F: FnMut(&str),
+{
+    let max_iterations = 3;
+    let prompt = build_corrector_prompt(prd, iteration, max_iterations);
+
+    let mut child = Command::new("claude")
+        .args(["--dangerously-skip-permissions", "--print"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to spawn claude: {}", e)))?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+    }
+
+    // Take stderr handle before consuming stdout
+    let stderr = child.stderr.take();
+
+    // Stream stdout
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
+
+    let reader = BufReader::new(stdout);
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
+        on_output(&line);
+    }
+
+    // Wait for process to complete
+    let status = child
+        .wait()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Wait error: {}", e)))?;
+
+    if !status.success() {
+        let stderr_content = stderr
+            .map(|s| std::io::read_to_string(s).unwrap_or_default())
+            .unwrap_or_default();
+        let error_msg = if stderr_content.is_empty() {
+            format!("Claude exited with status: {}", status)
+        } else {
+            format!(
+                "Claude exited with status {}: {}",
+                status,
+                stderr_content.trim()
+            )
+        };
+        return Ok(CorrectorResult::Error(error_msg));
+    }
+
+    Ok(CorrectorResult::Complete)
+}
+
+/// Build the prompt for the corrector agent
+fn build_corrector_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> String {
+    // Build stories context - summary of all user stories
+    let stories_context = prd
+        .user_stories
+        .iter()
+        .map(|s| {
+            let criteria = s
+                .acceptance_criteria
+                .iter()
+                .map(|c| format!("  - {}", c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "### {}: {}\n{}\n\n**Acceptance Criteria:**\n{}",
+                s.id, s.title, s.description, criteria
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    CORRECTOR_PROMPT
+        .replace("{project}", &prd.project)
+        .replace("{feature_description}", &prd.description)
+        .replace("{stories_context}", &stories_context)
+        .replace("{iteration}", &iteration.to_string())
+        .replace("{max_iterations}", &max_iterations.to_string())
+}
+
+/// Build the prompt for the reviewer agent
+fn build_reviewer_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> String {
+    // Build stories context - summary of all user stories
+    let stories_context = prd
+        .user_stories
+        .iter()
+        .map(|s| {
+            let criteria = s
+                .acceptance_criteria
+                .iter()
+                .map(|c| format!("  - {}", c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "### {}: {}\n{}\n\n**Acceptance Criteria:**\n{}",
+                s.id, s.title, s.description, criteria
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    REVIEWER_PROMPT
+        .replace("{project}", &prd.project)
+        .replace("{feature_description}", &prd.description)
+        .replace("{stories_context}", &stories_context)
+        .replace("{iteration}", &iteration.to_string())
+        .replace("{max_iterations}", &max_iterations.to_string())
 }
 
 /// Extract JSON from Claude's response, handling potential markdown code blocks
@@ -422,5 +643,191 @@ Done!"#;
 End of response"#;
         let json = extract_json(response).unwrap();
         assert_eq!(json, r#"{"project": "Test"}"#);
+    }
+
+    #[test]
+    fn test_build_reviewer_prompt() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test feature description".into(),
+            user_stories: vec![
+                UserStory {
+                    id: "US-001".into(),
+                    title: "First Story".into(),
+                    description: "First story description".into(),
+                    acceptance_criteria: vec!["Criterion A".into(), "Criterion B".into()],
+                    priority: 1,
+                    passes: true,
+                    notes: String::new(),
+                },
+                UserStory {
+                    id: "US-002".into(),
+                    title: "Second Story".into(),
+                    description: "Second story description".into(),
+                    acceptance_criteria: vec!["Criterion C".into()],
+                    priority: 2,
+                    passes: true,
+                    notes: String::new(),
+                },
+            ],
+        };
+
+        let prompt = build_reviewer_prompt(&prd, 1, 3);
+
+        // Check that project name is included
+        assert!(prompt.contains("TestProject"));
+        // Check that feature description is included
+        assert!(prompt.contains("A test feature description"));
+        // Check that iteration info is included
+        assert!(prompt.contains("Review iteration 1/3"));
+        // Check that stories context is included
+        assert!(prompt.contains("US-001"));
+        assert!(prompt.contains("First Story"));
+        assert!(prompt.contains("US-002"));
+        assert!(prompt.contains("Second Story"));
+        // Check acceptance criteria are included
+        assert!(prompt.contains("Criterion A"));
+        assert!(prompt.contains("Criterion B"));
+        assert!(prompt.contains("Criterion C"));
+    }
+
+    #[test]
+    fn test_build_reviewer_prompt_iteration_2() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "Test description".into(),
+            user_stories: vec![UserStory {
+                id: "US-001".into(),
+                title: "Story".into(),
+                description: "Description".into(),
+                acceptance_criteria: vec!["Criterion".into()],
+                priority: 1,
+                passes: true,
+                notes: String::new(),
+            }],
+        };
+
+        let prompt = build_reviewer_prompt(&prd, 2, 3);
+        assert!(prompt.contains("Review iteration 2/3"));
+    }
+
+    #[test]
+    fn test_review_result_variants() {
+        // Test that all variants can be created
+        let pass = ReviewResult::Pass;
+        let issues = ReviewResult::IssuesFound;
+        let error = ReviewResult::Error("test error".into());
+
+        assert_eq!(pass, ReviewResult::Pass);
+        assert_eq!(issues, ReviewResult::IssuesFound);
+        assert_eq!(error, ReviewResult::Error("test error".into()));
+    }
+
+    #[test]
+    fn test_review_result_clone() {
+        let result = ReviewResult::Error("clone test".into());
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    #[test]
+    fn test_review_result_debug() {
+        let result = ReviewResult::Pass;
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("Pass"));
+    }
+
+    #[test]
+    fn test_corrector_result_variants() {
+        // Test that all variants can be created
+        let complete = CorrectorResult::Complete;
+        let error = CorrectorResult::Error("test error".into());
+
+        assert_eq!(complete, CorrectorResult::Complete);
+        assert_eq!(error, CorrectorResult::Error("test error".into()));
+    }
+
+    #[test]
+    fn test_corrector_result_clone() {
+        let result = CorrectorResult::Error("clone test".into());
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    #[test]
+    fn test_corrector_result_debug() {
+        let result = CorrectorResult::Complete;
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("Complete"));
+    }
+
+    #[test]
+    fn test_build_corrector_prompt() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test feature description".into(),
+            user_stories: vec![
+                UserStory {
+                    id: "US-001".into(),
+                    title: "First Story".into(),
+                    description: "First story description".into(),
+                    acceptance_criteria: vec!["Criterion A".into(), "Criterion B".into()],
+                    priority: 1,
+                    passes: true,
+                    notes: String::new(),
+                },
+                UserStory {
+                    id: "US-002".into(),
+                    title: "Second Story".into(),
+                    description: "Second story description".into(),
+                    acceptance_criteria: vec!["Criterion C".into()],
+                    priority: 2,
+                    passes: true,
+                    notes: String::new(),
+                },
+            ],
+        };
+
+        let prompt = build_corrector_prompt(&prd, 1, 3);
+
+        // Check that project name is included
+        assert!(prompt.contains("TestProject"));
+        // Check that feature description is included
+        assert!(prompt.contains("A test feature description"));
+        // Check that iteration info is included
+        assert!(prompt.contains("Correction iteration 1/3"));
+        // Check that stories context is included
+        assert!(prompt.contains("US-001"));
+        assert!(prompt.contains("First Story"));
+        assert!(prompt.contains("US-002"));
+        assert!(prompt.contains("Second Story"));
+        // Check acceptance criteria are included
+        assert!(prompt.contains("Criterion A"));
+        assert!(prompt.contains("Criterion B"));
+        assert!(prompt.contains("Criterion C"));
+    }
+
+    #[test]
+    fn test_build_corrector_prompt_iteration_2() {
+        let prd = Prd {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "Test description".into(),
+            user_stories: vec![UserStory {
+                id: "US-001".into(),
+                title: "Story".into(),
+                description: "Description".into(),
+                acceptance_criteria: vec!["Criterion".into()],
+                priority: 1,
+                passes: true,
+                notes: String::new(),
+            }],
+        };
+
+        let prompt = build_corrector_prompt(&prd, 2, 3);
+        assert!(prompt.contains("Correction iteration 2/3"));
     }
 }
