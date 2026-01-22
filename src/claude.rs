@@ -1,11 +1,113 @@
 use crate::error::{Autom8Error, Result};
 use crate::prd::{Prd, UserStory};
 use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, PRD_JSON_PROMPT, REVIEWER_PROMPT};
+use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 const COMPLETION_SIGNAL: &str = "<promise>COMPLETE</promise>";
+
+// ============================================================================
+// Stream JSON parsing types for Claude CLI output
+// ============================================================================
+
+/// Top-level stream event wrapper
+#[derive(Debug, Deserialize)]
+struct StreamLine {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    event: Option<StreamEventInner>,
+    #[serde(default)]
+    message: Option<AssistantMessage>,
+    #[serde(default)]
+    result: Option<String>,
+}
+
+/// Inner event content for stream_event types
+#[derive(Debug, Deserialize)]
+struct StreamEventInner {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: Option<ContentDelta>,
+}
+
+/// Content delta containing text updates
+#[derive(Debug, Deserialize)]
+struct ContentDelta {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Assistant message containing content blocks
+#[derive(Debug, Deserialize)]
+struct AssistantMessage {
+    #[serde(default)]
+    content: Vec<ContentBlock>,
+}
+
+/// Content block that may contain text
+#[derive(Debug, Deserialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Extract text content from a stream JSON line
+fn extract_text_from_stream_line(line: &str) -> Option<String> {
+    let parsed: StreamLine = serde_json::from_str(line).ok()?;
+
+    match parsed.event_type.as_str() {
+        // Handle incremental text deltas from streaming
+        "stream_event" => {
+            if let Some(event) = parsed.event {
+                if event.event_type == "content_block_delta" {
+                    if let Some(delta) = event.delta {
+                        return delta.text;
+                    }
+                }
+            }
+            None
+        }
+        // Handle complete assistant messages
+        "assistant" => {
+            if let Some(message) = parsed.message {
+                let text: String = message
+                    .content
+                    .iter()
+                    .filter(|block| block.block_type == "text")
+                    .filter_map(|block| block.text.as_ref())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        // Handle final result
+        "result" => parsed.result,
+        _ => None,
+    }
+}
+
+// STREAMING OUTPUT IMPLEMENTATION (US-002):
+// ==========================================
+// Fixed the streaming output issue by using `--output-format stream-json --verbose` instead
+// of plain `--print` which buffers output.
+//
+// Stream JSON format provides real-time output as JSON lines:
+// - "stream_event" with "content_block_delta": incremental text pieces as tokens generate
+// - "assistant": complete message with full content
+// - "result": final result text
+//
+// The extract_text_from_stream_line() function parses each JSON line and extracts text content,
+// which is then passed to the on_output callback for real-time display updates.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaudeResult {
@@ -26,7 +128,13 @@ where
     let prompt = build_prompt(prd, story, prd_path);
 
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "--print"])
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -51,14 +159,19 @@ where
 
     let reader = BufReader::new(stdout);
     let mut found_complete = false;
+    let mut accumulated_text = String::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
-        on_output(&line);
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+            accumulated_text.push_str(&text);
 
-        if line.contains(COMPLETION_SIGNAL) {
-            found_complete = true;
+            if text.contains(COMPLETION_SIGNAL) || accumulated_text.contains(COMPLETION_SIGNAL) {
+                found_complete = true;
+            }
         }
     }
 
@@ -103,7 +216,13 @@ where
     let prompt = PRD_JSON_PROMPT.replace("{spec_content}", spec_content);
 
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "--print"])
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -131,9 +250,12 @@ where
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
-        on_output(&line);
-        full_output.push_str(&line);
-        full_output.push('\n');
+
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+            full_output.push_str(&text);
+        }
     }
 
     // Wait for process to complete
@@ -157,16 +279,31 @@ where
         return Err(Autom8Error::PrdGenerationFailed(error_msg));
     }
 
-    // Extract JSON from response (handle potential markdown code blocks)
-    let json_str = extract_json(&full_output).ok_or_else(|| {
-        Autom8Error::InvalidGeneratedPrd("No valid JSON found in response".into())
-    })?;
+    // Try to get JSON either from response or from file if Claude wrote it directly
+    let json_str = if let Some(json) = extract_json(&full_output) {
+        json
+    } else if output_path.exists() {
+        // Claude may have written the file directly using tools
+        std::fs::read_to_string(output_path).map_err(|e| {
+            Autom8Error::InvalidGeneratedPrd(format!("Failed to read generated file: {}", e))
+        })?
+    } else {
+        let preview = if full_output.len() > 200 {
+            format!("{}...", &full_output[..200])
+        } else {
+            full_output.clone()
+        };
+        return Err(Autom8Error::InvalidGeneratedPrd(format!(
+            "No valid JSON found in response. Response preview: {:?}",
+            preview
+        )));
+    };
 
     // Parse the JSON into Prd
     let prd: Prd = serde_json::from_str(&json_str)
         .map_err(|e| Autom8Error::InvalidGeneratedPrd(format!("JSON parse error: {}", e)))?;
 
-    // Save to output path
+    // Save to output path (may overwrite if Claude already wrote it, but ensures consistent format)
     prd.save(output_path)?;
 
     Ok(prd)
@@ -211,7 +348,13 @@ where
         .replace("{stories_summary}", &stories_summary);
 
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "--print"])
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -236,14 +379,23 @@ where
 
     let reader = BufReader::new(stdout);
     let mut nothing_to_commit = false;
+    let mut accumulated_text = String::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
-        on_output(&line);
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+            accumulated_text.push_str(&text);
 
-        if line.to_lowercase().contains("nothing to commit") {
-            nothing_to_commit = true;
+            if text.to_lowercase().contains("nothing to commit")
+                || accumulated_text
+                    .to_lowercase()
+                    .contains("nothing to commit")
+            {
+                nothing_to_commit = true;
+            }
         }
     }
 
@@ -293,7 +445,13 @@ where
     let prompt = build_reviewer_prompt(prd, iteration, max_iterations);
 
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "--print"])
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -320,7 +478,11 @@ where
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
-        on_output(&line);
+
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+        }
     }
 
     // Wait for process to complete
@@ -371,7 +533,13 @@ where
     let prompt = build_corrector_prompt(prd, iteration, max_iterations);
 
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "--print"])
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -398,7 +566,11 @@ where
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
-        on_output(&line);
+
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+        }
     }
 
     // Wait for process to complete
@@ -829,5 +1001,91 @@ End of response"#;
 
         let prompt = build_corrector_prompt(&prd, 2, 3);
         assert!(prompt.contains("Correction iteration 2/3"));
+    }
+
+    // ========================================================================
+    // Stream JSON parsing tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_text_from_stream_event_content_block_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}},"session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_extract_text_from_assistant_message() {
+        let line = r#"{"type":"assistant","message":{"model":"claude","id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"Complete response here"}]},"session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, Some("Complete response here".to_string()));
+    }
+
+    #[test]
+    fn test_extract_text_from_result() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"result":"Final result text","session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, Some("Final result text".to_string()));
+    }
+
+    #[test]
+    fn test_extract_text_from_system_event_returns_none() {
+        let line = r#"{"type":"system","subtype":"init","cwd":"/test","session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn test_extract_text_from_message_start_returns_none() {
+        let line = r#"{"type":"stream_event","event":{"type":"message_start","message":{}},"session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn test_extract_text_from_invalid_json_returns_none() {
+        let line = "not valid json at all";
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn test_extract_text_from_empty_delta_returns_none() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{}},"session_id":"test"}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn test_extract_text_from_assistant_with_multiple_content_blocks() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"text","text":" Second"},{"type":"tool_use","text":"ignored"}]}}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, Some("First Second".to_string()));
+    }
+
+    #[test]
+    fn test_extract_text_preserves_special_characters() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"Line1\nLine2\ttab"}}}"#;
+        let text = extract_text_from_stream_line(line);
+        assert_eq!(text, Some("Line1\nLine2\ttab".to_string()));
+    }
+
+    #[test]
+    fn test_extract_text_from_real_claude_output() {
+        // Test with actual Claude CLI output format
+        let init_line = r#"{"type":"system","subtype":"init","cwd":"/Users/test","session_id":"abc123","tools":["Bash"]}"#;
+        assert_eq!(extract_text_from_stream_line(init_line), None);
+
+        let delta_line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Code"}},"session_id":"abc123"}"#;
+        assert_eq!(
+            extract_text_from_stream_line(delta_line),
+            Some("Code".to_string())
+        );
+
+        let result_line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":2831,"result":"Code flows like water","session_id":"abc123"}"#;
+        assert_eq!(
+            extract_text_from_stream_line(result_line),
+            Some("Code flows like water".to_string())
+        );
     }
 }

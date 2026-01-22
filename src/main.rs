@@ -204,72 +204,61 @@ fn output_skill(name: &str) -> autom8::error::Result<()> {
 
 /// Auto-detect PRD files and run appropriately
 fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
+    use autom8::prd::Prd;
+    use autom8::state::StateManager;
+
     const DEFAULT_MAX_ITERATIONS: u32 = 10;
-
-    let prd_json = Path::new("./prd.json");
-    let prd_md = Path::new("./prd.md");
-
-    let json_exists = prd_json.exists();
-    let md_exists = prd_md.exists();
 
     print_header();
     println!("{YELLOW}[detecting]{RESET} Scanning for PRD files...");
     println!();
 
-    match (json_exists, md_exists) {
-        // Both files exist
-        (true, true) => {
-            prompt::print_found("prd.json", "./prd.json");
-            prompt::print_found("prd.md", "./prd.md");
-            println!();
+    // Check .autom8/prds/ first (new location)
+    let state_manager = StateManager::new();
+    let prds_in_autom8 = state_manager.list_prds().unwrap_or_default();
+    let incomplete_prds: Vec<_> = prds_in_autom8
+        .iter()
+        .filter_map(|path| {
+            Prd::load(path).ok().and_then(|prd| {
+                if prd.is_incomplete() {
+                    Some((path.clone(), prd))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
 
-            let choice = prompt::select(
-                "Found existing PRD files. What would you like to do?",
-                &[
-                    "Continue with existing prd.json (resume implementation)",
-                    "Regenerate prd.json from prd.md (start fresh)",
-                    "Clean up and start over (delete both files)",
-                    "Exit",
-                ],
-                0,
+    // Check legacy locations
+    let prd_json = Path::new("./prd.json");
+    let prd_md = Path::new("./prd.md");
+    let legacy_json_exists = prd_json.exists();
+    let md_exists = prd_md.exists();
+
+    // Priority 1: Incomplete PRDs in .autom8/prds/
+    if !incomplete_prds.is_empty() {
+        if incomplete_prds.len() == 1 {
+            let (path, prd) = &incomplete_prds[0];
+            let (completed, total) = prd.progress();
+            prompt::print_found(
+                "incomplete PRD",
+                &format!("{} ({}/{})", path.display(), completed, total),
             );
 
-            match choice {
-                0 => {
-                    println!();
-                    prompt::print_action("Continuing with existing prd.json");
-                    println!();
-                    runner.run(prd_json, DEFAULT_MAX_ITERATIONS)
-                }
-                1 => {
-                    println!();
-                    prompt::print_action("Regenerating prd.json from prd.md");
-                    // Delete existing prd.json first
-                    fs::remove_file(prd_json).ok();
-                    println!();
-                    runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
-                }
-                2 => {
-                    clean_prd_files()?;
-                    println!();
-                    print_getting_started();
-                    Ok(())
-                }
-                _ => {
-                    println!();
-                    println!("Exiting.");
-                    Ok(())
-                }
+            // Also check for legacy file and offer migration
+            if legacy_json_exists {
+                println!();
+                println!(
+                    "{YELLOW}Note:{RESET} Legacy ./prd.json found. Consider running {CYAN}autom8 clean{RESET} to remove it."
+                );
             }
-        }
-
-        // Only prd.json exists
-        (true, false) => {
-            prompt::print_found("prd.json", "./prd.json");
             println!();
 
             let choice = prompt::select(
-                "Found existing prd.json. What would you like to do?",
+                &format!(
+                    "Found incomplete PRD: {}. What would you like to do?",
+                    prd.project
+                ),
                 &["Continue implementation", "Delete and start fresh", "Exit"],
                 0,
             );
@@ -277,14 +266,14 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
             match choice {
                 0 => {
                     println!();
-                    prompt::print_action("Starting implementation from prd.json");
+                    prompt::print_action(&format!("Resuming {}", prd.project));
                     println!();
-                    runner.run(prd_json, DEFAULT_MAX_ITERATIONS)
+                    runner.run(path, DEFAULT_MAX_ITERATIONS)
                 }
                 1 => {
-                    fs::remove_file(prd_json).ok();
+                    fs::remove_file(path).ok();
                     println!();
-                    println!("{GREEN}Deleted{RESET} prd.json");
+                    println!("{GREEN}Deleted{RESET} {}", path.display());
                     println!();
                     print_getting_started();
                     Ok(())
@@ -295,55 +284,150 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                     Ok(())
                 }
             }
-        }
-
-        // Only prd.md exists
-        (false, true) => {
-            prompt::print_found("prd.md", "./prd.md");
-            println!();
-
-            let choice = prompt::select(
-                "Found prd.md spec file. What would you like to do?",
-                &[
-                    "Convert to prd.json and start implementation",
-                    "Delete and start fresh",
-                    "Exit",
-                ],
-                0,
+        } else {
+            // Multiple incomplete PRDs
+            println!(
+                "{BOLD}Found {} incomplete PRDs:{RESET}",
+                incomplete_prds.len()
             );
+            println!();
 
-            match choice {
-                0 => {
-                    println!();
-                    prompt::print_action(
-                        "Converting prd.md to prd.json and starting implementation",
-                    );
-                    println!();
-                    runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
-                }
-                1 => {
-                    fs::remove_file(prd_md).ok();
-                    println!();
-                    println!("{GREEN}Deleted{RESET} prd.md");
-                    println!();
-                    print_getting_started();
-                    Ok(())
-                }
-                _ => {
-                    println!();
-                    println!("Exiting.");
-                    Ok(())
-                }
+            let options: Vec<String> = incomplete_prds
+                .iter()
+                .map(|(path, prd)| {
+                    let (completed, total) = prd.progress();
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("prd.json");
+                    format!("{} - {} ({}/{})", filename, prd.project, completed, total)
+                })
+                .chain(std::iter::once("Exit".to_string()))
+                .collect();
+
+            let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+            let choice = prompt::select("Which PRD would you like to resume?", &option_refs, 0);
+
+            if choice >= incomplete_prds.len() {
+                println!();
+                println!("Exiting.");
+                return Ok(());
+            }
+
+            let (path, prd) = &incomplete_prds[choice];
+            println!();
+            prompt::print_action(&format!("Resuming {}", prd.project));
+            println!();
+            runner.run(path, DEFAULT_MAX_ITERATIONS)
+        }
+    }
+    // Priority 2: Legacy ./prd.json (backwards compatibility)
+    else if legacy_json_exists {
+        prompt::print_found("prd.json (legacy location)", "./prd.json");
+        if md_exists {
+            prompt::print_found("prd.md", "./prd.md");
+        }
+        println!();
+
+        let mut options = vec![
+            "Continue with existing prd.json",
+            "Migrate to .autom8/prds/ and continue",
+        ];
+        if md_exists {
+            options.push("Regenerate from prd.md (start fresh)");
+        }
+        options.push("Delete and start fresh");
+        options.push("Exit");
+
+        let choice = prompt::select(
+            "Found legacy PRD file. What would you like to do?",
+            &options,
+            0,
+        );
+
+        match options[choice] {
+            "Continue with existing prd.json" => {
+                println!();
+                prompt::print_action("Starting implementation from prd.json");
+                println!();
+                runner.run(prd_json, DEFAULT_MAX_ITERATIONS)
+            }
+            "Migrate to .autom8/prds/ and continue" => {
+                println!();
+                // Load PRD to get the project name for the filename
+                let prd = Prd::load(prd_json)?;
+                let prds_dir = state_manager.ensure_prds_dir()?;
+                let new_path = prds_dir.join("prd.json");
+                fs::rename(prd_json, &new_path)?;
+                println!("{GREEN}Migrated{RESET} ./prd.json → {}", new_path.display());
+                println!();
+                prompt::print_action(&format!("Resuming {}", prd.project));
+                println!();
+                runner.run(&new_path, DEFAULT_MAX_ITERATIONS)
+            }
+            "Regenerate from prd.md (start fresh)" => {
+                println!();
+                prompt::print_action("Regenerating from prd.md");
+                fs::remove_file(prd_json).ok();
+                println!();
+                runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
+            }
+            "Delete and start fresh" => {
+                clean_prd_files()?;
+                println!();
+                print_getting_started();
+                Ok(())
+            }
+            _ => {
+                println!();
+                println!("Exiting.");
+                Ok(())
             }
         }
+    }
+    // Priority 3: Only prd.md exists
+    else if md_exists {
+        prompt::print_found("prd.md", "./prd.md");
+        println!();
 
-        // No PRD files found
-        (false, false) => {
-            println!("{GRAY}No PRD files found in current directory.{RESET}");
-            println!();
-            print_getting_started();
-            Ok(())
+        let choice = prompt::select(
+            "Found prd.md spec file. What would you like to do?",
+            &[
+                "Convert and start implementation",
+                "Delete and start fresh",
+                "Exit",
+            ],
+            0,
+        );
+
+        match choice {
+            0 => {
+                println!();
+                prompt::print_action("Converting prd.md and starting implementation");
+                println!();
+                runner.run_from_spec(prd_md, DEFAULT_MAX_ITERATIONS)
+            }
+            1 => {
+                fs::remove_file(prd_md).ok();
+                println!();
+                println!("{GREEN}Deleted{RESET} prd.md");
+                println!();
+                print_getting_started();
+                Ok(())
+            }
+            _ => {
+                println!();
+                println!("Exiting.");
+                Ok(())
+            }
         }
+    }
+    // No PRD files found anywhere
+    else {
+        println!("{GRAY}No PRD files found.{RESET}");
+        println!();
+        print_getting_started();
+        Ok(())
     }
 }
 
@@ -359,21 +443,52 @@ fn print_getting_started() {
 }
 
 fn clean_prd_files() -> autom8::error::Result<()> {
+    use autom8::state::StateManager;
+
     let prd_json = Path::new("./prd.json");
     let prd_md = Path::new("./prd.md");
+    let state_manager = StateManager::new();
+    let prds_dir = state_manager.prds_dir();
 
     let mut deleted_any = false;
 
+    // Clean legacy files
     if prd_json.exists() {
         fs::remove_file(prd_json)?;
-        println!("{GREEN}Deleted{RESET} prd.json");
+        println!("{GREEN}Deleted{RESET} ./prd.json");
         deleted_any = true;
     }
 
     if prd_md.exists() {
         fs::remove_file(prd_md)?;
-        println!("{GREEN}Deleted{RESET} prd.md");
+        println!("{GREEN}Deleted{RESET} ./prd.md");
         deleted_any = true;
+    }
+
+    // Check .autom8/prds/ directory
+    if prds_dir.exists() {
+        let prds = state_manager.list_prds().unwrap_or_default();
+        if !prds.is_empty() {
+            println!();
+            println!(
+                "Found {} PRD file(s) in {}:",
+                prds.len(),
+                prds_dir.display()
+            );
+            for prd_path in &prds {
+                let filename = prd_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                println!("  - {}", filename);
+            }
+            println!();
+
+            if prompt::confirm("Delete all PRDs in .autom8/prds/?", false) {
+                for prd_path in prds {
+                    fs::remove_file(&prd_path)?;
+                    println!("{GREEN}Deleted{RESET} {}", prd_path.display());
+                    deleted_any = true;
+                }
+            }
+        }
     }
 
     if !deleted_any {

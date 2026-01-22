@@ -59,6 +59,9 @@ pub enum Autom8Error {
 
     #[error("Review failed after 3 iterations. Please manually review autom8_review.md for remaining issues.")]
     MaxReviewIterationsReached,
+
+    #[error("No incomplete PRDs found in .autom8/prds/")]
+    NoPrdsToResume,
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

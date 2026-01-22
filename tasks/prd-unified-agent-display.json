@@ -1,0 +1,168 @@
+{
+  "project": "Unified Agent Display System",
+  "branchName": "feature/unified-agent-display",
+  "description": "Standardize the UI/UX across all agent phases (Runner, Reviewer, Corrector, Commit) to provide a consistent, clear, and informative user experience. Currently, the Runner agent has rich display features (timers, progress, duration) while Reviewer and Corrector have minimal displays. This feature unifies the visual language, making state transitions obvious and providing consistent context throughout the entire workflow.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create unified display trait/interface for all agents",
+      "description": "As a developer, I need a common interface for agent display so all agents report status consistently.",
+      "acceptanceCriteria": [
+        "Create AgentDisplay trait in progress.rs with methods: start(), update(), finish_success(), finish_error(), finish_with_outcome()",
+        "Trait defines common display contract: agent name, elapsed time, activity preview, iteration info",
+        "Both VerboseTimer and ClaudeSpinner implement this trait",
+        "Typecheck passes (cargo check)"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Implement color-coded state transition banners",
+      "description": "As a user, I want clear visual separation when the system changes phases so I always know what's happening.",
+      "acceptanceCriteria": [
+        "Add print_phase_banner(phase_name, color) function to output.rs",
+        "Banner format: ━━━ PHASE_NAME ━━━ with appropriate color (cyan for start, green for success, red for failure)",
+        "Banner width adapts to terminal width (not too wide, not too narrow)",
+        "Banners used for: RUNNING, REVIEWING, CORRECTING, COMMITTING",
+        "Banners are visually distinct but not overly tall (single line with box-drawing characters)",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Add iteration and progress context to all agent displays",
+      "description": "As a user, I want to see my current position in the workflow (which story, which review iteration, overall progress) at all times.",
+      "acceptanceCriteria": [
+        "Spinner/timer prefix shows: [US-001 2/5] for story progress or [Review 1/3] for review iterations",
+        "Format: [{identifier} {current}/{total}] consistently across all agents",
+        "Runner shows: [US-001 2/5] (story 2 of 5)",
+        "Reviewer shows: [Review 1/3] (review iteration 1 of max 3)",
+        "Corrector shows: [Correct 1/3] (correction iteration 1 of max 3)",
+        "Commit shows: [Commit] (no iteration needed)",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Standardize completion messages with outcomes",
+      "description": "As a user, I want each phase completion to show pass/fail status, duration, and a brief outcome description.",
+      "acceptanceCriteria": [
+        "All agents show completion in format: ✓ {Phase} completed in {duration} - {outcome} or ✗ {Phase} failed in {duration} - {error}",
+        "Runner completion: ✓ US-001 completed in 2m 34s - Implementation done",
+        "Reviewer pass: ✓ Review 1/3 passed in 45s - No issues found",
+        "Reviewer fail: ✓ Review 1/3 completed in 1m 12s - 3 issues found",
+        "Corrector completion: ✓ Correct 1/3 completed in 1m 45s - Issues addressed",
+        "Commit completion: ✓ Commit completed in 12s - abc1234",
+        "Duration format is consistent: Xs for <60s, Xm Ys for >=60s",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Implement breadcrumb trail for workflow journey",
+      "description": "As a user, I want to see a compact trail of states I've passed through so I understand the workflow progression.",
+      "acceptanceCriteria": [
+        "Add Breadcrumb struct to track state history",
+        "Trail displayed after each phase completion: Journey: Story → Review → Correct → Review",
+        "Trail uses → separator and dim/gray color to not distract",
+        "Trail resets at start of each new story",
+        "Completed states shown in green, current state in yellow, future states not shown",
+        "Trail displayed on single line, truncated with ... if too long for terminal",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Update Runner to use unified display system",
+      "description": "As a developer, I need to refactor Runner to use the new unified display components.",
+      "acceptanceCriteria": [
+        "Runner uses print_phase_banner(\"RUNNING\", Color::Cyan) at story start",
+        "Runner spinner/timer shows iteration context [US-001 2/5]",
+        "Runner completion uses standardized outcome format",
+        "Runner updates breadcrumb trail",
+        "Existing verbose/preview mode behavior preserved",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Update Reviewer to use unified display system",
+      "description": "As a developer, I need to refactor Reviewer to use the new unified display components.",
+      "acceptanceCriteria": [
+        "Reviewer uses print_phase_banner(\"REVIEWING\", Color::Cyan) at start",
+        "Reviewer spinner/timer shows [Review 1/3] with elapsed time",
+        "Reviewer completion shows: duration + outcome (pass/issues found count)",
+        "Reviewer updates breadcrumb trail with \"Review\" state",
+        "Works correctly in both verbose and preview modes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Update Corrector to use unified display system",
+      "description": "As a developer, I need to refactor Corrector to use the new unified display components.",
+      "acceptanceCriteria": [
+        "Corrector uses print_phase_banner(\"CORRECTING\", Color::Yellow) at start",
+        "Corrector spinner/timer shows [Correct 1/3] with elapsed time",
+        "Corrector completion shows: duration + \"Issues addressed\" outcome",
+        "Corrector updates breadcrumb trail with \"Correct\" state",
+        "Works correctly in both verbose and preview modes",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Update Commit phase to use unified display system",
+      "description": "As a developer, I need to refactor Commit phase to use the new unified display components.",
+      "acceptanceCriteria": [
+        "Commit uses print_phase_banner(\"COMMITTING\", Color::Cyan) at start",
+        "Commit spinner/timer shows [Commit] with elapsed time",
+        "Commit completion shows: duration + short commit hash as outcome",
+        "Commit updates breadcrumb trail with \"Commit\" state",
+        "Works correctly in both verbose and preview modes",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Add overall progress context to displays",
+      "description": "As a user, I want to see overall progress (e.g., \"Story 2/5\") alongside the current operation.",
+      "acceptanceCriteria": [
+        "Add ProgressContext struct holding: current story index, total stories, current phase",
+        "Context passed to all display components",
+        "During review/correct, show both story progress and iteration: [US-001 2/5 | Review 1/3]",
+        "Progress context visible in both verbose timer output and spinner display",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

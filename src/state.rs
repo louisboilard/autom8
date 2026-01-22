@@ -8,6 +8,7 @@ use uuid::Uuid;
 const STATE_DIR: &str = ".autom8";
 const STATE_FILE: &str = "state.json";
 const RUNS_DIR: &str = "runs";
+const PRDS_DIR: &str = "prds";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -180,10 +181,47 @@ impl StateManager {
         self.base_dir.join(RUNS_DIR)
     }
 
+    /// Path to the prds directory
+    pub fn prds_dir(&self) -> PathBuf {
+        self.base_dir.join(PRDS_DIR)
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         fs::create_dir_all(&self.base_dir)?;
         fs::create_dir_all(self.runs_dir())?;
         Ok(())
+    }
+
+    /// Ensure prds directory exists
+    pub fn ensure_prds_dir(&self) -> Result<PathBuf> {
+        let dir = self.prds_dir();
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// List all PRD files in .autom8/prds/, sorted by modification time (newest first)
+    pub fn list_prds(&self) -> Result<Vec<PathBuf>> {
+        let prds_dir = self.prds_dir();
+        if !prds_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut prds: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in fs::read_dir(&prds_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(mtime) = metadata.modified() {
+                        prds.push((path, mtime));
+                    }
+                }
+            }
+        }
+
+        // Sort by modification time, newest first
+        prds.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(prds.into_iter().map(|(p, _)| p).collect())
     }
 
     pub fn load_current(&self) -> Result<Option<RunState>> {
