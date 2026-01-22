@@ -119,3 +119,49 @@ pub fn is_clean() -> Result<bool> {
 
     Ok(output.stdout.is_empty())
 }
+
+/// Get the short hash of the latest commit (HEAD)
+pub fn latest_commit_short() -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(Autom8Error::GitError(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_git_repo() {
+        // This test runs within a git repo, so should return true
+        assert!(is_git_repo());
+    }
+
+    #[test]
+    fn test_current_branch_returns_string() {
+        // Should return some branch name (not empty)
+        let branch = current_branch();
+        assert!(branch.is_ok());
+        assert!(!branch.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_latest_commit_short_returns_valid_hash() {
+        // In a git repo, should return a short hash (typically 7 chars)
+        let hash = latest_commit_short();
+        assert!(hash.is_ok());
+        let hash = hash.unwrap();
+        // Short hash should be alphanumeric and reasonable length (typically 7-10 chars)
+        assert!(!hash.is_empty());
+        assert!(hash.len() >= 7);
+        assert!(hash.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+}
