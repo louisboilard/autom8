@@ -26,6 +26,8 @@ pub enum MachineState {
     Initializing,
     PickingStory,
     RunningClaude,
+    Reviewing,
+    Correcting,
     Committing,
     Completed,
     Failed,
@@ -61,6 +63,9 @@ pub struct RunState {
     pub current_story: Option<String>,
     pub iteration: u32,
     pub max_iterations: u32,
+    /// Tracks the current review cycle (1, 2, or 3) during the review loop
+    #[serde(default)]
+    pub review_iteration: u32,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub iterations: Vec<IterationRecord>,
@@ -78,6 +83,7 @@ impl RunState {
             current_story: None,
             iteration: 0,
             max_iterations,
+            review_iteration: 0,
             started_at: Utc::now(),
             finished_at: None,
             iterations: Vec::new(),
@@ -95,6 +101,7 @@ impl RunState {
             current_story: None,
             iteration: 0,
             max_iterations,
+            review_iteration: 0,
             started_at: Utc::now(),
             finished_at: None,
             iterations: Vec::new(),
@@ -252,5 +259,125 @@ impl StateManager {
 impl Default for StateManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_machine_state_reviewing_exists() {
+        let state = MachineState::Reviewing;
+        assert_eq!(state, MachineState::Reviewing);
+    }
+
+    #[test]
+    fn test_machine_state_correcting_exists() {
+        let state = MachineState::Correcting;
+        assert_eq!(state, MachineState::Correcting);
+    }
+
+    #[test]
+    fn test_run_state_has_review_iteration() {
+        let state = RunState::new(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            3,
+        );
+        assert_eq!(state.review_iteration, 0);
+    }
+
+    #[test]
+    fn test_run_state_from_spec_has_review_iteration() {
+        let state = RunState::from_spec(
+            PathBuf::from("spec.md"),
+            PathBuf::from("prd.json"),
+            3,
+        );
+        assert_eq!(state.review_iteration, 0);
+    }
+
+    #[test]
+    fn test_transition_to_reviewing() {
+        let mut state = RunState::new(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            3,
+        );
+        state.transition_to(MachineState::Reviewing);
+        assert_eq!(state.machine_state, MachineState::Reviewing);
+        assert_eq!(state.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn test_transition_to_correcting() {
+        let mut state = RunState::new(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            3,
+        );
+        state.transition_to(MachineState::Correcting);
+        assert_eq!(state.machine_state, MachineState::Correcting);
+        assert_eq!(state.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn test_review_loop_state_transitions() {
+        let mut state = RunState::new(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            3,
+        );
+
+        // Simulate: PickingStory (all complete) → Reviewing → Correcting → Reviewing → Committing
+        state.transition_to(MachineState::PickingStory);
+        assert_eq!(state.machine_state, MachineState::PickingStory);
+
+        state.transition_to(MachineState::Reviewing);
+        state.review_iteration = 1;
+        assert_eq!(state.machine_state, MachineState::Reviewing);
+        assert_eq!(state.review_iteration, 1);
+
+        state.transition_to(MachineState::Correcting);
+        assert_eq!(state.machine_state, MachineState::Correcting);
+
+        state.transition_to(MachineState::Reviewing);
+        state.review_iteration = 2;
+        assert_eq!(state.machine_state, MachineState::Reviewing);
+        assert_eq!(state.review_iteration, 2);
+
+        state.transition_to(MachineState::Committing);
+        assert_eq!(state.machine_state, MachineState::Committing);
+    }
+
+    #[test]
+    fn test_machine_state_serialization() {
+        // Test that new states serialize correctly with kebab-case
+        let reviewing = serde_json::to_string(&MachineState::Reviewing).unwrap();
+        assert_eq!(reviewing, "\"reviewing\"");
+
+        let correcting = serde_json::to_string(&MachineState::Correcting).unwrap();
+        assert_eq!(correcting, "\"correcting\"");
+    }
+
+    #[test]
+    fn test_machine_state_deserialization() {
+        let reviewing: MachineState = serde_json::from_str("\"reviewing\"").unwrap();
+        assert_eq!(reviewing, MachineState::Reviewing);
+
+        let correcting: MachineState = serde_json::from_str("\"correcting\"").unwrap();
+        assert_eq!(correcting, MachineState::Correcting);
+    }
+
+    #[test]
+    fn test_run_state_review_iteration_serialization() {
+        let state = RunState::new(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            3,
+        );
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"review_iteration\":0"));
     }
 }

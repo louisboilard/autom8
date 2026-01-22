@@ -56,6 +56,9 @@ pub enum Autom8Error {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Review failed after 3 iterations. Please manually review autom8_review.md for remaining issues.")]
+    MaxReviewIterationsReached,
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;
