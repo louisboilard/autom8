@@ -53,6 +53,9 @@ pub enum Autom8Error {
 
     #[error("Unknown skill: {0}")]
     UnknownSkill(String),
+
+    #[error("Configuration error: {0}")]
+    Config(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

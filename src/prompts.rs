@@ -1,3 +1,9 @@
+/// Full SKILL.md content for the PRD skill (installed to ~/.claude/skills/pdr/)
+pub const PRD_SKILL_MD: &str = include_str!("../pdr/SKILL.md");
+
+/// Full SKILL.md content for the prd-json skill (installed to ~/.claude/skills/pdr-json/)
+pub const PRD_JSON_SKILL_MD: &str = include_str!("../pdr_json/SKILL.md");
+
 /// Prompt for interactive PRD creation with Claude.
 /// Users paste this into a Claude session to create their prd.md file.
 pub const PRD_SKILL_PROMPT: &str = r####"# PRD Creation Assistant

@@ -61,6 +61,9 @@ enum Commands {
 
     /// Clean up PRD files from current directory
     Clean,
+
+    /// Initialize autom8 by installing skills to ~/.claude/skills/
+    Init,
 }
 
 /// Determine input type based on file extension
@@ -150,6 +153,8 @@ fn main() {
         (None, Some(Commands::Skill { name })) => output_skill(name),
 
         (None, Some(Commands::Clean)) => clean_prd_files(),
+
+        (None, Some(Commands::Init)) => init_skills(),
 
         // No file and no command - auto-detect
         (None, None) => auto_detect_and_run(&runner),
@@ -367,6 +372,75 @@ fn clean_prd_files() -> autom8::error::Result<()> {
 
     if !deleted_any {
         println!("{GRAY}No PRD files to clean up.{RESET}");
+    }
+
+    Ok(())
+}
+
+fn init_skills() -> autom8::error::Result<()> {
+    println!("Initializing autom8 skills...");
+    println!();
+
+    // Get home directory
+    let home = dirs::home_dir().ok_or_else(|| {
+        Autom8Error::Config("Could not determine home directory".to_string())
+    })?;
+
+    // Define skill paths
+    let skills_dir = home.join(".claude").join("skills");
+    let prd_skill_path = skills_dir.join("pdr").join("SKILL.md");
+    let prd_json_skill_path = skills_dir.join("pdr-json").join("SKILL.md");
+
+    // Check which files already exist
+    let prd_exists = prd_skill_path.exists();
+    let prd_json_exists = prd_json_skill_path.exists();
+
+    // If any files exist, ask for confirmation
+    if prd_exists || prd_json_exists {
+        println!("Skill files already exist:");
+        if prd_exists {
+            println!("  - {}", prd_skill_path.display());
+        }
+        if prd_json_exists {
+            println!("  - {}", prd_json_skill_path.display());
+        }
+        println!();
+
+        if !prompt::confirm("Overwrite existing skill files?", true) {
+            println!();
+            println!("Skipped. Existing skill files unchanged.");
+            return Ok(());
+        }
+        println!();
+    }
+
+    // Create directories and write files
+    fs::create_dir_all(prd_skill_path.parent().unwrap())?;
+    fs::write(&prd_skill_path, prompts::PRD_SKILL_MD)?;
+    let prd_action = if prd_exists { "Overwrote" } else { "Created" };
+    println!("  {GREEN}{}{RESET} {}", prd_action, prd_skill_path.display());
+
+    fs::create_dir_all(prd_json_skill_path.parent().unwrap())?;
+    fs::write(&prd_json_skill_path, prompts::PRD_JSON_SKILL_MD)?;
+    let prd_json_action = if prd_json_exists { "Overwrote" } else { "Created" };
+    println!(
+        "  {GREEN}{}{RESET} {}",
+        prd_json_action,
+        prd_json_skill_path.display()
+    );
+
+    println!();
+    if prd_exists || prd_json_exists {
+        println!("Skills updated!");
+    } else {
+        println!("Skills installed! You can now use:");
+        println!("  {CYAN}/prd{RESET}       - Create a PRD through interactive Q&A");
+        println!("  {CYAN}/prd-json{RESET}  - Convert a PRD to prd.json format");
+        println!();
+        println!("{BOLD}Next steps:{RESET}");
+        println!("  1. Start a Claude session: {CYAN}claude{RESET}");
+        println!("  2. Use {CYAN}/prd{RESET} to create your PRD");
+        println!("  3. Run {CYAN}autom8{RESET} to implement it");
     }
 
     Ok(())
