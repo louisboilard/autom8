@@ -1,0 +1,180 @@
+{
+  "project": "Reviewer Agent",
+  "branchName": "autom8/feature",
+  "description": "Add a review loop between story completion and commit to ensure code quality before committing. When all stories pass, a Reviewer Agent inspects the changes for bugs, missing tests, and code quality issues. If issues are found, a Corrector Agent addresses them. This loop repeats up to 3 times until the review passes or the run fails.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add new state machine states for review loop",
+      "description": "As a developer, I need new states to track the review/correction cycle so the runner can orchestrate the review loop.",
+      "acceptanceCriteria": [
+        "Add Reviewing state to MachineState enum",
+        "Add Correcting state to MachineState enum",
+        "Add review_iteration: u32 field to RunState to track current review cycle (1, 2, or 3)",
+        "State transitions: PickingStory (all complete) → Reviewing → Correcting → Reviewing ... → Committing",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Create reviewer agent prompt",
+      "description": "As a developer, I need a prompt template for the reviewer agent that instructs Claude to review changes and write issues to a file.",
+      "acceptanceCriteria": [
+        "Add REVIEWER_PROMPT constant to prompts.rs",
+        "Prompt includes: project name, feature description, full PRD context (all stories)",
+        "Prompt includes current iteration number and max iterations (e.g., \"Review iteration 1/3\")",
+        "Prompt explicitly states: \"You have a maximum of 3 review cycles. Focus on critical issues, not nitpicks.\"",
+        "Prompt instructs: iteration 1 = thorough review; iteration 2 = only significant issues; iteration 3 = only blocking bugs",
+        "Prompt instructs Claude to write issues to autom8_review.md (overwrite if exists)",
+        "Prompt instructs Claude to output nothing to the file if all checks pass (delete file if it exists)",
+        "Review criteria: bugs, missing tests, code quality, pattern consistency, no needless repetition",
+        "Prompt instructs Claude to explicitly run the project's test suite if tests exist",
+        "Prompt instructs Claude to run typecheck/lint commands if available (e.g., cargo check, npm run typecheck)",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Create corrector agent prompt",
+      "description": "As a developer, I need a prompt template for the corrector agent that reads the review file and fixes the issues.",
+      "acceptanceCriteria": [
+        "Add CORRECTOR_PROMPT constant to prompts.rs",
+        "Prompt includes: project name, feature description, full PRD context",
+        "Prompt instructs Claude to read autom8_review.md for issues to fix",
+        "Prompt instructs Claude to fix issues it agrees with (use judgment)",
+        "Prompt instructs Claude to annotate fixed items with \"FIXED:\" prefix in autom8_review.md",
+        "Prompt reminds Claude this is iteration X/3, focus on the most critical fixes first",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Implement reviewer agent runner function",
+      "description": "As a developer, I need a function to spawn the reviewer agent and detect whether issues were found.",
+      "acceptanceCriteria": [
+        "Add run_reviewer() function to claude.rs",
+        "Function accepts: prd: &Prd, iteration: u32, max_iterations: u32, callback",
+        "Spawns Claude with REVIEWER_PROMPT (filled with context)",
+        "Returns ReviewResult::Pass if autom8_review.md does not exist after run",
+        "Returns ReviewResult::IssuesFound if autom8_review.md exists and has content",
+        "Returns ReviewResult::Error(String) on failure",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Implement corrector agent runner function",
+      "description": "As a developer, I need a function to spawn the corrector agent to fix review issues.",
+      "acceptanceCriteria": [
+        "Add run_corrector() function to claude.rs",
+        "Function accepts: prd: &Prd, iteration: u32, callback",
+        "Spawns Claude with CORRECTOR_PROMPT (filled with context)",
+        "Returns CorrectorResult::Complete when Claude finishes",
+        "Returns CorrectorResult::Error(String) on failure",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Integrate review loop into runner",
+      "description": "As a developer, I need the main runner to orchestrate the review/correction loop before committing.",
+      "acceptanceCriteria": [
+        "After all stories complete, transition to Reviewing state (not directly to Committing)",
+        "Call run_reviewer() with current iteration (starting at 1)",
+        "If ReviewResult::Pass: delete autom8_review.md if exists, transition to Committing",
+        "If ReviewResult::IssuesFound: transition to Correcting, call run_corrector()",
+        "After correction: increment review_iteration, transition back to Reviewing",
+        "If review_iteration > 3 and still issues: return Autom8Error::MaxReviewIterationsReached",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add autom8_review.md to commit exclusion list",
+      "description": "As a developer, I need to ensure the review file is never committed.",
+      "acceptanceCriteria": [
+        "Add autom8_review.md to the exclusion list in COMMIT_PROMPT",
+        "Verify commit agent is instructed to never stage or commit this file",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add MaxReviewIterationsReached error type",
+      "description": "As a developer, I need a specific error type for when the review loop exceeds max iterations.",
+      "acceptanceCriteria": [
+        "Add MaxReviewIterationsReached variant to Autom8Error enum",
+        "Error message: \"Review failed after 3 iterations. Please manually review autom8_review.md for remaining issues.\"",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Add review result types",
+      "description": "As a developer, I need result enums for the reviewer and corrector agents.",
+      "acceptanceCriteria": [
+        "Add ReviewResult enum: Pass, IssuesFound, Error(String)",
+        "Add CorrectorResult enum: Complete, Error(String)",
+        "Place in claude.rs or a new review.rs module",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Update progress/output for review states",
+      "description": "As a developer, I need the terminal output to show review progress clearly.",
+      "acceptanceCriteria": [
+        "Display \"Reviewing changes (iteration 1/3)...\" when entering Reviewing state",
+        "Display \"Review passed! Proceeding to commit.\" on ReviewResult::Pass",
+        "Display \"Issues found. Running corrector (iteration 1/3)...\" when entering Correcting state",
+        "Display \"Review failed after 3 iterations.\" on max iterations error",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Add --skip-review CLI flag",
+      "description": "As a user, I want to bypass the review loop when I trust my changes or need to commit quickly.",
+      "acceptanceCriteria": [
+        "Add --skip-review flag to the run command in main.rs",
+        "When flag is set, skip Reviewing state entirely and go directly to Committing",
+        "Display \"Skipping review (--skip-review flag set)\" in terminal output",
+        "Flag has no effect on resume command (respects current state)",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": ""
+    }
+  ]
+}

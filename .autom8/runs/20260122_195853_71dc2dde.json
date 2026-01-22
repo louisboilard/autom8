@@ -1,0 +1,71 @@
+{
+  "run_id": "71dc2dde-8c89-46df-807c-b7dcb50b0b10",
+  "status": "completed",
+  "machine_state": "completed",
+  "prd_path": "/Users/louis/projects/autom8/tasks/prd.json",
+  "spec_path": "/Users/louis/projects/autom8/tasks/prd-reviewer-agent.md",
+  "branch": "autom8/feature",
+  "current_story": "US-011",
+  "iteration": 7,
+  "max_iterations": 10,
+  "started_at": "2026-01-22T19:58:53.115484Z",
+  "finished_at": "2026-01-22T20:20:38.140271Z",
+  "iterations": [
+    {
+      "number": 1,
+      "story_id": "US-001",
+      "started_at": "2026-01-22T19:59:12.449034Z",
+      "finished_at": "2026-01-22T20:02:07.394432Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 2,
+      "story_id": "US-002",
+      "started_at": "2026-01-22T20:02:07.394742Z",
+      "finished_at": "2026-01-22T20:03:57.318087Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 3,
+      "story_id": "US-003",
+      "started_at": "2026-01-22T20:03:57.318341Z",
+      "finished_at": "2026-01-22T20:05:38.186086Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 4,
+      "story_id": "US-004",
+      "started_at": "2026-01-22T20:05:38.187755Z",
+      "finished_at": "2026-01-22T20:07:38.328707Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 5,
+      "story_id": "US-005",
+      "started_at": "2026-01-22T20:07:38.329634Z",
+      "finished_at": "2026-01-22T20:09:20.649200Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 6,
+      "story_id": "US-006",
+      "started_at": "2026-01-22T20:09:20.650605Z",
+      "finished_at": "2026-01-22T20:14:07.973371Z",
+      "status": "success",
+      "output_snippet": ""
+    },
+    {
+      "number": 7,
+      "story_id": "US-011",
+      "started_at": "2026-01-22T20:14:07.973831Z",
+      "finished_at": "2026-01-22T20:18:20.595477Z",
+      "status": "success",
+      "output_snippet": ""
+    }
+  ]
+}

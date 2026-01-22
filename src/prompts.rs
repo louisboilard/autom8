@@ -158,6 +158,7 @@ Make **multiple logical commits**, not one big commit. Examples:
 - NEVER use: `git add .` or `git add -A` (too dangerous)
 - Commit: `git commit -m "Your message"`
 - Do NOT use `--author` flag (uses system git config automatically)
+- Do NOT add any "Co-Authored-By" line to commit messages - the user must be the sole author
 - Do NOT push (autom8 handles that separately)
 
 ## Error Handling
