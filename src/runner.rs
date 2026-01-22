@@ -12,7 +12,7 @@ use crate::output::{
     print_spec_loaded, print_state_transition, print_story_complete, print_warning, StoryResult,
 };
 use crate::prd::Prd;
-use crate::progress::ClaudeSpinner;
+use crate::progress::{ClaudeSpinner, VerboseTimer};
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
 use std::fs;
 use std::path::Path;
@@ -88,14 +88,20 @@ impl Runner {
         print_generating_prd();
 
         // Run Claude to generate PRD
-        let prd_start = Instant::now();
         let verbose = self.verbose;
         let prd = if verbose {
-            run_for_prd_generation(&spec_content, &prd_path, |line| {
+            let mut timer = VerboseTimer::new_for_prd();
+            let result = run_for_prd_generation(&spec_content, &prd_path, |line| {
                 print_claude_output(line);
-            })?
+            });
+            match &result {
+                Ok(_) => timer.finish_success(),
+                Err(e) => timer.finish_error(&e.to_string()),
+            }
+            result?
         } else {
-            let spinner = ClaudeSpinner::new_for_prd();
+            let prd_start = Instant::now();
+            let mut spinner = ClaudeSpinner::new_for_prd();
             let result = run_for_prd_generation(&spec_content, &prd_path, |line| {
                 spinner.update(line);
             });
@@ -226,16 +232,28 @@ impl Runner {
                         // Run reviewer
                         let verbose = self.verbose;
                         let review_result = if verbose {
-                            run_reviewer(
+                            let mut timer = VerboseTimer::new(&format!(
+                                "review-{}",
+                                state.review_iteration
+                            ));
+                            let res = run_reviewer(
                                 &prd,
                                 state.review_iteration,
                                 MAX_REVIEW_ITERATIONS,
                                 |line| {
                                     print_claude_output(line);
                                 },
-                            )?
+                            );
+                            match &res {
+                                Ok(ReviewResult::Pass) | Ok(ReviewResult::IssuesFound) => {
+                                    timer.finish_success()
+                                }
+                                Ok(ReviewResult::Error(e)) => timer.finish_error(e),
+                                Err(e) => timer.finish_error(&e.to_string()),
+                            }
+                            res?
                         } else {
-                            let spinner =
+                            let mut spinner =
                                 ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
                             let res = run_reviewer(
                                 &prd,
@@ -281,11 +299,21 @@ impl Runner {
 
                                 // Run corrector
                                 let corrector_result = if verbose {
-                                    run_corrector(&prd, state.review_iteration, |line| {
+                                    let mut timer = VerboseTimer::new(&format!(
+                                        "correct-{}",
+                                        state.review_iteration
+                                    ));
+                                    let res = run_corrector(&prd, state.review_iteration, |line| {
                                         print_claude_output(line);
-                                    })?
+                                    });
+                                    match &res {
+                                        Ok(CorrectorResult::Complete) => timer.finish_success(),
+                                        Ok(CorrectorResult::Error(e)) => timer.finish_error(e),
+                                        Err(e) => timer.finish_error(&e.to_string()),
+                                    }
+                                    res?
                                 } else {
-                                    let spinner = ClaudeSpinner::new(&format!(
+                                    let mut spinner = ClaudeSpinner::new(&format!(
                                         "correct-{}",
                                         state.review_iteration
                                     ));
@@ -339,14 +367,22 @@ impl Runner {
                     state.transition_to(MachineState::Committing);
                     self.state_manager.save(&state)?;
 
-                    let commit_start = Instant::now();
                     let verbose = self.verbose;
                     let commit_result = if verbose {
-                        run_for_commit(&prd, |line| {
+                        let mut timer = VerboseTimer::new_for_commit();
+                        let res = run_for_commit(&prd, |line| {
                             print_claude_output(line);
-                        })?
+                        });
+                        match &res {
+                            Ok(CommitResult::Success) => timer.finish_success(),
+                            Ok(CommitResult::NothingToCommit) => timer.finish_success(),
+                            Ok(CommitResult::Error(e)) => timer.finish_error(e),
+                            Err(e) => timer.finish_error(&e.to_string()),
+                        }
+                        res?
                     } else {
-                        let spinner = ClaudeSpinner::new_for_commit();
+                        let commit_start = Instant::now();
+                        let mut spinner = ClaudeSpinner::new_for_commit();
                         let res = run_for_commit(&prd, |line| {
                             spinner.update(line);
                         });
@@ -405,11 +441,17 @@ impl Runner {
             let story_start = Instant::now();
             let verbose = self.verbose;
             let result = if verbose {
-                run_claude(&prd, &story, prd_path, |line| {
+                let mut timer = VerboseTimer::new(&story.id);
+                let res = run_claude(&prd, &story, prd_path, |line| {
                     print_claude_output(line);
-                })
+                });
+                match &res {
+                    Ok(_) => timer.finish_success(),
+                    Err(e) => timer.finish_error(&e.to_string()),
+                }
+                res
             } else {
-                let spinner = ClaudeSpinner::new(&story.id);
+                let mut spinner = ClaudeSpinner::new(&story.id);
                 let res = run_claude(&prd, &story, prd_path, |line| {
                     spinner.update(line);
                 });
@@ -465,16 +507,28 @@ impl Runner {
 
                             // Run reviewer
                             let review_result = if verbose {
-                                run_reviewer(
+                                let mut timer = VerboseTimer::new(&format!(
+                                    "review-{}",
+                                    state.review_iteration
+                                ));
+                                let res = run_reviewer(
                                     &prd,
                                     state.review_iteration,
                                     MAX_REVIEW_ITERATIONS,
                                     |line| {
                                         print_claude_output(line);
                                     },
-                                )?
+                                );
+                                match &res {
+                                    Ok(ReviewResult::Pass) | Ok(ReviewResult::IssuesFound) => {
+                                        timer.finish_success()
+                                    }
+                                    Ok(ReviewResult::Error(e)) => timer.finish_error(e),
+                                    Err(e) => timer.finish_error(&e.to_string()),
+                                }
+                                res?
                             } else {
-                                let spinner = ClaudeSpinner::new(&format!(
+                                let mut spinner = ClaudeSpinner::new(&format!(
                                     "review-{}",
                                     state.review_iteration
                                 ));
@@ -525,11 +579,22 @@ impl Runner {
 
                                     // Run corrector
                                     let corrector_result = if verbose {
-                                        run_corrector(&prd, state.review_iteration, |line| {
-                                            print_claude_output(line);
-                                        })?
+                                        let mut timer = VerboseTimer::new(&format!(
+                                            "correct-{}",
+                                            state.review_iteration
+                                        ));
+                                        let res =
+                                            run_corrector(&prd, state.review_iteration, |line| {
+                                                print_claude_output(line);
+                                            });
+                                        match &res {
+                                            Ok(CorrectorResult::Complete) => timer.finish_success(),
+                                            Ok(CorrectorResult::Error(e)) => timer.finish_error(e),
+                                            Err(e) => timer.finish_error(&e.to_string()),
+                                        }
+                                        res?
                                     } else {
-                                        let spinner = ClaudeSpinner::new(&format!(
+                                        let mut spinner = ClaudeSpinner::new(&format!(
                                             "correct-{}",
                                             state.review_iteration
                                         ));
@@ -586,13 +651,21 @@ impl Runner {
                         state.transition_to(MachineState::Committing);
                         self.state_manager.save(&state)?;
 
-                        let commit_start = Instant::now();
                         let commit_result = if verbose {
-                            run_for_commit(&prd, |line| {
+                            let mut timer = VerboseTimer::new_for_commit();
+                            let res = run_for_commit(&prd, |line| {
                                 print_claude_output(line);
-                            })?
+                            });
+                            match &res {
+                                Ok(CommitResult::Success) => timer.finish_success(),
+                                Ok(CommitResult::NothingToCommit) => timer.finish_success(),
+                                Ok(CommitResult::Error(e)) => timer.finish_error(e),
+                                Err(e) => timer.finish_error(&e.to_string()),
+                            }
+                            res?
                         } else {
-                            let spinner = ClaudeSpinner::new_for_commit();
+                            let commit_start = Instant::now();
+                            let mut spinner = ClaudeSpinner::new_for_commit();
                             let res = run_for_commit(&prd, |line| {
                                 spinner.update(line);
                             });
