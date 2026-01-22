@@ -226,9 +226,14 @@ impl Runner {
                         // Run reviewer
                         let verbose = self.verbose;
                         let review_result = if verbose {
-                            run_reviewer(&prd, state.review_iteration, MAX_REVIEW_ITERATIONS, |line| {
-                                print_claude_output(line);
-                            })?
+                            run_reviewer(
+                                &prd,
+                                state.review_iteration,
+                                MAX_REVIEW_ITERATIONS,
+                                |line| {
+                                    print_claude_output(line);
+                                },
+                            )?
                         } else {
                             let spinner =
                                 ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
@@ -241,7 +246,9 @@ impl Runner {
                                 },
                             );
                             match &res {
-                                Ok(ReviewResult::Pass) => spinner.finish_with_message("Review passed"),
+                                Ok(ReviewResult::Pass) => {
+                                    spinner.finish_with_message("Review passed")
+                                }
                                 Ok(ReviewResult::IssuesFound) => {
                                     spinner.finish_with_message("Issues found")
                                 }
@@ -317,7 +324,10 @@ impl Runner {
                                 self.state_manager.save(&state)?;
                                 print_error(&format!("Review failed: {}", e));
                                 print_summary(state.iteration, &story_results)?;
-                                return Err(Autom8Error::ClaudeError(format!("Review failed: {}", e)));
+                                return Err(Autom8Error::ClaudeError(format!(
+                                    "Review failed: {}",
+                                    e
+                                )));
                             }
                         }
                     }
@@ -464,8 +474,10 @@ impl Runner {
                                     },
                                 )?
                             } else {
-                                let spinner =
-                                    ClaudeSpinner::new(&format!("review-{}", state.review_iteration));
+                                let spinner = ClaudeSpinner::new(&format!(
+                                    "review-{}",
+                                    state.review_iteration
+                                ));
                                 let res = run_reviewer(
                                     &prd,
                                     state.review_iteration,
@@ -506,7 +518,10 @@ impl Runner {
                                     state.transition_to(MachineState::Correcting);
                                     self.state_manager.save(&state)?;
 
-                                    print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
+                                    print_issues_found(
+                                        state.review_iteration,
+                                        MAX_REVIEW_ITERATIONS,
+                                    );
 
                                     // Run corrector
                                     let corrector_result = if verbose {
@@ -526,7 +541,9 @@ impl Runner {
                                             Ok(CorrectorResult::Complete) => {
                                                 spinner.finish_with_message("Correction complete")
                                             }
-                                            Ok(CorrectorResult::Error(e)) => spinner.finish_error(e),
+                                            Ok(CorrectorResult::Error(e)) => {
+                                                spinner.finish_error(e)
+                                            }
                                             Err(e) => spinner.finish_error(&e.to_string()),
                                         }
                                         res?
@@ -581,7 +598,9 @@ impl Runner {
                             });
                             let commit_duration = commit_start.elapsed().as_secs();
                             match &res {
-                                Ok(CommitResult::Success) => spinner.finish_success(commit_duration),
+                                Ok(CommitResult::Success) => {
+                                    spinner.finish_success(commit_duration)
+                                }
                                 Ok(CommitResult::NothingToCommit) => {
                                     spinner.finish_with_message("Nothing to commit")
                                 }

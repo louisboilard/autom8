@@ -280,31 +280,19 @@ mod tests {
 
     #[test]
     fn test_run_state_has_review_iteration() {
-        let state = RunState::new(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            3,
-        );
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
         assert_eq!(state.review_iteration, 0);
     }
 
     #[test]
     fn test_run_state_from_spec_has_review_iteration() {
-        let state = RunState::from_spec(
-            PathBuf::from("spec.md"),
-            PathBuf::from("prd.json"),
-            3,
-        );
+        let state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("prd.json"), 3);
         assert_eq!(state.review_iteration, 0);
     }
 
     #[test]
     fn test_transition_to_reviewing() {
-        let mut state = RunState::new(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            3,
-        );
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
         state.transition_to(MachineState::Reviewing);
         assert_eq!(state.machine_state, MachineState::Reviewing);
         assert_eq!(state.status, RunStatus::Running);
@@ -312,11 +300,7 @@ mod tests {
 
     #[test]
     fn test_transition_to_correcting() {
-        let mut state = RunState::new(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            3,
-        );
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
         state.transition_to(MachineState::Correcting);
         assert_eq!(state.machine_state, MachineState::Correcting);
         assert_eq!(state.status, RunStatus::Running);
@@ -324,11 +308,7 @@ mod tests {
 
     #[test]
     fn test_review_loop_state_transitions() {
-        let mut state = RunState::new(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            3,
-        );
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
 
         // Simulate: PickingStory (all complete) → Reviewing → Correcting → Reviewing → Committing
         state.transition_to(MachineState::PickingStory);
@@ -372,11 +352,7 @@ mod tests {
 
     #[test]
     fn test_run_state_review_iteration_serialization() {
-        let state = RunState::new(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            3,
-        );
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string(), 3);
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"review_iteration\":0"));
     }

@@ -98,10 +98,8 @@ impl ClaudeSpinner {
     }
 
     pub fn finish_with_message(&self, message: &str) {
-        self.spinner.finish_with_message(format!(
-            "{GREEN}{}: {}{RESET}",
-            self.story_id, message
-        ));
+        self.spinner
+            .finish_with_message(format!("{GREEN}{}: {}{RESET}", self.story_id, message));
     }
 }
 

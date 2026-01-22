@@ -472,7 +472,10 @@ mod tests {
         assert!(REVIEWER_PROMPT.contains("Missing tests"));
         assert!(REVIEWER_PROMPT.contains("Code quality"));
         assert!(REVIEWER_PROMPT.contains("Pattern consistency"));
-        assert!(REVIEWER_PROMPT.contains("Needless repetition") || REVIEWER_PROMPT.contains("repetition"));
+        assert!(
+            REVIEWER_PROMPT.contains("Needless repetition")
+                || REVIEWER_PROMPT.contains("repetition")
+        );
     }
 
     #[test]

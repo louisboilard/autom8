@@ -388,9 +388,8 @@ fn init_skills() -> autom8::error::Result<()> {
     println!();
 
     // Get home directory
-    let home = dirs::home_dir().ok_or_else(|| {
-        Autom8Error::Config("Could not determine home directory".to_string())
-    })?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| Autom8Error::Config("Could not determine home directory".to_string()))?;
 
     // Define skill paths
     let skills_dir = home.join(".claude").join("skills");
@@ -424,11 +423,19 @@ fn init_skills() -> autom8::error::Result<()> {
     fs::create_dir_all(prd_skill_path.parent().unwrap())?;
     fs::write(&prd_skill_path, prompts::PRD_SKILL_MD)?;
     let prd_action = if prd_exists { "Overwrote" } else { "Created" };
-    println!("  {GREEN}{}{RESET} {}", prd_action, prd_skill_path.display());
+    println!(
+        "  {GREEN}{}{RESET} {}",
+        prd_action,
+        prd_skill_path.display()
+    );
 
     fs::create_dir_all(prd_json_skill_path.parent().unwrap())?;
     fs::write(&prd_json_skill_path, prompts::PRD_JSON_SKILL_MD)?;
-    let prd_json_action = if prd_json_exists { "Overwrote" } else { "Created" };
+    let prd_json_action = if prd_json_exists {
+        "Overwrote"
+    } else {
+        "Created"
+    };
     println!(
         "  {GREEN}{}{RESET} {}",
         prd_json_action,
