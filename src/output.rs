@@ -153,6 +153,8 @@ fn state_to_display(state: MachineState) -> &'static str {
         MachineState::Initializing => "initializing",
         MachineState::PickingStory => "picking-story",
         MachineState::RunningClaude => "running-claude",
+        MachineState::Reviewing => "reviewing",
+        MachineState::Correcting => "correcting",
         MachineState::Committing => "committing",
         MachineState::Completed => "completed",
         MachineState::Failed => "failed",
@@ -207,6 +209,52 @@ pub struct StoryResult {
     pub title: String,
     pub passed: bool,
     pub duration_secs: u64,
+}
+
+pub fn print_reviewing(iteration: u32, max_iterations: u32) {
+    println!();
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!(
+        "{YELLOW}Reviewing changes (iteration {}/{})...{RESET}",
+        iteration, max_iterations
+    );
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!();
+}
+
+pub fn print_skip_review() {
+    println!();
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!("{YELLOW}Skipping review (--skip-review flag set){RESET}");
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!();
+}
+
+pub fn print_review_passed() {
+    println!();
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!("{GREEN}{BOLD}Review passed! Proceeding to commit.{RESET}");
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!();
+}
+
+pub fn print_issues_found(iteration: u32, max_iterations: u32) {
+    println!();
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!(
+        "{YELLOW}Issues found. Running corrector (iteration {}/{})...{RESET}",
+        iteration, max_iterations
+    );
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!();
+}
+
+pub fn print_max_review_iterations() {
+    println!();
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!("{RED}{BOLD}Review failed after 3 iterations.{RESET}");
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!();
 }
 
 pub fn print_run_summary(
