@@ -39,6 +39,10 @@ enum Commands {
         /// Maximum number of iterations
         #[arg(long, default_value = "10")]
         max_iterations: u32,
+
+        /// Skip the review loop and go directly to committing
+        #[arg(long)]
+        skip_review: bool,
     },
 
     /// Check the current run status
@@ -82,7 +86,7 @@ fn detect_input_type(path: &Path) -> InputType {
 
 fn main() {
     let cli = Cli::parse();
-    let runner = Runner::new().with_verbose(cli.verbose);
+    let mut runner = Runner::new().with_verbose(cli.verbose);
 
     let result = match (&cli.file, &cli.command) {
         // Positional file argument takes precedence
@@ -94,8 +98,10 @@ fn main() {
             Some(Commands::Run {
                 prd,
                 max_iterations,
+                skip_review,
             }),
         ) => {
+            runner = runner.with_skip_review(*skip_review);
             print_header();
             match detect_input_type(prd) {
                 InputType::Prd => runner.run(prd, *max_iterations),
