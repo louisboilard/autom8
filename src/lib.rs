@@ -9,6 +9,7 @@ pub mod progress;
 pub mod prompt;
 pub mod prompts;
 pub mod runner;
+pub mod snapshot;
 pub mod state;
 
 pub use archive::ArchiveManager;
@@ -16,4 +17,5 @@ pub use error::{Autom8Error, Result};
 pub use prd::Prd;
 pub use progress::{Breadcrumb, BreadcrumbState, ProgressContext};
 pub use runner::Runner;
+pub use snapshot::{FileMetadata, PrdSnapshot};
 pub use state::{MachineState, RunState, RunStatus, StateManager};
