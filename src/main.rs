@@ -75,6 +75,9 @@ enum Commands {
 
     /// List all known projects in the config directory
     Projects,
+
+    /// Start a new PRD creation session with Claude
+    New,
 }
 
 /// Determine input type based on file extension
@@ -184,6 +187,8 @@ fn main() {
         (None, Some(Commands::Init)) => init_skills(),
 
         (None, Some(Commands::Projects)) => list_projects_command(),
+
+        (None, Some(Commands::New)) => new_prd_session(cli.verbose),
 
         // No file and no command - auto-detect
         (None, None) => auto_detect_and_run(&runner),
@@ -354,11 +359,15 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
 fn print_getting_started() {
     println!("{BOLD}Getting Started{RESET}");
     println!();
+    println!("  Run {CYAN}autom8 new{RESET} to start an interactive PRD creation session.");
+    println!("  Claude will guide you through defining your feature, then");
+    println!("  autom8 will automatically proceed to implementation.");
+    println!();
+    println!("{GRAY}Alternative (manual workflow):{RESET}");
     println!("  1. Run {CYAN}autom8 skill prd{RESET} to get the PRD creation prompt");
     println!("  2. Start a Claude session and paste the prompt");
-    println!("  3. Describe your feature through the interactive Q&A");
-    println!("  4. Save Claude's output as {BOLD}prd.md{RESET}");
-    println!("  5. Run {CYAN}autom8{RESET} to implement your feature");
+    println!("  3. Save the PRD as {BOLD}prd.md{RESET}");
+    println!("  4. Run {CYAN}autom8{RESET} to implement");
     println!();
 }
 
@@ -521,4 +530,163 @@ fn global_status_command() -> autom8::error::Result<()> {
     let statuses = autom8::config::global_status()?;
     print_global_status(&statuses);
     Ok(())
+}
+
+fn new_prd_session(verbose: bool) -> autom8::error::Result<()> {
+    use autom8::PrdSnapshot;
+    use std::process::Command;
+
+    print_header();
+
+    // Print explanation of what will happen
+    println!("{BOLD}Starting PRD Creation Session{RESET}");
+    println!();
+    println!("This will spawn an interactive Claude session to help you create a PRD.");
+    println!("Claude will guide you through defining your feature with questions about:");
+    println!("  • Project context and tech stack");
+    println!("  • Feature requirements and user stories");
+    println!("  • Acceptance criteria for each story");
+    println!();
+    println!("When you're done, save the PRD as {CYAN}prd.md{RESET} and exit the session.");
+    println!("autom8 will automatically proceed to implementation.");
+    println!();
+    println!("{GRAY}Starting Claude...{RESET}");
+    println!();
+
+    // Take a snapshot of existing PRD files before spawning Claude
+    let snapshot = PrdSnapshot::capture()?;
+
+    // Spawn interactive Claude session with the PRD skill prompt
+    let status = Command::new("claude")
+        .arg("--prompt")
+        .arg(prompts::PRD_SKILL_PROMPT)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(exit_status) => {
+            if exit_status.success() {
+                println!();
+                println!("{GREEN}Claude session ended.{RESET}");
+                println!();
+
+                // Detect new PRD files created during the session
+                let new_files = snapshot.detect_new_files()?;
+
+                match new_files.len() {
+                    0 => {
+                        print_error("No new PRD files detected.");
+                        println!();
+                        println!("{BOLD}Possible causes:{RESET}");
+                        println!("  • Claude session ended before the PRD was saved");
+                        println!("  • PRD was saved to an unexpected location");
+                        println!("  • Claude didn't follow the PRD skill instructions");
+                        println!();
+                        println!("{BOLD}Suggestions:{RESET}");
+                        println!("  • Run {CYAN}autom8 new{RESET} again to start a fresh session");
+                        println!("  • Or use the manual workflow:");
+                        println!("      1. Run {CYAN}autom8 skill prd{RESET} to get the prompt");
+                        println!("      2. Start a Claude session and paste the prompt");
+                        println!("      3. Save the PRD as {CYAN}prd.md{RESET}");
+                        println!("      4. Run {CYAN}autom8{RESET} to implement");
+                        std::process::exit(1);
+                    }
+                    1 => {
+                        let prd_path = &new_files[0];
+                        println!("{GREEN}Detected new PRD:{RESET} {}", prd_path.display());
+                        println!();
+                        println!("{BOLD}Proceeding to implementation...{RESET}");
+                        println!();
+
+                        // Create a new runner and run from the spec
+                        let runner = Runner::new()?.with_verbose(verbose);
+                        runner.run_from_spec(prd_path)
+                    }
+                    n => {
+                        println!("{YELLOW}Detected {} new PRD files:{RESET}", n);
+                        println!();
+
+                        // Build options list with file paths
+                        let options: Vec<String> = new_files
+                            .iter()
+                            .enumerate()
+                            .map(|(i, file)| {
+                                let filename = file
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("prd.md");
+                                format!("{}. {}", i + 1, filename)
+                            })
+                            .collect();
+                        let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+
+                        let choice = prompt::select(
+                            "Which PRD would you like to implement?",
+                            &option_refs,
+                            0,
+                        );
+
+                        let selected_prd = &new_files[choice];
+                        println!();
+                        println!("{GREEN}Selected:{RESET} {}", selected_prd.display());
+                        println!();
+                        println!("{BOLD}Proceeding to implementation...{RESET}");
+                        println!();
+
+                        // Create a new runner and run from the spec
+                        let runner = Runner::new()?.with_verbose(verbose);
+                        runner.run_from_spec(selected_prd)
+                    }
+                }
+            } else {
+                Err(Autom8Error::ClaudeError(format!(
+                    "Claude exited with status: {}",
+                    exit_status
+                )))
+            }
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Err(Autom8Error::ClaudeError(
+                    "Claude CLI not found. Please install it from https://github.com/anthropics/claude-code".to_string()
+                ))
+            } else {
+                Err(Autom8Error::ClaudeError(format!(
+                    "Failed to spawn Claude: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parses_new_command() {
+        // Test that `autom8 new` is recognized as a valid command
+        let cli = Cli::try_parse_from(["autom8", "new"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::New)));
+    }
+
+    #[test]
+    fn test_cli_new_command_no_extra_args() {
+        // Test that `new` doesn't accept extra arguments
+        let cli = Cli::try_parse_from(["autom8", "new"]).unwrap();
+        assert!(cli.file.is_none());
+        assert!(!cli.verbose);
+    }
+
+    #[test]
+    fn test_cli_new_command_with_verbose() {
+        // Test that verbose flag works with new command
+        let cli = Cli::try_parse_from(["autom8", "--verbose", "new"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::New)));
+        assert!(cli.verbose);
+    }
 }
