@@ -5,13 +5,13 @@ use crate::claude::{
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
-    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error,
+    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
     print_full_progress, print_generating_prd, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
     print_phase_banner, print_prd_generated, print_proceeding_to_implementation,
     print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
-    print_warning, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
+    BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::prd::Prd;
 use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
@@ -102,7 +102,18 @@ impl Runner {
                 Ok(_) => timer.finish_success(),
                 Err(e) => timer.finish_error(&e.to_string()),
             }
-            result?
+            match result {
+                Ok(prd) => prd,
+                Err(e) => {
+                    print_error_panel(
+                        "PRD Generation Failed",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
+                    return Err(e);
+                }
+            }
         } else {
             let prd_start = Instant::now();
             let mut spinner = ClaudeSpinner::new_for_prd();
@@ -113,7 +124,18 @@ impl Runner {
                 Ok(_) => spinner.finish_success(prd_start.elapsed().as_secs()),
                 Err(e) => spinner.finish_error(&e.to_string()),
             }
-            result?
+            match result {
+                Ok(prd) => prd,
+                Err(e) => {
+                    print_error_panel(
+                        "PRD Generation Failed",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
+                    return Err(e);
+                }
+            }
         };
 
         print_prd_generated(&prd, &prd_path);
@@ -391,7 +413,12 @@ impl Runner {
                                     CorrectorResult::Error(e) => {
                                         state.transition_to(MachineState::Failed);
                                         self.state_manager.save(&state)?;
-                                        print_error(&format!("Corrector failed: {}", e));
+                                        print_error_panel(
+                                            "Corrector Failed",
+                                            &e.message,
+                                            e.exit_code,
+                                            e.stderr.as_deref(),
+                                        );
                                         print_summary(state.iteration, &story_results)?;
                                         return Err(Autom8Error::ClaudeError(format!(
                                             "Corrector failed: {}",
@@ -403,7 +430,12 @@ impl Runner {
                             ReviewResult::Error(e) => {
                                 state.transition_to(MachineState::Failed);
                                 self.state_manager.save(&state)?;
-                                print_error(&format!("Review failed: {}", e));
+                                print_error_panel(
+                                    "Review Failed",
+                                    &e.message,
+                                    e.exit_code,
+                                    e.stderr.as_deref(),
+                                );
                                 print_summary(state.iteration, &story_results)?;
                                 return Err(Autom8Error::ClaudeError(format!(
                                     "Review failed: {}",
@@ -476,7 +508,14 @@ impl Runner {
                             print_info(&format!("Changes committed successfully ({})", hash))
                         }
                         CommitResult::NothingToCommit => print_info("Nothing to commit"),
-                        CommitResult::Error(e) => print_warning(&format!("Commit failed: {}", e)),
+                        CommitResult::Error(e) => {
+                            print_error_panel(
+                                "Commit Failed",
+                                &e.message,
+                                e.exit_code,
+                                e.stderr.as_deref(),
+                            );
+                        }
                     }
 
                     print_state_transition(MachineState::Committing, MachineState::Completed);
@@ -770,7 +809,12 @@ impl Runner {
                                         CorrectorResult::Error(e) => {
                                             state.transition_to(MachineState::Failed);
                                             self.state_manager.save(&state)?;
-                                            print_error(&format!("Corrector failed: {}", e));
+                                            print_error_panel(
+                                                "Corrector Failed",
+                                                &e.message,
+                                                e.exit_code,
+                                                e.stderr.as_deref(),
+                                            );
                                             print_summary(state.iteration, &story_results)?;
                                             return Err(Autom8Error::ClaudeError(format!(
                                                 "Corrector failed: {}",
@@ -782,7 +826,12 @@ impl Runner {
                                 ReviewResult::Error(e) => {
                                     state.transition_to(MachineState::Failed);
                                     self.state_manager.save(&state)?;
-                                    print_error(&format!("Review failed: {}", e));
+                                    print_error_panel(
+                                        "Review Failed",
+                                        &e.message,
+                                        e.exit_code,
+                                        e.stderr.as_deref(),
+                                    );
                                     print_summary(state.iteration, &story_results)?;
                                     return Err(Autom8Error::ClaudeError(format!(
                                         "Review failed: {}",
@@ -855,7 +904,12 @@ impl Runner {
                             }
                             CommitResult::NothingToCommit => print_info("Nothing to commit"),
                             CommitResult::Error(e) => {
-                                print_warning(&format!("Commit failed: {}", e))
+                                print_error_panel(
+                                    "Commit Failed",
+                                    &e.message,
+                                    e.exit_code,
+                                    e.stderr.as_deref(),
+                                );
                             }
                         }
 
@@ -913,10 +967,10 @@ impl Runner {
                     // Continue to next iteration
                 }
                 Ok(ClaudeStoryResult {
-                    outcome: ClaudeOutcome::Error(msg),
+                    outcome: ClaudeOutcome::Error(error_info),
                     ..
                 }) => {
-                    state.finish_iteration(IterationStatus::Failed, msg.clone());
+                    state.finish_iteration(IterationStatus::Failed, error_info.to_string());
                     state.transition_to(MachineState::Failed);
                     self.state_manager.save(&state)?;
 
@@ -927,9 +981,14 @@ impl Runner {
                         duration_secs: story_start.elapsed().as_secs(),
                     });
 
-                    print_error(&msg);
+                    print_error_panel(
+                        "Claude Process Failed",
+                        &error_info.message,
+                        error_info.exit_code,
+                        error_info.stderr.as_deref(),
+                    );
                     print_summary(state.iteration, &story_results)?;
-                    return Err(Autom8Error::ClaudeError(msg));
+                    return Err(Autom8Error::ClaudeError(error_info.message));
                 }
                 Err(e) => {
                     state.finish_iteration(IterationStatus::Failed, e.to_string());
@@ -943,7 +1002,12 @@ impl Runner {
                         duration_secs: story_start.elapsed().as_secs(),
                     });
 
-                    print_error(&e.to_string());
+                    print_error_panel(
+                        "Claude Error",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
                     print_summary(state.iteration, &story_results)?;
                     return Err(e);
                 }
