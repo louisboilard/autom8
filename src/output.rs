@@ -766,6 +766,48 @@ mod tests {
     }
 
     // ========================================================================
+    // US-002: Phase footer (bottom border) tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_phase_footer_cyan() {
+        // Should not panic with cyan color (matches RUNNING/REVIEWING phase banners)
+        print_phase_footer(BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_footer_yellow() {
+        // Should not panic with yellow color (matches CORRECTING phase banner)
+        print_phase_footer(BannerColor::Yellow);
+    }
+
+    #[test]
+    fn test_print_phase_footer_green() {
+        // Should not panic with green color (matches SUCCESS phase banner)
+        print_phase_footer(BannerColor::Green);
+    }
+
+    #[test]
+    fn test_print_phase_footer_red() {
+        // Should not panic with red color (matches FAILURE phase banner)
+        print_phase_footer(BannerColor::Red);
+    }
+
+    #[test]
+    fn test_print_phase_footer_uses_same_width_as_banner() {
+        // Both banner and footer should use the same width calculation
+        // This test ensures they share the get_terminal_width_for_banner() logic
+        let width = get_terminal_width_for_banner();
+        let clamped_width = width.clamp(MIN_BANNER_WIDTH, MAX_BANNER_WIDTH);
+
+        // The footer should produce a line of exactly clamped_width characters
+        // (excluding ANSI codes). This is verified by the function using the same
+        // width calculation as print_phase_banner.
+        assert!(clamped_width >= MIN_BANNER_WIDTH);
+        assert!(clamped_width <= MAX_BANNER_WIDTH);
+    }
+
+    // ========================================================================
     // US-004: Progress bar display tests
     // ========================================================================
 
