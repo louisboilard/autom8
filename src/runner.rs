@@ -617,7 +617,7 @@ impl Runner {
                     print_breadcrumb_trail(&breadcrumb);
 
                     // Show progress bar after story task completion
-                    // Reload PRD to get accurate count since all stories are now complete
+                    // Reload PRD to verify actual completion state
                     let updated_prd = Prd::load(prd_path)?;
                     print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
                     println!();
@@ -625,6 +625,14 @@ impl Runner {
                     if verbose {
                         print_story_complete(&story.id, duration);
                     }
+
+                    // Validate that all stories are actually complete
+                    // Claude may output COMPLETE prematurely before updating the PRD
+                    if !updated_prd.all_complete() {
+                        // PRD doesn't match Claude's claim - continue processing stories
+                        continue;
+                    }
+
                     print_all_complete();
 
                     // Skip review if --skip-review flag is set
