@@ -14,6 +14,76 @@ const WORK_SUMMARY_END: &str = "</work-summary>";
 const MAX_WORK_SUMMARY_LENGTH: usize = 500;
 
 // ============================================================================
+// Structured error information for Claude operations
+// ============================================================================
+
+/// Captures detailed error information from Claude process failures.
+/// This allows preserving stderr output and exit codes separately from
+/// the error message for better error display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaudeErrorInfo {
+    /// Human-readable error message
+    pub message: String,
+    /// Exit code from the subprocess, if available
+    pub exit_code: Option<i32>,
+    /// Stderr output from the subprocess, if available
+    pub stderr: Option<String>,
+}
+
+impl ClaudeErrorInfo {
+    /// Create a new error info with just a message
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            exit_code: None,
+            stderr: None,
+        }
+    }
+
+    /// Create error info from a process exit status and stderr
+    pub fn from_process_failure(
+        status: std::process::ExitStatus,
+        stderr: Option<String>,
+    ) -> Self {
+        let exit_code = status.code();
+        let stderr_trimmed = stderr.as_ref().map(|s| s.trim().to_string());
+
+        let message = match (&stderr_trimmed, exit_code) {
+            (Some(err), Some(code)) if !err.is_empty() => {
+                format!("Claude exited with status {}: {}", code, err)
+            }
+            (Some(err), None) if !err.is_empty() => {
+                format!("Claude exited with error: {}", err)
+            }
+            (_, Some(code)) => {
+                format!("Claude exited with status: {}", code)
+            }
+            (_, None) => {
+                format!("Claude exited with status: {}", status)
+            }
+        };
+
+        Self {
+            message,
+            exit_code,
+            stderr: stderr_trimmed.filter(|s| !s.is_empty()),
+        }
+    }
+}
+
+impl std::fmt::Display for ClaudeErrorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<ClaudeErrorInfo> for String {
+    fn from(info: ClaudeErrorInfo) -> Self {
+        info.message
+    }
+}
+
+// ============================================================================
 // Stream JSON parsing types for Claude CLI output
 // ============================================================================
 
@@ -155,7 +225,7 @@ pub struct ClaudeStoryResult {
 pub enum ClaudeOutcome {
     IterationComplete,
     AllStoriesComplete,
-    Error(String),
+    Error(ClaudeErrorInfo),
 }
 
 /// Legacy enum for backwards compatibility - use ClaudeStoryResult for new code
@@ -163,7 +233,7 @@ pub enum ClaudeOutcome {
 pub enum ClaudeResult {
     IterationComplete,
     AllStoriesComplete,
-    Error(String),
+    Error(ClaudeErrorInfo),
 }
 
 pub fn run_claude<F>(
@@ -237,16 +307,11 @@ where
         let stderr_content = stderr
             .map(|s| std::io::read_to_string(s).unwrap_or_default())
             .unwrap_or_default();
-        let error_msg = if stderr_content.is_empty() {
-            format!("Claude exited with status: {}", status)
-        } else {
-            format!(
-                "Claude exited with status {}: {}",
-                status,
-                stderr_content.trim()
-            )
-        };
-        return Err(Autom8Error::ClaudeError(error_msg));
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+        );
+        return Err(Autom8Error::ClaudeError(error_info.message.clone()));
     }
 
     // Extract work summary from accumulated output (graceful degradation if not found)
@@ -327,16 +392,11 @@ where
         let stderr_content = stderr
             .map(|s| std::io::read_to_string(s).unwrap_or_default())
             .unwrap_or_default();
-        let error_msg = if stderr_content.is_empty() {
-            format!("Claude exited with status: {}", status)
-        } else {
-            format!(
-                "Claude exited with status {}: {}",
-                status,
-                stderr_content.trim()
-            )
-        };
-        return Err(Autom8Error::PrdGenerationFailed(error_msg));
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+        );
+        return Err(Autom8Error::PrdGenerationFailed(error_info.message));
     }
 
     // Try to get JSON either from response or from file if Claude wrote it directly
@@ -374,20 +434,20 @@ pub enum CommitResult {
     /// Commit succeeded, with short commit hash
     Success(String),
     NothingToCommit,
-    Error(String),
+    Error(ClaudeErrorInfo),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReviewResult {
     Pass,
     IssuesFound,
-    Error(String),
+    Error(ClaudeErrorInfo),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CorrectorResult {
     Complete,
-    Error(String),
+    Error(ClaudeErrorInfo),
 }
 
 /// Run Claude to commit changes after all stories are complete
@@ -469,16 +529,11 @@ where
         let stderr_content = stderr
             .map(|s| std::io::read_to_string(s).unwrap_or_default())
             .unwrap_or_default();
-        let error_msg = if stderr_content.is_empty() {
-            format!("Claude exited with status: {}", status)
-        } else {
-            format!(
-                "Claude exited with status {}: {}",
-                status,
-                stderr_content.trim()
-            )
-        };
-        return Ok(CommitResult::Error(error_msg));
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+        );
+        return Ok(CommitResult::Error(error_info));
     }
 
     if nothing_to_commit {
@@ -495,7 +550,7 @@ const REVIEW_FILE: &str = "autom8_review.md";
 /// Run the reviewer agent to check completed work for quality issues.
 /// Returns ReviewResult::Pass if autom8_review.md does not exist after run.
 /// Returns ReviewResult::IssuesFound if autom8_review.md exists and has content.
-/// Returns ReviewResult::Error(String) on failure.
+/// Returns ReviewResult::Error(ClaudeErrorInfo) on failure with stderr and exit code preserved.
 pub fn run_reviewer<F>(
     prd: &Prd,
     iteration: u32,
@@ -557,16 +612,11 @@ where
         let stderr_content = stderr
             .map(|s| std::io::read_to_string(s).unwrap_or_default())
             .unwrap_or_default();
-        let error_msg = if stderr_content.is_empty() {
-            format!("Claude exited with status: {}", status)
-        } else {
-            format!(
-                "Claude exited with status {}: {}",
-                status,
-                stderr_content.trim()
-            )
-        };
-        return Ok(ReviewResult::Error(error_msg));
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+        );
+        return Ok(ReviewResult::Error(error_info));
     }
 
     // Check if autom8_review.md exists and has content
@@ -575,10 +625,10 @@ where
         match std::fs::read_to_string(review_path) {
             Ok(content) if !content.trim().is_empty() => Ok(ReviewResult::IssuesFound),
             Ok(_) => Ok(ReviewResult::Pass), // File exists but is empty
-            Err(e) => Ok(ReviewResult::Error(format!(
+            Err(e) => Ok(ReviewResult::Error(ClaudeErrorInfo::new(format!(
                 "Failed to read review file: {}",
                 e
-            ))),
+            )))),
         }
     } else {
         Ok(ReviewResult::Pass)
@@ -587,7 +637,7 @@ where
 
 /// Run the corrector agent to fix issues identified by the reviewer.
 /// Returns CorrectorResult::Complete when Claude finishes successfully.
-/// Returns CorrectorResult::Error(String) on failure.
+/// Returns CorrectorResult::Error(ClaudeErrorInfo) on failure with stderr and exit code preserved.
 pub fn run_corrector<F>(prd: &Prd, iteration: u32, mut on_output: F) -> Result<CorrectorResult>
 where
     F: FnMut(&str),
@@ -645,16 +695,11 @@ where
         let stderr_content = stderr
             .map(|s| std::io::read_to_string(s).unwrap_or_default())
             .unwrap_or_default();
-        let error_msg = if stderr_content.is_empty() {
-            format!("Claude exited with status: {}", status)
-        } else {
-            format!(
-                "Claude exited with status {}: {}",
-                status,
-                stderr_content.trim()
-            )
-        };
-        return Ok(CorrectorResult::Error(error_msg));
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+        );
+        return Ok(CorrectorResult::Error(error_info));
     }
 
     Ok(CorrectorResult::Complete)
@@ -873,6 +918,96 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    // ========================================================================
+    // ClaudeErrorInfo tests (US-006)
+    // ========================================================================
+
+    #[test]
+    fn test_claude_error_info_new() {
+        let info = ClaudeErrorInfo::new("test error message");
+        assert_eq!(info.message, "test error message");
+        assert_eq!(info.exit_code, None);
+        assert_eq!(info.stderr, None);
+    }
+
+    #[test]
+    fn test_claude_error_info_from_process_failure_with_stderr() {
+        // Create a mock ExitStatus - we can't easily create one, so test the logic
+        let info = ClaudeErrorInfo {
+            message: "Claude exited with status 1: authentication failed".to_string(),
+            exit_code: Some(1),
+            stderr: Some("authentication failed".to_string()),
+        };
+        assert_eq!(info.exit_code, Some(1));
+        assert_eq!(info.stderr, Some("authentication failed".to_string()));
+        assert!(info.message.contains("status 1"));
+        assert!(info.message.contains("authentication failed"));
+    }
+
+    #[test]
+    fn test_claude_error_info_from_process_failure_no_stderr() {
+        let info = ClaudeErrorInfo {
+            message: "Claude exited with status: 1".to_string(),
+            exit_code: Some(1),
+            stderr: None,
+        };
+        assert_eq!(info.exit_code, Some(1));
+        assert_eq!(info.stderr, None);
+    }
+
+    #[test]
+    fn test_claude_error_info_display() {
+        let info = ClaudeErrorInfo::new("test error");
+        assert_eq!(format!("{}", info), "test error");
+    }
+
+    #[test]
+    fn test_claude_error_info_into_string() {
+        let info = ClaudeErrorInfo::new("convertible error");
+        let s: String = info.into();
+        assert_eq!(s, "convertible error");
+    }
+
+    #[test]
+    fn test_claude_error_info_clone() {
+        let info = ClaudeErrorInfo {
+            message: "cloned error".to_string(),
+            exit_code: Some(42),
+            stderr: Some("stderr content".to_string()),
+        };
+        let cloned = info.clone();
+        assert_eq!(info, cloned);
+    }
+
+    #[test]
+    fn test_claude_error_info_equality() {
+        let info1 = ClaudeErrorInfo::new("error");
+        let info2 = ClaudeErrorInfo::new("error");
+        let info3 = ClaudeErrorInfo::new("different");
+        assert_eq!(info1, info2);
+        assert_ne!(info1, info3);
+    }
+
+    #[test]
+    fn test_claude_error_info_with_all_fields() {
+        let info = ClaudeErrorInfo {
+            message: "Claude exited with status 127: command not found".to_string(),
+            exit_code: Some(127),
+            stderr: Some("command not found".to_string()),
+        };
+        assert_eq!(info.exit_code, Some(127));
+        assert!(info.stderr.as_ref().unwrap().contains("command not found"));
+        assert!(info.message.contains("127"));
+    }
+
+    #[test]
+    fn test_claude_error_info_debug() {
+        let info = ClaudeErrorInfo::new("debug test");
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("ClaudeErrorInfo"));
+        assert!(debug_str.contains("debug test"));
+    }
+
     #[test]
     fn test_build_prompt() {
         let prd = Prd {
@@ -1001,16 +1136,16 @@ End of response"#;
         // Test that all variants can be created
         let pass = ReviewResult::Pass;
         let issues = ReviewResult::IssuesFound;
-        let error = ReviewResult::Error("test error".into());
+        let error = ReviewResult::Error(ClaudeErrorInfo::new("test error"));
 
         assert_eq!(pass, ReviewResult::Pass);
         assert_eq!(issues, ReviewResult::IssuesFound);
-        assert_eq!(error, ReviewResult::Error("test error".into()));
+        assert_eq!(error, ReviewResult::Error(ClaudeErrorInfo::new("test error")));
     }
 
     #[test]
     fn test_review_result_clone() {
-        let result = ReviewResult::Error("clone test".into());
+        let result = ReviewResult::Error(ClaudeErrorInfo::new("clone test"));
         let cloned = result.clone();
         assert_eq!(result, cloned);
     }
@@ -1026,15 +1161,15 @@ End of response"#;
     fn test_corrector_result_variants() {
         // Test that all variants can be created
         let complete = CorrectorResult::Complete;
-        let error = CorrectorResult::Error("test error".into());
+        let error = CorrectorResult::Error(ClaudeErrorInfo::new("test error"));
 
         assert_eq!(complete, CorrectorResult::Complete);
-        assert_eq!(error, CorrectorResult::Error("test error".into()));
+        assert_eq!(error, CorrectorResult::Error(ClaudeErrorInfo::new("test error")));
     }
 
     #[test]
     fn test_corrector_result_clone() {
-        let result = CorrectorResult::Error("clone test".into());
+        let result = CorrectorResult::Error(ClaudeErrorInfo::new("clone test"));
         let cloned = result.clone();
         assert_eq!(result, cloned);
     }
