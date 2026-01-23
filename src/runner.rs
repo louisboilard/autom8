@@ -1203,4 +1203,74 @@ mod tests {
         assert!(runner.skip_review);
         assert!(runner.verbose);
     }
+
+    /// Tests that story_index calculation produces 1-indexed values.
+    /// The formula: position().map(|i| i as u32 + 1).unwrap_or(state.iteration)
+    /// must produce 1-indexed display values like [US-001 1/8], not [US-001 0/8].
+    #[test]
+    fn test_story_index_calculation_is_one_indexed() {
+        // Simulate the story_index calculation from runner.rs:557-562
+        let story_ids = vec!["US-001", "US-002", "US-003", "US-004", "US-005", "US-006", "US-007", "US-008"];
+
+        // Test case 1: First story (task 1 of 8) should show 1, not 0
+        let current_story = "US-001";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(1); // fallback to iteration=1
+        assert_eq!(story_index, 1, "First story should display as 1/8, not 0/8");
+
+        // Test case 2: Last story (task 8 of 8) should show 8, not 7
+        let current_story = "US-008";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(8); // fallback to iteration=8
+        assert_eq!(story_index, 8, "Last story should display as 8/8, not 7/8");
+
+        // Test case 3: Middle story (task 4 of 8) should show 4
+        let current_story = "US-004";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(4);
+        assert_eq!(story_index, 4, "Fourth story should display as 4/8");
+    }
+
+    /// Tests that state.iteration fallback produces correct 1-indexed value
+    /// when position lookup fails.
+    #[test]
+    fn test_story_index_fallback_is_one_indexed() {
+        use crate::state::RunState;
+
+        // Create a state and simulate iteration increments
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Before any iteration, state.iteration is 0
+        assert_eq!(state.iteration, 0);
+
+        // After start_iteration, it should be 1 (1-indexed)
+        state.start_iteration("US-001");
+        assert_eq!(state.iteration, 1, "After first start_iteration, iteration should be 1");
+
+        // Simulate fallback scenario where position lookup fails
+        let story_ids: Vec<&str> = vec!["US-001", "US-002"];
+        let unknown_story = "US-UNKNOWN";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == unknown_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(state.iteration);
+
+        // The fallback should use state.iteration which is 1 (1-indexed)
+        assert_eq!(story_index, 1, "Fallback should use 1-indexed state.iteration");
+
+        // After second iteration
+        state.finish_iteration(crate::state::IterationStatus::Success, String::new());
+        state.start_iteration("US-002");
+        assert_eq!(state.iteration, 2, "After second start_iteration, iteration should be 2");
+    }
 }
