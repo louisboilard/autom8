@@ -33,31 +33,61 @@ autom8 init
 This installs the `/pdr` skill to `~/.claude/skills/` so Claude knows how to create PRDs.
 You only need to do this the first time you use `autom8`.
 
-### 2. Create your PRD
+### 2. Create and implement your feature
 
 ```bash
+autom8
+```
+
+This single command handles the entire workflow:
+
+1. Spawns an interactive Claude session with the PRD skill pre-loaded
+2. You describe your feature and answer Claude's questions
+3. Claude creates the `prd.md` file
+4. When you exit the session, autom8 detects the new PRD
+5. Automatically proceeds to implementation
+
+Example session:
+
+```
+$ autom8
+
+Starting new PRD creation session...
+
+This will:
+  1. Open an interactive Claude session with the PRD skill
+  2. You describe your feature and answer questions
+  3. Claude creates a prd.md file
+  4. autom8 automatically detects and implements the PRD
+
+Press Ctrl+D or type /exit when done.
+
+[Claude session starts - you interact naturally]
+...
+[You exit the Claude session]
+
+Detected new PRD file: ~/.config/autom8/my-project/pdr/prd-my-feature.md
+Proceeding to implementation...
+
+[autom8 implementation begins]
+```
+
+### Alternative: Manual workflow
+
+If you prefer more control, you can create the PRD separately:
+
+```bash
+# Start Claude and use the PRD skill
 claude
-```
+> /pdr <description of your feature>
 
-Then in the Claude session, prompt claude like so:
-
-```
-Use the skill /pdr. <a description of your task with as much details as possible>
-```
-
-Claude will ask you questions about your feature, answer and let it generate a `prd.md` file.
-
-### 3. Run autom8
-
-```bash
+# After saving the prd.md file, run autom8
 autom8 prd.md
 ```
 
-Optionally you can also just run `autom8`: it will ask you against which `prd-<feature>.md`
-file you want to work interactively (from the available ones inside
-`.autom8/tasks`).
+You can also run `autom8` without arguments to interactively select from existing PRD files.
 
-### 4. Watch it work
+### 3. Watch it work
 
 autom8 will:
 1. Convert your `prd.md` to structured `prd.json`
@@ -67,6 +97,38 @@ autom8 will:
 5. Commit when all stories pass
 
 ## Workflow
+
+### Recommended: `autom8`
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. One-time setup                                           │
+│    $ autom8 init                                            │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. Create and implement                                     │
+│    $ autom8                                                 │
+│                                                             │
+│    - Opens interactive Claude session with PRD skill        │
+│    - You describe feature and answer questions              │
+│    - Claude creates prd.md                                  │
+│    - On exit: detects PRD and starts implementation         │
+│    - Converts prd.md → prd.json                             │
+│    - Iterates through user stories                          │
+│    - Reviews implementation, fixes issues                   │
+│    - Commits all changes when feature is complete           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Feature complete!                                        │
+│    All user stories implemented and passing                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Alternative: Manual workflow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -154,6 +216,7 @@ stateDiagram-v2
 ## CLI Commands
 
 ```bash
+autom8                    # Start PRD creation and implementation (recommended)
 autom8 init               # Install skills to ~/.claude/skills/ (one-time setup)
 autom8                    # Auto-detect and run (interactive)
 autom8 <file>             # Run with specific prd.md or prd.json
