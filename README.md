@@ -36,7 +36,7 @@ You only need to do this the first time you use `autom8`.
 ### 2. Create and implement your feature
 
 ```bash
-autom8 new
+autom8
 ```
 
 This single command handles the entire workflow:
@@ -50,7 +50,7 @@ This single command handles the entire workflow:
 Example session:
 
 ```
-$ autom8 new
+$ autom8
 
 Starting new PRD creation session...
 
@@ -98,7 +98,7 @@ autom8 will:
 
 ## Workflow
 
-### Recommended: `autom8 new`
+### Recommended: `autom8`
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -109,7 +109,7 @@ autom8 will:
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. Create and implement                                     │
-│    $ autom8 new                                             │
+│    $ autom8                                                 │
 │                                                             │
 │    - Opens interactive Claude session with PRD skill        │
 │    - You describe feature and answer questions              │
@@ -216,7 +216,7 @@ stateDiagram-v2
 ## CLI Commands
 
 ```bash
-autom8 new                # Start integrated PRD creation and implementation (recommended)
+autom8                    # Start PRD creation and implementation (recommended)
 autom8 init               # Install skills to ~/.claude/skills/ (one-time setup)
 autom8                    # Auto-detect and run (interactive)
 autom8 <file>             # Run with specific prd.md or prd.json
