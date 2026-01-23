@@ -1,7 +1,7 @@
 use autom8::error::Autom8Error;
 use autom8::output::{
-    print_error, print_header, print_history_entry, print_status, print_warning, BOLD, CYAN, GRAY,
-    GREEN, RESET, YELLOW,
+    print_error, print_global_status, print_header, print_history_entry, print_status,
+    print_warning, BOLD, CYAN, GRAY, GREEN, RESET, YELLOW,
 };
 use autom8::prompt;
 use autom8::prompts;
@@ -42,7 +42,15 @@ enum Commands {
     },
 
     /// Check the current run status
-    Status,
+    Status {
+        /// Show status across all projects
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+
+        /// Show status across all projects (alias for --all)
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+    },
 
     /// Resume a failed or interrupted run
     Resume,
@@ -64,6 +72,9 @@ enum Commands {
 
     /// Initialize autom8 by installing skills to ~/.claude/skills/
     Init,
+
+    /// List all known projects in the config directory
+    Projects,
 }
 
 /// Determine input type based on file extension
@@ -82,7 +93,22 @@ fn detect_input_type(path: &Path) -> InputType {
 
 fn main() {
     let cli = Cli::parse();
-    let mut runner = Runner::new().with_verbose(cli.verbose);
+    let mut runner = match Runner::new() {
+        Ok(r) => r.with_verbose(cli.verbose),
+        Err(e) => {
+            print_error(&format!("Failed to initialize runner: {}", e));
+            std::process::exit(1);
+        }
+    };
+
+    // Ensure project config directory exists for commands that need it
+    // (Skip for init command since it has its own config directory handling)
+    if !matches!(&cli.command, Some(Commands::Init)) {
+        if let Err(e) = autom8::config::ensure_project_config_dir() {
+            print_error(&format!("Failed to create project config directory: {}", e));
+            std::process::exit(1);
+        }
+    }
 
     let result = match (&cli.file, &cli.command) {
         // Positional file argument takes precedence
@@ -98,18 +124,24 @@ fn main() {
             }
         }
 
-        (None, Some(Commands::Status)) => {
+        (None, Some(Commands::Status { all, global })) => {
             print_header();
-            match runner.status() {
-                Ok(Some(state)) => {
-                    print_status(&state);
-                    Ok(())
+            if *all || *global {
+                // Global status across all projects
+                global_status_command()
+            } else {
+                // Local status for current project
+                match runner.status() {
+                    Ok(Some(state)) => {
+                        print_status(&state);
+                        Ok(())
+                    }
+                    Ok(None) => {
+                        println!("No active run.");
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
                 }
-                Ok(None) => {
-                    println!("No active run.");
-                    Ok(())
-                }
-                Err(e) => Err(e),
             }
         }
 
@@ -151,6 +183,8 @@ fn main() {
 
         (None, Some(Commands::Init)) => init_skills(),
 
+        (None, Some(Commands::Projects)) => list_projects_command(),
+
         // No file and no command - auto-detect
         (None, None) => auto_detect_and_run(&runner),
     };
@@ -162,10 +196,25 @@ fn main() {
 }
 
 fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
+    // Copy file to config directory if not already there
+    let copy_result = autom8::config::copy_to_config_dir(file)?;
+
     print_header();
-    match detect_input_type(file) {
-        InputType::Prd => runner.run(file),
-        InputType::Spec => runner.run_from_spec(file),
+
+    // Notify user if file was copied
+    if copy_result.was_copied {
+        println!(
+            "{GREEN}Copied{RESET} {} → {}",
+            file.display(),
+            copy_result.dest_path.display()
+        );
+        println!();
+    }
+
+    // Use the destination path for processing
+    match detect_input_type(&copy_result.dest_path) {
+        InputType::Prd => runner.run(&copy_result.dest_path),
+        InputType::Spec => runner.run_from_spec(&copy_result.dest_path),
     }
 }
 
@@ -190,6 +239,9 @@ fn output_skill(name: &str) -> autom8::error::Result<()> {
 }
 
 /// Auto-detect PRD files and run appropriately
+///
+/// Looks in `~/.config/autom8/<project-name>/prds/` for incomplete PRDs.
+/// Does NOT check legacy `.autom8/` or project root directories (clean break).
 fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
     use autom8::prd::Prd;
     use autom8::state::StateManager;
@@ -198,10 +250,10 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
     println!("{YELLOW}[detecting]{RESET} Scanning for PRD files...");
     println!();
 
-    // Check .autom8/prds/ first (new location)
-    let state_manager = StateManager::new();
-    let prds_in_autom8 = state_manager.list_prds().unwrap_or_default();
-    let incomplete_prds: Vec<_> = prds_in_autom8
+    // Check config directory prds/ for incomplete PRDs
+    let state_manager = StateManager::new()?;
+    let prds_in_config = state_manager.list_prds().unwrap_or_default();
+    let incomplete_prds: Vec<_> = prds_in_config
         .iter()
         .filter_map(|path| {
             Prd::load(path).ok().and_then(|prd| {
@@ -214,13 +266,6 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
         })
         .collect();
 
-    // Check legacy locations
-    let prd_json = Path::new("./prd.json");
-    let prd_md = Path::new("./prd.md");
-    let legacy_json_exists = prd_json.exists();
-    let md_exists = prd_md.exists();
-
-    // Priority 1: Incomplete PRDs in .autom8/prds/
     if !incomplete_prds.is_empty() {
         if incomplete_prds.len() == 1 {
             let (path, prd) = &incomplete_prds[0];
@@ -229,14 +274,6 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
                 "incomplete PRD",
                 &format!("{} ({}/{})", path.display(), completed, total),
             );
-
-            // Also check for legacy file and offer migration
-            if legacy_json_exists {
-                println!();
-                println!(
-                    "{YELLOW}Note:{RESET} Legacy ./prd.json found. Consider running {CYAN}autom8 clean{RESET} to remove it."
-                );
-            }
             println!();
 
             let choice = prompt::select(
@@ -305,110 +342,8 @@ fn auto_detect_and_run(runner: &Runner) -> autom8::error::Result<()> {
             println!();
             runner.run(path)
         }
-    }
-    // Priority 2: Legacy ./prd.json (backwards compatibility)
-    else if legacy_json_exists {
-        prompt::print_found("prd.json (legacy location)", "./prd.json");
-        if md_exists {
-            prompt::print_found("prd.md", "./prd.md");
-        }
-        println!();
-
-        let mut options = vec![
-            "Continue with existing prd.json",
-            "Migrate to .autom8/prds/ and continue",
-        ];
-        if md_exists {
-            options.push("Regenerate from prd.md (start fresh)");
-        }
-        options.push("Delete and start fresh");
-        options.push("Exit");
-
-        let choice = prompt::select(
-            "Found legacy PRD file. What would you like to do?",
-            &options,
-            0,
-        );
-
-        match options[choice] {
-            "Continue with existing prd.json" => {
-                println!();
-                prompt::print_action("Starting implementation from prd.json");
-                println!();
-                runner.run(prd_json)
-            }
-            "Migrate to .autom8/prds/ and continue" => {
-                println!();
-                // Load PRD to get the project name for the filename
-                let prd = Prd::load(prd_json)?;
-                let prds_dir = state_manager.ensure_prds_dir()?;
-                let new_path = prds_dir.join("prd.json");
-                fs::rename(prd_json, &new_path)?;
-                println!("{GREEN}Migrated{RESET} ./prd.json → {}", new_path.display());
-                println!();
-                prompt::print_action(&format!("Resuming {}", prd.project));
-                println!();
-                runner.run(&new_path)
-            }
-            "Regenerate from prd.md (start fresh)" => {
-                println!();
-                prompt::print_action("Regenerating from prd.md");
-                fs::remove_file(prd_json).ok();
-                println!();
-                runner.run_from_spec(prd_md)
-            }
-            "Delete and start fresh" => {
-                clean_prd_files()?;
-                println!();
-                print_getting_started();
-                Ok(())
-            }
-            _ => {
-                println!();
-                println!("Exiting.");
-                Ok(())
-            }
-        }
-    }
-    // Priority 3: Only prd.md exists
-    else if md_exists {
-        prompt::print_found("prd.md", "./prd.md");
-        println!();
-
-        let choice = prompt::select(
-            "Found prd.md spec file. What would you like to do?",
-            &[
-                "Convert and start implementation",
-                "Delete and start fresh",
-                "Exit",
-            ],
-            0,
-        );
-
-        match choice {
-            0 => {
-                println!();
-                prompt::print_action("Converting prd.md and starting implementation");
-                println!();
-                runner.run_from_spec(prd_md)
-            }
-            1 => {
-                fs::remove_file(prd_md).ok();
-                println!();
-                println!("{GREEN}Deleted{RESET} prd.md");
-                println!();
-                print_getting_started();
-                Ok(())
-            }
-            _ => {
-                println!();
-                println!("Exiting.");
-                Ok(())
-            }
-        }
-    }
-    // No PRD files found anywhere
-    else {
+    } else {
+        // No incomplete PRDs found in config directory
         println!("{GRAY}No PRD files found.{RESET}");
         println!();
         print_getting_started();
@@ -430,27 +365,13 @@ fn print_getting_started() {
 fn clean_prd_files() -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
-    let prd_json = Path::new("./prd.json");
-    let prd_md = Path::new("./prd.md");
-    let state_manager = StateManager::new();
+    let state_manager = StateManager::new()?;
     let prds_dir = state_manager.prds_dir();
+    let project_config_dir = autom8::config::project_config_dir()?;
 
     let mut deleted_any = false;
 
-    // Clean legacy files
-    if prd_json.exists() {
-        fs::remove_file(prd_json)?;
-        println!("{GREEN}Deleted{RESET} ./prd.json");
-        deleted_any = true;
-    }
-
-    if prd_md.exists() {
-        fs::remove_file(prd_md)?;
-        println!("{GREEN}Deleted{RESET} ./prd.md");
-        deleted_any = true;
-    }
-
-    // Check .autom8/prds/ directory
+    // Check prds/ directory in config
     if prds_dir.exists() {
         let prds = state_manager.list_prds().unwrap_or_default();
         if !prds.is_empty() {
@@ -466,7 +387,8 @@ fn clean_prd_files() -> autom8::error::Result<()> {
             }
             println!();
 
-            if prompt::confirm("Delete all PRDs in .autom8/prds/?", false) {
+            let prompt_msg = format!("Delete all PRDs in {}?", prds_dir.display());
+            if prompt::confirm(&prompt_msg, false) {
                 for prd_path in prds {
                     fs::remove_file(&prd_path)?;
                     println!("{GREEN}Deleted{RESET} {}", prd_path.display());
@@ -477,17 +399,26 @@ fn clean_prd_files() -> autom8::error::Result<()> {
     }
 
     if !deleted_any {
-        println!("{GRAY}No PRD files to clean up.{RESET}");
+        println!("{GRAY}No PRD files to clean up in {}.{RESET}", project_config_dir.display());
     }
 
     Ok(())
 }
 
 fn init_skills() -> autom8::error::Result<()> {
-    println!("Initializing autom8 skills...");
+    println!("Initializing autom8...");
     println!();
 
-    // Get home directory
+    // Create config directory ~/.config/autom8/
+    let (config_dir, config_created) = autom8::config::ensure_config_dir()?;
+    if config_created {
+        println!("  {GREEN}Created{RESET} {}", config_dir.display());
+    } else {
+        println!("  {GRAY}Exists{RESET}  {}", config_dir.display());
+    }
+    println!();
+
+    // Get home directory for skill paths
     let home = dirs::home_dir()
         .ok_or_else(|| Autom8Error::Config("Could not determine home directory".to_string()))?;
 
@@ -543,18 +474,51 @@ fn init_skills() -> autom8::error::Result<()> {
     );
 
     println!();
+    println!("{GREEN}Initialization complete!{RESET}");
+    println!();
+    if config_created {
+        println!("  - Config directory created at {}", config_dir.display());
+    }
     if prd_exists || prd_json_exists {
-        println!("Skills updated!");
+        println!("  - Skills updated");
     } else {
-        println!("Skills installed! You can now use:");
-        println!("  {CYAN}/prd{RESET}       - Create a PRD through interactive Q&A");
-        println!("  {CYAN}/prd-json{RESET}  - Convert a PRD to prd.json format");
+        println!("  - Skills installed");
+    }
+    println!();
+    println!("You can now use:");
+    println!("  {CYAN}/prd{RESET}       - Create a PRD through interactive Q&A");
+    println!("  {CYAN}/prd-json{RESET}  - Convert a PRD to prd.json format");
+    println!();
+    println!("{BOLD}Next steps:{RESET}");
+    println!("  1. Start a Claude session: {CYAN}claude{RESET}");
+    println!("  2. Use {CYAN}/prd{RESET} to create your PRD");
+    println!("  3. Run {CYAN}autom8{RESET} to implement it");
+
+    Ok(())
+}
+
+fn list_projects_command() -> autom8::error::Result<()> {
+    let projects = autom8::config::list_projects()?;
+
+    if projects.is_empty() {
+        println!("{GRAY}No projects found.{RESET}");
         println!();
-        println!("{BOLD}Next steps:{RESET}");
-        println!("  1. Start a Claude session: {CYAN}claude{RESET}");
-        println!("  2. Use {CYAN}/prd{RESET} to create your PRD");
-        println!("  3. Run {CYAN}autom8{RESET} to implement it");
+        println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
+    } else {
+        println!("{BOLD}Known projects:{RESET}");
+        println!();
+        for project in &projects {
+            println!("  {}", project);
+        }
+        println!();
+        println!("{GRAY}({} project{}){RESET}", projects.len(), if projects.len() == 1 { "" } else { "s" });
     }
 
+    Ok(())
+}
+
+fn global_status_command() -> autom8::error::Result<()> {
+    let statuses = autom8::config::global_status()?;
+    print_global_status(&statuses);
     Ok(())
 }
