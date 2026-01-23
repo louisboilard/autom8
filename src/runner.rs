@@ -8,7 +8,7 @@ use crate::output::{
     print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
     print_full_progress, print_generating_prd, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
-    print_phase_banner, print_prd_generated, print_proceeding_to_implementation,
+    print_phase_banner, print_phase_footer, print_prd_generated, print_proceeding_to_implementation,
     print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
     BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
@@ -313,6 +313,9 @@ impl Runner {
                             res?
                         };
 
+                        // Print bottom border to close the output frame
+                        print_phase_footer(BannerColor::Cyan);
+
                         // Print breadcrumb trail after review phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
@@ -392,6 +395,9 @@ impl Runner {
                                     }
                                     res?
                                 };
+
+                                // Print bottom border to close the output frame
+                                print_phase_footer(BannerColor::Yellow);
 
                                 // Print breadcrumb trail after correct phase completion
                                 print_breadcrumb_trail(&breadcrumb);
@@ -500,6 +506,9 @@ impl Runner {
                         res?
                     };
 
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
+
                     // Print breadcrumb trail after commit phase completion
                     print_breadcrumb_trail(&breadcrumb);
 
@@ -600,6 +609,9 @@ impl Runner {
                         passed: true,
                         duration_secs: duration,
                     });
+
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
 
                     // Print breadcrumb trail after story phase completion
                     print_breadcrumb_trail(&breadcrumb);
@@ -703,6 +715,9 @@ impl Runner {
                                 res?
                             };
 
+                            // Print bottom border to close the output frame
+                            print_phase_footer(BannerColor::Cyan);
+
                             // Print breadcrumb trail after review phase completion
                             print_breadcrumb_trail(&breadcrumb);
 
@@ -788,6 +803,9 @@ impl Runner {
                                         }
                                         res?
                                     };
+
+                                    // Print bottom border to close the output frame
+                                    print_phase_footer(BannerColor::Yellow);
 
                                     // Print breadcrumb trail after correct phase completion
                                     print_breadcrumb_trail(&breadcrumb);
@@ -895,6 +913,9 @@ impl Runner {
                             res?
                         };
 
+                        // Print bottom border to close the output frame
+                        print_phase_footer(BannerColor::Cyan);
+
                         // Print breadcrumb trail after commit phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
@@ -933,6 +954,9 @@ impl Runner {
                     self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
+
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
 
                     // Print breadcrumb trail after story phase completion
                     print_breadcrumb_trail(&breadcrumb);

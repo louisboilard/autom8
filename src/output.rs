@@ -95,6 +95,33 @@ pub fn print_phase_banner(phase_name: &str, color: BannerColor) {
     );
 }
 
+/// Print a phase footer (bottom border) to visually close the output section.
+///
+/// The footer is a horizontal line using the same style as the phase banner,
+/// providing visual framing around the Claude output section.
+///
+/// # Arguments
+/// * `color` - The color to use for the footer (should match the phase banner)
+///
+/// # Example
+/// ```ignore
+/// print_phase_banner("RUNNING", BannerColor::Cyan);
+/// // ... Claude output ...
+/// print_phase_footer(BannerColor::Cyan);
+/// ```
+pub fn print_phase_footer(color: BannerColor) {
+    let terminal_width = get_terminal_width_for_banner();
+
+    // Clamp banner width between MIN and MAX (same as phase banner)
+    let banner_width = terminal_width.clamp(MIN_BANNER_WIDTH, MAX_BANNER_WIDTH);
+
+    let color_code = color.ansi_code();
+
+    println!("{}{BOLD}{}{RESET}", color_code, "━".repeat(banner_width));
+    // Print blank line for padding after the frame (US-003)
+    println!();
+}
+
 pub fn print_header() {
     println!("{CYAN}{BOLD}");
     println!("+---------------------------------------------------------+");
