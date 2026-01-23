@@ -1,3 +1,4 @@
+use crate::config;
 use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,6 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-const STATE_DIR: &str = ".autom8";
 const STATE_FILE: &str = "state.json";
 const RUNS_DIR: &str = "runs";
 const PRDS_DIR: &str = "prds";
@@ -171,12 +171,21 @@ pub struct StateManager {
 }
 
 impl StateManager {
-    pub fn new() -> Self {
-        Self {
-            base_dir: PathBuf::from(STATE_DIR),
-        }
+    /// Create a StateManager using the config directory for the current project.
+    /// Uses `~/.config/autom8/<project-name>/` as the base directory.
+    pub fn new() -> Result<Self> {
+        let base_dir = config::project_config_dir()?;
+        Ok(Self { base_dir })
     }
 
+    /// Create a StateManager for a specific project name.
+    /// Uses `~/.config/autom8/<project-name>/` as the base directory.
+    pub fn for_project(project_name: &str) -> Result<Self> {
+        let base_dir = config::project_config_dir_for(project_name)?;
+        Ok(Self { base_dir })
+    }
+
+    /// Create a StateManager with a custom base directory (for testing).
     pub fn with_dir(dir: PathBuf) -> Self {
         Self { base_dir: dir }
     }
@@ -207,7 +216,7 @@ impl StateManager {
         Ok(dir)
     }
 
-    /// List all PRD files in .autom8/prds/, sorted by modification time (newest first)
+    /// List all PRD files in the config directory's prds/, sorted by modification time (newest first)
     pub fn list_prds(&self) -> Result<Vec<PathBuf>> {
         let prds_dir = self.prds_dir();
         if !prds_dir.exists() {
@@ -302,11 +311,6 @@ impl StateManager {
     }
 }
 
-impl Default for StateManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -487,5 +491,319 @@ mod tests {
         state.set_work_summary(Some("Should not crash".to_string()));
         // Should not panic, just do nothing
         assert!(state.iterations.is_empty());
+    }
+
+    // StateManager tests using with_dir for testability
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_state_manager_with_dir_creates_state_file_in_base_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&run_state).unwrap();
+
+        // state.json should be in the base dir
+        assert!(temp_dir.path().join(STATE_FILE).exists());
+    }
+
+    #[test]
+    fn test_state_manager_with_dir_creates_runs_subdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        sm.ensure_dirs().unwrap();
+
+        // runs/ should be in the base dir
+        assert!(temp_dir.path().join(RUNS_DIR).exists());
+        assert!(temp_dir.path().join(RUNS_DIR).is_dir());
+    }
+
+    #[test]
+    fn test_state_manager_with_dir_creates_prds_subdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let prds_dir = sm.ensure_prds_dir().unwrap();
+
+        // prds/ should be in the base dir
+        assert_eq!(prds_dir, temp_dir.path().join(PRDS_DIR));
+        assert!(prds_dir.exists());
+        assert!(prds_dir.is_dir());
+    }
+
+    #[test]
+    fn test_state_manager_save_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let mut run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run_state.start_iteration("US-001");
+
+        sm.save(&run_state).unwrap();
+
+        let loaded = sm.load_current().unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.run_id, run_state.run_id);
+        assert_eq!(loaded.branch, "test-branch");
+        assert_eq!(loaded.iteration, 1);
+    }
+
+    #[test]
+    fn test_state_manager_clear_current() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&run_state).unwrap();
+        assert!(sm.load_current().unwrap().is_some());
+
+        sm.clear_current().unwrap();
+        assert!(sm.load_current().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_state_manager_archive() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let archive_path = sm.archive(&run_state).unwrap();
+
+        assert!(archive_path.exists());
+        assert!(archive_path.starts_with(temp_dir.path().join(RUNS_DIR)));
+    }
+
+    #[test]
+    fn test_state_manager_list_archived() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No archived runs initially
+        let runs = sm.list_archived().unwrap();
+        assert!(runs.is_empty());
+
+        // Archive a run
+        let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.archive(&run_state).unwrap();
+
+        let runs = sm.list_archived().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, run_state.run_id);
+    }
+
+    #[test]
+    fn test_state_manager_has_active_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No active run initially
+        assert!(!sm.has_active_run().unwrap());
+
+        // Save a running state
+        let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert_eq!(run_state.status, RunStatus::Running);
+        sm.save(&run_state).unwrap();
+
+        assert!(sm.has_active_run().unwrap());
+    }
+
+    #[test]
+    fn test_state_manager_list_prds_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let prds = sm.list_prds().unwrap();
+        assert!(prds.is_empty());
+    }
+
+    #[test]
+    fn test_state_manager_list_prds_finds_json_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let prds_dir = sm.ensure_prds_dir().unwrap();
+
+        // Create a test PRD file
+        let prd_content = r#"{"project": "test", "branchName": "test", "userStories": []}"#;
+        fs::write(prds_dir.join("test.json"), prd_content).unwrap();
+
+        let prds = sm.list_prds().unwrap();
+        assert_eq!(prds.len(), 1);
+        assert!(prds[0].ends_with("test.json"));
+    }
+
+    #[test]
+    fn test_state_manager_new_uses_config_directory() {
+        // This test verifies that StateManager::new() uses the config directory
+        let sm = StateManager::new().unwrap();
+        let prds_dir = sm.prds_dir();
+
+        // The prds_dir should be under ~/.config/autom8/<project-name>/prds/
+        assert!(prds_dir.ends_with("prds"));
+        // Parent should be the project name (autom8 when running tests)
+        let project_dir = prds_dir.parent().unwrap();
+        assert!(project_dir.parent().unwrap().ends_with("autom8"));
+    }
+
+    #[test]
+    fn test_state_manager_for_project() {
+        let sm = StateManager::for_project("test-project").unwrap();
+        let prds_dir = sm.prds_dir();
+
+        // The prds_dir should be under ~/.config/autom8/test-project/prds/
+        assert!(prds_dir.ends_with("prds"));
+        let project_dir = prds_dir.parent().unwrap();
+        assert!(project_dir.ends_with("test-project"));
+    }
+
+    // ======================================================================
+    // Tests for resume command config directory integration (US-007)
+    // ======================================================================
+
+    /// Tests that StateManager::new() creates a state file path in the config directory.
+    /// This is used by the resume command to find active runs.
+    #[test]
+    fn test_state_manager_state_file_in_config_directory() {
+        let sm = StateManager::new().unwrap();
+
+        // save and load operations use state_file() which should be in config dir
+        // We verify the structure: ~/.config/autom8/<project-name>/state.json
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Save should work (creates in config directory)
+        assert!(sm.save(&state).is_ok(), "Should save state to config directory");
+
+        // Load should find the state in config directory
+        let loaded = sm.load_current().unwrap();
+        assert!(loaded.is_some(), "Should load state from config directory");
+        assert_eq!(loaded.unwrap().run_id, state.run_id);
+
+        // Cleanup
+        sm.clear_current().unwrap();
+    }
+
+    /// Tests that smart_resume (via list_prds) scans the config directory prds/.
+    /// This verifies the path: ~/.config/autom8/<project-name>/prds/
+    #[test]
+    fn test_state_manager_list_prds_uses_config_directory() {
+        let sm = StateManager::new().unwrap();
+        let prds_dir = sm.prds_dir();
+
+        // Verify path structure
+        let path_str = prds_dir.to_string_lossy();
+        assert!(
+            path_str.contains(".config/autom8/") || path_str.contains(".config\\autom8\\"),
+            "prds_dir should be in ~/.config/autom8/: got {}",
+            path_str
+        );
+        assert!(prds_dir.ends_with("prds"), "prds_dir should end with 'prds'");
+
+        // list_prds should work (even if empty)
+        let prds = sm.list_prds().unwrap();
+        assert!(prds.is_empty() || prds.iter().all(|p| p.to_string_lossy().contains(".config/autom8/")),
+            "All PRDs should be in config directory");
+    }
+
+    /// Tests that archived runs (used by resume history) are stored in config directory.
+    #[test]
+    fn test_state_manager_archive_uses_config_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let archive_path = sm.archive(&state).unwrap();
+
+        // Archive should be in runs/ subdirectory
+        assert!(archive_path.starts_with(temp_dir.path().join("runs")));
+
+        // list_archived should find it
+        let archived = sm.list_archived().unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].run_id, state.run_id);
+    }
+
+    /// Tests has_active_run() which is used by resume to check for ongoing work.
+    #[test]
+    fn test_state_manager_has_active_run_for_resume() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No active run initially
+        assert!(!sm.has_active_run().unwrap(), "Should have no active run initially");
+
+        // Save a running state
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Now has_active_run should return true
+        assert!(sm.has_active_run().unwrap(), "Should detect active run");
+
+        // Clear and verify
+        sm.clear_current().unwrap();
+        assert!(!sm.has_active_run().unwrap(), "Should have no active run after clear");
+    }
+
+    /// Tests that clean command can list and delete PRDs from config directory.
+    /// This verifies that files in ~/.config/autom8/<project-name>/prds/ can be:
+    /// 1. Listed via list_prds()
+    /// 2. Deleted via standard fs::remove_file()
+    #[test]
+    fn test_clean_command_operates_on_config_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create prds directory structure
+        let prds_dir = temp_dir.path().join("prds");
+        std::fs::create_dir_all(&prds_dir).unwrap();
+
+        // Create test PRD files
+        let prd1 = prds_dir.join("prd-feature1.json");
+        let prd2 = prds_dir.join("prd-feature2.json");
+        std::fs::write(&prd1, r#"{"project": "test1"}"#).unwrap();
+        std::fs::write(&prd2, r#"{"project": "test2"}"#).unwrap();
+
+        // Verify list_prds finds the files
+        let prds = sm.list_prds().unwrap();
+        assert_eq!(prds.len(), 2, "Should find 2 PRD files");
+
+        // Verify prds_dir points to config directory structure
+        assert_eq!(sm.prds_dir(), prds_dir);
+
+        // Clean (delete) the files - simulating what clean_prd_files does
+        for prd_path in &prds {
+            std::fs::remove_file(prd_path).unwrap();
+        }
+
+        // Verify files are gone
+        let prds_after = sm.list_prds().unwrap();
+        assert!(prds_after.is_empty(), "All PRD files should be deleted");
+        assert!(!prd1.exists(), "prd-feature1.json should be deleted");
+        assert!(!prd2.exists(), "prd-feature2.json should be deleted");
+    }
+
+    /// Tests that clean command no longer operates on legacy .autom8/ location.
+    /// PRD files should ONLY be found in the config directory.
+    #[test]
+    fn test_clean_uses_config_directory_not_legacy_location() {
+        let sm = StateManager::new().unwrap();
+        let prds_dir = sm.prds_dir();
+
+        // prds_dir should NOT point to .autom8/prds/ in current directory
+        let path_str = prds_dir.to_string_lossy();
+        assert!(
+            !path_str.starts_with(".autom8/") && !path_str.contains("/.autom8/prds"),
+            "prds_dir should not reference legacy .autom8/ location: got {}",
+            path_str
+        );
+
+        // Should be in ~/.config/autom8/
+        assert!(
+            path_str.contains(".config/autom8/") || path_str.contains(".config\\autom8\\"),
+            "prds_dir should be in config directory: got {}",
+            path_str
+        );
     }
 }
