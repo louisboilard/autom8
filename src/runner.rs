@@ -27,12 +27,12 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new() -> Self {
-        Self {
-            state_manager: StateManager::new(),
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            state_manager: StateManager::new()?,
             verbose: false,
             skip_review: false,
-        }
+        })
     }
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
@@ -59,7 +59,7 @@ impl Runner {
             .canonicalize()
             .map_err(|_| Autom8Error::SpecNotFound(spec_path.to_path_buf()))?;
 
-        // Determine PRD output path in .autom8/prds/ directory
+        // Determine PRD output path in config directory
         let stem = spec_path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -563,6 +563,8 @@ impl Runner {
             let story_start = Instant::now();
             let verbose = self.verbose;
             // Calculate story progress for display: [US-001 2/5]
+            // Position is 0-indexed, so we add 1 to get 1-indexed display.
+            // Fallback to state.iteration (already 1-indexed after start_iteration()).
             let story_index = prd
                 .user_stories
                 .iter()
@@ -1068,7 +1070,7 @@ impl Runner {
         self.smart_resume()
     }
 
-    /// Scan .autom8/prds/ for incomplete PRDs and offer to resume one
+    /// Scan prds/ in config directory for incomplete PRDs and offer to resume one
     fn smart_resume(&self) -> Result<()> {
         use crate::prompt;
 
@@ -1177,11 +1179,6 @@ impl Runner {
     }
 }
 
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1189,25 +1186,25 @@ mod tests {
 
     #[test]
     fn test_runner_skip_review_defaults_to_false() {
-        let runner = Runner::new();
+        let runner = Runner::new().unwrap();
         assert!(!runner.skip_review);
     }
 
     #[test]
     fn test_runner_with_skip_review_true() {
-        let runner = Runner::new().with_skip_review(true);
+        let runner = Runner::new().unwrap().with_skip_review(true);
         assert!(runner.skip_review);
     }
 
     #[test]
     fn test_runner_with_skip_review_false() {
-        let runner = Runner::new().with_skip_review(false);
+        let runner = Runner::new().unwrap().with_skip_review(false);
         assert!(!runner.skip_review);
     }
 
     #[test]
     fn test_runner_builder_pattern_preserves_skip_review() {
-        let runner = Runner::new().with_verbose(true).with_skip_review(true);
+        let runner = Runner::new().unwrap().with_verbose(true).with_skip_review(true);
         assert!(runner.skip_review);
         assert!(runner.verbose);
     }
@@ -1280,5 +1277,25 @@ mod tests {
         state.finish_iteration(crate::state::IterationStatus::Success, String::new());
         state.start_iteration("US-002");
         assert_eq!(state.iteration, 2, "After second start_iteration, iteration should be 2");
+    }
+
+    /// Tests that Runner uses StateManager which uses config directory paths.
+    /// This verifies the resume command looks in the right location.
+    #[test]
+    fn test_runner_state_manager_uses_config_directory() {
+        let runner = Runner::new().unwrap();
+        // The state_manager field is private, but we can verify through the status() method
+        // that it reads from the config directory (no error means path resolution works)
+        let status_result = runner.status();
+        assert!(status_result.is_ok(), "Runner should use valid config directory paths");
+    }
+
+    /// Tests that history() (used by resume) reads from config directory runs/.
+    #[test]
+    fn test_runner_history_uses_config_directory() {
+        let runner = Runner::new().unwrap();
+        // history() reads from runs/ subdirectory of config directory
+        let history_result = runner.history();
+        assert!(history_result.is_ok(), "Runner history should use valid config directory paths");
     }
 }

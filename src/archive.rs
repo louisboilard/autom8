@@ -7,10 +7,10 @@ pub struct ArchiveManager {
 }
 
 impl ArchiveManager {
-    pub fn new() -> Self {
-        Self {
-            state_manager: StateManager::new(),
-        }
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            state_manager: StateManager::new()?,
+        })
     }
 
     pub fn archive_current_run(&self) -> Result<Option<PathBuf>> {
@@ -50,11 +50,6 @@ impl ArchiveManager {
     }
 }
 
-impl Default for ArchiveManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[derive(Debug)]
 pub struct ArchiveStats {
