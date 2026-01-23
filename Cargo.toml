@@ -15,3 +15,6 @@ thiserror = "1"
 indicatif = "0.17"
 dirs = "5"
 terminal_size = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

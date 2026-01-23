@@ -216,6 +216,91 @@ pub fn print_status(state: &RunState) {
     println!("{BLUE}Tasks run:{RESET}  {}", state.iterations.len());
 }
 
+/// Print global status across all projects.
+///
+/// Shows each project with its status: active runs, failed runs, and incomplete PRDs.
+/// Projects with active/failed runs are highlighted.
+/// Projects with no active work are shown as "idle".
+pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
+    use crate::state::RunStatus;
+
+    if statuses.is_empty() {
+        println!("{GRAY}No projects found.{RESET}");
+        println!();
+        println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
+        return;
+    }
+
+    // Separate projects that need attention from idle ones
+    let (needs_attention, idle): (Vec<_>, Vec<_>) =
+        statuses.iter().partition(|s| s.needs_attention());
+
+    // Print projects needing attention first
+    if !needs_attention.is_empty() {
+        println!("{BOLD}Projects needing attention:{RESET}");
+        println!();
+
+        for status in &needs_attention {
+            let status_indicator = match status.run_status {
+                Some(RunStatus::Running) => format!("{YELLOW}[running]{RESET}"),
+                Some(RunStatus::Failed) => format!("{RED}[failed]{RESET}"),
+                Some(RunStatus::Completed) => String::new(),
+                None => String::new(),
+            };
+
+            let prd_info = if status.incomplete_prd_count > 0 {
+                format!(
+                    " {CYAN}{} incomplete PRD{}{RESET}",
+                    status.incomplete_prd_count,
+                    if status.incomplete_prd_count == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            };
+
+            if status_indicator.is_empty() {
+                println!("  {BOLD}{}{RESET}{}", status.name, prd_info);
+            } else {
+                println!(
+                    "  {BOLD}{}{RESET} {}{}",
+                    status.name, status_indicator, prd_info
+                );
+            }
+        }
+        println!();
+    }
+
+    // Print idle projects
+    if !idle.is_empty() {
+        println!("{GRAY}Idle projects:{RESET}");
+        for status in &idle {
+            println!("{GRAY}  {}{RESET}", status.name);
+        }
+        println!();
+    }
+
+    // Print summary
+    let active_count = statuses
+        .iter()
+        .filter(|s| s.run_status == Some(RunStatus::Running))
+        .count();
+    let failed_count = statuses
+        .iter()
+        .filter(|s| s.run_status == Some(RunStatus::Failed))
+        .count();
+    let incomplete_prd_total: usize = statuses.iter().map(|s| s.incomplete_prd_count).sum();
+
+    println!(
+        "{GRAY}({} project{}, {} active, {} failed, {} incomplete PRD{}){RESET}",
+        statuses.len(),
+        if statuses.len() == 1 { "" } else { "s" },
+        active_count,
+        failed_count,
+        incomplete_prd_total,
+        if incomplete_prd_total == 1 { "" } else { "s" }
+    );
+}
+
 pub fn print_history_entry(state: &RunState, index: usize) {
     let status_color = match state.status {
         crate::state::RunStatus::Completed => GREEN,
