@@ -8,8 +8,6 @@ use terminal_size::{terminal_size, Width};
 
 const SPINNER_CHARS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
-// Spinner (2) + " Claude working on " (19) + " [HH:MM:SS]" (11) = 32 chars overhead
-const SPINNER_OVERHEAD: usize = 32;
 /// Fixed width for activity text to prevent timer position jumping (US-002)
 pub const ACTIVITY_TEXT_WIDTH: usize = 40;
 
@@ -738,21 +736,6 @@ impl Drop for ClaudeSpinner {
     }
 }
 
-/// Calculate the available width for activity text given the story ID
-fn calculate_available_width(story_id: &str) -> usize {
-    let terminal_width = get_terminal_width();
-    // Story ID is displayed as "{story_id} | " which adds len + 3 chars
-    let story_id_overhead = story_id.chars().count() + 3;
-    let total_overhead = SPINNER_OVERHEAD + story_id_overhead;
-
-    // Ensure we have at least some minimum space (10 chars) for the activity
-    if terminal_width > total_overhead + 10 {
-        terminal_width - total_overhead
-    } else {
-        10 // Minimum activity width
-    }
-}
-
 fn truncate_activity(activity: &str, max_len: usize) -> String {
     // Take first line only and clean it up
     let first_line = activity.lines().next().unwrap_or(activity);
@@ -793,12 +776,6 @@ fn fixed_width_activity(activity: &str) -> String {
         // Pad with spaces to reach fixed width
         format!("{:width$}", cleaned, width = ACTIVITY_TEXT_WIDTH)
     }
-}
-
-/// Truncate activity text to fit terminal width, accounting for story ID and spinner overhead
-fn truncate_activity_for_display(activity: &str, story_id: &str) -> String {
-    let available_width = calculate_available_width(story_id);
-    truncate_activity(activity, available_width)
 }
 
 // ============================================================================
@@ -1140,56 +1117,6 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_available_width_short_story_id() {
-        // With a short story ID, should have more space for activity
-        let width = calculate_available_width("US-001");
-        // Should be positive and reasonable
-        assert!(width >= 10);
-    }
-
-    #[test]
-    fn test_calculate_available_width_long_story_id() {
-        // With a longer story ID, should have less space for activity
-        let short_width = calculate_available_width("US-001");
-        let long_width = calculate_available_width("US-001-very-long-story-identifier");
-        // Longer story ID should result in less available width
-        assert!(long_width < short_width);
-    }
-
-    #[test]
-    fn test_calculate_available_width_minimum_bound() {
-        // Even with very long story ID, should have at least minimum width
-        let width = calculate_available_width("A".repeat(200).as_str());
-        assert!(width >= 10);
-    }
-
-    #[test]
-    fn test_truncate_activity_for_display() {
-        // Test that truncate_activity_for_display produces a result
-        let long_activity = "This is a very long activity message that should definitely be truncated to fit within the terminal width when displayed";
-        let result = truncate_activity_for_display(long_activity, "US-001");
-        // Result should be shorter than original if terminal is narrow
-        // or equal/longer only if terminal is very wide
-        assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_truncate_activity_for_display_short_message() {
-        // Short messages should not be truncated
-        let short_activity = "Working";
-        let result = truncate_activity_for_display(short_activity, "US-001");
-        assert_eq!(result, "Working");
-    }
-
-    #[test]
-    fn test_truncate_activity_for_display_with_prd() {
-        // PRD has specific handling, test it works
-        let activity = "Generating user stories";
-        let result = truncate_activity_for_display(activity, "PRD");
-        assert_eq!(result, "Generating user stories");
-    }
-
-    #[test]
     fn test_truncate_activity_very_small_max_len() {
         // Edge case: very small max_len should still produce valid output
         let result = truncate_activity("Hello world", 3);
@@ -1202,14 +1129,6 @@ mod tests {
         let result = truncate_activity("Hello world", 4);
         assert_eq!(result, "H...");
         assert_eq!(result.chars().count(), 4);
-    }
-
-    #[test]
-    fn test_truncate_activity_preserves_first_line_only() {
-        let multiline = "First line of output\nSecond line\nThird line";
-        let result = truncate_activity_for_display(multiline, "US-001");
-        assert!(!result.contains('\n'));
-        assert!(result.starts_with("First") || result == "...");
     }
 
     #[test]

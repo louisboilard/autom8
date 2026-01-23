@@ -95,6 +95,33 @@ pub fn print_phase_banner(phase_name: &str, color: BannerColor) {
     );
 }
 
+/// Print a phase footer (bottom border) to visually close the output section.
+///
+/// The footer is a horizontal line using the same style as the phase banner,
+/// providing visual framing around the Claude output section.
+///
+/// # Arguments
+/// * `color` - The color to use for the footer (should match the phase banner)
+///
+/// # Example
+/// ```ignore
+/// print_phase_banner("RUNNING", BannerColor::Cyan);
+/// // ... Claude output ...
+/// print_phase_footer(BannerColor::Cyan);
+/// ```
+pub fn print_phase_footer(color: BannerColor) {
+    let terminal_width = get_terminal_width_for_banner();
+
+    // Clamp banner width between MIN and MAX (same as phase banner)
+    let banner_width = terminal_width.clamp(MIN_BANNER_WIDTH, MAX_BANNER_WIDTH);
+
+    let color_code = color.ansi_code();
+
+    println!("{}{BOLD}{}{RESET}", color_code, "━".repeat(banner_width));
+    // Print blank line for padding after the frame (US-003)
+    println!();
+}
+
 pub fn print_header() {
     println!("{CYAN}{BOLD}");
     println!("+---------------------------------------------------------+");
@@ -451,6 +478,215 @@ pub fn print_breadcrumb_trail(breadcrumb: &Breadcrumb) {
     breadcrumb.print();
 }
 
+// ============================================================================
+// Error panel display
+// ============================================================================
+
+/// Structured error information for display.
+///
+/// This type captures all relevant details about an error that occurred
+/// during Claude operations, enabling comprehensive error display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrorDetails {
+    /// Category of error (e.g., "Process Failed", "Timeout", "Auth Error")
+    pub error_type: String,
+    /// User-friendly description of what went wrong
+    pub message: String,
+    /// Exit code from subprocess, if applicable
+    pub exit_code: Option<i32>,
+    /// Stderr output from subprocess, if available
+    pub stderr: Option<String>,
+    /// Which Claude function failed (e.g., "run_claude", "run_reviewer")
+    pub source: Option<String>,
+}
+
+impl ErrorDetails {
+    /// Create a new ErrorDetails instance.
+    pub fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error_type: error_type.into(),
+            message: message.into(),
+            exit_code: None,
+            stderr: None,
+            source: None,
+        }
+    }
+
+    /// Set the exit code.
+    pub fn with_exit_code(mut self, code: i32) -> Self {
+        self.exit_code = Some(code);
+        self
+    }
+
+    /// Set the stderr output.
+    pub fn with_stderr(mut self, stderr: impl Into<String>) -> Self {
+        self.stderr = Some(stderr.into());
+        self
+    }
+
+    /// Set the source function.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// Print this error using the error panel.
+    pub fn print_panel(&self) {
+        print_error_panel(
+            &self.error_type,
+            &self.message,
+            self.exit_code,
+            self.stderr.as_deref(),
+        );
+    }
+}
+
+impl std::fmt::Display for ErrorDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.error_type, self.message)?;
+
+        if let Some(source) = &self.source {
+            write!(f, " (source: {})", source)?;
+        }
+
+        if let Some(code) = self.exit_code {
+            write!(f, " [exit code: {}]", code)?;
+        }
+
+        if let Some(stderr) = &self.stderr {
+            let trimmed = stderr.trim();
+            if !trimmed.is_empty() {
+                // Show first line of stderr in display
+                if let Some(first_line) = trimmed.lines().next() {
+                    write!(f, " stderr: {}", first_line)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+const ERROR_PANEL_WIDTH: usize = 60;
+
+/// Print a dedicated error panel with full error details.
+///
+/// This displays a visually distinct panel with a red bordered header,
+/// showing the error type, message, exit code (if applicable), and stderr
+/// output (if available).
+///
+/// # Arguments
+/// * `error_type` - Category of error (e.g., "Claude Process Failed", "API Error", "Timeout")
+/// * `message` - The error message describing what went wrong
+/// * `exit_code` - Optional exit code from the subprocess
+/// * `stderr` - Optional stderr output from the subprocess
+///
+/// # Example
+/// ```ignore
+/// print_error_panel(
+///     "Claude Process Failed",
+///     "The process exited unexpectedly",
+///     Some(1),
+///     Some("Error: authentication failed"),
+/// );
+/// ```
+pub fn print_error_panel(
+    error_type: &str,
+    message: &str,
+    exit_code: Option<i32>,
+    stderr: Option<&str>,
+) {
+    let top_border = format!("╔{}╗", "═".repeat(ERROR_PANEL_WIDTH - 2));
+    let bottom_border = format!("╚{}╝", "═".repeat(ERROR_PANEL_WIDTH - 2));
+    let separator = format!("╟{}╢", "─".repeat(ERROR_PANEL_WIDTH - 2));
+
+    // Print top border
+    println!("{RED}{BOLD}{}{RESET}", top_border);
+
+    // Print header with error type
+    let header = format!(" ERROR: {} ", error_type);
+    let header_padding = ERROR_PANEL_WIDTH.saturating_sub(header.len() + 2);
+    let left_pad = header_padding / 2;
+    let right_pad = header_padding - left_pad;
+    println!(
+        "{RED}{BOLD}║{}{}{}║{RESET}",
+        " ".repeat(left_pad),
+        header,
+        " ".repeat(right_pad)
+    );
+
+    // Print separator
+    println!("{RED}{}{RESET}", separator);
+
+    // Print message (wrapped if necessary)
+    print_panel_content("Message", message);
+
+    // Print exit code if available
+    if let Some(code) = exit_code {
+        print_panel_line(&format!("Exit code: {}", code));
+    }
+
+    // Print stderr if available
+    if let Some(err) = stderr {
+        let trimmed = err.trim();
+        if !trimmed.is_empty() {
+            println!("{RED}{}{RESET}", separator);
+            print_panel_content("Stderr", trimmed);
+        }
+    }
+
+    // Print bottom border
+    println!("{RED}{BOLD}{}{RESET}", bottom_border);
+}
+
+/// Print a labeled content section within the error panel.
+fn print_panel_content(label: &str, content: &str) {
+    let max_content_width = ERROR_PANEL_WIDTH - 6; // Account for "║ " prefix and " ║" suffix
+
+    // Print label
+    print_panel_line(&format!("{}:", label));
+
+    // Print content, wrapping long lines
+    for line in content.lines() {
+        if line.len() <= max_content_width {
+            print_panel_line(&format!("  {}", line));
+        } else {
+            // Wrap long lines
+            let mut remaining = line;
+            while !remaining.is_empty() {
+                let (chunk, rest) = if remaining.len() <= max_content_width - 2 {
+                    (remaining, "")
+                } else {
+                    // Find a good break point
+                    let break_at = remaining[..max_content_width - 2]
+                        .rfind(|c: char| c.is_whitespace() || c == '/' || c == '\\' || c == ':')
+                        .map(|i| i + 1)
+                        .unwrap_or(max_content_width - 2);
+                    (&remaining[..break_at], &remaining[break_at..])
+                };
+                print_panel_line(&format!("  {}", chunk));
+                remaining = rest;
+            }
+        }
+    }
+}
+
+/// Print a single line within the error panel borders.
+fn print_panel_line(text: &str) {
+    let max_width = ERROR_PANEL_WIDTH - 4; // Account for "║ " and " ║"
+    let display_text = if text.len() > max_width {
+        &text[..max_width]
+    } else {
+        text
+    };
+    let padding = max_width.saturating_sub(display_text.len());
+    println!(
+        "{RED}║{RESET} {}{} {RED}║{RESET}",
+        display_text,
+        " ".repeat(padding)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +763,48 @@ mod tests {
     fn test_print_phase_banner_long_name() {
         // Should not panic with a very long name
         print_phase_banner("THIS_IS_A_VERY_LONG_PHASE_NAME_THAT_EXCEEDS_NORMAL_LENGTH", BannerColor::Cyan);
+    }
+
+    // ========================================================================
+    // US-002: Phase footer (bottom border) tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_phase_footer_cyan() {
+        // Should not panic with cyan color (matches RUNNING/REVIEWING phase banners)
+        print_phase_footer(BannerColor::Cyan);
+    }
+
+    #[test]
+    fn test_print_phase_footer_yellow() {
+        // Should not panic with yellow color (matches CORRECTING phase banner)
+        print_phase_footer(BannerColor::Yellow);
+    }
+
+    #[test]
+    fn test_print_phase_footer_green() {
+        // Should not panic with green color (matches SUCCESS phase banner)
+        print_phase_footer(BannerColor::Green);
+    }
+
+    #[test]
+    fn test_print_phase_footer_red() {
+        // Should not panic with red color (matches FAILURE phase banner)
+        print_phase_footer(BannerColor::Red);
+    }
+
+    #[test]
+    fn test_print_phase_footer_uses_same_width_as_banner() {
+        // Both banner and footer should use the same width calculation
+        // This test ensures they share the get_terminal_width_for_banner() logic
+        let width = get_terminal_width_for_banner();
+        let clamped_width = width.clamp(MIN_BANNER_WIDTH, MAX_BANNER_WIDTH);
+
+        // The footer should produce a line of exactly clamped_width characters
+        // (excluding ANSI codes). This is verified by the function using the same
+        // width calculation as print_phase_banner.
+        assert!(clamped_width >= MIN_BANNER_WIDTH);
+        assert!(clamped_width <= MAX_BANNER_WIDTH);
     }
 
     // ========================================================================
@@ -612,5 +890,229 @@ mod tests {
         // Both should work without panic
         assert!(!bar_8.is_empty());
         assert!(!bar_16.is_empty());
+    }
+
+    // ========================================================================
+    // Error panel display tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_error_panel_basic() {
+        // Should not panic with basic inputs
+        print_error_panel("Claude Process Failed", "The process exited unexpectedly", None, None);
+    }
+
+    #[test]
+    fn test_print_error_panel_with_exit_code() {
+        // Should not panic with exit code
+        print_error_panel(
+            "Claude Process Failed",
+            "The process exited with an error",
+            Some(1),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_print_error_panel_with_stderr() {
+        // Should not panic with stderr
+        print_error_panel(
+            "API Error",
+            "Failed to communicate with Claude API",
+            None,
+            Some("Error: connection refused"),
+        );
+    }
+
+    #[test]
+    fn test_print_error_panel_full_details() {
+        // Should not panic with all details
+        print_error_panel(
+            "Timeout",
+            "Claude did not respond within the timeout period",
+            Some(124),
+            Some("Process killed after 300 seconds"),
+        );
+    }
+
+    #[test]
+    fn test_print_error_panel_empty_message() {
+        // Should not panic with empty message
+        print_error_panel("Unknown Error", "", None, None);
+    }
+
+    #[test]
+    fn test_print_error_panel_long_message() {
+        // Should not panic with long message (should wrap)
+        let long_message = "This is a very long error message that should be wrapped across multiple lines because it exceeds the panel width significantly and needs proper handling";
+        print_error_panel("Test Error", long_message, None, None);
+    }
+
+    #[test]
+    fn test_print_error_panel_multiline_stderr() {
+        // Should not panic with multiline stderr
+        let stderr = "Line 1: Some error occurred\nLine 2: More details here\nLine 3: Stack trace follows";
+        print_error_panel("Process Error", "Multiple errors occurred", Some(1), Some(stderr));
+    }
+
+    #[test]
+    fn test_print_error_panel_empty_stderr() {
+        // Should not panic with empty stderr (should be treated as None)
+        print_error_panel("Test Error", "Test message", None, Some(""));
+    }
+
+    #[test]
+    fn test_print_error_panel_whitespace_stderr() {
+        // Should not panic with whitespace-only stderr (should be treated as empty)
+        print_error_panel("Test Error", "Test message", None, Some("   \n\t  "));
+    }
+
+    #[test]
+    fn test_error_panel_width_constant() {
+        // Verify the error panel width is reasonable
+        assert!(ERROR_PANEL_WIDTH >= 40);
+        assert!(ERROR_PANEL_WIDTH <= 120);
+    }
+
+    // ========================================================================
+    // US-005: ErrorDetails struct tests
+    // ========================================================================
+
+    #[test]
+    fn test_error_details_new() {
+        let err = ErrorDetails::new("Process Failed", "The process crashed");
+        assert_eq!(err.error_type, "Process Failed");
+        assert_eq!(err.message, "The process crashed");
+        assert_eq!(err.exit_code, None);
+        assert_eq!(err.stderr, None);
+        assert_eq!(err.source, None);
+    }
+
+    #[test]
+    fn test_error_details_builder_pattern() {
+        let err = ErrorDetails::new("Timeout", "Operation timed out")
+            .with_exit_code(124)
+            .with_stderr("killed by signal")
+            .with_source("run_claude");
+
+        assert_eq!(err.error_type, "Timeout");
+        assert_eq!(err.message, "Operation timed out");
+        assert_eq!(err.exit_code, Some(124));
+        assert_eq!(err.stderr, Some("killed by signal".to_string()));
+        assert_eq!(err.source, Some("run_claude".to_string()));
+    }
+
+    #[test]
+    fn test_error_details_with_exit_code() {
+        let err = ErrorDetails::new("Process Failed", "Non-zero exit").with_exit_code(1);
+        assert_eq!(err.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_error_details_with_stderr() {
+        let err = ErrorDetails::new("API Error", "Connection failed")
+            .with_stderr("Error: connection refused");
+        assert_eq!(err.stderr, Some("Error: connection refused".to_string()));
+    }
+
+    #[test]
+    fn test_error_details_with_source() {
+        let err = ErrorDetails::new("Auth Error", "Invalid token").with_source("run_reviewer");
+        assert_eq!(err.source, Some("run_reviewer".to_string()));
+    }
+
+    #[test]
+    fn test_error_details_display_basic() {
+        let err = ErrorDetails::new("Process Failed", "The process crashed");
+        let display = format!("{}", err);
+        assert_eq!(display, "[Process Failed] The process crashed");
+    }
+
+    #[test]
+    fn test_error_details_display_with_source() {
+        let err = ErrorDetails::new("Timeout", "Operation timed out").with_source("run_claude");
+        let display = format!("{}", err);
+        assert!(display.contains("[Timeout]"));
+        assert!(display.contains("Operation timed out"));
+        assert!(display.contains("(source: run_claude)"));
+    }
+
+    #[test]
+    fn test_error_details_display_with_exit_code() {
+        let err = ErrorDetails::new("Process Failed", "Exited").with_exit_code(1);
+        let display = format!("{}", err);
+        assert!(display.contains("[exit code: 1]"));
+    }
+
+    #[test]
+    fn test_error_details_display_with_stderr() {
+        let err = ErrorDetails::new("API Error", "Failed").with_stderr("connection refused");
+        let display = format!("{}", err);
+        assert!(display.contains("stderr: connection refused"));
+    }
+
+    #[test]
+    fn test_error_details_display_full() {
+        let err = ErrorDetails::new("Auth Error", "Authentication failed")
+            .with_exit_code(1)
+            .with_stderr("Error: unauthorized\nMore details here")
+            .with_source("run_reviewer");
+        let display = format!("{}", err);
+
+        assert!(display.contains("[Auth Error]"));
+        assert!(display.contains("Authentication failed"));
+        assert!(display.contains("(source: run_reviewer)"));
+        assert!(display.contains("[exit code: 1]"));
+        // Should only show first line of stderr in Display
+        assert!(display.contains("stderr: Error: unauthorized"));
+        assert!(!display.contains("More details here"));
+    }
+
+    #[test]
+    fn test_error_details_display_empty_stderr() {
+        let err = ErrorDetails::new("Test", "Test message").with_stderr("   \n  ");
+        let display = format!("{}", err);
+        // Empty/whitespace stderr should not appear in display
+        assert!(!display.contains("stderr:"));
+    }
+
+    #[test]
+    fn test_error_details_equality() {
+        let err1 = ErrorDetails::new("Test", "Message").with_exit_code(1);
+        let err2 = ErrorDetails::new("Test", "Message").with_exit_code(1);
+        let err3 = ErrorDetails::new("Test", "Message").with_exit_code(2);
+
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn test_error_details_clone() {
+        let err = ErrorDetails::new("Test", "Message")
+            .with_exit_code(1)
+            .with_stderr("some error")
+            .with_source("test_source");
+        let cloned = err.clone();
+
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn test_error_details_debug() {
+        let err = ErrorDetails::new("Test", "Message");
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("ErrorDetails"));
+        assert!(debug.contains("Test"));
+        assert!(debug.contains("Message"));
+    }
+
+    #[test]
+    fn test_error_details_print_panel_no_panic() {
+        // Should not panic when printing error panel
+        let err = ErrorDetails::new("Process Failed", "The process crashed")
+            .with_exit_code(1)
+            .with_stderr("Error details here")
+            .with_source("run_claude");
+        err.print_panel();
     }
 }

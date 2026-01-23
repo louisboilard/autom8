@@ -31,6 +31,7 @@ autom8 init
 ```
 
 This installs the `/pdr` skill to `~/.claude/skills/` so Claude knows how to create PRDs.
+You only need to do this the first time you use `autom8`.
 
 ### 2. Create your PRD
 
@@ -38,19 +39,23 @@ This installs the `/pdr` skill to `~/.claude/skills/` so Claude knows how to cre
 claude
 ```
 
-Then in the Claude session, use the skill:
+Then in the Claude session, prompt claude like so:
 
 ```
-/pdr
+Use the skill /pdr. <a description of your task with as much details as possible>
 ```
 
-Claude will ask you questions about your feature and generate a `prd.md` file.
+Claude will ask you questions about your feature, answer and let it generate a `prd.md` file.
 
 ### 3. Run autom8
 
 ```bash
 autom8 prd.md
 ```
+
+Optionally you can also just run `autom8`: it will ask you against which `prd-<feature>.md`
+file you want to work interactively (from the available ones inside
+`.autom8/tasks`).
 
 ### 4. Watch it work
 
@@ -249,19 +254,13 @@ Completed runs are archived to `.autom8/runs/`.
 
 ## Configuration
 
-### Max Iterations
-
-Limit the number of Claude invocations (default: 10):
-
-```bash
-autom8 run --prd prd.json --max_iterations 20
-```
-
 ### Git Integration
 
 If running in a git repository, autom8 will:
 - Check out or create the branch specified in `branchName`
 - Allow Claude to commit changes as it implements
+- The easier (and recommended) thing is to just switch to your desired
+  branch before starting any work.
 
 ## Example Session
 

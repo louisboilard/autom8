@@ -5,13 +5,13 @@ use crate::claude::{
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
-    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error,
+    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
     print_full_progress, print_generating_prd, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
-    print_phase_banner, print_prd_generated, print_proceeding_to_implementation,
+    print_phase_banner, print_phase_footer, print_prd_generated, print_proceeding_to_implementation,
     print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
-    print_warning, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
+    BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::prd::Prd;
 use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
@@ -102,7 +102,18 @@ impl Runner {
                 Ok(_) => timer.finish_success(),
                 Err(e) => timer.finish_error(&e.to_string()),
             }
-            result?
+            match result {
+                Ok(prd) => prd,
+                Err(e) => {
+                    print_error_panel(
+                        "PRD Generation Failed",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
+                    return Err(e);
+                }
+            }
         } else {
             let prd_start = Instant::now();
             let mut spinner = ClaudeSpinner::new_for_prd();
@@ -113,7 +124,18 @@ impl Runner {
                 Ok(_) => spinner.finish_success(prd_start.elapsed().as_secs()),
                 Err(e) => spinner.finish_error(&e.to_string()),
             }
-            result?
+            match result {
+                Ok(prd) => prd,
+                Err(e) => {
+                    print_error_panel(
+                        "PRD Generation Failed",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
+                    return Err(e);
+                }
+            }
         };
 
         print_prd_generated(&prd, &prd_path);
@@ -291,6 +313,9 @@ impl Runner {
                             res?
                         };
 
+                        // Print bottom border to close the output frame
+                        print_phase_footer(BannerColor::Cyan);
+
                         // Print breadcrumb trail after review phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
@@ -371,6 +396,9 @@ impl Runner {
                                     res?
                                 };
 
+                                // Print bottom border to close the output frame
+                                print_phase_footer(BannerColor::Yellow);
+
                                 // Print breadcrumb trail after correct phase completion
                                 print_breadcrumb_trail(&breadcrumb);
 
@@ -391,7 +419,12 @@ impl Runner {
                                     CorrectorResult::Error(e) => {
                                         state.transition_to(MachineState::Failed);
                                         self.state_manager.save(&state)?;
-                                        print_error(&format!("Corrector failed: {}", e));
+                                        print_error_panel(
+                                            "Corrector Failed",
+                                            &e.message,
+                                            e.exit_code,
+                                            e.stderr.as_deref(),
+                                        );
                                         print_summary(state.iteration, &story_results)?;
                                         return Err(Autom8Error::ClaudeError(format!(
                                             "Corrector failed: {}",
@@ -403,7 +436,12 @@ impl Runner {
                             ReviewResult::Error(e) => {
                                 state.transition_to(MachineState::Failed);
                                 self.state_manager.save(&state)?;
-                                print_error(&format!("Review failed: {}", e));
+                                print_error_panel(
+                                    "Review Failed",
+                                    &e.message,
+                                    e.exit_code,
+                                    e.stderr.as_deref(),
+                                );
                                 print_summary(state.iteration, &story_results)?;
                                 return Err(Autom8Error::ClaudeError(format!(
                                     "Review failed: {}",
@@ -468,6 +506,9 @@ impl Runner {
                         res?
                     };
 
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
+
                     // Print breadcrumb trail after commit phase completion
                     print_breadcrumb_trail(&breadcrumb);
 
@@ -476,7 +517,14 @@ impl Runner {
                             print_info(&format!("Changes committed successfully ({})", hash))
                         }
                         CommitResult::NothingToCommit => print_info("Nothing to commit"),
-                        CommitResult::Error(e) => print_warning(&format!("Commit failed: {}", e)),
+                        CommitResult::Error(e) => {
+                            print_error_panel(
+                                "Commit Failed",
+                                &e.message,
+                                e.exit_code,
+                                e.stderr.as_deref(),
+                            );
+                        }
                     }
 
                     print_state_transition(MachineState::Committing, MachineState::Completed);
@@ -562,11 +610,14 @@ impl Runner {
                         duration_secs: duration,
                     });
 
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
+
                     // Print breadcrumb trail after story phase completion
                     print_breadcrumb_trail(&breadcrumb);
 
                     // Show progress bar after story task completion
-                    // Reload PRD to get accurate count since all stories are now complete
+                    // Reload PRD to verify actual completion state
                     let updated_prd = Prd::load(prd_path)?;
                     print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
                     println!();
@@ -574,6 +625,14 @@ impl Runner {
                     if verbose {
                         print_story_complete(&story.id, duration);
                     }
+
+                    // Validate that all stories are actually complete
+                    // Claude may output COMPLETE prematurely before updating the PRD
+                    if !updated_prd.all_complete() {
+                        // PRD doesn't match Claude's claim - continue processing stories
+                        continue;
+                    }
+
                     print_all_complete();
 
                     // Skip review if --skip-review flag is set
@@ -664,6 +723,9 @@ impl Runner {
                                 res?
                             };
 
+                            // Print bottom border to close the output frame
+                            print_phase_footer(BannerColor::Cyan);
+
                             // Print breadcrumb trail after review phase completion
                             print_breadcrumb_trail(&breadcrumb);
 
@@ -750,6 +812,9 @@ impl Runner {
                                         res?
                                     };
 
+                                    // Print bottom border to close the output frame
+                                    print_phase_footer(BannerColor::Yellow);
+
                                     // Print breadcrumb trail after correct phase completion
                                     print_breadcrumb_trail(&breadcrumb);
 
@@ -770,7 +835,12 @@ impl Runner {
                                         CorrectorResult::Error(e) => {
                                             state.transition_to(MachineState::Failed);
                                             self.state_manager.save(&state)?;
-                                            print_error(&format!("Corrector failed: {}", e));
+                                            print_error_panel(
+                                                "Corrector Failed",
+                                                &e.message,
+                                                e.exit_code,
+                                                e.stderr.as_deref(),
+                                            );
                                             print_summary(state.iteration, &story_results)?;
                                             return Err(Autom8Error::ClaudeError(format!(
                                                 "Corrector failed: {}",
@@ -782,7 +852,12 @@ impl Runner {
                                 ReviewResult::Error(e) => {
                                     state.transition_to(MachineState::Failed);
                                     self.state_manager.save(&state)?;
-                                    print_error(&format!("Review failed: {}", e));
+                                    print_error_panel(
+                                        "Review Failed",
+                                        &e.message,
+                                        e.exit_code,
+                                        e.stderr.as_deref(),
+                                    );
                                     print_summary(state.iteration, &story_results)?;
                                     return Err(Autom8Error::ClaudeError(format!(
                                         "Review failed: {}",
@@ -846,6 +921,9 @@ impl Runner {
                             res?
                         };
 
+                        // Print bottom border to close the output frame
+                        print_phase_footer(BannerColor::Cyan);
+
                         // Print breadcrumb trail after commit phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
@@ -855,7 +933,12 @@ impl Runner {
                             }
                             CommitResult::NothingToCommit => print_info("Nothing to commit"),
                             CommitResult::Error(e) => {
-                                print_warning(&format!("Commit failed: {}", e))
+                                print_error_panel(
+                                    "Commit Failed",
+                                    &e.message,
+                                    e.exit_code,
+                                    e.stderr.as_deref(),
+                                );
                             }
                         }
 
@@ -879,6 +962,9 @@ impl Runner {
                     self.state_manager.save(&state)?;
 
                     let duration = state.current_iteration_duration();
+
+                    // Print bottom border to close the output frame
+                    print_phase_footer(BannerColor::Cyan);
 
                     // Print breadcrumb trail after story phase completion
                     print_breadcrumb_trail(&breadcrumb);
@@ -913,10 +999,10 @@ impl Runner {
                     // Continue to next iteration
                 }
                 Ok(ClaudeStoryResult {
-                    outcome: ClaudeOutcome::Error(msg),
+                    outcome: ClaudeOutcome::Error(error_info),
                     ..
                 }) => {
-                    state.finish_iteration(IterationStatus::Failed, msg.clone());
+                    state.finish_iteration(IterationStatus::Failed, error_info.to_string());
                     state.transition_to(MachineState::Failed);
                     self.state_manager.save(&state)?;
 
@@ -927,9 +1013,14 @@ impl Runner {
                         duration_secs: story_start.elapsed().as_secs(),
                     });
 
-                    print_error(&msg);
+                    print_error_panel(
+                        "Claude Process Failed",
+                        &error_info.message,
+                        error_info.exit_code,
+                        error_info.stderr.as_deref(),
+                    );
                     print_summary(state.iteration, &story_results)?;
-                    return Err(Autom8Error::ClaudeError(msg));
+                    return Err(Autom8Error::ClaudeError(error_info.message));
                 }
                 Err(e) => {
                     state.finish_iteration(IterationStatus::Failed, e.to_string());
@@ -943,7 +1034,12 @@ impl Runner {
                         duration_secs: story_start.elapsed().as_secs(),
                     });
 
-                    print_error(&e.to_string());
+                    print_error_panel(
+                        "Claude Error",
+                        &e.to_string(),
+                        None,
+                        None,
+                    );
                     print_summary(state.iteration, &story_results)?;
                     return Err(e);
                 }
@@ -1114,5 +1210,75 @@ mod tests {
         let runner = Runner::new().with_verbose(true).with_skip_review(true);
         assert!(runner.skip_review);
         assert!(runner.verbose);
+    }
+
+    /// Tests that story_index calculation produces 1-indexed values.
+    /// The formula: position().map(|i| i as u32 + 1).unwrap_or(state.iteration)
+    /// must produce 1-indexed display values like [US-001 1/8], not [US-001 0/8].
+    #[test]
+    fn test_story_index_calculation_is_one_indexed() {
+        // Simulate the story_index calculation from runner.rs:557-562
+        let story_ids = vec!["US-001", "US-002", "US-003", "US-004", "US-005", "US-006", "US-007", "US-008"];
+
+        // Test case 1: First story (task 1 of 8) should show 1, not 0
+        let current_story = "US-001";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(1); // fallback to iteration=1
+        assert_eq!(story_index, 1, "First story should display as 1/8, not 0/8");
+
+        // Test case 2: Last story (task 8 of 8) should show 8, not 7
+        let current_story = "US-008";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(8); // fallback to iteration=8
+        assert_eq!(story_index, 8, "Last story should display as 8/8, not 7/8");
+
+        // Test case 3: Middle story (task 4 of 8) should show 4
+        let current_story = "US-004";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == current_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(4);
+        assert_eq!(story_index, 4, "Fourth story should display as 4/8");
+    }
+
+    /// Tests that state.iteration fallback produces correct 1-indexed value
+    /// when position lookup fails.
+    #[test]
+    fn test_story_index_fallback_is_one_indexed() {
+        use crate::state::RunState;
+
+        // Create a state and simulate iteration increments
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Before any iteration, state.iteration is 0
+        assert_eq!(state.iteration, 0);
+
+        // After start_iteration, it should be 1 (1-indexed)
+        state.start_iteration("US-001");
+        assert_eq!(state.iteration, 1, "After first start_iteration, iteration should be 1");
+
+        // Simulate fallback scenario where position lookup fails
+        let story_ids: Vec<&str> = vec!["US-001", "US-002"];
+        let unknown_story = "US-UNKNOWN";
+        let story_index = story_ids
+            .iter()
+            .position(|&s| s == unknown_story)
+            .map(|i| i as u32 + 1)
+            .unwrap_or(state.iteration);
+
+        // The fallback should use state.iteration which is 1 (1-indexed)
+        assert_eq!(story_index, 1, "Fallback should use 1-indexed state.iteration");
+
+        // After second iteration
+        state.finish_iteration(crate::state::IterationStatus::Success, String::new());
+        state.start_iteration("US-002");
+        assert_eq!(state.iteration, 2, "After second start_iteration, iteration should be 2");
     }
 }
