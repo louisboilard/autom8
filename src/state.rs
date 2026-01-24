@@ -30,6 +30,8 @@ pub enum MachineState {
     Reviewing,
     Correcting,
     Committing,
+    #[serde(rename = "creating-pr")]
+    CreatingPR,
     Completed,
     Failed,
 }
@@ -398,6 +400,50 @@ mod tests {
 
         let correcting: MachineState = serde_json::from_str("\"correcting\"").unwrap();
         assert_eq!(correcting, MachineState::Correcting);
+    }
+
+    #[test]
+    fn test_machine_state_creating_pr_exists() {
+        let state = MachineState::CreatingPR;
+        assert_eq!(state, MachineState::CreatingPR);
+    }
+
+    #[test]
+    fn test_machine_state_creating_pr_serialization() {
+        // Test that CreatingPR serializes to "creating-pr" (kebab-case)
+        let creating_pr = serde_json::to_string(&MachineState::CreatingPR).unwrap();
+        assert_eq!(creating_pr, "\"creating-pr\"");
+    }
+
+    #[test]
+    fn test_machine_state_creating_pr_deserialization() {
+        let creating_pr: MachineState = serde_json::from_str("\"creating-pr\"").unwrap();
+        assert_eq!(creating_pr, MachineState::CreatingPR);
+    }
+
+    #[test]
+    fn test_transition_to_creating_pr() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.transition_to(MachineState::CreatingPR);
+        assert_eq!(state.machine_state, MachineState::CreatingPR);
+        assert_eq!(state.status, RunStatus::Running); // Should remain running, not completed
+    }
+
+    #[test]
+    fn test_creating_pr_state_workflow_position() {
+        // Test that CreatingPR can transition from Committing and to Completed
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.transition_to(MachineState::Committing);
+        assert_eq!(state.machine_state, MachineState::Committing);
+
+        state.transition_to(MachineState::CreatingPR);
+        assert_eq!(state.machine_state, MachineState::CreatingPR);
+        assert_eq!(state.status, RunStatus::Running);
+
+        state.transition_to(MachineState::Completed);
+        assert_eq!(state.machine_state, MachineState::Completed);
+        assert_eq!(state.status, RunStatus::Completed);
     }
 
     #[test]

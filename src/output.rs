@@ -200,6 +200,42 @@ pub fn print_info(msg: &str) {
     println!("{CYAN}Info:{RESET} {}", msg);
 }
 
+/// Print a prominent success message for a created PR with its URL.
+///
+/// This displays a visually distinct box to highlight the PR URL,
+/// making it easy for users to find and click.
+pub fn print_pr_success(url: &str) {
+    println!();
+    println!("{GREEN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{GREEN}{BOLD}║  ✓ Pull Request Created                                ║{RESET}");
+    println!("{GREEN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{GREEN}{BOLD}  {}{RESET}", url);
+    println!();
+}
+
+/// Print a prominent message when a PR already exists for the branch.
+///
+/// This displays the existing PR URL in a visually distinct style similar
+/// to print_pr_success, making it easy for users to find and click.
+pub fn print_pr_already_exists(url: &str) {
+    println!();
+    println!("{CYAN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{CYAN}{BOLD}║  ℹ Pull Request Already Exists                         ║{RESET}");
+    println!("{CYAN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{CYAN}{BOLD}  {}{RESET}", url);
+    println!();
+}
+
+/// Print a skip message for PR creation with the reason.
+///
+/// This displays the skip reason in a less prominent style than success/exists,
+/// using the standard info format.
+pub fn print_pr_skipped(reason: &str) {
+    println!("{GRAY}PR creation skipped: {}{RESET}", reason);
+}
+
 pub fn print_status(state: &RunState) {
     println!("{BLUE}Run ID:{RESET}    {}", state.run_id);
     println!("{BLUE}Status:{RESET}    {:?}", state.status);
@@ -565,6 +601,7 @@ fn state_to_display(state: MachineState) -> &'static str {
         MachineState::Reviewing => "reviewing",
         MachineState::Correcting => "correcting",
         MachineState::Committing => "committing",
+        MachineState::CreatingPR => "creating-pr",
         MachineState::Completed => "completed",
         MachineState::Failed => "failed",
     }
@@ -1702,5 +1739,67 @@ mod tests {
         // Should not panic and return empty bar
         let bar = make_progress_bar_simple(0, 0, 10);
         assert_eq!(bar.len(), 10);
+    }
+
+    // ========================================================================
+    // US-006: PR success display tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_pr_success_no_panic() {
+        // Should not panic when printing PR success message
+        print_pr_success("https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn test_print_pr_success_with_long_url() {
+        // Should not panic with a long PR URL
+        print_pr_success("https://github.com/very-long-organization-name/extremely-long-repository-name-for-testing/pull/12345");
+    }
+
+    #[test]
+    fn test_print_pr_success_with_empty_url() {
+        // Should not panic with empty URL (edge case)
+        print_pr_success("");
+    }
+
+    // ========================================================================
+    // US-007: PR URL console output tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_pr_already_exists_no_panic() {
+        // Should not panic when printing PR already exists message
+        print_pr_already_exists("https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn test_print_pr_already_exists_with_long_url() {
+        // Should not panic with a long PR URL
+        print_pr_already_exists("https://github.com/very-long-organization-name/extremely-long-repository-name-for-testing/pull/12345");
+    }
+
+    #[test]
+    fn test_print_pr_already_exists_with_empty_url() {
+        // Should not panic with empty URL (edge case)
+        print_pr_already_exists("");
+    }
+
+    #[test]
+    fn test_print_pr_skipped_no_panic() {
+        // Should not panic when printing PR skipped message
+        print_pr_skipped("No commits were made in this session");
+    }
+
+    #[test]
+    fn test_print_pr_skipped_with_long_reason() {
+        // Should not panic with a long skip reason
+        print_pr_skipped("Not authenticated with GitHub CLI - please run 'gh auth login' to authenticate before creating pull requests");
+    }
+
+    #[test]
+    fn test_print_pr_skipped_with_empty_reason() {
+        // Should not panic with empty reason (edge case)
+        print_pr_skipped("");
     }
 }
