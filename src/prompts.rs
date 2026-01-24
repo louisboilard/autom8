@@ -1,8 +1,8 @@
-/// Prompt for interactive PRD creation with Claude.
-/// Users paste this into a Claude session to create their prd.md file.
-pub const PRD_SKILL_PROMPT: &str = r####"# PRD Creation Assistant
+/// Prompt for interactive spec creation with Claude.
+/// Users paste this into a Claude session to create their spec-<feature>.md file.
+pub const SPEC_SKILL_PROMPT: &str = r####"# Spec Creation Assistant
 
-You are helping the user create a Product Requirements Document (PRD) for a software feature. Your goal is to gather enough information to produce a well-structured prd.md file.
+You are helping the user create a specification document for a software feature. Your goal is to gather enough information to produce a well-structured spec-<feature>.md file.
 
 ## Process
 
@@ -25,7 +25,7 @@ Start with these, then drill deeper based on responses:
 
 ## Output Format
 
-Once you have enough information, generate a prd.md file in this format:
+Once you have enough information, generate a spec-<feature>.md file in this format:
 
 ```markdown
 # [Feature Name]
@@ -69,10 +69,10 @@ Once you have enough information, generate a prd.md file in this format:
 
 ## REQUIRED Save Location
 
-**CRITICAL:** You MUST save the PRD file to this exact location:
+**CRITICAL:** You MUST save the spec file to this exact location:
 
 ```
-~/.config/autom8/<project-name>/pdr/prd-[feature-name].md
+~/.config/autom8/<project-name>/spec/spec-[feature-name].md
 ```
 
 Where:
@@ -116,8 +116,8 @@ Create clean, logical git commits for the changes made to implement this feature
 You MUST be extremely careful about which files you commit.
 
 ### NEVER commit these (always exclude):
-- `prd.json` - autom8 state file, not part of the feature
-- `prd.md` - autom8 spec file, not part of the feature
+- `spec-*.json` - autom8 spec JSON files, not part of the feature
+- `spec-*.md` - autom8 spec markdown files, not part of the feature
 - `autom8_review.md` - autom8 review file, not part of the feature
 - `.autom8/` - autom8 internal directory
 - `tasks/` - task tracking directory
@@ -179,15 +179,15 @@ Make **multiple logical commits**, not one big commit. Examples:
 
 Before each commit, verify:
 - [ ] Only feature-related files are staged
-- [ ] No prd.json, prd.md, autom8_review.md, or .autom8/ files staged
+- [ ] No spec-*.json, spec-*.md, autom8_review.md, or .autom8/ files staged
 - [ ] Commit message is clear and under 50 chars
 - [ ] Tests are in separate commits with [test] prefix
 "####;
 
-/// Prompt for converting prd.md to prd.json (used internally by autom8).
-pub const PRD_JSON_PROMPT: &str = r####"Convert the following PRD markdown document into a valid JSON format.
+/// Prompt for converting spec-<feature>.md to spec-<feature>.json (used internally by autom8).
+pub const SPEC_JSON_PROMPT: &str = r####"Convert the following spec markdown document into a valid JSON format.
 
-## Input PRD:
+## Input Spec:
 
 {spec_content}
 
@@ -233,6 +233,37 @@ Produce a JSON object with this exact structure:
 Return ONLY the JSON object, no markdown code fences, no explanation. The output must be valid JSON that can be parsed directly.
 "####;
 
+/// Prompt for asking Claude to fix malformed JSON from a previous spec generation attempt.
+/// Placeholders: {malformed_json}, {error_message}, {attempt}, {max_attempts}
+pub const SPEC_JSON_CORRECTION_PROMPT: &str = r####"The previous JSON generation attempt produced malformed JSON that failed to parse.
+
+## Error Details
+
+**Parse Error:** {error_message}
+**Attempt:** {attempt}/{max_attempts}
+
+## Malformed JSON
+
+```json
+{malformed_json}
+```
+
+## Your Task
+
+Fix the JSON above to make it valid. The JSON should:
+1. Be syntactically correct (proper quoting, commas, brackets)
+2. Preserve all the original content and meaning
+3. Follow the expected schema with these fields:
+   - `project` (string)
+   - `branchName` (string)
+   - `description` (string)
+   - `userStories` (array of objects with: id, title, description, acceptanceCriteria, priority, passes, notes)
+
+## Output
+
+Return ONLY the corrected JSON object, no markdown code fences, no explanation. The output must be valid JSON that can be parsed directly.
+"####;
+
 /// Prompt for the reviewer agent that checks completed work for issues.
 /// Placeholders: {project}, {feature_description}, {stories_context}, {iteration}, {max_iterations}
 pub const REVIEWER_PROMPT: &str = r####"You are a code reviewer checking completed feature work for quality issues.
@@ -246,7 +277,7 @@ pub const REVIEWER_PROMPT: &str = r####"You are a code reviewer checking complet
 
 You have a maximum of 3 review cycles. Focus on critical issues, not nitpicks.
 
-## PRD Context (All User Stories)
+## Spec Context (All User Stories)
 
 {stories_context}
 
@@ -342,7 +373,7 @@ pub const CORRECTOR_PROMPT: &str = r####"You are a corrector agent fixing issues
 
 This is your chance to fix the issues. Focus on the most critical fixes first.
 
-## PRD Context (All User Stories)
+## Spec Context (All User Stories)
 
 {stories_context}
 
@@ -543,23 +574,83 @@ mod tests {
     }
 
     #[test]
-    fn prd_skill_prompt_specifies_required_save_location() {
+    fn spec_skill_prompt_specifies_required_save_location() {
         // Must contain the exact save path pattern
-        assert!(PRD_SKILL_PROMPT.contains("~/.config/autom8/<project-name>/pdr/prd-[feature-name].md"));
+        assert!(SPEC_SKILL_PROMPT.contains("~/.config/autom8/<project-name>/spec/spec-[feature-name].md"));
     }
 
     #[test]
-    fn prd_skill_prompt_emphasizes_save_location_is_required() {
+    fn spec_skill_prompt_emphasizes_save_location_is_required() {
         // Must emphasize this is required, not a suggestion
-        assert!(PRD_SKILL_PROMPT.contains("REQUIRED"));
-        assert!(PRD_SKILL_PROMPT.contains("CRITICAL"));
-        assert!(PRD_SKILL_PROMPT.contains("NOT a suggestion"));
+        assert!(SPEC_SKILL_PROMPT.contains("REQUIRED"));
+        assert!(SPEC_SKILL_PROMPT.contains("CRITICAL"));
+        assert!(SPEC_SKILL_PROMPT.contains("NOT a suggestion"));
     }
 
     #[test]
-    fn prd_skill_prompt_warns_against_wrong_location() {
+    fn spec_skill_prompt_warns_against_wrong_location() {
         // Must explicitly warn against saving to wrong location
-        assert!(PRD_SKILL_PROMPT.contains("Do NOT save to the current working directory"));
+        assert!(SPEC_SKILL_PROMPT.contains("Do NOT save to the current working directory"));
     }
 
+    #[test]
+    fn spec_skill_prompt_uses_spec_terminology() {
+        // Verify prompt uses "spec" terminology, not "PRD"
+        assert!(SPEC_SKILL_PROMPT.contains("specification document"));
+        assert!(SPEC_SKILL_PROMPT.contains("spec-<feature>.md"));
+        assert!(!SPEC_SKILL_PROMPT.contains("PRD"));
+    }
+
+    #[test]
+    fn spec_json_prompt_uses_spec_terminology() {
+        // Verify JSON conversion prompt uses "spec" terminology
+        assert!(SPEC_JSON_PROMPT.contains("## Input Spec:"));
+        assert!(!SPEC_JSON_PROMPT.contains("PRD"));
+    }
+
+    // ========================================================================
+    // JSON correction prompt tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn spec_json_correction_prompt_contains_placeholders() {
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("{malformed_json}"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("{error_message}"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("{attempt}"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("{max_attempts}"));
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_explains_task() {
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("malformed JSON"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("failed to parse"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("Fix the JSON"));
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_describes_expected_schema() {
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("project"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("branchName"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("description"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("userStories"));
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_requests_only_json_output() {
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("Return ONLY the corrected JSON"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("no markdown code fences"));
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_can_be_populated() {
+        let populated = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{malformed_json}", r#"{"project": "test"#)
+            .replace("{error_message}", "unexpected end of input")
+            .replace("{attempt}", "2")
+            .replace("{max_attempts}", "3");
+
+        assert!(populated.contains(r#"{"project": "test"#));
+        assert!(populated.contains("unexpected end of input"));
+        assert!(populated.contains("2/3"));
+    }
 }
