@@ -22,6 +22,8 @@ cargo install --path .
 
 Requires the `claude` CLI to be installed and configured.
 
+Optional: Install the [GitHub CLI](https://cli.github.com/) (`gh`) for automatic PR creation after feature completion.
+
 ## Quick Start
 
 ### 1. Create and implement your feature
@@ -131,8 +133,12 @@ stateDiagram-v2
 
     Correcting --> Reviewing: Corrections applied
 
-    Committing --> Completed: Commit done
+    Committing --> CreatingPR: Commit done
+    Committing --> Completed: Nothing to commit
     Committing --> Failed: Commit error
+
+    CreatingPR --> Completed: PR created/skipped/exists
+    CreatingPR --> Failed: PR creation error
 
     Completed --> [*]
     Failed --> [*]
@@ -153,6 +159,7 @@ stateDiagram-v2
 | `reviewing` | Claude reviewing completed implementation |
 | `correcting` | Claude fixing issues found during review |
 | `committing` | Claude committing changes for completed feature |
+| `creating-pr` | Creating a GitHub pull request for the feature branch |
 | `completed` | All user stories pass |
 | `failed` | Error occurred, run stopped |
 
@@ -245,6 +252,46 @@ Description of what this story accomplishes.
 
 6. **Committing**: When review passes, Claude commits changes (only files it modified, excluding spec.json and .autom8/)
 
+7. **PR Creation**: After committing, autom8 attempts to create a GitHub pull request
+
+## Automatic PR Creation
+
+After successfully committing changes, autom8 automatically attempts to create a pull request using the GitHub CLI (`gh`).
+
+### Prerequisites
+
+For automatic PR creation to work:
+
+- **GitHub CLI installed**: The `gh` command must be available in your PATH
+- **Authenticated**: You must be logged in via `gh auth login`
+- **Feature branch**: You must be on a branch other than `main` or `master`
+- **Commits made**: Changes must have been committed (skipped if nothing to commit)
+
+### Skip Scenarios
+
+PR creation is gracefully skipped (not a failure) when:
+
+| Scenario | Reason |
+|----------|--------|
+| `gh` CLI not installed | GitHub CLI is required for PR creation |
+| Not authenticated | Run `gh auth login` to authenticate |
+| On main/master branch | PRs target the default branch, can't create from it |
+| No commits made | Nothing to commit means no PR needed |
+| PR already exists | Existing PR URL is displayed instead |
+
+When PR creation is skipped, autom8 transitions to the `completed` state normally. Only actual errors during PR creation cause the run to fail.
+
+### PR Output
+
+On successful PR creation, the PR URL is displayed prominently:
+
+```
+┌─────────────────────────────────────────────────┐
+│  Pull Request Created                           │
+│  https://github.com/user/repo/pull/42           │
+└─────────────────────────────────────────────────┘
+```
+
 ## State Persistence
 
 Run state is saved to `.autom8/state.json`, allowing you to:
@@ -325,7 +372,15 @@ Review 1/3 - Checking implementation...
 [state] reviewing -> committing
 Review passed! Committing changes...
 
-[state] committing -> completed
+[state] committing -> creating-pr
+Creating pull request...
+
+┌─────────────────────────────────────────────────┐
+│  Pull Request Created                           │
+│  https://github.com/user/my-api/pull/42         │
+└─────────────────────────────────────────────────┘
+
+[state] creating-pr -> completed
 Feature complete!
 ```
 
