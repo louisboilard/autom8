@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Prd {
+pub struct Spec {
     pub project: String,
     #[serde(default = "default_branch_name")]
     pub branch_name: String,
@@ -30,18 +30,18 @@ pub struct UserStory {
     pub notes: String,
 }
 
-impl Prd {
+impl Spec {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Err(Autom8Error::PrdNotFound(path.to_path_buf()));
+            return Err(Autom8Error::SpecNotFound(path.to_path_buf()));
         }
 
         let content = fs::read_to_string(path)?;
-        let prd: Prd =
-            serde_json::from_str(&content).map_err(|e| Autom8Error::InvalidPrd(e.to_string()))?;
+        let spec: Spec =
+            serde_json::from_str(&content).map_err(|e| Autom8Error::InvalidSpec(e.to_string()))?;
 
-        prd.validate()?;
-        Ok(prd)
+        spec.validate()?;
+        Ok(spec)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -52,16 +52,16 @@ impl Prd {
 
     fn validate(&self) -> Result<()> {
         if self.project.is_empty() {
-            return Err(Autom8Error::InvalidPrd("project name is required".into()));
+            return Err(Autom8Error::InvalidSpec("project name is required".into()));
         }
         if self.user_stories.is_empty() {
-            return Err(Autom8Error::InvalidPrd(
+            return Err(Autom8Error::InvalidSpec(
                 "at least one user story is required".into(),
             ));
         }
         for story in &self.user_stories {
             if story.id.is_empty() {
-                return Err(Autom8Error::InvalidPrd("story id is required".into()));
+                return Err(Autom8Error::InvalidSpec("story id is required".into()));
             }
         }
         Ok(())
@@ -86,7 +86,7 @@ impl Prd {
         self.user_stories.iter().all(|s| s.passes)
     }
 
-    /// Returns true if PRD has incomplete stories
+    /// Returns true if spec has incomplete stories
     pub fn is_incomplete(&self) -> bool {
         !self.all_complete()
     }
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn test_next_incomplete_story() {
-        let prd = Prd {
+        let spec = Spec {
             project: "Test".into(),
             branch_name: "test".into(),
             description: "Test".into(),
@@ -135,7 +135,7 @@ mod tests {
             ],
         };
 
-        let next = prd.next_incomplete_story().unwrap();
+        let next = spec.next_incomplete_story().unwrap();
         assert_eq!(next.id, "US-002"); // Lower priority number = higher priority
     }
 }
