@@ -301,6 +301,230 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
     );
 }
 
+/// Print a tree view of all projects in the config directory.
+///
+/// Shows each project with its subdirectories and key files, using box-drawing
+/// characters for visual tree structure.
+///
+/// Example output:
+/// ```text
+/// ~/.config/autom8/
+/// ├── my-project [running]
+/// │   ├── pdr/     (2 files)
+/// │   ├── prds/    (1 file)
+/// │   └── runs/    (3 archived)
+/// └── other-project [complete]
+///     ├── pdr/     (1 file)
+///     ├── prds/    (2 files)
+///     └── runs/    (empty)
+/// ```
+pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
+    use crate::state::RunStatus;
+
+    if projects.is_empty() {
+        println!("{GRAY}No projects found in ~/.config/autom8/{RESET}");
+        println!();
+        println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
+        return;
+    }
+
+    // Print header
+    println!("{BOLD}~/.config/autom8/{RESET}");
+
+    let total = projects.len();
+
+    for (idx, project) in projects.iter().enumerate() {
+        let is_last_project = idx == total - 1;
+        let branch_char = if is_last_project { "└" } else { "├" };
+        let cont_char = if is_last_project { " " } else { "│" };
+
+        // Determine status indicator and color
+        let (status_indicator, status_color) = match project.run_status {
+            Some(RunStatus::Running) => ("[running]", YELLOW),
+            Some(RunStatus::Failed) => ("[failed]", RED),
+            Some(RunStatus::Completed) if project.incomplete_prd_count > 0 => {
+                ("[incomplete]", CYAN)
+            }
+            Some(RunStatus::Completed) => ("[complete]", GREEN),
+            None if project.incomplete_prd_count > 0 => ("[incomplete]", CYAN),
+            None if project.has_content() => ("[idle]", GRAY),
+            None => ("", GRAY),
+        };
+
+        // Print project line
+        if status_indicator.is_empty() {
+            println!("{branch_char}── {BOLD}{}{RESET}", project.name);
+        } else {
+            println!(
+                "{branch_char}── {BOLD}{}{RESET} {status_color}{status_indicator}{RESET}",
+                project.name
+            );
+        }
+
+        // Print subdirectories
+        let subdirs = [
+            ("pdr", project.pdr_count, "file"),
+            ("prds", project.prd_count, "PRD"),
+            ("runs", project.runs_count, "archived"),
+        ];
+
+        for (subidx, (name, count, unit)) in subdirs.iter().enumerate() {
+            let is_last_subdir = subidx == subdirs.len() - 1;
+            let sub_branch = if is_last_subdir { "└" } else { "├" };
+
+            let count_str = if *count == 0 {
+                format!("{GRAY}(empty){RESET}")
+            } else if *count == 1 {
+                format!("{GRAY}(1 {unit}){RESET}")
+            } else {
+                format!("{GRAY}({count} {unit}s){RESET}")
+            };
+
+            println!("{cont_char}   {sub_branch}── {name}/     {count_str}");
+        }
+
+        // Add spacing between projects (except after the last one)
+        if !is_last_project {
+            println!("{cont_char}");
+        }
+    }
+
+    // Print summary
+    println!();
+    let active_count = projects.iter().filter(|p| p.has_active_run).count();
+    let failed_count = projects
+        .iter()
+        .filter(|p| p.run_status == Some(RunStatus::Failed))
+        .count();
+    let incomplete_total: usize = projects.iter().map(|p| p.incomplete_prd_count).sum();
+
+    println!(
+        "{GRAY}({} project{}, {} active, {} failed, {} incomplete PRD{}){RESET}",
+        total,
+        if total == 1 { "" } else { "s" },
+        active_count,
+        failed_count,
+        incomplete_total,
+        if incomplete_total == 1 { "" } else { "s" }
+    );
+}
+
+/// Print detailed description of a project.
+///
+/// Shows:
+/// - Project name and path
+/// - Current status (active run, idle, etc.)
+/// - PRD details with user stories and progress
+/// - File counts
+pub fn print_project_description(desc: &crate::config::ProjectDescription) {
+    use crate::state::RunStatus;
+
+    // Header
+    println!("{BOLD}Project: {CYAN}{}{RESET}", desc.name);
+    println!("{GRAY}Path: {}{RESET}", desc.path.display());
+    println!();
+
+    // Status section
+    let status_indicator = match desc.run_status {
+        Some(RunStatus::Running) => format!("{YELLOW}[running]{RESET}"),
+        Some(RunStatus::Failed) => format!("{RED}[failed]{RESET}"),
+        Some(RunStatus::Completed) => format!("{GREEN}[completed]{RESET}"),
+        None => format!("{GRAY}[idle]{RESET}"),
+    };
+    println!("{BOLD}Status:{RESET} {}", status_indicator);
+
+    if let Some(branch) = &desc.current_branch {
+        println!("{BLUE}Branch:{RESET} {}", branch);
+    }
+
+    if let Some(story) = &desc.current_story {
+        println!("{BLUE}Current Story:{RESET} {}", story);
+    }
+    println!();
+
+    // PRDs section
+    if desc.prds.is_empty() {
+        println!("{GRAY}No PRDs found.{RESET}");
+    } else {
+        println!("{BOLD}PRDs:{RESET} ({} total)", desc.prds.len());
+        println!();
+
+        for prd in &desc.prds {
+            print_prd_summary(prd);
+        }
+    }
+
+    // File counts summary
+    println!("{GRAY}─────────────────────────────────────────────────────────{RESET}");
+    println!(
+        "{GRAY}Files: {} pdr, {} prds, {} archived runs{RESET}",
+        desc.pdr_count,
+        desc.prds.len(),
+        desc.runs_count
+    );
+}
+
+/// Print summary of a single PRD with its user stories.
+fn print_prd_summary(prd: &crate::config::PrdSummary) {
+    // PRD header
+    println!("{CYAN}━━━{RESET} {BOLD}{}{RESET}", prd.filename);
+    println!("{BLUE}Project:{RESET} {}", prd.project_name);
+    println!("{BLUE}Branch:{RESET}  {}", prd.branch_name);
+
+    // Description (truncate if too long)
+    let desc_preview = if prd.description.len() > 100 {
+        format!("{}...", &prd.description[..100])
+    } else {
+        prd.description.clone()
+    };
+    // Show first line only for brevity
+    let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
+    println!("{BLUE}Description:{RESET} {}", first_line);
+    println!();
+
+    // Progress bar
+    let progress_bar = make_progress_bar_simple(prd.completed_count, prd.total_count, 12);
+    let progress_color = if prd.completed_count == prd.total_count {
+        GREEN
+    } else if prd.completed_count == 0 {
+        GRAY
+    } else {
+        YELLOW
+    };
+    println!(
+        "{BOLD}Progress:{RESET} [{}] {}{}/{} stories complete{}",
+        progress_bar, progress_color, prd.completed_count, prd.total_count, RESET
+    );
+    println!();
+
+    // User stories
+    println!("{BOLD}User Stories:{RESET}");
+    for story in &prd.stories {
+        let status_icon = if story.passes {
+            format!("{GREEN}✓{RESET}")
+        } else {
+            format!("{GRAY}○{RESET}")
+        };
+        let title_color = if story.passes { GREEN } else { RESET };
+        println!("  {} {BOLD}{}{RESET}: {}{}{}", status_icon, story.id, title_color, story.title, RESET);
+    }
+    println!();
+}
+
+/// Make a simple progress bar (internal helper for describe output).
+fn make_progress_bar_simple(completed: usize, total: usize, width: usize) -> String {
+    if total == 0 {
+        return " ".repeat(width);
+    }
+    let filled = (completed * width) / total;
+    let empty = width - filled;
+    format!(
+        "{GREEN}{}{RESET}{GRAY}{}{RESET}",
+        "█".repeat(filled),
+        "░".repeat(empty)
+    )
+}
+
 pub fn print_history_entry(state: &RunState, index: usize) {
     let status_color = match state.status {
         crate::state::RunStatus::Completed => GREEN,
@@ -1199,5 +1423,286 @@ mod tests {
             .with_stderr("Error details here")
             .with_source("run_claude");
         err.print_panel();
+    }
+
+    // ========================================================================
+    // US-007: Project tree view tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_project_tree_empty_no_panic() {
+        // Should not panic with empty list
+        let projects: Vec<crate::config::ProjectTreeInfo> = vec![];
+        print_project_tree(&projects);
+    }
+
+    #[test]
+    fn test_print_project_tree_single_project_no_panic() {
+        // Should not panic with single project
+        let projects = vec![crate::config::ProjectTreeInfo {
+            name: "test-project".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 1,
+            incomplete_prd_count: 0,
+            pdr_count: 2,
+            runs_count: 0,
+        }];
+        print_project_tree(&projects);
+    }
+
+    #[test]
+    fn test_print_project_tree_multiple_projects_no_panic() {
+        // Should not panic with multiple projects
+        let projects = vec![
+            crate::config::ProjectTreeInfo {
+                name: "project-a".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                prd_count: 1,
+                incomplete_prd_count: 1,
+                pdr_count: 2,
+                runs_count: 3,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "project-b".to_string(),
+                has_active_run: false,
+                run_status: Some(crate::state::RunStatus::Failed),
+                prd_count: 0,
+                incomplete_prd_count: 0,
+                pdr_count: 0,
+                runs_count: 1,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "project-c".to_string(),
+                has_active_run: false,
+                run_status: Some(crate::state::RunStatus::Completed),
+                prd_count: 2,
+                incomplete_prd_count: 0,
+                pdr_count: 1,
+                runs_count: 5,
+            },
+        ];
+        print_project_tree(&projects);
+    }
+
+    #[test]
+    fn test_print_project_tree_all_status_types_no_panic() {
+        // Test all possible status types don't panic
+        use crate::state::RunStatus;
+
+        let projects = vec![
+            crate::config::ProjectTreeInfo {
+                name: "running".to_string(),
+                has_active_run: true,
+                run_status: Some(RunStatus::Running),
+                prd_count: 1,
+                incomplete_prd_count: 0,
+                pdr_count: 0,
+                runs_count: 0,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "failed".to_string(),
+                has_active_run: false,
+                run_status: Some(RunStatus::Failed),
+                prd_count: 0,
+                incomplete_prd_count: 0,
+                pdr_count: 0,
+                runs_count: 0,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "complete".to_string(),
+                has_active_run: false,
+                run_status: Some(RunStatus::Completed),
+                prd_count: 1,
+                incomplete_prd_count: 0,
+                pdr_count: 0,
+                runs_count: 0,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "incomplete".to_string(),
+                has_active_run: false,
+                run_status: None,
+                prd_count: 1,
+                incomplete_prd_count: 1,
+                pdr_count: 0,
+                runs_count: 0,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "idle".to_string(),
+                has_active_run: false,
+                run_status: None,
+                prd_count: 0,
+                incomplete_prd_count: 0,
+                pdr_count: 1,
+                runs_count: 0,
+            },
+            crate::config::ProjectTreeInfo {
+                name: "empty".to_string(),
+                has_active_run: false,
+                run_status: None,
+                prd_count: 0,
+                incomplete_prd_count: 0,
+                pdr_count: 0,
+                runs_count: 0,
+            },
+        ];
+        print_project_tree(&projects);
+    }
+
+    // ========================================================================
+    // US-008: Project description output tests
+    // ========================================================================
+
+    #[test]
+    fn test_us008_print_project_description_no_panic() {
+        // Should not panic when printing a project description
+        use std::path::PathBuf;
+
+        let desc = crate::config::ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/test/path"),
+            has_active_run: false,
+            run_status: None,
+            current_story: None,
+            current_branch: None,
+            prds: vec![],
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        print_project_description(&desc);
+    }
+
+    #[test]
+    fn test_us008_print_project_description_with_prd_no_panic() {
+        // Should not panic when printing a project with a PRD
+        use std::path::PathBuf;
+
+        let desc = crate::config::ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/test/path"),
+            has_active_run: false,
+            run_status: Some(crate::state::RunStatus::Completed),
+            current_story: None,
+            current_branch: Some("feature/test".to_string()),
+            prds: vec![crate::config::PrdSummary {
+                filename: "prd-test.json".to_string(),
+                path: PathBuf::from("/test/path/prds/prd-test.json"),
+                project_name: "Test Project".to_string(),
+                branch_name: "feature/test".to_string(),
+                description: "A test project description.".to_string(),
+                stories: vec![
+                    crate::config::StorySummary {
+                        id: "US-001".to_string(),
+                        title: "First Story".to_string(),
+                        passes: true,
+                    },
+                    crate::config::StorySummary {
+                        id: "US-002".to_string(),
+                        title: "Second Story".to_string(),
+                        passes: false,
+                    },
+                ],
+                completed_count: 1,
+                total_count: 2,
+            }],
+            pdr_count: 1,
+            runs_count: 2,
+        };
+        print_project_description(&desc);
+    }
+
+    #[test]
+    fn test_us008_print_project_description_running_status_no_panic() {
+        // Should not panic when printing a project with running status
+        use std::path::PathBuf;
+
+        let desc = crate::config::ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/test/path"),
+            has_active_run: true,
+            run_status: Some(crate::state::RunStatus::Running),
+            current_story: Some("US-003".to_string()),
+            current_branch: Some("feature/wip".to_string()),
+            prds: vec![],
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        print_project_description(&desc);
+    }
+
+    #[test]
+    fn test_us008_print_project_description_failed_status_no_panic() {
+        // Should not panic when printing a project with failed status
+        use std::path::PathBuf;
+
+        let desc = crate::config::ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/test/path"),
+            has_active_run: false,
+            run_status: Some(crate::state::RunStatus::Failed),
+            current_story: Some("US-001".to_string()),
+            current_branch: Some("feature/broken".to_string()),
+            prds: vec![],
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        print_project_description(&desc);
+    }
+
+    #[test]
+    fn test_us008_print_project_description_long_description_no_panic() {
+        // Should not panic with long description (should truncate)
+        use std::path::PathBuf;
+
+        let long_desc = "This is a very long description that goes on and on and on and should be truncated when displayed to the user because it's too long for a single line display in the terminal output.";
+
+        let desc = crate::config::ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/test/path"),
+            has_active_run: false,
+            run_status: None,
+            current_story: None,
+            current_branch: None,
+            prds: vec![crate::config::PrdSummary {
+                filename: "prd-test.json".to_string(),
+                path: PathBuf::from("/test/path/prds/prd-test.json"),
+                project_name: "Test Project".to_string(),
+                branch_name: "feature/test".to_string(),
+                description: long_desc.to_string(),
+                stories: vec![],
+                completed_count: 0,
+                total_count: 0,
+            }],
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        print_project_description(&desc);
+    }
+
+    #[test]
+    fn test_us008_make_progress_bar_simple_empty() {
+        let bar = make_progress_bar_simple(0, 10, 10);
+        assert!(bar.contains("░"), "Empty progress bar should have empty chars");
+    }
+
+    #[test]
+    fn test_us008_make_progress_bar_simple_full() {
+        let bar = make_progress_bar_simple(10, 10, 10);
+        assert!(bar.contains("█"), "Full progress bar should have filled chars");
+    }
+
+    #[test]
+    fn test_us008_make_progress_bar_simple_partial() {
+        let bar = make_progress_bar_simple(5, 10, 10);
+        assert!(bar.contains("█"), "Partial bar should have filled chars");
+        assert!(bar.contains("░"), "Partial bar should have empty chars");
+    }
+
+    #[test]
+    fn test_us008_make_progress_bar_simple_zero_total() {
+        // Should not panic and return empty bar
+        let bar = make_progress_bar_simple(0, 0, 10);
+        assert_eq!(bar.len(), 10);
     }
 }
