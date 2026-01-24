@@ -48,9 +48,6 @@ pub enum Autom8Error {
     #[error("Invalid generated PRD: {0}")]
     InvalidGeneratedPrd(String),
 
-    #[error("Unknown skill: {0}")]
-    UnknownSkill(String),
-
     #[error("Configuration error: {0}")]
     Config(String),
 

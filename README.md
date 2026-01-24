@@ -24,16 +24,7 @@ Requires the `claude` CLI to be installed and configured.
 
 ## Quick Start
 
-### 1. Install skills (one-time setup)
-
-```bash
-autom8 init
-```
-
-This installs the `/pdr` skill to `~/.claude/skills/` so Claude knows how to create PRDs.
-You only need to do this the first time you use `autom8`.
-
-### 2. Create and implement your feature
+### 1. Create and implement your feature
 
 ```bash
 autom8
@@ -41,9 +32,9 @@ autom8
 
 This single command handles the entire workflow:
 
-1. Spawns an interactive Claude session with the PRD skill pre-loaded
+1. Spawns an interactive Claude session
 2. You describe your feature and answer Claude's questions
-3. Claude creates the `prd.md` file
+3. Claude creates a PRD file (saved to `~/.config/autom8/<project>/pdr/`)
 4. When you exit the session, autom8 detects the new PRD
 5. Automatically proceeds to implementation
 
@@ -53,14 +44,6 @@ Example session:
 $ autom8
 
 Starting new PRD creation session...
-
-This will:
-  1. Open an interactive Claude session with the PRD skill
-  2. You describe your feature and answer questions
-  3. Claude creates a prd.md file
-  4. autom8 automatically detects and implements the PRD
-
-Press Ctrl+D or type /exit when done.
 
 [Claude session starts - you interact naturally]
 ...
@@ -72,22 +55,17 @@ Proceeding to implementation...
 [autom8 implementation begins]
 ```
 
-### Alternative: Manual workflow
+### Alternative: Direct file usage
 
-If you prefer more control, you can create the PRD separately:
+If you already have a PRD file, run autom8 with the file path:
 
 ```bash
-# Start Claude and use the PRD skill
-claude
-> /pdr <description of your feature>
-
-# After saving the prd.md file, run autom8
 autom8 prd.md
 ```
 
 You can also run `autom8` without arguments to interactively select from existing PRD files.
 
-### 3. Watch it work
+### 2. Watch it work
 
 autom8 will:
 1. Convert your `prd.md` to structured `prd.json`
@@ -98,22 +76,14 @@ autom8 will:
 
 ## Workflow
 
-### Recommended: `autom8`
-
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. One-time setup                                           │
-│    $ autom8 init                                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. Create and implement                                     │
+│ 1. Create and implement                                     │
 │    $ autom8                                                 │
 │                                                             │
-│    - Opens interactive Claude session with PRD skill        │
+│    - Opens interactive Claude session                       │
 │    - You describe feature and answer questions              │
-│    - Claude creates prd.md                                  │
+│    - Claude creates prd.md → ~/.config/autom8/<project>/pdr/│
 │    - On exit: detects PRD and starts implementation         │
 │    - Converts prd.md → prd.json                             │
 │    - Iterates through user stories                          │
@@ -123,41 +93,7 @@ autom8 will:
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. Feature complete!                                        │
-│    All user stories implemented and passing                 │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Alternative: Manual workflow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. One-time setup                                           │
-│    $ autom8 init                                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. Create prd.md interactively with Claude                  │
-│    $ claude                                                 │
-│    > /pdr                                                   │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. Run autom8                                               │
-│    $ autom8 prd.md                                          │
-│                                                             │
-│    - Converts prd.md → prd.json                             │
-│    - Iterates through user stories                          │
-│    - Claude implements each story                           │
-│    - Reviews implementation, fixes issues                   │
-│    - Commits all changes when feature is complete           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4. Feature complete!                                        │
+│ 2. Feature complete!                                        │
 │    All user stories implemented and passing                 │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -217,18 +153,14 @@ stateDiagram-v2
 
 ```bash
 autom8                    # Start PRD creation and implementation (recommended)
-autom8 init               # Install skills to ~/.claude/skills/ (one-time setup)
-autom8                    # Auto-detect and run (interactive)
 autom8 <file>             # Run with specific prd.md or prd.json
 autom8 run --prd <file>   # Explicit run command
 autom8 run --skip-review  # Skip the review loop
 autom8 status             # Check current run status
 autom8 resume             # Resume a failed/interrupted run
-autom8 history            # List past runs
-autom8 archive            # Archive current run and reset
-autom8 clean              # Delete prd.md and prd.json
-autom8 skill prd          # Output PRD creation prompt
-autom8 skill prd-json     # Output PRD→JSON conversion prompt
+autom8 projects           # List all known projects
+autom8 clean              # Delete prd.md and prd.json from CWD
+autom8 init               # Pre-create config directory structure (optional)
 ```
 
 ## PRD Format
@@ -311,9 +243,22 @@ Description of what this story accomplishes.
 Run state is saved to `.autom8/state.json`, allowing you to:
 - Interrupt with Ctrl+C and resume later
 - Check progress with `autom8 status`
-- Review history with `autom8 history`
 
 Completed runs are archived to `.autom8/runs/`.
+
+## File Storage
+
+PRD files are stored in `~/.config/autom8/<project>/pdr/`:
+
+```
+~/.config/autom8/
+└── my-project/
+    ├── pdr/           # PRD markdown files (prd-feature.md)
+    ├── prds/          # Converted JSON files (prd-feature.json)
+    └── runs/          # Archived run state
+```
+
+The `init` command pre-creates this directory structure, but it's optional — directories are created automatically when needed.
 
 ## Configuration
 

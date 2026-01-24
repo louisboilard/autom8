@@ -1,9 +1,3 @@
-/// Full SKILL.md content for the PRD skill (installed to ~/.claude/skills/pdr/)
-pub const PRD_SKILL_MD: &str = include_str!("../pdr/SKILL.md");
-
-/// Full SKILL.md content for the prd-json skill (installed to ~/.claude/skills/pdr-json/)
-pub const PRD_JSON_SKILL_MD: &str = include_str!("../pdr_json/SKILL.md");
-
 /// Prompt for interactive PRD creation with Claude.
 /// Users paste this into a Claude session to create their prd.md file.
 pub const PRD_SKILL_PROMPT: &str = r####"# PRD Creation Assistant
@@ -72,6 +66,20 @@ Once you have enough information, generate a prd.md file in this format:
 - Lower priority number = higher priority (1 is highest)
 - Include 3-7 user stories for most features
 - Stories should be ordered by dependency (prerequisites first)
+
+## REQUIRED Save Location
+
+**CRITICAL:** You MUST save the PRD file to this exact location:
+
+```
+~/.config/autom8/<project-name>/pdr/prd-[feature-name].md
+```
+
+Where:
+- `<project-name>` is the basename of the current working directory (e.g., if in `/Users/alice/projects/my-app`, use `my-app`)
+- `[feature-name]` is a kebab-case name for the feature (e.g., `user-authentication`, `task-priority`)
+
+**This is NOT a suggestion - this is the required location.** The autom8 tool expects files in this directory structure. Do NOT save to the current working directory or any other location.
 
 ---
 
@@ -533,4 +541,25 @@ mod tests {
         assert!(CORRECTOR_PROMPT.contains("Iteration 3"));
         assert!(CORRECTOR_PROMPT.contains("most critical fixes first"));
     }
+
+    #[test]
+    fn prd_skill_prompt_specifies_required_save_location() {
+        // Must contain the exact save path pattern
+        assert!(PRD_SKILL_PROMPT.contains("~/.config/autom8/<project-name>/pdr/prd-[feature-name].md"));
+    }
+
+    #[test]
+    fn prd_skill_prompt_emphasizes_save_location_is_required() {
+        // Must emphasize this is required, not a suggestion
+        assert!(PRD_SKILL_PROMPT.contains("REQUIRED"));
+        assert!(PRD_SKILL_PROMPT.contains("CRITICAL"));
+        assert!(PRD_SKILL_PROMPT.contains("NOT a suggestion"));
+    }
+
+    #[test]
+    fn prd_skill_prompt_warns_against_wrong_location() {
+        // Must explicitly warn against saving to wrong location
+        assert!(PRD_SKILL_PROMPT.contains("Do NOT save to the current working directory"));
+    }
+
 }

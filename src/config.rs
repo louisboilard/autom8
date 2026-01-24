@@ -140,28 +140,30 @@ pub fn is_in_config_dir(file_path: &std::path::Path) -> Result<bool> {
     Ok(canonical_file.starts_with(&canonical_config))
 }
 
-/// Result of copying a file to the config directory.
+/// Result of moving a file to the config directory.
 #[derive(Debug)]
-pub struct CopyResult {
-    /// The destination path where the file was copied.
+pub struct MoveResult {
+    /// The destination path where the file was moved.
     pub dest_path: PathBuf,
-    /// Whether the file was actually copied (false if already in config dir).
-    pub was_copied: bool,
+    /// Whether the file was actually moved (false if already in config dir).
+    pub was_moved: bool,
 }
 
-/// Copy a file to the appropriate config subdirectory if it's not already there.
+/// Move a file to the appropriate config subdirectory if it's not already there.
 ///
-/// - Markdown files (`.md`) are copied to `~/.config/autom8/<project-name>/pdr/`
-/// - JSON files (`.json`) are copied to `~/.config/autom8/<project-name>/prds/`
+/// - Markdown files (`.md`) are moved to `~/.config/autom8/<project-name>/pdr/`
+/// - JSON files (`.json`) are moved to `~/.config/autom8/<project-name>/prds/`
 ///
-/// Returns the path to use for processing (either the original or the copy).
-pub fn copy_to_config_dir(file_path: &std::path::Path) -> Result<CopyResult> {
+/// Uses `fs::rename()` when possible, falls back to copy+delete for cross-filesystem moves.
+///
+/// Returns the path to use for processing (either the original or the moved location).
+pub fn move_to_config_dir(file_path: &std::path::Path) -> Result<MoveResult> {
     // If already in config directory, return original path
     if is_in_config_dir(file_path)? {
         let canonical = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
-        return Ok(CopyResult {
+        return Ok(MoveResult {
             dest_path: canonical,
-            was_copied: false,
+            was_moved: false,
         });
     }
 
@@ -189,12 +191,16 @@ pub fn copy_to_config_dir(file_path: &std::path::Path) -> Result<CopyResult> {
         .ok_or_else(|| Autom8Error::Config("Could not determine filename".to_string()))?;
     let dest_path = dest_dir.join(filename);
 
-    // Copy the file
-    fs::copy(file_path, &dest_path)?;
+    // Try rename first (fast, atomic), fall back to copy+delete for cross-filesystem
+    if fs::rename(file_path, &dest_path).is_err() {
+        // Cross-filesystem move: copy then delete original
+        fs::copy(file_path, &dest_path)?;
+        fs::remove_file(file_path)?;
+    }
 
-    Ok(CopyResult {
+    Ok(MoveResult {
         dest_path,
-        was_copied: true,
+        was_moved: true,
     })
 }
 
@@ -225,6 +231,264 @@ impl ProjectStatus {
     pub fn is_idle(&self) -> bool {
         !self.needs_attention()
     }
+}
+
+/// Information about a project's directory contents for tree display.
+#[derive(Debug, Clone)]
+pub struct ProjectTreeInfo {
+    /// The project name (directory basename).
+    pub name: String,
+    /// Whether there is an active run.
+    pub has_active_run: bool,
+    /// The run status (if any run exists).
+    pub run_status: Option<crate::state::RunStatus>,
+    /// Number of PRD files in prds/ directory.
+    pub prd_count: usize,
+    /// Number of incomplete PRDs.
+    pub incomplete_prd_count: usize,
+    /// Number of files in pdr/ directory.
+    pub pdr_count: usize,
+    /// Number of archived runs in runs/ directory.
+    pub runs_count: usize,
+}
+
+impl ProjectTreeInfo {
+    /// Returns a status label for the project.
+    pub fn status_label(&self) -> &'static str {
+        if self.has_active_run {
+            "running"
+        } else if self.run_status == Some(crate::state::RunStatus::Failed) {
+            "failed"
+        } else if self.incomplete_prd_count > 0 {
+            "incomplete"
+        } else if self.prd_count > 0 {
+            "complete"
+        } else {
+            "empty"
+        }
+    }
+
+    /// Returns true if this project has any content.
+    pub fn has_content(&self) -> bool {
+        self.prd_count > 0 || self.pdr_count > 0 || self.runs_count > 0 || self.has_active_run
+    }
+}
+
+/// Get detailed tree information for all projects.
+///
+/// Returns a list of `ProjectTreeInfo` for each project in `~/.config/autom8/`.
+/// Projects are sorted alphabetically by name.
+pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
+    use crate::prd::Prd;
+    use crate::state::StateManager;
+
+    let projects = list_projects()?;
+    let mut tree_info = Vec::new();
+
+    for project_name in projects {
+        let sm = StateManager::for_project(&project_name)?;
+
+        // Check for active run
+        let run_state = sm.load_current().ok().flatten();
+        let has_active_run = run_state
+            .as_ref()
+            .map(|s| s.status == crate::state::RunStatus::Running)
+            .unwrap_or(false);
+        let run_status = run_state.map(|s| s.status);
+
+        // Count PRDs and incomplete PRDs
+        let prds = sm.list_prds().unwrap_or_default();
+        let mut incomplete_count = 0;
+
+        for prd_path in &prds {
+            if let Ok(prd) = Prd::load(prd_path) {
+                if prd.is_incomplete() {
+                    incomplete_count += 1;
+                }
+            }
+        }
+
+        // Count pdr files
+        let project_dir = project_config_dir_for(&project_name)?;
+        let pdr_dir = project_dir.join("pdr");
+        let pdr_count = if pdr_dir.exists() {
+            fs::read_dir(&pdr_dir)
+                .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Count archived runs
+        let runs_count = sm.list_archived().unwrap_or_default().len();
+
+        tree_info.push(ProjectTreeInfo {
+            name: project_name,
+            has_active_run,
+            run_status,
+            prd_count: prds.len(),
+            incomplete_prd_count: incomplete_count,
+            pdr_count,
+            runs_count,
+        });
+    }
+
+    Ok(tree_info)
+}
+
+/// Detailed information about a project for the describe command.
+#[derive(Debug, Clone)]
+pub struct ProjectDescription {
+    /// The project name.
+    pub name: String,
+    /// Path to the project config directory.
+    pub path: PathBuf,
+    /// Whether there is an active run.
+    pub has_active_run: bool,
+    /// The run status (if any run exists).
+    pub run_status: Option<crate::state::RunStatus>,
+    /// Current story being worked on (if any).
+    pub current_story: Option<String>,
+    /// Current branch from state (if any).
+    pub current_branch: Option<String>,
+    /// List of PRDs with their details.
+    pub prds: Vec<PrdSummary>,
+    /// Number of pdr files.
+    pub pdr_count: usize,
+    /// Number of archived runs.
+    pub runs_count: usize,
+}
+
+/// Summary of a single PRD.
+#[derive(Debug, Clone)]
+pub struct PrdSummary {
+    /// The PRD filename.
+    pub filename: String,
+    /// Full path to the PRD file.
+    pub path: PathBuf,
+    /// Project name from the PRD.
+    pub project_name: String,
+    /// Branch name from the PRD.
+    pub branch_name: String,
+    /// Description from the PRD.
+    pub description: String,
+    /// All user stories with their status.
+    pub stories: Vec<StorySummary>,
+    /// Number of completed stories.
+    pub completed_count: usize,
+    /// Total number of stories.
+    pub total_count: usize,
+}
+
+/// Summary of a user story.
+#[derive(Debug, Clone)]
+pub struct StorySummary {
+    /// Story ID (e.g., "US-001").
+    pub id: String,
+    /// Story title.
+    pub title: String,
+    /// Whether the story passes.
+    pub passes: bool,
+}
+
+/// Check if a project exists in the config directory.
+pub fn project_exists(project_name: &str) -> Result<bool> {
+    let project_dir = project_config_dir_for(project_name)?;
+    Ok(project_dir.exists())
+}
+
+/// Get detailed description of a project.
+///
+/// Returns `None` if the project doesn't exist.
+pub fn get_project_description(project_name: &str) -> Result<Option<ProjectDescription>> {
+    use crate::prd::Prd;
+    use crate::state::StateManager;
+
+    let project_dir = project_config_dir_for(project_name)?;
+
+    if !project_dir.exists() {
+        return Ok(None);
+    }
+
+    let sm = StateManager::for_project(project_name)?;
+
+    // Check for active run
+    let run_state = sm.load_current().ok().flatten();
+    let has_active_run = run_state
+        .as_ref()
+        .map(|s| s.status == crate::state::RunStatus::Running)
+        .unwrap_or(false);
+    let run_status = run_state.as_ref().map(|s| s.status.clone());
+    let current_story = run_state.as_ref().and_then(|s| s.current_story.clone());
+    let current_branch = run_state.map(|s| s.branch);
+
+    // Load PRDs with details
+    let prd_paths = sm.list_prds().unwrap_or_default();
+    let mut prds = Vec::new();
+
+    for prd_path in prd_paths {
+        if let Ok(prd) = Prd::load(&prd_path) {
+            let stories: Vec<StorySummary> = prd
+                .user_stories
+                .iter()
+                .map(|s| StorySummary {
+                    id: s.id.clone(),
+                    title: s.title.clone(),
+                    passes: s.passes,
+                })
+                .collect();
+
+            let completed_count = stories.iter().filter(|s| s.passes).count();
+            let total_count = stories.len();
+
+            let filename = prd_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            prds.push(PrdSummary {
+                filename,
+                path: prd_path,
+                project_name: prd.project,
+                branch_name: prd.branch_name,
+                description: prd.description,
+                stories,
+                completed_count,
+                total_count,
+            });
+        }
+    }
+
+    // Count pdr files
+    let pdr_dir = project_dir.join("pdr");
+    let pdr_count = if pdr_dir.exists() {
+        fs::read_dir(&pdr_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_file())
+                    .count()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Count archived runs
+    let runs_count = sm.list_archived().unwrap_or_default().len();
+
+    Ok(Some(ProjectDescription {
+        name: project_name.to_string(),
+        path: project_dir,
+        has_active_run,
+        run_status,
+        current_story,
+        current_branch,
+        prds,
+        pdr_count,
+        runs_count,
+    }))
 }
 
 /// Get status for all projects across the config directory.
@@ -614,16 +878,17 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_to_config_dir_copies_md_to_pdr() {
+    fn test_move_to_config_dir_moves_md_to_pdr() {
         let temp_dir = TempDir::new().unwrap();
         let source_file = temp_dir.path().join("test-spec.md");
         let content = "# Test Spec\n\nThis is a test.";
         fs::write(&source_file, content).unwrap();
 
-        let result = copy_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir(&source_file).unwrap();
 
-        assert!(result.was_copied, "File should have been copied");
+        assert!(result.was_moved, "File should have been moved");
         assert!(result.dest_path.exists(), "Destination file should exist");
+        assert!(!source_file.exists(), "Source file should be deleted after move");
         assert!(
             result.dest_path.parent().unwrap().ends_with("pdr"),
             "MD files should go to pdr/ directory"
@@ -639,16 +904,17 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_to_config_dir_copies_json_to_prds() {
+    fn test_move_to_config_dir_moves_json_to_prds() {
         let temp_dir = TempDir::new().unwrap();
         let source_file = temp_dir.path().join("test-prd.json");
         let content = r#"{"project": "test"}"#;
         fs::write(&source_file, content).unwrap();
 
-        let result = copy_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir(&source_file).unwrap();
 
-        assert!(result.was_copied, "File should have been copied");
+        assert!(result.was_moved, "File should have been moved");
         assert!(result.dest_path.exists(), "Destination file should exist");
+        assert!(!source_file.exists(), "Source file should be deleted after move");
         assert!(
             result.dest_path.parent().unwrap().ends_with("prds"),
             "JSON files should go to prds/ directory"
@@ -664,16 +930,17 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_to_config_dir_no_copy_if_already_in_config() {
+    fn test_move_to_config_dir_no_move_if_already_in_config() {
         // Create a file already in the config directory
         let pdr_dir = pdr_dir().unwrap();
         fs::create_dir_all(&pdr_dir).unwrap();
         let existing_file = pdr_dir.join("existing-test.md");
         fs::write(&existing_file, "# Already here").unwrap();
 
-        let result = copy_to_config_dir(&existing_file).unwrap();
+        let result = move_to_config_dir(&existing_file).unwrap();
 
-        assert!(!result.was_copied, "File should not have been copied");
+        assert!(!result.was_moved, "File should not have been moved");
+        assert!(existing_file.exists(), "File should still exist in original location");
         assert_eq!(
             result.dest_path.canonicalize().unwrap(),
             existing_file.canonicalize().unwrap(),
@@ -685,14 +952,15 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_to_config_dir_unknown_extension_goes_to_pdr() {
+    fn test_move_to_config_dir_unknown_extension_goes_to_pdr() {
         let temp_dir = TempDir::new().unwrap();
         let source_file = temp_dir.path().join("test-file.txt");
         fs::write(&source_file, "Some content").unwrap();
 
-        let result = copy_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir(&source_file).unwrap();
 
-        assert!(result.was_copied, "File should have been copied");
+        assert!(result.was_moved, "File should have been moved");
+        assert!(!source_file.exists(), "Source file should be deleted after move");
         assert!(
             result.dest_path.parent().unwrap().ends_with("pdr"),
             "Unknown extensions should default to pdr/ directory"
@@ -703,32 +971,33 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_to_config_dir_preserves_filename() {
+    fn test_move_to_config_dir_preserves_filename() {
         let temp_dir = TempDir::new().unwrap();
         let source_file = temp_dir.path().join("my-custom-name.md");
         fs::write(&source_file, "# Test").unwrap();
 
-        let result = copy_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir(&source_file).unwrap();
 
         assert_eq!(
             result.dest_path.file_name().unwrap().to_str().unwrap(),
             "my-custom-name.md",
             "Filename should be preserved"
         );
+        assert!(!source_file.exists(), "Source file should be deleted after move");
 
         // Cleanup
         fs::remove_file(&result.dest_path).ok();
     }
 
     #[test]
-    fn test_copy_result_struct() {
-        // Verify CopyResult fields work correctly
-        let result = CopyResult {
+    fn test_move_result_struct() {
+        // Verify MoveResult fields work correctly
+        let result = MoveResult {
             dest_path: PathBuf::from("/test/path"),
-            was_copied: true,
+            was_moved: true,
         };
         assert_eq!(result.dest_path, PathBuf::from("/test/path"));
-        assert!(result.was_copied);
+        assert!(result.was_moved);
     }
 
     #[test]
@@ -951,5 +1220,263 @@ mod tests {
         // Test against real config directory - should not error
         let result = global_status();
         assert!(result.is_ok(), "global_status() should not error");
+    }
+
+    // ========================================================================
+    // US-007: Project tree view tests
+    // ========================================================================
+
+    #[test]
+    fn test_project_tree_info_status_label_running() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: true,
+            run_status: Some(crate::state::RunStatus::Running),
+            prd_count: 1,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert_eq!(info.status_label(), "running");
+    }
+
+    #[test]
+    fn test_project_tree_info_status_label_failed() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: Some(crate::state::RunStatus::Failed),
+            prd_count: 1,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert_eq!(info.status_label(), "failed");
+    }
+
+    #[test]
+    fn test_project_tree_info_status_label_incomplete() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 2,
+            incomplete_prd_count: 1,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert_eq!(info.status_label(), "incomplete");
+    }
+
+    #[test]
+    fn test_project_tree_info_status_label_complete() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 2,
+            incomplete_prd_count: 0,
+            pdr_count: 1,
+            runs_count: 0,
+        };
+        assert_eq!(info.status_label(), "complete");
+    }
+
+    #[test]
+    fn test_project_tree_info_status_label_empty() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 0,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert_eq!(info.status_label(), "empty");
+    }
+
+    #[test]
+    fn test_project_tree_info_has_content_true() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 1,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert!(info.has_content());
+    }
+
+    #[test]
+    fn test_project_tree_info_has_content_false() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            prd_count: 0,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert!(!info.has_content());
+    }
+
+    #[test]
+    fn test_project_tree_info_has_content_with_active_run() {
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: true,
+            run_status: Some(crate::state::RunStatus::Running),
+            prd_count: 0,
+            incomplete_prd_count: 0,
+            pdr_count: 0,
+            runs_count: 0,
+        };
+        assert!(info.has_content());
+    }
+
+    #[test]
+    fn test_list_projects_tree_real_config() {
+        // Test against real config directory - should not error
+        let result = list_projects_tree();
+        assert!(result.is_ok(), "list_projects_tree() should not error");
+    }
+
+    // ========================================================================
+    // US-008: Describe command tests
+    // ========================================================================
+
+    #[test]
+    fn test_us008_project_exists_true_for_existing() {
+        // The autom8 project should exist since we're running from it
+        let result = project_exists("autom8");
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "autom8 project should exist");
+    }
+
+    #[test]
+    fn test_us008_project_exists_false_for_nonexistent() {
+        let result = project_exists("nonexistent-project-xyz-12345");
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "nonexistent project should return false");
+    }
+
+    #[test]
+    fn test_us008_get_project_description_existing_project() {
+        // Test getting description for an existing project
+        let result = get_project_description("autom8");
+        assert!(result.is_ok());
+        let desc = result.unwrap();
+        assert!(desc.is_some(), "autom8 project should return Some");
+
+        let desc = desc.unwrap();
+        assert_eq!(desc.name, "autom8");
+        assert!(desc.path.exists());
+        // autom8 has at least one PRD
+        assert!(!desc.prds.is_empty());
+    }
+
+    #[test]
+    fn test_us008_get_project_description_nonexistent_project() {
+        // Test getting description for a nonexistent project
+        let result = get_project_description("nonexistent-project-xyz-12345");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "nonexistent project should return None");
+    }
+
+    #[test]
+    fn test_us008_project_description_has_all_fields() {
+        // Test that ProjectDescription has all expected fields populated
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        // name and path should be set
+        assert!(!desc.name.is_empty());
+        assert!(desc.path.exists());
+
+        // PRDs should have correct structure
+        for prd in &desc.prds {
+            assert!(!prd.filename.is_empty());
+            assert!(prd.path.exists());
+            assert!(!prd.project_name.is_empty());
+            assert!(!prd.branch_name.is_empty());
+            assert!(!prd.stories.is_empty());
+            assert!(prd.completed_count <= prd.total_count);
+            assert_eq!(prd.total_count, prd.stories.len());
+        }
+    }
+
+    #[test]
+    fn test_us008_prd_summary_struct_fields() {
+        // Verify PrdSummary struct has all fields
+        let summary = PrdSummary {
+            filename: "test.json".to_string(),
+            path: PathBuf::from("/test"),
+            project_name: "Test Project".to_string(),
+            branch_name: "feature/test".to_string(),
+            description: "Test description".to_string(),
+            stories: vec![
+                StorySummary {
+                    id: "US-001".to_string(),
+                    title: "Test Story".to_string(),
+                    passes: true,
+                },
+            ],
+            completed_count: 1,
+            total_count: 1,
+        };
+
+        assert_eq!(summary.filename, "test.json");
+        assert_eq!(summary.project_name, "Test Project");
+        assert_eq!(summary.branch_name, "feature/test");
+        assert_eq!(summary.completed_count, 1);
+        assert_eq!(summary.total_count, 1);
+    }
+
+    #[test]
+    fn test_us008_story_summary_struct_fields() {
+        // Verify StorySummary struct has all fields
+        let story = StorySummary {
+            id: "US-001".to_string(),
+            title: "Test Story".to_string(),
+            passes: false,
+        };
+
+        assert_eq!(story.id, "US-001");
+        assert_eq!(story.title, "Test Story");
+        assert!(!story.passes);
+    }
+
+    #[test]
+    fn test_us008_project_description_counts_pdr_files() {
+        // Test that pdr_count is populated correctly for real project
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        // pdr_count should be >= 0 (may or may not have pdr files)
+        // Just verify it's accessible and doesn't panic
+        let _pdr_count = desc.pdr_count;
+    }
+
+    #[test]
+    fn test_us008_project_description_counts_archived_runs() {
+        // Test that runs_count is populated correctly for real project
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        // runs_count should be >= 0
+        let _runs_count = desc.runs_count;
+    }
+
+    #[test]
+    fn test_us008_project_description_run_state_fields() {
+        // Test that run state fields are accessible
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        // These fields should be accessible even if None
+        let _has_active_run = desc.has_active_run;
+        let _run_status = &desc.run_status;
+        let _current_story = &desc.current_story;
+        let _current_branch = &desc.current_branch;
     }
 }

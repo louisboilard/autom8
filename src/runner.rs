@@ -1163,20 +1163,6 @@ impl Runner {
     pub fn status(&self) -> Result<Option<RunState>> {
         self.state_manager.load_current()
     }
-
-    pub fn history(&self) -> Result<Vec<RunState>> {
-        self.state_manager.list_archived()
-    }
-
-    pub fn archive_current(&self) -> Result<Option<std::path::PathBuf>> {
-        if let Some(state) = self.state_manager.load_current()? {
-            let path = self.state_manager.archive(&state)?;
-            self.state_manager.clear_current()?;
-            Ok(Some(path))
-        } else {
-            Ok(None)
-        }
-    }
 }
 
 
@@ -1288,14 +1274,5 @@ mod tests {
         // that it reads from the config directory (no error means path resolution works)
         let status_result = runner.status();
         assert!(status_result.is_ok(), "Runner should use valid config directory paths");
-    }
-
-    /// Tests that history() (used by resume) reads from config directory runs/.
-    #[test]
-    fn test_runner_history_uses_config_directory() {
-        let runner = Runner::new().unwrap();
-        // history() reads from runs/ subdirectory of config directory
-        let history_result = runner.history();
-        assert!(history_result.is_ok(), "Runner history should use valid config directory paths");
     }
 }

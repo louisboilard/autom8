@@ -1,4 +1,3 @@
-pub mod archive;
 pub mod claude;
 pub mod config;
 pub mod error;
@@ -12,7 +11,6 @@ pub mod runner;
 pub mod snapshot;
 pub mod state;
 
-pub use archive::ArchiveManager;
 pub use error::{Autom8Error, Result};
 pub use prd::Prd;
 pub use progress::{Breadcrumb, BreadcrumbState, ProgressContext};
