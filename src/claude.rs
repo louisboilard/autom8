@@ -1,7 +1,7 @@
 use crate::error::{Autom8Error, Result};
 use crate::git;
-use crate::prd::{Prd, UserStory};
-use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, PRD_JSON_PROMPT, REVIEWER_PROMPT};
+use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, SPEC_JSON_PROMPT, SPEC_JSON_CORRECTION_PROMPT, REVIEWER_PROMPT};
+use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
@@ -237,9 +237,9 @@ pub enum ClaudeResult {
 }
 
 pub fn run_claude<F>(
-    prd: &Prd,
+    spec: &Spec,
     story: &UserStory,
-    prd_path: &std::path::Path,
+    spec_path: &std::path::Path,
     previous_iterations: &[IterationRecord],
     mut on_output: F,
 ) -> Result<ClaudeStoryResult>
@@ -247,7 +247,7 @@ where
     F: FnMut(&str),
 {
     let previous_context = build_previous_context(previous_iterations);
-    let prompt = build_prompt(prd, story, prd_path, previous_context.as_deref());
+    let prompt = build_prompt(spec, story, spec_path, previous_context.as_deref());
 
     let mut child = Command::new("claude")
         .args([
@@ -329,17 +329,14 @@ where
     })
 }
 
-/// Run Claude to convert a prd.md spec into prd.json
-pub fn run_for_prd_generation<F>(
-    spec_content: &str,
-    output_path: &Path,
-    mut on_output: F,
-) -> Result<Prd>
+const MAX_JSON_RETRY_ATTEMPTS: u32 = 3;
+
+/// Helper function to run Claude with a given prompt and return the raw output.
+/// Streams output to the callback and returns the accumulated text.
+fn run_claude_with_prompt<F>(prompt: &str, mut on_output: F) -> Result<String>
 where
     F: FnMut(&str),
 {
-    let prompt = PRD_JSON_PROMPT.replace("{spec_content}", spec_content);
-
     let mut child = Command::new("claude")
         .args([
             "--dangerously-skip-permissions",
@@ -396,16 +393,33 @@ where
             status,
             if stderr_content.is_empty() { None } else { Some(stderr_content) },
         );
-        return Err(Autom8Error::PrdGenerationFailed(error_info.message));
+        return Err(Autom8Error::SpecGenerationFailed(error_info.message));
     }
 
+    Ok(full_output)
+}
+
+/// Run Claude to convert a spec-<feature>.md markdown file into spec-<feature>.json
+/// Implements retry logic (up to 3 attempts) when JSON parsing fails.
+pub fn run_for_spec_generation<F>(
+    spec_content: &str,
+    output_path: &Path,
+    mut on_output: F,
+) -> Result<Spec>
+where
+    F: FnMut(&str),
+{
+    // First attempt with the initial prompt
+    let initial_prompt = SPEC_JSON_PROMPT.replace("{spec_content}", spec_content);
+    let mut full_output = run_claude_with_prompt(&initial_prompt, &mut on_output)?;
+
     // Try to get JSON either from response or from file if Claude wrote it directly
-    let json_str = if let Some(json) = extract_json(&full_output) {
+    let mut json_str = if let Some(json) = extract_json(&full_output) {
         json
     } else if output_path.exists() {
         // Claude may have written the file directly using tools
         std::fs::read_to_string(output_path).map_err(|e| {
-            Autom8Error::InvalidGeneratedPrd(format!("Failed to read generated file: {}", e))
+            Autom8Error::InvalidGeneratedSpec(format!("Failed to read generated file: {}", e))
         })?
     } else {
         let preview = if full_output.len() > 200 {
@@ -413,20 +427,66 @@ where
         } else {
             full_output.clone()
         };
-        return Err(Autom8Error::InvalidGeneratedPrd(format!(
+        return Err(Autom8Error::InvalidGeneratedSpec(format!(
             "No valid JSON found in response. Response preview: {:?}",
             preview
         )));
     };
 
-    // Parse the JSON into Prd
-    let prd: Prd = serde_json::from_str(&json_str)
-        .map_err(|e| Autom8Error::InvalidGeneratedPrd(format!("JSON parse error: {}", e)))?;
+    // Try to parse the JSON, with retry logic on failure
+    let mut last_error: Option<serde_json::Error> = None;
 
-    // Save to output path (may overwrite if Claude already wrote it, but ensures consistent format)
-    prd.save(output_path)?;
+    for attempt in 1..=MAX_JSON_RETRY_ATTEMPTS {
+        match serde_json::from_str::<Spec>(&json_str) {
+            Ok(spec) => {
+                // Success! Save and return
+                spec.save(output_path)?;
+                return Ok(spec);
+            }
+            Err(e) => {
+                last_error = Some(e);
 
-    Ok(prd)
+                // If this was the last attempt, don't retry
+                if attempt == MAX_JSON_RETRY_ATTEMPTS {
+                    break;
+                }
+
+                // Inform user of retry
+                let retry_msg = format!(
+                    "\nJSON malformed, retrying (attempt {}/{})...\n",
+                    attempt + 1,
+                    MAX_JSON_RETRY_ATTEMPTS
+                );
+                on_output(&retry_msg);
+
+                // Build correction prompt with the malformed JSON
+                let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+                    .replace("{malformed_json}", &json_str)
+                    .replace("{error_message}", &last_error.as_ref().unwrap().to_string())
+                    .replace("{attempt}", &(attempt + 1).to_string())
+                    .replace("{max_attempts}", &MAX_JSON_RETRY_ATTEMPTS.to_string());
+
+                // Run Claude again with correction prompt
+                full_output = run_claude_with_prompt(&correction_prompt, &mut on_output)?;
+
+                // Extract JSON from the new response
+                if let Some(json) = extract_json(&full_output) {
+                    json_str = json;
+                } else {
+                    // If we can't extract JSON at all, use the raw output as the "JSON"
+                    // This will fail parsing but we'll try again on next iteration
+                    json_str = full_output.clone();
+                }
+            }
+        }
+    }
+
+    // All retries exhausted, return the last error
+    Err(Autom8Error::InvalidGeneratedSpec(format!(
+        "JSON parse error after {} attempts: {}",
+        MAX_JSON_RETRY_ATTEMPTS,
+        last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -451,12 +511,12 @@ pub enum CorrectorResult {
 }
 
 /// Run Claude to commit changes after all stories are complete
-pub fn run_for_commit<F>(prd: &Prd, mut on_output: F) -> Result<CommitResult>
+pub fn run_for_commit<F>(spec: &Spec, mut on_output: F) -> Result<CommitResult>
 where
     F: FnMut(&str),
 {
     // Build stories summary for context
-    let stories_summary = prd
+    let stories_summary = spec
         .user_stories
         .iter()
         .map(|s| format!("- {}: {}", s.id, s.title))
@@ -464,8 +524,8 @@ where
         .join("\n");
 
     let prompt = COMMIT_PROMPT
-        .replace("{project}", &prd.project)
-        .replace("{feature_description}", &prd.description)
+        .replace("{project}", &spec.project)
+        .replace("{feature_description}", &spec.description)
         .replace("{stories_summary}", &stories_summary);
 
     let mut child = Command::new("claude")
@@ -552,7 +612,7 @@ const REVIEW_FILE: &str = "autom8_review.md";
 /// Returns ReviewResult::IssuesFound if autom8_review.md exists and has content.
 /// Returns ReviewResult::Error(ClaudeErrorInfo) on failure with stderr and exit code preserved.
 pub fn run_reviewer<F>(
-    prd: &Prd,
+    spec: &Spec,
     iteration: u32,
     max_iterations: u32,
     mut on_output: F,
@@ -560,7 +620,7 @@ pub fn run_reviewer<F>(
 where
     F: FnMut(&str),
 {
-    let prompt = build_reviewer_prompt(prd, iteration, max_iterations);
+    let prompt = build_reviewer_prompt(spec, iteration, max_iterations);
 
     let mut child = Command::new("claude")
         .args([
@@ -638,12 +698,12 @@ where
 /// Run the corrector agent to fix issues identified by the reviewer.
 /// Returns CorrectorResult::Complete when Claude finishes successfully.
 /// Returns CorrectorResult::Error(ClaudeErrorInfo) on failure with stderr and exit code preserved.
-pub fn run_corrector<F>(prd: &Prd, iteration: u32, mut on_output: F) -> Result<CorrectorResult>
+pub fn run_corrector<F>(spec: &Spec, iteration: u32, mut on_output: F) -> Result<CorrectorResult>
 where
     F: FnMut(&str),
 {
     let max_iterations = 3;
-    let prompt = build_corrector_prompt(prd, iteration, max_iterations);
+    let prompt = build_corrector_prompt(spec, iteration, max_iterations);
 
     let mut child = Command::new("claude")
         .args([
@@ -706,9 +766,9 @@ where
 }
 
 /// Build the prompt for the corrector agent
-fn build_corrector_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> String {
+fn build_corrector_prompt(spec: &Spec, iteration: u32, max_iterations: u32) -> String {
     // Build stories context - summary of all user stories
-    let stories_context = prd
+    let stories_context = spec
         .user_stories
         .iter()
         .map(|s| {
@@ -727,17 +787,17 @@ fn build_corrector_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> Str
         .join("\n\n");
 
     CORRECTOR_PROMPT
-        .replace("{project}", &prd.project)
-        .replace("{feature_description}", &prd.description)
+        .replace("{project}", &spec.project)
+        .replace("{feature_description}", &spec.description)
         .replace("{stories_context}", &stories_context)
         .replace("{iteration}", &iteration.to_string())
         .replace("{max_iterations}", &max_iterations.to_string())
 }
 
 /// Build the prompt for the reviewer agent
-fn build_reviewer_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> String {
+fn build_reviewer_prompt(spec: &Spec, iteration: u32, max_iterations: u32) -> String {
     // Build stories context - summary of all user stories
-    let stories_context = prd
+    let stories_context = spec
         .user_stories
         .iter()
         .map(|s| {
@@ -756,8 +816,8 @@ fn build_reviewer_prompt(prd: &Prd, iteration: u32, max_iterations: u32) -> Stri
         .join("\n\n");
 
     REVIEWER_PROMPT
-        .replace("{project}", &prd.project)
-        .replace("{feature_description}", &prd.description)
+        .replace("{project}", &spec.project)
+        .replace("{feature_description}", &spec.description)
         .replace("{stories_context}", &stories_context)
         .replace("{iteration}", &iteration.to_string())
         .replace("{max_iterations}", &max_iterations.to_string())
@@ -828,7 +888,7 @@ pub fn build_previous_context(iterations: &[IterationRecord]) -> Option<String> 
     }
 }
 
-fn build_prompt(prd: &Prd, story: &UserStory, prd_path: &Path, previous_context: Option<&str>) -> String {
+fn build_prompt(spec: &Spec, story: &UserStory, spec_path: &Path, previous_context: Option<&str>) -> String {
     let acceptance_criteria = story
         .acceptance_criteria
         .iter()
@@ -836,7 +896,7 @@ fn build_prompt(prd: &Prd, story: &UserStory, prd_path: &Path, previous_context:
         .collect::<Vec<_>>()
         .join("\n");
 
-    let prd_path_str = prd_path.display();
+    let spec_path_str = spec_path.display();
 
     // Build the previous work section if we have context
     let previous_work_section = match previous_context {
@@ -871,11 +931,11 @@ Implement user story **{story_id}: {story_title}**
 1. Implement the user story according to the acceptance criteria
 2. Write tests to verify the implementation
 3. Run the tests to ensure they pass
-4. After implementation, update `{prd_path}` to set `passes: true` for story {story_id}
+4. After implementation, update `{spec_path}` to set `passes: true` for story {story_id}
 
 ## Completion
 
-When ALL user stories in `{prd_path}` have `passes: true`, output exactly:
+When ALL user stories in `{spec_path}` have `passes: true`, output exactly:
 <promise>COMPLETE</promise>
 
 This signals that the entire feature is done.
@@ -892,18 +952,18 @@ This helps provide context for subsequent tasks.
 
 ## Project Context
 
-{prd_description}{previous_work}
+{spec_description}{previous_work}
 
 ## Notes
 {notes}
 "#,
-        project = prd.project,
+        project = spec.project,
         story_id = story.id,
         story_title = story.title,
         story_description = story.description,
         acceptance_criteria = acceptance_criteria,
-        prd_description = prd.description,
-        prd_path = prd_path_str,
+        spec_description = spec.description,
+        spec_path = spec_path_str,
         previous_work = previous_work_section,
         notes = if story.notes.is_empty() {
             "None"
@@ -1010,7 +1070,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test project".into(),
@@ -1025,13 +1085,13 @@ mod tests {
             passes: false,
             notes: String::new(),
         };
-        let prd_path = Path::new("/tmp/prd.json");
+        let spec_path = Path::new("/tmp/spec-test.json");
 
-        let prompt = build_prompt(&prd, &story, prd_path, None);
+        let prompt = build_prompt(&spec, &story, spec_path, None);
         assert!(prompt.contains("TestProject"));
         assert!(prompt.contains("US-001"));
         assert!(prompt.contains("Criterion 1"));
-        assert!(prompt.contains("/tmp/prd.json"));
+        assert!(prompt.contains("/tmp/spec-test.json"));
         // No previous context, so no "Previous Work" section
         assert!(!prompt.contains("Previous Work"));
     }
@@ -1065,7 +1125,7 @@ End of response"#;
 
     #[test]
     fn test_build_reviewer_prompt() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test feature description".into(),
@@ -1091,7 +1151,7 @@ End of response"#;
             ],
         };
 
-        let prompt = build_reviewer_prompt(&prd, 1, 3);
+        let prompt = build_reviewer_prompt(&spec, 1, 3);
 
         // Check that project name is included
         assert!(prompt.contains("TestProject"));
@@ -1112,7 +1172,7 @@ End of response"#;
 
     #[test]
     fn test_build_reviewer_prompt_iteration_2() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "Test description".into(),
@@ -1127,7 +1187,7 @@ End of response"#;
             }],
         };
 
-        let prompt = build_reviewer_prompt(&prd, 2, 3);
+        let prompt = build_reviewer_prompt(&spec, 2, 3);
         assert!(prompt.contains("Review iteration 2/3"));
     }
 
@@ -1183,7 +1243,7 @@ End of response"#;
 
     #[test]
     fn test_build_corrector_prompt() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test feature description".into(),
@@ -1209,7 +1269,7 @@ End of response"#;
             ],
         };
 
-        let prompt = build_corrector_prompt(&prd, 1, 3);
+        let prompt = build_corrector_prompt(&spec, 1, 3);
 
         // Check that project name is included
         assert!(prompt.contains("TestProject"));
@@ -1230,7 +1290,7 @@ End of response"#;
 
     #[test]
     fn test_build_corrector_prompt_iteration_2() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "Test description".into(),
@@ -1245,7 +1305,7 @@ End of response"#;
             }],
         };
 
-        let prompt = build_corrector_prompt(&prd, 2, 3);
+        let prompt = build_corrector_prompt(&spec, 2, 3);
         assert!(prompt.contains("Correction iteration 2/3"));
     }
 
@@ -1538,7 +1598,7 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
 
     #[test]
     fn test_build_prompt_with_previous_context() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test project".into(),
@@ -1553,10 +1613,10 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
             passes: false,
             notes: String::new(),
         };
-        let prd_path = Path::new("/tmp/prd.json");
+        let spec_path = Path::new("/tmp/spec-test.json");
         let previous_context = Some("US-001: Files changed: src/main.rs. Added entry point.");
 
-        let prompt = build_prompt(&prd, &story, prd_path, previous_context);
+        let prompt = build_prompt(&spec, &story, spec_path, previous_context);
 
         // Should contain the Previous Work section
         assert!(prompt.contains("## Previous Work"));
@@ -1566,7 +1626,7 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
 
     #[test]
     fn test_build_prompt_without_previous_context() {
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test project".into(),
@@ -1581,9 +1641,9 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
             passes: false,
             notes: String::new(),
         };
-        let prd_path = Path::new("/tmp/prd.json");
+        let spec_path = Path::new("/tmp/spec-test.json");
 
-        let prompt = build_prompt(&prd, &story, prd_path, None);
+        let prompt = build_prompt(&spec, &story, spec_path, None);
 
         // Should NOT contain the Previous Work section for first story
         assert!(!prompt.contains("## Previous Work"));
@@ -1593,7 +1653,7 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
     #[test]
     fn test_build_prompt_integration_with_iteration_records() {
         // Test the full integration: iterations -> build_previous_context -> build_prompt
-        let prd = Prd {
+        let spec = Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
             description: "A test project".into(),
@@ -1608,7 +1668,7 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
             passes: false,
             notes: String::new(),
         };
-        let prd_path = Path::new("/tmp/prd.json");
+        let spec_path = Path::new("/tmp/spec-test.json");
 
         let iterations = vec![
             create_iteration_record("US-001", Some("Added authentication module.")),
@@ -1616,10 +1676,133 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
         ];
 
         let previous_context = build_previous_context(&iterations);
-        let prompt = build_prompt(&prd, &story, prd_path, previous_context.as_deref());
+        let prompt = build_prompt(&spec, &story, spec_path, previous_context.as_deref());
 
         assert!(prompt.contains("## Previous Work"));
         assert!(prompt.contains("US-001: Added authentication module."));
         assert!(prompt.contains("US-002: Added user management."));
+    }
+
+    // ========================================================================
+    // JSON retry logic tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn test_max_json_retry_attempts_is_three() {
+        assert_eq!(MAX_JSON_RETRY_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn test_correction_prompt_construction() {
+        use crate::prompts::SPEC_JSON_CORRECTION_PROMPT;
+
+        let malformed_json = r#"{"project": "Test", "branchName": "test"#;
+        let error_message = "EOF while parsing a string at line 1 column 39";
+
+        let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{malformed_json}", malformed_json)
+            .replace("{error_message}", error_message)
+            .replace("{attempt}", "2")
+            .replace("{max_attempts}", "3");
+
+        // Verify the correction prompt contains the malformed JSON
+        assert!(correction_prompt.contains(malformed_json));
+        // Verify it contains the error message
+        assert!(correction_prompt.contains(error_message));
+        // Verify it shows the attempt count
+        assert!(correction_prompt.contains("2/3"));
+        // Verify it asks Claude to fix the JSON
+        assert!(correction_prompt.contains("Fix the JSON"));
+    }
+
+    #[test]
+    fn test_extract_json_valid_json() {
+        let valid_json = r#"{"project": "Test", "branchName": "main", "description": "desc", "userStories": []}"#;
+        let result = extract_json(valid_json);
+        assert!(result.is_some());
+        // Verify it can be parsed as JSON
+        let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&result.unwrap());
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_extract_json_from_markdown_code_block() {
+        let response = r#"Here's the fixed JSON:
+
+```json
+{"project": "Test", "branchName": "main"}
+```
+
+Hope that helps!"#;
+        let result = extract_json(response);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), r#"{"project": "Test", "branchName": "main"}"#);
+    }
+
+    #[test]
+    fn test_extract_json_handles_malformed_gracefully() {
+        // extract_json should still extract JSON-like content even if malformed
+        let response = r#"{"project": "Test", "branchName": "#;
+        let result = extract_json(response);
+        // It should still extract something since there's an opening brace
+        // but there's no closing brace, so it should return None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_spec_parsing_valid_json() {
+        let valid_spec_json = r#"{
+            "project": "TestProject",
+            "branchName": "test-branch",
+            "description": "A test project",
+            "userStories": [{
+                "id": "US-001",
+                "title": "Test Story",
+                "description": "A test story",
+                "acceptanceCriteria": ["Criterion 1"],
+                "priority": 1,
+                "passes": false,
+                "notes": ""
+            }]
+        }"#;
+
+        let result: std::result::Result<Spec, _> = serde_json::from_str(valid_spec_json);
+        assert!(result.is_ok());
+        let spec = result.unwrap();
+        assert_eq!(spec.project, "TestProject");
+        assert_eq!(spec.user_stories.len(), 1);
+    }
+
+    #[test]
+    fn test_spec_parsing_malformed_json() {
+        // Missing closing brace
+        let malformed_json = r#"{"project": "Test", "branchName": "main""#;
+        let result: std::result::Result<Spec, _> = serde_json::from_str(malformed_json);
+        assert!(result.is_err());
+        // Verify error message is useful for correction prompt
+        let error_msg = result.unwrap_err().to_string();
+        assert!(!error_msg.is_empty());
+    }
+
+    #[test]
+    fn test_spec_parsing_invalid_schema() {
+        // Valid JSON but invalid schema (missing required fields)
+        let invalid_schema = r#"{"project": "Test"}"#;
+        let result: std::result::Result<Spec, _> = serde_json::from_str(invalid_schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retry_message_format() {
+        // Test the format of the retry message shown to users
+        let attempt = 2;
+        let max_attempts = 3;
+        let retry_msg = format!(
+            "\nJSON malformed, retrying (attempt {}/{})...\n",
+            attempt, max_attempts
+        );
+        assert!(retry_msg.contains("JSON malformed"));
+        assert!(retry_msg.contains("retrying"));
+        assert!(retry_msg.contains("2/3"));
     }
 }

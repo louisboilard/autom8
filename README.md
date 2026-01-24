@@ -1,6 +1,6 @@
 # autom8
 
-A CLI automation tool for orchestrating Claude-powered development. Define your feature requirements in a PRD, and let autom8 drive Claude through iterative implementation of each user story.
+A CLI automation tool for orchestrating Claude-powered development. Define your feature requirements in a spec, and let autom8 drive Claude through iterative implementation of each user story.
 
 ## Overview
 
@@ -8,7 +8,7 @@ autom8 bridges the gap between product requirements and working code. You descri
 
 ### Key Features
 
-- **PRD-driven development** - Define features as structured user stories with acceptance criteria
+- **Spec-driven development** - Define features as structured user stories with acceptance criteria
 - **Iterative implementation** - Claude implements one story at a time, marking progress as it goes
 - **State persistence** - Interrupt and resume runs at any time
 - **Git integration** - Automatic branch management for feature development
@@ -34,8 +34,8 @@ This single command handles the entire workflow:
 
 1. Spawns an interactive Claude session
 2. You describe your feature and answer Claude's questions
-3. Claude creates a PRD file (saved to `~/.config/autom8/<project>/pdr/`)
-4. When you exit the session, autom8 detects the new PRD
+3. Claude creates a spec file (saved to `~/.config/autom8/<project>/spec/`)
+4. When you exit the session, autom8 detects the new spec
 5. Automatically proceeds to implementation
 
 Example session:
@@ -43,13 +43,13 @@ Example session:
 ```
 $ autom8
 
-Starting new PRD creation session...
+Starting new spec creation session...
 
 [Claude session starts - you interact naturally]
 ...
 [You exit the Claude session]
 
-Detected new PRD file: ~/.config/autom8/my-project/pdr/prd-my-feature.md
+Detected new spec file: ~/.config/autom8/my-project/spec/spec-my-feature.md
 Proceeding to implementation...
 
 [autom8 implementation begins]
@@ -57,18 +57,18 @@ Proceeding to implementation...
 
 ### Alternative: Direct file usage
 
-If you already have a PRD file, run autom8 with the file path:
+If you already have a spec file, run autom8 with the file path:
 
 ```bash
-autom8 prd.md
+autom8 spec.md
 ```
 
-You can also run `autom8` without arguments to interactively select from existing PRD files.
+You can also run `autom8` without arguments to interactively select from existing spec files.
 
 ### 2. Watch it work
 
 autom8 will:
-1. Convert your `prd.md` to structured `prd.json`
+1. Convert your `spec.md` to structured `spec.json`
 2. Pick the highest-priority incomplete story
 3. Run Claude to implement it
 4. Review the implementation and fix any issues
@@ -77,25 +77,25 @@ autom8 will:
 ## Workflow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. Create and implement                                     │
-│    $ autom8                                                 │
-│                                                             │
-│    - Opens interactive Claude session                       │
-│    - You describe feature and answer questions              │
-│    - Claude creates prd.md → ~/.config/autom8/<project>/pdr/│
-│    - On exit: detects PRD and starts implementation         │
-│    - Converts prd.md → prd.json                             │
-│    - Iterates through user stories                          │
-│    - Reviews implementation, fixes issues                   │
-│    - Commits all changes when feature is complete           │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ 1. Create and implement                                      │
+│    $ autom8                                                  │
+│                                                              │
+│    - Opens interactive Claude session                        │
+│    - You describe feature and answer questions               │
+│    - Claude creates spec.md → ~/.config/autom8/<project>/spec│
+│    - On exit: detects spec and starts implementation         │
+│    - Converts spec.md → spec.json                            │
+│    - Iterates through user stories                           │
+│    - Reviews implementation, fixes issues                    │
+│    - Commits all changes when feature is complete            │
+└──────────────────────────────────────────────────────────────┘
                               │
                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. Feature complete!                                        │
-│    All user stories implemented and passing                 │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ 2. Feature complete!                                         │
+│    All user stories implemented and passing                  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## State Machine
@@ -106,11 +106,16 @@ autom8 uses a state machine to track progress through the implementation process
 stateDiagram-v2
     [*] --> Idle
 
-    Idle --> LoadingSpec: autom8 prd.md
-    Idle --> Initializing: autom8 prd.json
+    Idle --> Resuming: autom8 (no args)
+    Idle --> LoadingSpec: autom8 spec.md
+    Idle --> Initializing: autom8 spec.json
 
-    LoadingSpec --> GeneratingPrd: Spec loaded
-    GeneratingPrd --> Initializing: PRD generated
+    Resuming --> PickingStory: State found
+    Resuming --> CreatingSpec: No state
+
+    CreatingSpec --> LoadingSpec: Spec created
+    LoadingSpec --> GeneratingSpec: Spec loaded
+    GeneratingSpec --> Initializing: Spec JSON generated
 
     Initializing --> PickingStory: Ready
 
@@ -138,9 +143,11 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | `idle` | Initial state, no active run |
-| `loading-spec` | Loading and validating prd.md file |
-| `generating-prd` | Claude converting prd.md → prd.json |
-| `initializing` | Loading PRD, setting up git branch |
+| `resuming` | Checking for existing state to resume |
+| `creating-spec` | Interactive Claude session for spec creation |
+| `loading-spec` | Loading and validating spec.md file |
+| `generating-spec` | Claude converting spec.md → spec.json |
+| `initializing` | Loading spec, setting up git branch |
 | `picking-story` | Selecting next incomplete user story |
 | `running-claude` | Claude implementing current story |
 | `reviewing` | Claude reviewing completed implementation |
@@ -152,20 +159,20 @@ stateDiagram-v2
 ## CLI Commands
 
 ```bash
-autom8                    # Start PRD creation and implementation (recommended)
-autom8 <file>             # Run with specific prd.md or prd.json
-autom8 run --prd <file>   # Explicit run command
+autom8                    # Resume existing state or start spec creation (recommended)
+autom8 <file>             # Run with specific spec.md or spec.json
+autom8 run --spec <file>  # Explicit run command
 autom8 run --skip-review  # Skip the review loop
 autom8 status             # Check current run status
 autom8 resume             # Resume a failed/interrupted run
 autom8 projects           # List all known projects
-autom8 clean              # Delete prd.md and prd.json from CWD
+autom8 clean              # Delete spec.md and spec.json from CWD
 autom8 init               # Pre-create config directory structure (optional)
 ```
 
-## PRD Format
+## Spec Format
 
-### Markdown (prd.md)
+### Markdown (spec.md)
 
 ```markdown
 # Feature Name
@@ -197,7 +204,7 @@ Description of what this story accomplishes.
 ...
 ```
 
-### JSON (prd.json)
+### JSON (spec.json)
 
 ```json
 {
@@ -227,7 +234,7 @@ Description of what this story accomplishes.
    - Story details and acceptance criteria
    - Instructions to implement, test, and mark complete
 
-3. **Completion Detection**: Claude updates `prd.json` setting `passes: true` when a story's acceptance criteria are met
+3. **Completion Detection**: Claude updates `spec.json` setting `passes: true` when a story's acceptance criteria are met
 
 4. **Iteration**: Process repeats until all stories pass or max iterations reached
 
@@ -236,7 +243,7 @@ Description of what this story accomplishes.
    - If issues are found, enters correction mode to fix them
    - Review/correct cycles up to 3 times before failing
 
-6. **Committing**: When review passes, Claude commits changes (only files it modified, excluding prd.json and .autom8/)
+6. **Committing**: When review passes, Claude commits changes (only files it modified, excluding spec.json and .autom8/)
 
 ## State Persistence
 
@@ -248,13 +255,12 @@ Completed runs are archived to `.autom8/runs/`.
 
 ## File Storage
 
-PRD files are stored in `~/.config/autom8/<project>/pdr/`:
+Spec files are stored in `~/.config/autom8/<project>/spec/`:
 
 ```
 ~/.config/autom8/
 └── my-project/
-    ├── pdr/           # PRD markdown files (prd-feature.md)
-    ├── prds/          # Converted JSON files (prd-feature.json)
+    ├── spec/          # Spec files (spec-feature.md, spec-feature.json)
     └── runs/          # Archived run state
 ```
 
@@ -273,29 +279,29 @@ If running in a git repository, autom8 will:
 ## Example Session
 
 ```
-$ autom8 prd.md
+$ autom8 spec.md
 
 +---------------------------------------------------------+
 |  autom8 v0.1.0                                          |
 +---------------------------------------------------------+
 
 [state] idle -> loading-spec
-Spec: ./prd.md (1.2 KB)
+Spec: ./spec.md (1.2 KB)
 
-[state] loading-spec -> generating-prd
-Converting to prd.json...
+[state] loading-spec -> generating-spec
+Converting to spec.json...
 Claude is working...
 
-PRD Generated Successfully
+Spec Generated Successfully
 Project: my-api
 Stories: 3
   - US-001: Set up project structure
   - US-002: Implement user endpoint
   - US-003: Add authentication
 
-Saved: .autom8/prds/prd.json
+Saved: .autom8/spec/spec-my-api.json
 
-[state] generating-prd -> initializing
+[state] generating-spec -> initializing
 Proceeding to implementation...
 
 [state] initializing -> picking-story

@@ -324,8 +324,8 @@ impl VerboseTimer {
         timer
     }
 
-    pub fn new_for_prd() -> Self {
-        Self::new("PRD generation")
+    pub fn new_for_spec() -> Self {
+        Self::new("Spec generation")
     }
 
     /// Create a new timer for commit
@@ -454,9 +454,9 @@ fn format_display_prefix(story_id: &str, iteration_info: &Option<IterationInfo>)
         }
     }
     // Fall back to story_id if no iteration info or invalid format
-    // Special case for PRD
-    if story_id == "PRD" {
-        "PRD generation".to_string()
+    // Special case for Spec
+    if story_id == "Spec" {
+        "Spec generation".to_string()
     } else {
         story_id.to_string()
     }
@@ -513,8 +513,8 @@ impl ClaudeSpinner {
         Self::create_with_iteration("Correct", format!("{} | Starting...", prefix), Some(info))
     }
 
-    pub fn new_for_prd() -> Self {
-        Self::create("PRD", "PRD generation | Starting...".to_string())
+    pub fn new_for_spec() -> Self {
+        Self::create("Spec", "Spec generation | Starting...".to_string())
     }
 
     /// Create a new spinner for commit
@@ -1063,9 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn test_spinner_prd_variant() {
-        let mut spinner = ClaudeSpinner::new_for_prd();
-        assert_eq!(spinner.story_id, "PRD");
+    fn test_spinner_spec_variant() {
+        let mut spinner = ClaudeSpinner::new_for_spec();
+        assert_eq!(spinner.story_id, "Spec");
         spinner.stop_timer();
     }
 
@@ -1197,9 +1197,9 @@ mod tests {
     }
 
     #[test]
-    fn test_verbose_timer_prd_variant() {
-        let mut timer = VerboseTimer::new_for_prd();
-        assert_eq!(timer.story_id, "PRD generation");
+    fn test_verbose_timer_spec_variant() {
+        let mut timer = VerboseTimer::new_for_spec();
+        assert_eq!(timer.story_id, "Spec generation");
         timer.stop_timer();
     }
 
@@ -1581,9 +1581,9 @@ mod tests {
     }
 
     #[test]
-    fn test_format_display_prefix_prd_fallback() {
-        let prefix = format_display_prefix("PRD", &None);
-        assert_eq!(prefix, "PRD generation");
+    fn test_format_display_prefix_spec_fallback() {
+        let prefix = format_display_prefix("Spec", &None);
+        assert_eq!(prefix, "Spec generation");
     }
 
     #[test]

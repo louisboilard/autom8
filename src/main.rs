@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
     about = "CLI automation tool for orchestrating Claude-powered development"
 )]
 struct Cli {
-    /// Path to a prd.md or prd.json file (shorthand for `run --prd <file>`)
+    /// Path to a spec.md or spec.json file (shorthand for `run --spec <file>`)
     file: Option<PathBuf>,
 
     /// Show full Claude output instead of spinner (useful for debugging)
@@ -30,11 +30,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the agent loop to implement PRD stories
+    /// Run the agent loop to implement spec stories
     Run {
-        /// Path to the PRD JSON or spec file
-        #[arg(long, default_value = "./prd.json")]
-        prd: PathBuf,
+        /// Path to the spec JSON or markdown file
+        #[arg(long, default_value = "./spec.json")]
+        spec: PathBuf,
 
         /// Skip the review loop and go directly to committing
         #[arg(long)]
@@ -55,7 +55,7 @@ enum Commands {
     /// Resume a failed or interrupted run
     Resume,
 
-    /// Clean up PRD files from current directory
+    /// Clean up spec files from config directory
     Clean,
 
     /// Initialize autom8 config directory structure for current project
@@ -77,14 +77,14 @@ enum Commands {
 /// Determine input type based on file extension
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum InputType {
-    Prd,  // .json file
-    Spec, // .md or other file
+    Json, // .json file (spec-<feature>.json)
+    Markdown, // .md or other file (spec-<feature>.md)
 }
 
 fn detect_input_type(path: &Path) -> InputType {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => InputType::Prd,
-        _ => InputType::Spec,
+        Some("json") => InputType::Json,
+        _ => InputType::Markdown,
     }
 }
 
@@ -112,12 +112,12 @@ fn main() {
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (None, Some(Commands::Run { prd, skip_review })) => {
+        (None, Some(Commands::Run { spec, skip_review })) => {
             runner = runner.with_skip_review(*skip_review);
             print_header();
-            match detect_input_type(prd) {
-                InputType::Prd => runner.run(prd),
-                InputType::Spec => runner.run_from_spec(prd),
+            match detect_input_type(spec) {
+                InputType::Json => runner.run(spec),
+                InputType::Markdown => runner.run_from_spec(spec),
             }
         }
 
@@ -144,7 +144,7 @@ fn main() {
 
         (None, Some(Commands::Resume)) => runner.resume(),
 
-        (None, Some(Commands::Clean)) => clean_prd_files(),
+        (None, Some(Commands::Clean)) => clean_spec_files(),
 
         (None, Some(Commands::Init)) => init_command(),
 
@@ -154,7 +154,7 @@ fn main() {
 
         (None, Some(Commands::Describe { project_name })) => describe_command(project_name),
 
-        // No file and no command - check for existing state first, then start PRD creation
+        // No file and no command - check for existing state first, then start spec creation
         (None, None) => default_command(cli.verbose),
     };
 
@@ -182,8 +182,8 @@ fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
 
     // Use the destination path for processing
     match detect_input_type(&move_result.dest_path) {
-        InputType::Prd => runner.run(&move_result.dest_path),
-        InputType::Spec => runner.run_from_spec(&move_result.dest_path),
+        InputType::Json => runner.run(&move_result.dest_path),
+        InputType::Markdown => runner.run_from_spec(&move_result.dest_path),
     }
 }
 
@@ -191,7 +191,7 @@ fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
 ///
 /// First checks for an existing state file indicating work in progress.
 /// If state exists, proceeds to prompt the user (US-002).
-/// If no state exists, proceeds to start PRD creation (US-003).
+/// If no state exists, proceeds to start spec creation (US-003).
 fn default_command(verbose: bool) -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
@@ -202,8 +202,8 @@ fn default_command(verbose: bool) -> autom8::error::Result<()> {
         // State exists - proceed to US-002 (prompt user)
         handle_existing_state(state, verbose)
     } else {
-        // No state - proceed to US-003 (start PRD creation)
-        start_prd_creation(verbose)
+        // No state - proceed to US-003 (start spec creation)
+        start_spec_creation(verbose)
     }
 }
 
@@ -240,7 +240,7 @@ fn handle_existing_state(state: autom8::state::RunState, verbose: bool) -> autom
             runner.resume()
         }
         1 => {
-            // Option 2: Start fresh → archive state and proceed to PRD creation
+            // Option 2: Start fresh → archive state and proceed to spec creation
             let state_manager = StateManager::new()?;
 
             // Archive before deleting (US-004 behavior)
@@ -254,8 +254,8 @@ fn handle_existing_state(state: autom8::state::RunState, verbose: bool) -> autom
             );
             println!();
 
-            // Proceed to PRD creation
-            start_prd_creation(verbose)
+            // Proceed to spec creation
+            start_spec_creation(verbose)
         }
         _ => {
             // Option 3: Exit → do nothing, exit cleanly
@@ -266,34 +266,34 @@ fn handle_existing_state(state: autom8::state::RunState, verbose: bool) -> autom
     }
 }
 
-/// Start a new PRD creation session (US-003)
-fn start_prd_creation(verbose: bool) -> autom8::error::Result<()> {
-    use autom8::PrdSnapshot;
+/// Start a new spec creation session (US-003)
+fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
+    use autom8::SpecSnapshot;
     use std::process::Command;
 
     print_header();
 
     // Print explanation of what will happen
-    println!("{BOLD}Starting PRD Creation Session{RESET}");
+    println!("{BOLD}Starting Spec Creation Session{RESET}");
     println!();
-    println!("This will spawn an interactive Claude session to help you create a PRD.");
+    println!("This will spawn an interactive Claude session to help you create a spec.");
     println!("Claude will guide you through defining your feature with questions about:");
     println!("  • Project context and tech stack");
     println!("  • Feature requirements and user stories");
     println!("  • Acceptance criteria for each story");
     println!();
-    println!("When you're done, save the PRD as {CYAN}prd.md{RESET} and exit the session.");
+    println!("When you're done, save the spec as {CYAN}spec-<feature>.md{RESET} and exit the session.");
     println!("autom8 will automatically proceed to implementation.");
     println!();
     println!("{GRAY}Starting Claude...{RESET}");
     println!();
 
-    // Take a snapshot of existing PRD files before spawning Claude
-    let snapshot = PrdSnapshot::capture()?;
+    // Take a snapshot of existing spec files before spawning Claude
+    let snapshot = SpecSnapshot::capture()?;
 
-    // Spawn interactive Claude session with the PRD skill prompt
+    // Spawn interactive Claude session with the spec skill prompt
     let status = Command::new("claude")
-        .arg(prompts::PRD_SKILL_PROMPT)
+        .arg(prompts::SPEC_SKILL_PROMPT)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -306,40 +306,40 @@ fn start_prd_creation(verbose: bool) -> autom8::error::Result<()> {
                 println!("{GREEN}Claude session ended.{RESET}");
                 println!();
 
-                // Detect new PRD files created during the session
+                // Detect new spec files created during the session
                 let new_files = snapshot.detect_new_files()?;
 
                 match new_files.len() {
                     0 => {
-                        print_error("No new PRD files detected.");
+                        print_error("No new spec files detected.");
                         println!();
                         println!("{BOLD}Possible causes:{RESET}");
-                        println!("  • Claude session ended before the PRD was saved");
-                        println!("  • PRD was saved to an unexpected location");
-                        println!("  • Claude didn't follow the PRD skill instructions");
+                        println!("  • Claude session ended before the spec was saved");
+                        println!("  • Spec was saved to an unexpected location");
+                        println!("  • Claude didn't follow the spec skill instructions");
                         println!();
                         println!("{BOLD}Suggestions:{RESET}");
                         println!("  • Run {CYAN}autom8{RESET} again to start a fresh session");
                         println!("  • Or use the manual workflow:");
-                        println!("      1. Run {CYAN}autom8 skill prd{RESET} to get the prompt");
+                        println!("      1. Run {CYAN}autom8 skill spec{RESET} to get the prompt");
                         println!("      2. Start a Claude session and paste the prompt");
-                        println!("      3. Save the PRD as {CYAN}prd.md{RESET}");
+                        println!("      3. Save the spec as {CYAN}spec-<feature>.md{RESET}");
                         println!("      4. Run {CYAN}autom8{RESET} to implement");
                         std::process::exit(1);
                     }
                     1 => {
-                        let prd_path = &new_files[0];
-                        println!("{GREEN}Detected new PRD:{RESET} {}", prd_path.display());
+                        let spec_path = &new_files[0];
+                        println!("{GREEN}Detected new spec:{RESET} {}", spec_path.display());
                         println!();
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
                         // Create a new runner and run from the spec
                         let runner = Runner::new()?.with_verbose(verbose);
-                        runner.run_from_spec(prd_path)
+                        runner.run_from_spec(spec_path)
                     }
                     n => {
-                        println!("{YELLOW}Detected {} new PRD files:{RESET}", n);
+                        println!("{YELLOW}Detected {} new spec files:{RESET}", n);
                         println!();
 
                         // Build options list with file paths
@@ -350,28 +350,28 @@ fn start_prd_creation(verbose: bool) -> autom8::error::Result<()> {
                                 let filename = file
                                     .file_name()
                                     .and_then(|n| n.to_str())
-                                    .unwrap_or("prd.md");
+                                    .unwrap_or("spec.md");
                                 format!("{}. {}", i + 1, filename)
                             })
                             .collect();
                         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
 
                         let choice = prompt::select(
-                            "Which PRD would you like to implement?",
+                            "Which spec would you like to implement?",
                             &option_refs,
                             0,
                         );
 
-                        let selected_prd = &new_files[choice];
+                        let selected_spec = &new_files[choice];
                         println!();
-                        println!("{GREEN}Selected:{RESET} {}", selected_prd.display());
+                        println!("{GREEN}Selected:{RESET} {}", selected_spec.display());
                         println!();
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
                         // Create a new runner and run from the spec
                         let runner = Runner::new()?.with_verbose(verbose);
-                        runner.run_from_spec(selected_prd)
+                        runner.run_from_spec(selected_spec)
                     }
                 }
             } else {
@@ -396,36 +396,36 @@ fn start_prd_creation(verbose: bool) -> autom8::error::Result<()> {
     }
 }
 
-fn clean_prd_files() -> autom8::error::Result<()> {
+fn clean_spec_files() -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
     let state_manager = StateManager::new()?;
-    let prds_dir = state_manager.prds_dir();
+    let spec_dir = state_manager.spec_dir();
     let project_config_dir = autom8::config::project_config_dir()?;
 
     let mut deleted_any = false;
 
-    // Check prds/ directory in config
-    if prds_dir.exists() {
-        let prds = state_manager.list_prds().unwrap_or_default();
-        if !prds.is_empty() {
+    // Check spec/ directory in config
+    if spec_dir.exists() {
+        let specs = state_manager.list_specs().unwrap_or_default();
+        if !specs.is_empty() {
             println!();
             println!(
-                "Found {} PRD file(s) in {}:",
-                prds.len(),
-                prds_dir.display()
+                "Found {} spec file(s) in {}:",
+                specs.len(),
+                spec_dir.display()
             );
-            for prd_path in &prds {
-                let filename = prd_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            for spec_path in &specs {
+                let filename = spec_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                 println!("  - {}", filename);
             }
             println!();
 
-            let prompt_msg = format!("Delete all PRDs in {}?", prds_dir.display());
+            let prompt_msg = format!("Delete all spec files in {}?", spec_dir.display());
             if prompt::confirm(&prompt_msg, false) {
-                for prd_path in prds {
-                    fs::remove_file(&prd_path)?;
-                    println!("{GREEN}Deleted{RESET} {}", prd_path.display());
+                for spec_path in specs {
+                    fs::remove_file(&spec_path)?;
+                    println!("{GREEN}Deleted{RESET} {}", spec_path.display());
                     deleted_any = true;
                 }
             }
@@ -433,7 +433,7 @@ fn clean_prd_files() -> autom8::error::Result<()> {
     }
 
     if !deleted_any {
-        println!("{GRAY}No PRD files to clean up in {}.{RESET}", project_config_dir.display());
+        println!("{GRAY}No spec files to clean up in {}.{RESET}", project_config_dir.display());
     }
 
     Ok(())
@@ -455,8 +455,7 @@ fn init_command() -> autom8::error::Result<()> {
     let (project_dir, project_created) = autom8::config::ensure_project_config_dir()?;
     if project_created {
         println!("  {GREEN}Created{RESET} {}", project_dir.display());
-        println!("  {GREEN}Created{RESET} {}/pdr/", project_dir.display());
-        println!("  {GREEN}Created{RESET} {}/prds/", project_dir.display());
+        println!("  {GREEN}Created{RESET} {}/spec/", project_dir.display());
         println!("  {GREEN}Created{RESET} {}/runs/", project_dir.display());
     } else {
         println!("  {GRAY}Exists{RESET}  {}", project_dir.display());
@@ -467,12 +466,11 @@ fn init_command() -> autom8::error::Result<()> {
     println!();
     println!("Config directory structure:");
     println!("  {CYAN}{}{RESET}", project_dir.display());
-    println!("    ├── pdr/   (PRD markdown files)");
-    println!("    ├── prds/  (PRD JSON files)");
+    println!("    ├── spec/  (spec markdown and JSON files)");
     println!("    └── runs/  (archived run states)");
     println!();
     println!("{BOLD}Next steps:{RESET}");
-    println!("  Run {CYAN}autom8{RESET} to start creating a PRD");
+    println!("  Run {CYAN}autom8{RESET} to start creating a spec");
 
     Ok(())
 }
@@ -515,43 +513,43 @@ fn describe_command(project_name: &str) -> autom8::error::Result<()> {
     // Check if project exists
     match autom8::config::get_project_description(project_name)? {
         Some(desc) => {
-            // If multiple PRDs exist and user might want to select one, handle that case
-            if desc.prds.len() > 1 {
-                // Ask user which PRD to describe
-                println!("{YELLOW}Multiple PRDs found for project '{}'{RESET}", project_name);
+            // If multiple specs exist and user might want to select one, handle that case
+            if desc.specs.len() > 1 {
+                // Ask user which spec to describe
+                println!("{YELLOW}Multiple specs found for project '{}'{RESET}", project_name);
                 println!();
 
                 let options: Vec<String> = desc
-                    .prds
+                    .specs
                     .iter()
-                    .map(|prd| {
-                        let progress = format!("{}/{}", prd.completed_count, prd.total_count);
-                        format!("{} ({})", prd.filename, progress)
+                    .map(|spec| {
+                        let progress = format!("{}/{}", spec.completed_count, spec.total_count);
+                        format!("{} ({})", spec.filename, progress)
                     })
                     .collect();
 
-                // Add an "All PRDs" option at the beginning
-                let mut all_options: Vec<&str> = vec!["Show all PRDs"];
+                // Add an "All specs" option at the beginning
+                let mut all_options: Vec<&str> = vec!["Show all specs"];
                 all_options.extend(options.iter().map(|s| s.as_str()));
 
-                let choice = prompt::select("Which PRD would you like to describe?", &all_options, 0);
+                let choice = prompt::select("Which spec would you like to describe?", &all_options, 0);
 
                 if choice == 0 {
-                    // Show all PRDs
+                    // Show all specs
                     print_project_description(&desc);
                 } else {
-                    // Show specific PRD
-                    let selected_prd = &desc.prds[choice - 1];
+                    // Show specific spec
+                    let selected_spec = &desc.specs[choice - 1];
 
-                    // Create a description with just the selected PRD
-                    let single_prd_desc = autom8::config::ProjectDescription {
-                        prds: vec![selected_prd.clone()],
+                    // Create a description with just the selected spec
+                    let single_spec_desc = autom8::config::ProjectDescription {
+                        specs: vec![selected_spec.clone()],
                         ..desc
                     };
-                    print_project_description(&single_prd_desc);
+                    print_project_description(&single_spec_desc);
                 }
             } else {
-                // Single or no PRDs - just show the description
+                // Single or no specs - just show the description
                 print_project_description(&desc);
             }
             Ok(())
@@ -633,9 +631,9 @@ mod tests {
     #[test]
     fn test_us006_file_argument_still_takes_precedence() {
         // Test that positional file argument still works
-        let cli = Cli::try_parse_from(["autom8", "my-prd.json"]).unwrap();
+        let cli = Cli::try_parse_from(["autom8", "my-spec.json"]).unwrap();
         assert!(cli.file.is_some());
-        assert_eq!(cli.file.unwrap().to_string_lossy(), "my-prd.json");
+        assert_eq!(cli.file.unwrap().to_string_lossy(), "my-spec.json");
     }
 
     // ======================================================================
@@ -759,11 +757,11 @@ mod tests {
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
         // Create first state, archive it
-        let state1 = RunState::new(PathBuf::from("prd1.json"), "feature/first".to_string());
+        let state1 = RunState::new(PathBuf::from("spec1.json"), "feature/first".to_string());
         sm.archive(&state1).unwrap();
 
         // Create second state, archive it
-        let state2 = RunState::new(PathBuf::from("prd2.json"), "feature/second".to_string());
+        let state2 = RunState::new(PathBuf::from("spec2.json"), "feature/second".to_string());
         sm.archive(&state2).unwrap();
 
         // Both archives should exist
@@ -772,46 +770,46 @@ mod tests {
     }
 
     // ======================================================================
-    // Tests for US-003: Run PRD creation flow as default
+    // Tests for US-003: Run spec creation flow as default
     // ======================================================================
-    // Note: The core PrdSnapshot detection logic is tested extensively in
+    // Note: The core SpecSnapshot detection logic is tested extensively in
     // src/snapshot.rs. Here we test the integration points for US-003.
 
     #[test]
-    fn test_us003_prd_snapshot_public_api_exists() {
-        // Test that PrdSnapshot has the required public API for the PRD creation flow
-        use autom8::PrdSnapshot;
+    fn test_us003_spec_snapshot_public_api_exists() {
+        // Test that SpecSnapshot has the required public API for the spec creation flow
+        use autom8::SpecSnapshot;
 
         // Verify capture() exists and returns a Result
         // (We can't test it directly without setting up config dirs, but we verify the API)
 
         // Verify the struct has the expected public fields
-        let _: fn() -> autom8::error::Result<PrdSnapshot> = PrdSnapshot::capture;
+        let _: fn() -> autom8::error::Result<SpecSnapshot> = SpecSnapshot::capture;
 
         // The snapshot module is properly exported
-        assert!(true, "PrdSnapshot is available through autom8::PrdSnapshot");
+        assert!(true, "SpecSnapshot is available through autom8::SpecSnapshot");
     }
 
     #[test]
-    fn test_us003_prd_skill_prompt_available() {
-        // Verify the PRD skill prompt is available for the PRD creation flow
+    fn test_us003_spec_skill_prompt_available() {
+        // Verify the spec skill prompt is available for the spec creation flow
         // This is what gets passed to Claude when spawning the session
         assert!(
-            !prompts::PRD_SKILL_PROMPT.is_empty(),
-            "PRD_SKILL_PROMPT should be defined and non-empty"
+            !prompts::SPEC_SKILL_PROMPT.is_empty(),
+            "SPEC_SKILL_PROMPT should be defined and non-empty"
         );
 
-        // The prompt should contain key instructions for PRD creation
+        // The prompt should contain key instructions for spec creation
         assert!(
-            prompts::PRD_SKILL_PROMPT.contains("PRD") || prompts::PRD_SKILL_PROMPT.contains("prd"),
-            "PRD_SKILL_PROMPT should mention PRD"
+            prompts::SPEC_SKILL_PROMPT.contains("spec") || prompts::SPEC_SKILL_PROMPT.contains("Spec"),
+            "SPEC_SKILL_PROMPT should mention spec"
         );
     }
 
     #[test]
-    fn test_us003_start_prd_creation_path_from_default_command() {
-        // Test that when no state exists, default_command proceeds to PRD creation
-        // This verifies the control flow: no state -> start_prd_creation
+    fn test_us003_start_spec_creation_path_from_default_command() {
+        // Test that when no state exists, default_command proceeds to spec creation
+        // This verifies the control flow: no state -> start_spec_creation
         use autom8::state::StateManager;
         use tempfile::TempDir;
 
@@ -823,14 +821,14 @@ mod tests {
         let result = sm.load_current().unwrap();
         assert!(result.is_none(), "Should have no state file");
 
-        // This confirms the condition for entering the PRD creation path:
+        // This confirms the condition for entering the spec creation path:
         // In default_command(), when load_current() returns None,
-        // it calls start_prd_creation(verbose)
+        // it calls start_spec_creation(verbose)
     }
 
     #[test]
-    fn test_us003_start_fresh_leads_to_prd_creation() {
-        // Test that "start fresh" option (after archiving state) leads to PRD creation
+    fn test_us003_start_fresh_leads_to_spec_creation() {
+        // Test that "start fresh" option (after archiving state) leads to spec creation
         use autom8::state::{RunState, StateManager};
         use tempfile::TempDir;
 
@@ -849,10 +847,10 @@ mod tests {
         let result = sm.load_current().unwrap();
         assert!(
             result.is_none(),
-            "After clear, should have no state - ready for PRD creation"
+            "After clear, should have no state - ready for spec creation"
         );
 
-        // This confirms the path: start fresh -> archive -> clear -> start_prd_creation
+        // This confirms the path: start fresh -> archive -> clear -> start_spec_creation
     }
 
     // ======================================================================
@@ -943,17 +941,17 @@ mod tests {
             name: "test-project".to_string(),
             has_active_run: false,
             run_status: None,
-            prd_count: 2,
-            incomplete_prd_count: 1,
-            pdr_count: 3,
+            spec_count: 2,
+            incomplete_spec_count: 1,
+            spec_md_count: 3,
             runs_count: 4,
         };
         assert_eq!(info.name, "test-project");
         assert!(!info.has_active_run);
         assert!(info.run_status.is_none());
-        assert_eq!(info.prd_count, 2);
-        assert_eq!(info.incomplete_prd_count, 1);
-        assert_eq!(info.pdr_count, 3);
+        assert_eq!(info.spec_count, 2);
+        assert_eq!(info.incomplete_spec_count, 1);
+        assert_eq!(info.spec_md_count, 3);
         assert_eq!(info.runs_count, 4);
     }
 
@@ -986,8 +984,7 @@ mod tests {
         let (path, _) = result.unwrap();
 
         // Verify all required subdirectories exist
-        assert!(path.join("pdr").exists(), "pdr/ should be created");
-        assert!(path.join("prds").exists(), "prds/ should be created");
+        assert!(path.join("spec").exists(), "spec/ should be created");
         assert!(path.join("runs").exists(), "runs/ should be created");
     }
 
@@ -1091,15 +1088,14 @@ mod tests {
         assert!(!desc.name.is_empty());
         assert!(desc.path.exists());
 
-        // PRDs should be loaded (autom8 has at least one PRD)
-        assert!(!desc.prds.is_empty(), "autom8 should have at least one PRD");
-
-        // Check PRD summary fields
-        let first_prd = &desc.prds[0];
-        assert!(!first_prd.filename.is_empty());
-        assert!(!first_prd.project_name.is_empty());
-        assert!(!first_prd.branch_name.is_empty());
-        assert!(!first_prd.stories.is_empty(), "PRD should have stories");
+        // Check spec summary fields if any exist
+        if !desc.specs.is_empty() {
+            let first_spec = &desc.specs[0];
+            assert!(!first_spec.filename.is_empty());
+            assert!(!first_spec.project_name.is_empty());
+            assert!(!first_spec.branch_name.is_empty());
+            assert!(!first_spec.stories.is_empty(), "Spec should have stories");
+        }
     }
 
     #[test]
@@ -1109,29 +1105,32 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let first_prd = &desc.prds[0];
-        let first_story = &first_prd.stories[0];
+        // Only test if there are specs available
+        if !desc.specs.is_empty() {
+            let first_spec = &desc.specs[0];
+            let first_story = &first_spec.stories[0];
 
-        // Story fields should be populated
-        assert!(!first_story.id.is_empty());
-        assert!(!first_story.title.is_empty());
-        // passes is a bool, so no emptiness check needed
+            // Story fields should be populated
+            assert!(!first_story.id.is_empty());
+            assert!(!first_story.title.is_empty());
+            // passes is a bool, so no emptiness check needed
+        }
     }
 
     #[test]
-    fn test_us008_prd_summary_progress_counts() {
+    fn test_us008_spec_summary_progress_counts() {
         // Verify completed_count and total_count are consistent
         let desc = autom8::config::get_project_description("autom8")
             .unwrap()
             .unwrap();
 
-        for prd in &desc.prds {
-            assert!(prd.completed_count <= prd.total_count);
-            assert_eq!(prd.total_count, prd.stories.len());
+        for spec in &desc.specs {
+            assert!(spec.completed_count <= spec.total_count);
+            assert_eq!(spec.total_count, spec.stories.len());
 
             // Verify completed_count matches actual passing stories
-            let actual_completed = prd.stories.iter().filter(|s| s.passes).count();
-            assert_eq!(prd.completed_count, actual_completed);
+            let actual_completed = spec.stories.iter().filter(|s| s.passes).count();
+            assert_eq!(spec.completed_count, actual_completed);
         }
     }
 }

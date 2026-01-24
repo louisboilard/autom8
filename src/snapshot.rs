@@ -1,6 +1,6 @@
-//! PRD file snapshot functionality for detecting new files after Claude sessions.
+//! Spec file snapshot functionality for detecting new files after Claude sessions.
 //!
-//! This module provides utilities to snapshot the state of PRD files (`.md` files)
+//! This module provides utilities to snapshot the state of spec files (`.md` files)
 //! before spawning a Claude session, so that new files can be detected afterward.
 
 use std::collections::HashMap;
@@ -17,19 +17,19 @@ pub struct FileMetadata {
     pub modified: SystemTime,
 }
 
-/// A snapshot of PRD files at a point in time.
+/// A snapshot of spec files at a point in time.
 ///
 /// This struct captures the state of `.md` files in relevant directories
 /// before spawning a Claude session, allowing detection of new files afterward.
 #[derive(Debug, Clone)]
-pub struct PrdSnapshot {
+pub struct SpecSnapshot {
     /// The timestamp when this snapshot was taken.
     pub timestamp: SystemTime,
     /// Map of file paths to their metadata at snapshot time.
     pub files: HashMap<PathBuf, FileMetadata>,
 }
 
-impl PrdSnapshot {
+impl SpecSnapshot {
     /// Create a new snapshot by scanning the specified directories for `.md` files.
     ///
     /// Scans both:
@@ -42,9 +42,9 @@ impl PrdSnapshot {
         let timestamp = SystemTime::now();
         let mut files = HashMap::new();
 
-        // Scan config directory pdr/
-        if let Ok(pdr_dir) = crate::config::pdr_dir() {
-            collect_md_files(&pdr_dir, &mut files);
+        // Scan config directory spec/
+        if let Ok(spec_dir) = crate::config::spec_dir() {
+            collect_md_files(&spec_dir, &mut files);
         }
 
         // Scan current working directory
@@ -97,9 +97,9 @@ impl PrdSnapshot {
         self.files.get(path)
     }
 
-    /// Detect new PRD files by comparing current state against this snapshot.
+    /// Detect new spec files by comparing current state against this snapshot.
     ///
-    /// Scans the same directories (config pdr/ and current working directory) and returns
+    /// Scans the same directories (config spec/ and current working directory) and returns
     /// paths to files that are either:
     /// - Not present in the original snapshot (newly created)
     /// - Present but modified after the snapshot timestamp (modified during session)
@@ -108,9 +108,9 @@ impl PrdSnapshot {
     pub fn detect_new_files(&self) -> Result<Vec<PathBuf>> {
         let mut current_files = HashMap::new();
 
-        // Scan config directory pdr/
-        if let Ok(pdr_dir) = crate::config::pdr_dir() {
-            collect_md_files(&pdr_dir, &mut current_files);
+        // Scan config directory spec/
+        if let Ok(spec_dir) = crate::config::spec_dir() {
+            collect_md_files(&spec_dir, &mut current_files);
         }
 
         // Scan current working directory
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_empty_snapshot() {
-        let snapshot = PrdSnapshot::empty();
+        let snapshot = SpecSnapshot::empty();
         assert!(snapshot.is_empty());
         assert_eq!(snapshot.len(), 0);
     }
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn test_capture_from_nonexistent_directory() {
         let nonexistent = PathBuf::from("/this/path/does/not/exist");
-        let snapshot = PrdSnapshot::capture_from_dirs(&[nonexistent]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[nonexistent]);
 
         assert!(snapshot.is_empty());
         assert_eq!(snapshot.len(), 0);
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_capture_from_empty_directory() {
         let temp_dir = TempDir::new().unwrap();
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         assert!(snapshot.is_empty());
     }
@@ -255,7 +255,7 @@ mod tests {
         fs::write(temp_dir.path().join("config.json"), "{}").unwrap();
         fs::write(temp_dir.path().join("script.sh"), "#!/bin/bash").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         assert_eq!(snapshot.len(), 2, "Should only capture .md files");
     }
@@ -266,7 +266,7 @@ mod tests {
         let md_file = temp_dir.path().join("test.md");
         fs::write(&md_file, "# Test").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         assert_eq!(snapshot.len(), 1);
 
@@ -291,7 +291,7 @@ mod tests {
         let md_file = temp_dir.path().join("test.md");
         fs::write(&md_file, "# Test").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         let canonical = md_file.canonicalize().unwrap();
         assert!(snapshot.contains(&canonical));
@@ -310,7 +310,7 @@ mod tests {
         fs::write(temp_dir1.path().join("file1.md"), "# File 1").unwrap();
         fs::write(temp_dir2.path().join("file2.md"), "# File 2").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[
+        let snapshot = SpecSnapshot::capture_from_dirs(&[
             temp_dir1.path().to_path_buf(),
             temp_dir2.path().to_path_buf(),
         ]);
@@ -330,7 +330,7 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
         fs::write(subdir.join("nested.md"), "# Nested").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         assert_eq!(
             snapshot.len(),
@@ -343,7 +343,7 @@ mod tests {
     fn test_snapshot_timestamp_is_current() {
         let before = SystemTime::now();
         thread::sleep(Duration::from_millis(10));
-        let snapshot = PrdSnapshot::empty();
+        let snapshot = SpecSnapshot::empty();
         thread::sleep(Duration::from_millis(10));
         let after = SystemTime::now();
 
@@ -378,7 +378,7 @@ mod tests {
 
         fs::write(existing_dir.join("test.md"), "# Test").unwrap();
 
-        let snapshot = PrdSnapshot::capture_from_dirs(&[existing_dir, nonexistent_dir]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[existing_dir, nonexistent_dir]);
 
         assert_eq!(
             snapshot.len(),
@@ -399,7 +399,7 @@ mod tests {
             let symlink = temp_dir.path().join("link.md");
             std::os::unix::fs::symlink(&md_file, &symlink).unwrap();
 
-            let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+            let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
             // Due to canonicalization, the symlink should resolve to the same file
             // but since we're iterating directory entries, we might see both
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn test_detect_new_files_empty_snapshot_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         // No changes - should detect nothing
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
@@ -425,15 +425,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Take snapshot of empty directory
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
         assert!(snapshot.is_empty());
 
         // Small delay to ensure file timestamp is after snapshot
         thread::sleep(Duration::from_millis(50));
 
         // Create new file
-        let new_file = temp_dir.path().join("new_prd.md");
-        fs::write(&new_file, "# New PRD").unwrap();
+        let new_file = temp_dir.path().join("spec-new-feature.md");
+        fs::write(&new_file, "# New Spec").unwrap();
 
         // Detect new files
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
@@ -447,15 +447,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Take snapshot of empty directory
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         // Small delay
         thread::sleep(Duration::from_millis(50));
 
         // Create multiple new files
-        fs::write(temp_dir.path().join("prd1.md"), "# PRD 1").unwrap();
-        fs::write(temp_dir.path().join("prd2.md"), "# PRD 2").unwrap();
-        fs::write(temp_dir.path().join("prd3.md"), "# PRD 3").unwrap();
+        fs::write(temp_dir.path().join("spec-one.md"), "# Spec 1").unwrap();
+        fs::write(temp_dir.path().join("spec-two.md"), "# Spec 2").unwrap();
+        fs::write(temp_dir.path().join("spec-three.md"), "# Spec 3").unwrap();
 
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
 
@@ -468,10 +468,10 @@ mod tests {
 
         // Create existing file
         let existing_file = temp_dir.path().join("existing.md");
-        fs::write(&existing_file, "# Existing PRD").unwrap();
+        fs::write(&existing_file, "# Existing Spec").unwrap();
 
         // Take snapshot
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
         assert_eq!(snapshot.len(), 1);
 
         // Detect without any changes
@@ -489,7 +489,7 @@ mod tests {
         fs::write(&existing_file, "# Original content").unwrap();
 
         // Take snapshot
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         // Small delay to ensure modification time differs
         thread::sleep(Duration::from_millis(50));
@@ -508,12 +508,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Take snapshot of empty directory
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         thread::sleep(Duration::from_millis(50));
 
         // Create files of various types
-        fs::write(temp_dir.path().join("prd.md"), "# PRD").unwrap();
+        fs::write(temp_dir.path().join("spec-feature.md"), "# Spec").unwrap();
         fs::write(temp_dir.path().join("config.json"), "{}").unwrap();
         fs::write(temp_dir.path().join("readme.txt"), "readme").unwrap();
         fs::write(temp_dir.path().join("script.sh"), "#!/bin/bash").unwrap();
@@ -529,7 +529,7 @@ mod tests {
         let temp_dir2 = TempDir::new().unwrap();
 
         // Take snapshot of both directories
-        let snapshot = PrdSnapshot::capture_from_dirs(&[
+        let snapshot = SpecSnapshot::capture_from_dirs(&[
             temp_dir1.path().to_path_buf(),
             temp_dir2.path().to_path_buf(),
         ]);
@@ -537,8 +537,8 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         // Create new files in both directories
-        fs::write(temp_dir1.path().join("prd1.md"), "# PRD 1").unwrap();
-        fs::write(temp_dir2.path().join("prd2.md"), "# PRD 2").unwrap();
+        fs::write(temp_dir1.path().join("spec1.md"), "# Spec 1").unwrap();
+        fs::write(temp_dir2.path().join("spec2.md"), "# Spec 2").unwrap();
 
         let new_files = snapshot.detect_new_files_from_dirs(&[
             temp_dir1.path().to_path_buf(),
@@ -553,7 +553,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Take snapshot of empty directory
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         thread::sleep(Duration::from_millis(50));
 
@@ -580,7 +580,7 @@ mod tests {
         let nonexistent = PathBuf::from("/this/path/does/not/exist/at/all");
 
         // Snapshot from temp_dir, then detect including nonexistent dir
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
 
         thread::sleep(Duration::from_millis(50));
 
@@ -604,7 +604,7 @@ mod tests {
         fs::write(temp_dir.path().join("old2.md"), "# Old 2").unwrap();
 
         // Take snapshot
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
         assert_eq!(snapshot.len(), 2);
 
         thread::sleep(Duration::from_millis(50));
@@ -636,7 +636,7 @@ mod tests {
         fs::write(&to_delete, "# Delete me").unwrap();
 
         // Take snapshot
-        let snapshot = PrdSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
+        let snapshot = SpecSnapshot::capture_from_dirs(&[temp_dir.path().to_path_buf()]);
         assert_eq!(snapshot.len(), 1);
 
         // Delete the file

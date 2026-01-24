@@ -1,4 +1,4 @@
-use crate::prd::Prd;
+use crate::spec::Spec;
 use crate::progress::Breadcrumb;
 use crate::state::{MachineState, RunState};
 use terminal_size::{terminal_size, Width};
@@ -133,13 +133,13 @@ pub fn print_header() {
     println!("{RESET}");
 }
 
-pub fn print_project_info(prd: &Prd) {
-    let completed = prd.completed_count();
-    let total = prd.total_count();
+pub fn print_project_info(spec: &Spec) {
+    let completed = spec.completed_count();
+    let total = spec.total_count();
     let progress_bar = make_progress_bar(completed, total, 12);
 
-    println!("{BLUE}Project:{RESET} {}", prd.project);
-    println!("{BLUE}Branch:{RESET}  {}", prd.branch_name);
+    println!("{BLUE}Project:{RESET} {}", spec.project);
+    println!("{BLUE}Branch:{RESET}  {}", spec.branch_name);
     println!(
         "{BLUE}Stories:{RESET} [{}] {}/{} complete",
         progress_bar, completed, total
@@ -203,7 +203,7 @@ pub fn print_info(msg: &str) {
 pub fn print_status(state: &RunState) {
     println!("{BLUE}Run ID:{RESET}    {}", state.run_id);
     println!("{BLUE}Status:{RESET}    {:?}", state.status);
-    println!("{BLUE}PRD:{RESET}       {}", state.prd_path.display());
+    println!("{BLUE}Spec:{RESET}      {}", state.spec_json_path.display());
     println!("{BLUE}Branch:{RESET}    {}", state.branch);
     if let Some(story) = &state.current_story {
         println!("{BLUE}Current:{RESET}   {}", story);
@@ -218,7 +218,7 @@ pub fn print_status(state: &RunState) {
 
 /// Print global status across all projects.
 ///
-/// Shows each project with its status: active runs, failed runs, and incomplete PRDs.
+/// Shows each project with its status: active runs, failed runs, and incomplete specs.
 /// Projects with active/failed runs are highlighted.
 /// Projects with no active work are shown as "idle".
 pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
@@ -248,22 +248,22 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
                 None => String::new(),
             };
 
-            let prd_info = if status.incomplete_prd_count > 0 {
+            let spec_info = if status.incomplete_spec_count > 0 {
                 format!(
-                    " {CYAN}{} incomplete PRD{}{RESET}",
-                    status.incomplete_prd_count,
-                    if status.incomplete_prd_count == 1 { "" } else { "s" }
+                    " {CYAN}{} incomplete spec{}{RESET}",
+                    status.incomplete_spec_count,
+                    if status.incomplete_spec_count == 1 { "" } else { "s" }
                 )
             } else {
                 String::new()
             };
 
             if status_indicator.is_empty() {
-                println!("  {BOLD}{}{RESET}{}", status.name, prd_info);
+                println!("  {BOLD}{}{RESET}{}", status.name, spec_info);
             } else {
                 println!(
                     "  {BOLD}{}{RESET} {}{}",
-                    status.name, status_indicator, prd_info
+                    status.name, status_indicator, spec_info
                 );
             }
         }
@@ -288,16 +288,16 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
         .iter()
         .filter(|s| s.run_status == Some(RunStatus::Failed))
         .count();
-    let incomplete_prd_total: usize = statuses.iter().map(|s| s.incomplete_prd_count).sum();
+    let incomplete_spec_total: usize = statuses.iter().map(|s| s.incomplete_spec_count).sum();
 
     println!(
-        "{GRAY}({} project{}, {} active, {} failed, {} incomplete PRD{}){RESET}",
+        "{GRAY}({} project{}, {} active, {} failed, {} incomplete spec{}){RESET}",
         statuses.len(),
         if statuses.len() == 1 { "" } else { "s" },
         active_count,
         failed_count,
-        incomplete_prd_total,
-        if incomplete_prd_total == 1 { "" } else { "s" }
+        incomplete_spec_total,
+        if incomplete_spec_total == 1 { "" } else { "s" }
     );
 }
 
@@ -310,12 +310,10 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
 /// ```text
 /// ~/.config/autom8/
 /// ├── my-project [running]
-/// │   ├── pdr/     (2 files)
-/// │   ├── prds/    (1 file)
+/// │   ├── spec/    (2 files)
 /// │   └── runs/    (3 archived)
 /// └── other-project [complete]
-///     ├── pdr/     (1 file)
-///     ├── prds/    (2 files)
+///     ├── spec/    (1 file)
 ///     └── runs/    (empty)
 /// ```
 pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
@@ -342,11 +340,11 @@ pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
         let (status_indicator, status_color) = match project.run_status {
             Some(RunStatus::Running) => ("[running]", YELLOW),
             Some(RunStatus::Failed) => ("[failed]", RED),
-            Some(RunStatus::Completed) if project.incomplete_prd_count > 0 => {
+            Some(RunStatus::Completed) if project.incomplete_spec_count > 0 => {
                 ("[incomplete]", CYAN)
             }
             Some(RunStatus::Completed) => ("[complete]", GREEN),
-            None if project.incomplete_prd_count > 0 => ("[incomplete]", CYAN),
+            None if project.incomplete_spec_count > 0 => ("[incomplete]", CYAN),
             None if project.has_content() => ("[idle]", GRAY),
             None => ("", GRAY),
         };
@@ -363,8 +361,8 @@ pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
 
         // Print subdirectories
         let subdirs = [
-            ("pdr", project.pdr_count, "file"),
-            ("prds", project.prd_count, "PRD"),
+            ("spec", project.spec_md_count, "md"),
+            ("spec", project.spec_count, "json"),
             ("runs", project.runs_count, "archived"),
         ];
 
@@ -396,10 +394,10 @@ pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
         .iter()
         .filter(|p| p.run_status == Some(RunStatus::Failed))
         .count();
-    let incomplete_total: usize = projects.iter().map(|p| p.incomplete_prd_count).sum();
+    let incomplete_total: usize = projects.iter().map(|p| p.incomplete_spec_count).sum();
 
     println!(
-        "{GRAY}({} project{}, {} active, {} failed, {} incomplete PRD{}){RESET}",
+        "{GRAY}({} project{}, {} active, {} failed, {} incomplete spec{}){RESET}",
         total,
         if total == 1 { "" } else { "s" },
         active_count,
@@ -414,7 +412,7 @@ pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
 /// Shows:
 /// - Project name and path
 /// - Current status (active run, idle, etc.)
-/// - PRD details with user stories and progress
+/// - Spec details with user stories and progress
 /// - File counts
 pub fn print_project_description(desc: &crate::config::ProjectDescription) {
     use crate::state::RunStatus;
@@ -442,40 +440,40 @@ pub fn print_project_description(desc: &crate::config::ProjectDescription) {
     }
     println!();
 
-    // PRDs section
-    if desc.prds.is_empty() {
-        println!("{GRAY}No PRDs found.{RESET}");
+    // Specs section
+    if desc.specs.is_empty() {
+        println!("{GRAY}No specs found.{RESET}");
     } else {
-        println!("{BOLD}PRDs:{RESET} ({} total)", desc.prds.len());
+        println!("{BOLD}Specs:{RESET} ({} total)", desc.specs.len());
         println!();
 
-        for prd in &desc.prds {
-            print_prd_summary(prd);
+        for spec in &desc.specs {
+            print_spec_summary(spec);
         }
     }
 
     // File counts summary
     println!("{GRAY}─────────────────────────────────────────────────────────{RESET}");
     println!(
-        "{GRAY}Files: {} pdr, {} prds, {} archived runs{RESET}",
-        desc.pdr_count,
-        desc.prds.len(),
+        "{GRAY}Files: {} spec md, {} spec json, {} archived runs{RESET}",
+        desc.spec_md_count,
+        desc.specs.len(),
         desc.runs_count
     );
 }
 
-/// Print summary of a single PRD with its user stories.
-fn print_prd_summary(prd: &crate::config::PrdSummary) {
-    // PRD header
-    println!("{CYAN}━━━{RESET} {BOLD}{}{RESET}", prd.filename);
-    println!("{BLUE}Project:{RESET} {}", prd.project_name);
-    println!("{BLUE}Branch:{RESET}  {}", prd.branch_name);
+/// Print summary of a single spec with its user stories.
+fn print_spec_summary(spec: &crate::config::SpecSummary) {
+    // Spec header
+    println!("{CYAN}━━━{RESET} {BOLD}{}{RESET}", spec.filename);
+    println!("{BLUE}Project:{RESET} {}", spec.project_name);
+    println!("{BLUE}Branch:{RESET}  {}", spec.branch_name);
 
     // Description (truncate if too long)
-    let desc_preview = if prd.description.len() > 100 {
-        format!("{}...", &prd.description[..100])
+    let desc_preview = if spec.description.len() > 100 {
+        format!("{}...", &spec.description[..100])
     } else {
-        prd.description.clone()
+        spec.description.clone()
     };
     // Show first line only for brevity
     let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
@@ -483,23 +481,23 @@ fn print_prd_summary(prd: &crate::config::PrdSummary) {
     println!();
 
     // Progress bar
-    let progress_bar = make_progress_bar_simple(prd.completed_count, prd.total_count, 12);
-    let progress_color = if prd.completed_count == prd.total_count {
+    let progress_bar = make_progress_bar_simple(spec.completed_count, spec.total_count, 12);
+    let progress_color = if spec.completed_count == spec.total_count {
         GREEN
-    } else if prd.completed_count == 0 {
+    } else if spec.completed_count == 0 {
         GRAY
     } else {
         YELLOW
     };
     println!(
         "{BOLD}Progress:{RESET} [{}] {}{}/{} stories complete{}",
-        progress_bar, progress_color, prd.completed_count, prd.total_count, RESET
+        progress_bar, progress_color, spec.completed_count, spec.total_count, RESET
     );
     println!();
 
     // User stories
     println!("{BOLD}User Stories:{RESET}");
-    for story in &prd.stories {
+    for story in &spec.stories {
         let status_icon = if story.passes {
             format!("{GREEN}✓{RESET}")
         } else {
@@ -560,7 +558,7 @@ fn state_to_display(state: MachineState) -> &'static str {
     match state {
         MachineState::Idle => "idle",
         MachineState::LoadingSpec => "loading-spec",
-        MachineState::GeneratingPrd => "generating-prd",
+        MachineState::GeneratingSpec => "generating-spec",
         MachineState::Initializing => "initializing",
         MachineState::PickingStory => "picking-story",
         MachineState::RunningClaude => "running-claude",
@@ -589,18 +587,18 @@ pub fn print_spec_loaded(path: &std::path::Path, size_bytes: u64) {
     println!("{BLUE}Spec:{RESET} {} ({})", path.display(), size_str);
 }
 
-pub fn print_generating_prd() {
-    println!("Converting to prd.json...");
+pub fn print_generating_spec() {
+    println!("Converting to spec JSON...");
     println!("{GRAY}{}{RESET}", "-".repeat(57));
 }
 
-pub fn print_prd_generated(prd: &Prd, output_path: &std::path::Path) {
+pub fn print_spec_generated(spec: &Spec, output_path: &std::path::Path) {
     println!("{GRAY}{}{RESET}", "-".repeat(57));
     println!();
-    println!("{GREEN}{BOLD}PRD Generated Successfully{RESET}");
-    println!("{BLUE}Project:{RESET} {}", prd.project);
-    println!("{BLUE}Stories:{RESET} {}", prd.total_count());
-    for story in &prd.user_stories {
+    println!("{GREEN}{BOLD}Spec Generated Successfully{RESET}");
+    println!("{BLUE}Project:{RESET} {}", spec.project);
+    println!("{BLUE}Stories:{RESET} {}", spec.total_count());
+    for story in &spec.user_stories {
         println!("  - {}: {}", story.id, story.title);
     }
     println!();
@@ -1443,9 +1441,9 @@ mod tests {
             name: "test-project".to_string(),
             has_active_run: false,
             run_status: None,
-            prd_count: 1,
-            incomplete_prd_count: 0,
-            pdr_count: 2,
+            spec_count: 1,
+            incomplete_spec_count: 0,
+            spec_md_count: 2,
             runs_count: 0,
         }];
         print_project_tree(&projects);
@@ -1459,27 +1457,27 @@ mod tests {
                 name: "project-a".to_string(),
                 has_active_run: true,
                 run_status: Some(crate::state::RunStatus::Running),
-                prd_count: 1,
-                incomplete_prd_count: 1,
-                pdr_count: 2,
+                spec_count: 1,
+                incomplete_spec_count: 1,
+                spec_md_count: 2,
                 runs_count: 3,
             },
             crate::config::ProjectTreeInfo {
                 name: "project-b".to_string(),
                 has_active_run: false,
                 run_status: Some(crate::state::RunStatus::Failed),
-                prd_count: 0,
-                incomplete_prd_count: 0,
-                pdr_count: 0,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
                 runs_count: 1,
             },
             crate::config::ProjectTreeInfo {
                 name: "project-c".to_string(),
                 has_active_run: false,
                 run_status: Some(crate::state::RunStatus::Completed),
-                prd_count: 2,
-                incomplete_prd_count: 0,
-                pdr_count: 1,
+                spec_count: 2,
+                incomplete_spec_count: 0,
+                spec_md_count: 1,
                 runs_count: 5,
             },
         ];
@@ -1496,54 +1494,54 @@ mod tests {
                 name: "running".to_string(),
                 has_active_run: true,
                 run_status: Some(RunStatus::Running),
-                prd_count: 1,
-                incomplete_prd_count: 0,
-                pdr_count: 0,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
                 runs_count: 0,
             },
             crate::config::ProjectTreeInfo {
                 name: "failed".to_string(),
                 has_active_run: false,
                 run_status: Some(RunStatus::Failed),
-                prd_count: 0,
-                incomplete_prd_count: 0,
-                pdr_count: 0,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
                 runs_count: 0,
             },
             crate::config::ProjectTreeInfo {
                 name: "complete".to_string(),
                 has_active_run: false,
                 run_status: Some(RunStatus::Completed),
-                prd_count: 1,
-                incomplete_prd_count: 0,
-                pdr_count: 0,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
                 runs_count: 0,
             },
             crate::config::ProjectTreeInfo {
                 name: "incomplete".to_string(),
                 has_active_run: false,
                 run_status: None,
-                prd_count: 1,
-                incomplete_prd_count: 1,
-                pdr_count: 0,
+                spec_count: 1,
+                incomplete_spec_count: 1,
+                spec_md_count: 0,
                 runs_count: 0,
             },
             crate::config::ProjectTreeInfo {
                 name: "idle".to_string(),
                 has_active_run: false,
                 run_status: None,
-                prd_count: 0,
-                incomplete_prd_count: 0,
-                pdr_count: 1,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 1,
                 runs_count: 0,
             },
             crate::config::ProjectTreeInfo {
                 name: "empty".to_string(),
                 has_active_run: false,
                 run_status: None,
-                prd_count: 0,
-                incomplete_prd_count: 0,
-                pdr_count: 0,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
                 runs_count: 0,
             },
         ];
@@ -1566,8 +1564,8 @@ mod tests {
             run_status: None,
             current_story: None,
             current_branch: None,
-            prds: vec![],
-            pdr_count: 0,
+            specs: vec![],
+            spec_md_count: 0,
             runs_count: 0,
         };
         print_project_description(&desc);
@@ -1585,7 +1583,7 @@ mod tests {
             run_status: Some(crate::state::RunStatus::Completed),
             current_story: None,
             current_branch: Some("feature/test".to_string()),
-            prds: vec![crate::config::PrdSummary {
+            specs: vec![crate::config::SpecSummary {
                 filename: "prd-test.json".to_string(),
                 path: PathBuf::from("/test/path/prds/prd-test.json"),
                 project_name: "Test Project".to_string(),
@@ -1606,7 +1604,7 @@ mod tests {
                 completed_count: 1,
                 total_count: 2,
             }],
-            pdr_count: 1,
+            spec_md_count: 1,
             runs_count: 2,
         };
         print_project_description(&desc);
@@ -1624,8 +1622,8 @@ mod tests {
             run_status: Some(crate::state::RunStatus::Running),
             current_story: Some("US-003".to_string()),
             current_branch: Some("feature/wip".to_string()),
-            prds: vec![],
-            pdr_count: 0,
+            specs: vec![],
+            spec_md_count: 0,
             runs_count: 0,
         };
         print_project_description(&desc);
@@ -1643,8 +1641,8 @@ mod tests {
             run_status: Some(crate::state::RunStatus::Failed),
             current_story: Some("US-001".to_string()),
             current_branch: Some("feature/broken".to_string()),
-            prds: vec![],
-            pdr_count: 0,
+            specs: vec![],
+            spec_md_count: 0,
             runs_count: 0,
         };
         print_project_description(&desc);
@@ -1664,7 +1662,7 @@ mod tests {
             run_status: None,
             current_story: None,
             current_branch: None,
-            prds: vec![crate::config::PrdSummary {
+            specs: vec![crate::config::SpecSummary {
                 filename: "prd-test.json".to_string(),
                 path: PathBuf::from("/test/path/prds/prd-test.json"),
                 project_name: "Test Project".to_string(),
@@ -1674,7 +1672,7 @@ mod tests {
                 completed_count: 0,
                 total_count: 0,
             }],
-            pdr_count: 0,
+            spec_md_count: 0,
             runs_count: 0,
         };
         print_project_description(&desc);

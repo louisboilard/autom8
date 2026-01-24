@@ -1,19 +1,19 @@
 use crate::claude::{
-    run_claude, run_corrector, run_for_commit, run_for_prd_generation, run_reviewer, ClaudeOutcome,
+    run_claude, run_corrector, run_for_commit, run_for_spec_generation, run_reviewer, ClaudeOutcome,
     ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
 use crate::error::{Autom8Error, Result};
 use crate::git;
 use crate::output::{
     print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
-    print_full_progress, print_generating_prd, print_header, print_info, print_issues_found,
+    print_full_progress, print_generating_spec, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
-    print_phase_banner, print_phase_footer, print_prd_generated, print_proceeding_to_implementation,
+    print_phase_banner, print_phase_footer, print_spec_generated, print_proceeding_to_implementation,
     print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
     BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
-use crate::prd::Prd;
+use crate::spec::Spec;
 use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
 use std::fs;
@@ -45,7 +45,7 @@ impl Runner {
         self
     }
 
-    /// Run from a prd.md spec file - converts to JSON first, then implements
+    /// Run from a spec-<feature>.md markdown file - converts to JSON first, then implements
     pub fn run_from_spec(&self, spec_path: &Path) -> Result<()> {
         // Check for existing active run
         if self.state_manager.has_active_run()? {
@@ -59,16 +59,16 @@ impl Runner {
             .canonicalize()
             .map_err(|_| Autom8Error::SpecNotFound(spec_path.to_path_buf()))?;
 
-        // Determine PRD output path in config directory
+        // Determine spec JSON output path in config directory
         let stem = spec_path
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("prd");
-        let prds_dir = self.state_manager.ensure_prds_dir()?;
-        let prd_path = prds_dir.join(format!("{}.json", stem));
+            .unwrap_or("spec");
+        let spec_dir = self.state_manager.ensure_spec_dir()?;
+        let spec_json_path = spec_dir.join(format!("{}.json", stem));
 
         // Initialize state
-        let mut state = RunState::from_spec(spec_path.clone(), prd_path.clone());
+        let mut state = RunState::from_spec(spec_path.clone(), spec_json_path.clone());
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -84,18 +84,18 @@ impl Runner {
         print_spec_loaded(&spec_path, metadata.len());
         println!();
 
-        // Transition to GeneratingPrd
-        state.transition_to(MachineState::GeneratingPrd);
+        // Transition to GeneratingSpec
+        state.transition_to(MachineState::GeneratingSpec);
         self.state_manager.save(&state)?;
-        print_state_transition(MachineState::LoadingSpec, MachineState::GeneratingPrd);
+        print_state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
 
-        print_generating_prd();
+        print_generating_spec();
 
-        // Run Claude to generate PRD
+        // Run Claude to generate spec JSON
         let verbose = self.verbose;
-        let prd = if verbose {
-            let mut timer = VerboseTimer::new_for_prd();
-            let result = run_for_prd_generation(&spec_content, &prd_path, |line| {
+        let spec = if verbose {
+            let mut timer = VerboseTimer::new_for_spec();
+            let result = run_for_spec_generation(&spec_content, &spec_json_path, |line| {
                 print_claude_output(line);
             });
             match &result {
@@ -103,10 +103,10 @@ impl Runner {
                 Err(e) => timer.finish_error(&e.to_string()),
             }
             match result {
-                Ok(prd) => prd,
+                Ok(spec) => spec,
                 Err(e) => {
                     print_error_panel(
-                        "PRD Generation Failed",
+                        "Spec Generation Failed",
                         &e.to_string(),
                         None,
                         None,
@@ -115,20 +115,20 @@ impl Runner {
                 }
             }
         } else {
-            let prd_start = Instant::now();
-            let mut spinner = ClaudeSpinner::new_for_prd();
-            let result = run_for_prd_generation(&spec_content, &prd_path, |line| {
+            let spec_start = Instant::now();
+            let mut spinner = ClaudeSpinner::new_for_spec();
+            let result = run_for_spec_generation(&spec_content, &spec_json_path, |line| {
                 spinner.update(line);
             });
             match &result {
-                Ok(_) => spinner.finish_success(prd_start.elapsed().as_secs()),
+                Ok(_) => spinner.finish_success(spec_start.elapsed().as_secs()),
                 Err(e) => spinner.finish_error(&e.to_string()),
             }
             match result {
-                Ok(prd) => prd,
+                Ok(spec) => spec,
                 Err(e) => {
                     print_error_panel(
-                        "PRD Generation Failed",
+                        "Spec Generation Failed",
                         &e.to_string(),
                         None,
                         None,
@@ -138,21 +138,21 @@ impl Runner {
             }
         };
 
-        print_prd_generated(&prd, &prd_path);
+        print_spec_generated(&spec, &spec_json_path);
 
-        // Update state with branch from generated PRD
-        state.branch = prd.branch_name.clone();
+        // Update state with branch from generated spec
+        state.branch = spec.branch_name.clone();
         state.transition_to(MachineState::Initializing);
         self.state_manager.save(&state)?;
-        print_state_transition(MachineState::GeneratingPrd, MachineState::Initializing);
+        print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
 
         // Continue with normal implementation flow
-        self.run_implementation_loop(state, &prd_path)
+        self.run_implementation_loop(state, &spec_json_path)
     }
 
-    pub fn run(&self, prd_path: &Path) -> Result<()> {
+    pub fn run(&self, spec_json_path: &Path) -> Result<()> {
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -161,35 +161,35 @@ impl Runner {
         }
 
         // Canonicalize path so resume works from any directory
-        let prd_path = prd_path
+        let spec_json_path = spec_json_path
             .canonicalize()
-            .map_err(|_| Autom8Error::PrdNotFound(prd_path.to_path_buf()))?;
+            .map_err(|_| Autom8Error::SpecNotFound(spec_json_path.to_path_buf()))?;
 
-        // Load and validate PRD
-        let prd = Prd::load(&prd_path)?;
+        // Load and validate spec
+        let spec = Spec::load(&spec_json_path)?;
 
         // If in a git repo, ensure we're on the correct branch
         if git::is_git_repo() {
             let current_branch = git::current_branch()?;
-            if current_branch != prd.branch_name {
+            if current_branch != spec.branch_name {
                 print_info(&format!(
                     "Switching from '{}' to '{}'",
-                    current_branch, prd.branch_name
+                    current_branch, spec.branch_name
                 ));
-                git::ensure_branch(&prd.branch_name)?;
+                git::ensure_branch(&spec.branch_name)?;
             }
         }
 
         // Initialize state
-        let state = RunState::new(prd_path.to_path_buf(), prd.branch_name.clone());
+        let state = RunState::new(spec_json_path.to_path_buf(), spec.branch_name.clone());
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
-        print_project_info(&prd);
+        print_project_info(&spec);
 
-        self.run_implementation_loop(state, &prd_path)
+        self.run_implementation_loop(state, &spec_json_path)
     }
 
-    fn run_implementation_loop(&self, mut state: RunState, prd_path: &Path) -> Result<()> {
+    fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {
         // Transition to PickingStory
         print_state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
@@ -202,12 +202,12 @@ impl Runner {
         // Breadcrumb trail for tracking workflow journey
         let mut breadcrumb = Breadcrumb::new();
 
-        // Helper to print run summary (loads PRD and prints)
+        // Helper to print run summary (loads spec and prints)
         let print_summary = |iteration: u32, results: &[StoryResult]| -> Result<()> {
-            let prd = Prd::load(prd_path)?;
+            let spec = Spec::load(spec_json_path)?;
             print_run_summary(
-                prd.total_count(),
-                prd.completed_count(),
+                spec.total_count(),
+                spec.completed_count(),
                 iteration,
                 run_start.elapsed().as_secs(),
                 results,
@@ -217,11 +217,11 @@ impl Runner {
 
         // Main loop
         loop {
-            // Reload PRD to get latest passes state
-            let prd = Prd::load(prd_path)?;
+            // Reload spec to get latest passes state
+            let spec = Spec::load(spec_json_path)?;
 
             // Check if all stories complete
-            if prd.all_complete() {
+            if spec.all_complete() {
                 print_all_complete();
 
                 // Skip review if --skip-review flag is set
@@ -261,7 +261,7 @@ impl Runner {
                                 MAX_REVIEW_ITERATIONS,
                             );
                             let res = run_reviewer(
-                                &prd,
+                                &spec,
                                 state.review_iteration,
                                 MAX_REVIEW_ITERATIONS,
                                 |line| {
@@ -289,7 +289,7 @@ impl Runner {
                                 MAX_REVIEW_ITERATIONS,
                             );
                             let res = run_reviewer(
-                                &prd,
+                                &spec,
                                 state.review_iteration,
                                 MAX_REVIEW_ITERATIONS,
                                 |line| {
@@ -321,8 +321,8 @@ impl Runner {
 
                         // Show progress bar after review task completion
                         print_full_progress(
-                            prd.completed_count(),
-                            prd.total_count(),
+                            spec.completed_count(),
+                            spec.total_count(),
                             state.review_iteration,
                             MAX_REVIEW_ITERATIONS,
                         );
@@ -359,7 +359,7 @@ impl Runner {
                                         state.review_iteration,
                                         MAX_REVIEW_ITERATIONS,
                                     );
-                                    let res = run_corrector(&prd, state.review_iteration, |line| {
+                                    let res = run_corrector(&spec, state.review_iteration, |line| {
                                         print_claude_output(line);
                                     });
                                     match &res {
@@ -379,7 +379,7 @@ impl Runner {
                                         state.review_iteration,
                                         MAX_REVIEW_ITERATIONS,
                                     );
-                                    let res = run_corrector(&prd, state.review_iteration, |line| {
+                                    let res = run_corrector(&spec, state.review_iteration, |line| {
                                         spinner.update(line);
                                     });
                                     match &res {
@@ -404,8 +404,8 @@ impl Runner {
 
                                 // Show progress bar after correct task completion
                                 print_full_progress(
-                                    prd.completed_count(),
-                                    prd.total_count(),
+                                    spec.completed_count(),
+                                    spec.total_count(),
                                     state.review_iteration,
                                     MAX_REVIEW_ITERATIONS,
                                 );
@@ -466,7 +466,7 @@ impl Runner {
                     let verbose = self.verbose;
                     let commit_result = if verbose {
                         let mut timer = VerboseTimer::new_for_commit();
-                        let res = run_for_commit(&prd, |line| {
+                        let res = run_for_commit(&spec, |line| {
                             print_claude_output(line);
                         });
                         match &res {
@@ -486,7 +486,7 @@ impl Runner {
                         res?
                     } else {
                         let mut spinner = ClaudeSpinner::new_for_commit();
-                        let res = run_for_commit(&prd, |line| {
+                        let res = run_for_commit(&spec, |line| {
                             spinner.update(line);
                         });
                         match &res {
@@ -540,7 +540,7 @@ impl Runner {
             }
 
             // Pick next story
-            let story = prd
+            let story = spec
                 .next_incomplete_story()
                 .ok_or(Autom8Error::NoIncompleteStories)?
                 .clone();
@@ -565,17 +565,17 @@ impl Runner {
             // Calculate story progress for display: [US-001 2/5]
             // Position is 0-indexed, so we add 1 to get 1-indexed display.
             // Fallback to state.iteration (already 1-indexed after start_iteration()).
-            let story_index = prd
+            let story_index = spec
                 .user_stories
                 .iter()
                 .position(|s| s.id == story.id)
                 .map(|i| i as u32 + 1)
                 .unwrap_or(state.iteration);
-            let total_stories = prd.total_count() as u32;
+            let total_stories = spec.total_count() as u32;
             let result = if verbose {
                 let mut timer =
                     VerboseTimer::new_with_story_progress(&story.id, story_index, total_stories);
-                let res = run_claude(&prd, &story, prd_path, &state.iterations, |line| {
+                let res = run_claude(&spec, &story, spec_json_path, &state.iterations, |line| {
                     print_claude_output(line);
                 });
                 match &res {
@@ -586,7 +586,7 @@ impl Runner {
             } else {
                 let mut spinner =
                     ClaudeSpinner::new_with_story_progress(&story.id, story_index, total_stories);
-                let res = run_claude(&prd, &story, prd_path, &state.iterations, |line| {
+                let res = run_claude(&spec, &story, spec_json_path, &state.iterations, |line| {
                     spinner.update(line);
                 });
                 match &res {
@@ -619,9 +619,9 @@ impl Runner {
                     print_breadcrumb_trail(&breadcrumb);
 
                     // Show progress bar after story task completion
-                    // Reload PRD to verify actual completion state
-                    let updated_prd = Prd::load(prd_path)?;
-                    print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
+                    // Reload spec to verify actual completion state
+                    let updated_spec = Spec::load(spec_json_path)?;
+                    print_tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
                     println!();
 
                     if verbose {
@@ -629,9 +629,9 @@ impl Runner {
                     }
 
                     // Validate that all stories are actually complete
-                    // Claude may output COMPLETE prematurely before updating the PRD
-                    if !updated_prd.all_complete() {
-                        // PRD doesn't match Claude's claim - continue processing stories
+                    // Claude may output COMPLETE prematurely before updating the spec
+                    if !updated_spec.all_complete() {
+                        // Spec doesn't match Claude's claim - continue processing stories
                         continue;
                     }
 
@@ -673,7 +673,7 @@ impl Runner {
                                     MAX_REVIEW_ITERATIONS,
                                 );
                                 let res = run_reviewer(
-                                    &prd,
+                                    &spec,
                                     state.review_iteration,
                                     MAX_REVIEW_ITERATIONS,
                                     |line| {
@@ -701,7 +701,7 @@ impl Runner {
                                     MAX_REVIEW_ITERATIONS,
                                 );
                                 let res = run_reviewer(
-                                    &prd,
+                                    &spec,
                                     state.review_iteration,
                                     MAX_REVIEW_ITERATIONS,
                                     |line| {
@@ -732,10 +732,10 @@ impl Runner {
                             print_breadcrumb_trail(&breadcrumb);
 
                             // Show progress bar after review task completion
-                            // Use updated_prd which was loaded earlier in this block
+                            // Use updated_spec which was loaded earlier in this block
                             print_full_progress(
-                                updated_prd.completed_count(),
-                                updated_prd.total_count(),
+                                updated_spec.completed_count(),
+                                updated_spec.total_count(),
                                 state.review_iteration,
                                 MAX_REVIEW_ITERATIONS,
                             );
@@ -776,7 +776,7 @@ impl Runner {
                                             MAX_REVIEW_ITERATIONS,
                                         );
                                         let res =
-                                            run_corrector(&prd, state.review_iteration, |line| {
+                                            run_corrector(&spec, state.review_iteration, |line| {
                                                 print_claude_output(line);
                                             });
                                         match &res {
@@ -797,7 +797,7 @@ impl Runner {
                                             MAX_REVIEW_ITERATIONS,
                                         );
                                         let res =
-                                            run_corrector(&prd, state.review_iteration, |line| {
+                                            run_corrector(&spec, state.review_iteration, |line| {
                                                 spinner.update(line);
                                             });
                                         match &res {
@@ -822,8 +822,8 @@ impl Runner {
 
                                     // Show progress bar after correct task completion
                                     print_full_progress(
-                                        updated_prd.completed_count(),
-                                        updated_prd.total_count(),
+                                        updated_spec.completed_count(),
+                                        updated_spec.total_count(),
                                         state.review_iteration,
                                         MAX_REVIEW_ITERATIONS,
                                     );
@@ -883,7 +883,7 @@ impl Runner {
 
                         let commit_result = if verbose {
                             let mut timer = VerboseTimer::new_for_commit();
-                            let res = run_for_commit(&prd, |line| {
+                            let res = run_for_commit(&spec, |line| {
                                 print_claude_output(line);
                             });
                             match &res {
@@ -903,7 +903,7 @@ impl Runner {
                             res?
                         } else {
                             let mut spinner = ClaudeSpinner::new_for_commit();
-                            let res = run_for_commit(&prd, |line| {
+                            let res = run_for_commit(&spec, |line| {
                                 spinner.update(line);
                             });
                             match &res {
@@ -974,9 +974,9 @@ impl Runner {
                     print_state_transition(MachineState::RunningClaude, MachineState::PickingStory);
                     print_iteration_complete(state.iteration);
 
-                    // Reload PRD and check if current story passed
-                    let updated_prd = Prd::load(prd_path)?;
-                    let story_passed = updated_prd
+                    // Reload spec and check if current story passed
+                    let updated_spec = Spec::load(spec_json_path)?;
+                    let story_passed = updated_spec
                         .user_stories
                         .iter()
                         .find(|s| s.id == story.id)
@@ -995,7 +995,7 @@ impl Runner {
                     }
 
                     // Show progress bar after story task completion
-                    print_tasks_progress(updated_prd.completed_count(), updated_prd.total_count());
+                    print_tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
                     println!();
 
                     // Continue to next iteration
@@ -1055,37 +1055,37 @@ impl Runner {
             if state.status == crate::state::RunStatus::Running
                 || state.status == crate::state::RunStatus::Failed
             {
-                let prd_path = state.prd_path.clone();
+                let spec_json_path = state.spec_json_path.clone();
 
                 // Archive the interrupted/failed run before starting fresh
                 self.state_manager.archive(&state)?;
                 self.state_manager.clear_current()?;
 
                 // Start a new run with the same parameters
-                return self.run(&prd_path);
+                return self.run(&spec_json_path);
             }
         }
 
-        // Second try: smart resume - scan for incomplete PRDs
+        // Second try: smart resume - scan for incomplete specs
         self.smart_resume()
     }
 
-    /// Scan prds/ in config directory for incomplete PRDs and offer to resume one
+    /// Scan spec/ in config directory for incomplete specs and offer to resume one
     fn smart_resume(&self) -> Result<()> {
         use crate::prompt;
 
-        let prd_files = self.state_manager.list_prds()?;
-        if prd_files.is_empty() {
-            return Err(Autom8Error::NoPrdsToResume);
+        let spec_files = self.state_manager.list_specs()?;
+        if spec_files.is_empty() {
+            return Err(Autom8Error::NoSpecsToResume);
         }
 
-        // Filter to incomplete PRDs
-        let incomplete_prds: Vec<(PathBuf, Prd)> = prd_files
+        // Filter to incomplete specs
+        let incomplete_specs: Vec<(PathBuf, Spec)> = spec_files
             .into_iter()
             .filter_map(|path| {
-                Prd::load(&path).ok().and_then(|prd| {
-                    if prd.is_incomplete() {
-                        Some((path, prd))
+                Spec::load(&path).ok().and_then(|spec| {
+                    if spec.is_incomplete() {
+                        Some((path, spec))
                     } else {
                         None
                     }
@@ -1093,65 +1093,65 @@ impl Runner {
             })
             .collect();
 
-        if incomplete_prds.is_empty() {
-            return Err(Autom8Error::NoPrdsToResume);
+        if incomplete_specs.is_empty() {
+            return Err(Autom8Error::NoSpecsToResume);
         }
 
         print_header();
-        println!("{YELLOW}[resume]{RESET} No active run found, scanning for incomplete PRDs...");
+        println!("{YELLOW}[resume]{RESET} No active run found, scanning for incomplete specs...");
         println!();
 
-        if incomplete_prds.len() == 1 {
-            // Auto-resume single incomplete PRD
-            let (prd_path, prd) = &incomplete_prds[0];
-            let (completed, total) = prd.progress();
+        if incomplete_specs.len() == 1 {
+            // Auto-resume single incomplete spec
+            let (spec_path, spec) = &incomplete_specs[0];
+            let (completed, total) = spec.progress();
             println!(
                 "{CYAN}Found{RESET} {} {GRAY}({}/{}){RESET}",
-                prd_path.display(),
+                spec_path.display(),
                 completed,
                 total
             );
             println!();
-            prompt::print_action(&format!("Resuming {}", prd.project));
+            prompt::print_action(&format!("Resuming {}", spec.project));
             println!();
-            return self.run(prd_path);
+            return self.run(spec_path);
         }
 
-        // Multiple incomplete PRDs - let user choose
+        // Multiple incomplete specs - let user choose
         println!(
-            "{BOLD}Found {} incomplete PRDs:{RESET}",
-            incomplete_prds.len()
+            "{BOLD}Found {} incomplete specs:{RESET}",
+            incomplete_specs.len()
         );
         println!();
 
-        let options: Vec<String> = incomplete_prds
+        let options: Vec<String> = incomplete_specs
             .iter()
-            .map(|(path, prd)| {
-                let (completed, total) = prd.progress();
+            .map(|(path, spec)| {
+                let (completed, total) = spec.progress();
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .unwrap_or("prd.json");
-                format!("{} - {} ({}/{})", filename, prd.project, completed, total)
+                    .unwrap_or("spec.json");
+                format!("{} - {} ({}/{})", filename, spec.project, completed, total)
             })
             .chain(std::iter::once("Exit".to_string()))
             .collect();
 
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-        let choice = prompt::select("Which PRD would you like to resume?", &option_refs, 0);
+        let choice = prompt::select("Which spec would you like to resume?", &option_refs, 0);
 
         // Handle Exit option
-        if choice >= incomplete_prds.len() {
+        if choice >= incomplete_specs.len() {
             println!();
             println!("Exiting.");
-            return Err(Autom8Error::NoPrdsToResume);
+            return Err(Autom8Error::NoSpecsToResume);
         }
 
-        let (prd_path, prd) = &incomplete_prds[choice];
+        let (spec_path, spec) = &incomplete_specs[choice];
         println!();
-        prompt::print_action(&format!("Resuming {}", prd.project));
+        prompt::print_action(&format!("Resuming {}", spec.project));
         println!();
-        self.run(prd_path)
+        self.run(spec_path)
     }
 
     fn archive_and_cleanup(&self, state: &RunState) -> Result<()> {

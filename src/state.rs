@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 const STATE_FILE: &str = "state.json";
 const RUNS_DIR: &str = "runs";
-const PRDS_DIR: &str = "prds";
+const SPEC_DIR: &str = "spec";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -23,7 +23,7 @@ pub enum RunStatus {
 pub enum MachineState {
     Idle,
     LoadingSpec,
-    GeneratingPrd,
+    GeneratingSpec,
     Initializing,
     PickingStory,
     RunningClaude,
@@ -60,9 +60,9 @@ pub struct RunState {
     pub run_id: String,
     pub status: RunStatus,
     pub machine_state: MachineState,
-    pub prd_path: PathBuf,
+    pub spec_json_path: PathBuf,
     #[serde(default)]
-    pub spec_path: Option<PathBuf>,
+    pub spec_md_path: Option<PathBuf>,
     pub branch: String,
     pub current_story: Option<String>,
     pub iteration: u32,
@@ -75,13 +75,13 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new(prd_path: PathBuf, branch: String) -> Self {
+    pub fn new(spec_json_path: PathBuf, branch: String) -> Self {
         Self {
             run_id: Uuid::new_v4().to_string(),
             status: RunStatus::Running,
             machine_state: MachineState::Initializing,
-            prd_path,
-            spec_path: None,
+            spec_json_path,
+            spec_md_path: None,
             branch,
             current_story: None,
             iteration: 0,
@@ -92,14 +92,14 @@ impl RunState {
         }
     }
 
-    pub fn from_spec(spec_path: PathBuf, prd_path: PathBuf) -> Self {
+    pub fn from_spec(spec_md_path: PathBuf, spec_json_path: PathBuf) -> Self {
         Self {
             run_id: Uuid::new_v4().to_string(),
             status: RunStatus::Running,
             machine_state: MachineState::LoadingSpec,
-            prd_path,
-            spec_path: Some(spec_path),
-            branch: String::new(), // Will be set after PRD generation
+            spec_json_path,
+            spec_md_path: Some(spec_md_path),
+            branch: String::new(), // Will be set after spec generation
             current_story: None,
             iteration: 0,
             review_iteration: 0,
@@ -198,9 +198,9 @@ impl StateManager {
         self.base_dir.join(RUNS_DIR)
     }
 
-    /// Path to the prds directory
-    pub fn prds_dir(&self) -> PathBuf {
-        self.base_dir.join(PRDS_DIR)
+    /// Path to the spec directory
+    pub fn spec_dir(&self) -> PathBuf {
+        self.base_dir.join(SPEC_DIR)
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -209,36 +209,36 @@ impl StateManager {
         Ok(())
     }
 
-    /// Ensure prds directory exists
-    pub fn ensure_prds_dir(&self) -> Result<PathBuf> {
-        let dir = self.prds_dir();
+    /// Ensure spec directory exists
+    pub fn ensure_spec_dir(&self) -> Result<PathBuf> {
+        let dir = self.spec_dir();
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
 
-    /// List all PRD files in the config directory's prds/, sorted by modification time (newest first)
-    pub fn list_prds(&self) -> Result<Vec<PathBuf>> {
-        let prds_dir = self.prds_dir();
-        if !prds_dir.exists() {
+    /// List all spec JSON files in the config directory's spec/, sorted by modification time (newest first)
+    pub fn list_specs(&self) -> Result<Vec<PathBuf>> {
+        let spec_dir = self.spec_dir();
+        if !spec_dir.exists() {
             return Ok(Vec::new());
         }
 
-        let mut prds: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-        for entry in fs::read_dir(&prds_dir)? {
+        let mut specs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in fs::read_dir(&spec_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(mtime) = metadata.modified() {
-                        prds.push((path, mtime));
+                        specs.push((path, mtime));
                     }
                 }
             }
         }
 
         // Sort by modification time, newest first
-        prds.sort_by(|a, b| b.1.cmp(&a.1));
-        Ok(prds.into_iter().map(|(p, _)| p).collect())
+        specs.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(specs.into_iter().map(|(p, _)| p).collect())
     }
 
     pub fn load_current(&self) -> Result<Option<RunState>> {
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_run_state_from_spec_has_review_iteration() {
-        let state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("prd.json"));
+        let state = RunState::from_spec(PathBuf::from("spec-feature.md"), PathBuf::from("spec-feature.json"));
         assert_eq!(state.review_iteration, 0);
     }
 
@@ -521,16 +521,16 @@ mod tests {
     }
 
     #[test]
-    fn test_state_manager_with_dir_creates_prds_subdir() {
+    fn test_state_manager_with_dir_creates_spec_subdir() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        let prds_dir = sm.ensure_prds_dir().unwrap();
+        let spec_dir = sm.ensure_spec_dir().unwrap();
 
-        // prds/ should be in the base dir
-        assert_eq!(prds_dir, temp_dir.path().join(PRDS_DIR));
-        assert!(prds_dir.exists());
-        assert!(prds_dir.is_dir());
+        // spec/ should be in the base dir
+        assert_eq!(spec_dir, temp_dir.path().join(SPEC_DIR));
+        assert!(spec_dir.exists());
+        assert!(spec_dir.is_dir());
     }
 
     #[test]
@@ -611,51 +611,51 @@ mod tests {
     }
 
     #[test]
-    fn test_state_manager_list_prds_empty() {
+    fn test_state_manager_list_specs_empty() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        let prds = sm.list_prds().unwrap();
-        assert!(prds.is_empty());
+        let specs = sm.list_specs().unwrap();
+        assert!(specs.is_empty());
     }
 
     #[test]
-    fn test_state_manager_list_prds_finds_json_files() {
+    fn test_state_manager_list_specs_finds_json_files() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        let prds_dir = sm.ensure_prds_dir().unwrap();
+        let spec_dir = sm.ensure_spec_dir().unwrap();
 
-        // Create a test PRD file
-        let prd_content = r#"{"project": "test", "branchName": "test", "userStories": []}"#;
-        fs::write(prds_dir.join("test.json"), prd_content).unwrap();
+        // Create a test spec file
+        let spec_content = r#"{"project": "test", "branchName": "test", "userStories": []}"#;
+        fs::write(spec_dir.join("test.json"), spec_content).unwrap();
 
-        let prds = sm.list_prds().unwrap();
-        assert_eq!(prds.len(), 1);
-        assert!(prds[0].ends_with("test.json"));
+        let specs = sm.list_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert!(specs[0].ends_with("test.json"));
     }
 
     #[test]
     fn test_state_manager_new_uses_config_directory() {
         // This test verifies that StateManager::new() uses the config directory
         let sm = StateManager::new().unwrap();
-        let prds_dir = sm.prds_dir();
+        let spec_dir = sm.spec_dir();
 
-        // The prds_dir should be under ~/.config/autom8/<project-name>/prds/
-        assert!(prds_dir.ends_with("prds"));
+        // The spec_dir should be under ~/.config/autom8/<project-name>/spec/
+        assert!(spec_dir.ends_with("spec"));
         // Parent should be the project name (autom8 when running tests)
-        let project_dir = prds_dir.parent().unwrap();
+        let project_dir = spec_dir.parent().unwrap();
         assert!(project_dir.parent().unwrap().ends_with("autom8"));
     }
 
     #[test]
     fn test_state_manager_for_project() {
         let sm = StateManager::for_project("test-project").unwrap();
-        let prds_dir = sm.prds_dir();
+        let spec_dir = sm.spec_dir();
 
-        // The prds_dir should be under ~/.config/autom8/test-project/prds/
-        assert!(prds_dir.ends_with("prds"));
-        let project_dir = prds_dir.parent().unwrap();
+        // The spec_dir should be under ~/.config/autom8/test-project/spec/
+        assert!(spec_dir.ends_with("spec"));
+        let project_dir = spec_dir.parent().unwrap();
         assert!(project_dir.ends_with("test-project"));
     }
 
@@ -685,26 +685,26 @@ mod tests {
         sm.clear_current().unwrap();
     }
 
-    /// Tests that smart_resume (via list_prds) scans the config directory prds/.
-    /// This verifies the path: ~/.config/autom8/<project-name>/prds/
+    /// Tests that smart_resume (via list_specs) scans the config directory spec/.
+    /// This verifies the path: ~/.config/autom8/<project-name>/spec/
     #[test]
-    fn test_state_manager_list_prds_uses_config_directory() {
+    fn test_state_manager_list_specs_uses_config_directory() {
         let sm = StateManager::new().unwrap();
-        let prds_dir = sm.prds_dir();
+        let spec_dir = sm.spec_dir();
 
         // Verify path structure
-        let path_str = prds_dir.to_string_lossy();
+        let path_str = spec_dir.to_string_lossy();
         assert!(
             path_str.contains(".config/autom8/") || path_str.contains(".config\\autom8\\"),
-            "prds_dir should be in ~/.config/autom8/: got {}",
+            "spec_dir should be in ~/.config/autom8/: got {}",
             path_str
         );
-        assert!(prds_dir.ends_with("prds"), "prds_dir should end with 'prds'");
+        assert!(spec_dir.ends_with("spec"), "spec_dir should end with 'spec'");
 
-        // list_prds should work (even if empty)
-        let prds = sm.list_prds().unwrap();
-        assert!(prds.is_empty() || prds.iter().all(|p| p.to_string_lossy().contains(".config/autom8/")),
-            "All PRDs should be in config directory");
+        // list_specs should work (even if empty)
+        let specs = sm.list_specs().unwrap();
+        assert!(specs.is_empty() || specs.iter().all(|p| p.to_string_lossy().contains(".config/autom8/")),
+            "All specs should be in config directory");
     }
 
     /// Tests that archived runs (used by resume history) are stored in config directory.
@@ -746,63 +746,63 @@ mod tests {
         assert!(!sm.has_active_run().unwrap(), "Should have no active run after clear");
     }
 
-    /// Tests that clean command can list and delete PRDs from config directory.
-    /// This verifies that files in ~/.config/autom8/<project-name>/prds/ can be:
-    /// 1. Listed via list_prds()
+    /// Tests that clean command can list and delete specs from config directory.
+    /// This verifies that files in ~/.config/autom8/<project-name>/spec/ can be:
+    /// 1. Listed via list_specs()
     /// 2. Deleted via standard fs::remove_file()
     #[test]
     fn test_clean_command_operates_on_config_directory() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        // Create prds directory structure
-        let prds_dir = temp_dir.path().join("prds");
-        std::fs::create_dir_all(&prds_dir).unwrap();
+        // Create spec directory structure
+        let spec_dir = temp_dir.path().join("spec");
+        std::fs::create_dir_all(&spec_dir).unwrap();
 
-        // Create test PRD files
-        let prd1 = prds_dir.join("prd-feature1.json");
-        let prd2 = prds_dir.join("prd-feature2.json");
-        std::fs::write(&prd1, r#"{"project": "test1"}"#).unwrap();
-        std::fs::write(&prd2, r#"{"project": "test2"}"#).unwrap();
+        // Create test spec files
+        let spec1 = spec_dir.join("spec-feature1.json");
+        let spec2 = spec_dir.join("spec-feature2.json");
+        std::fs::write(&spec1, r#"{"project": "test1"}"#).unwrap();
+        std::fs::write(&spec2, r#"{"project": "test2"}"#).unwrap();
 
-        // Verify list_prds finds the files
-        let prds = sm.list_prds().unwrap();
-        assert_eq!(prds.len(), 2, "Should find 2 PRD files");
+        // Verify list_specs finds the files
+        let specs = sm.list_specs().unwrap();
+        assert_eq!(specs.len(), 2, "Should find 2 spec files");
 
-        // Verify prds_dir points to config directory structure
-        assert_eq!(sm.prds_dir(), prds_dir);
+        // Verify spec_dir points to config directory structure
+        assert_eq!(sm.spec_dir(), spec_dir);
 
-        // Clean (delete) the files - simulating what clean_prd_files does
-        for prd_path in &prds {
-            std::fs::remove_file(prd_path).unwrap();
+        // Clean (delete) the files - simulating what clean_spec_files does
+        for spec_path in &specs {
+            std::fs::remove_file(spec_path).unwrap();
         }
 
         // Verify files are gone
-        let prds_after = sm.list_prds().unwrap();
-        assert!(prds_after.is_empty(), "All PRD files should be deleted");
-        assert!(!prd1.exists(), "prd-feature1.json should be deleted");
-        assert!(!prd2.exists(), "prd-feature2.json should be deleted");
+        let specs_after = sm.list_specs().unwrap();
+        assert!(specs_after.is_empty(), "All spec files should be deleted");
+        assert!(!spec1.exists(), "spec-feature1.json should be deleted");
+        assert!(!spec2.exists(), "spec-feature2.json should be deleted");
     }
 
     /// Tests that clean command no longer operates on legacy .autom8/ location.
-    /// PRD files should ONLY be found in the config directory.
+    /// Spec files should ONLY be found in the config directory.
     #[test]
     fn test_clean_uses_config_directory_not_legacy_location() {
         let sm = StateManager::new().unwrap();
-        let prds_dir = sm.prds_dir();
+        let spec_dir = sm.spec_dir();
 
-        // prds_dir should NOT point to .autom8/prds/ in current directory
-        let path_str = prds_dir.to_string_lossy();
+        // spec_dir should NOT point to .autom8/spec/ in current directory
+        let path_str = spec_dir.to_string_lossy();
         assert!(
-            !path_str.starts_with(".autom8/") && !path_str.contains("/.autom8/prds"),
-            "prds_dir should not reference legacy .autom8/ location: got {}",
+            !path_str.starts_with(".autom8/") && !path_str.contains("/.autom8/spec"),
+            "spec_dir should not reference legacy .autom8/ location: got {}",
             path_str
         );
 
         // Should be in ~/.config/autom8/
         assert!(
             path_str.contains(".config/autom8/") || path_str.contains(".config\\autom8\\"),
-            "prds_dir should be in config directory: got {}",
+            "spec_dir should be in config directory: got {}",
             path_str
         );
     }
