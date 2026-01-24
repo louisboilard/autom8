@@ -3,15 +3,17 @@ use crate::claude::{
     ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
 use crate::error::{Autom8Error, Result};
+use crate::gh::{create_pull_request, PRResult};
 use crate::git;
 use crate::output::{
     print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
     print_full_progress, print_generating_spec, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
-    print_phase_banner, print_phase_footer, print_spec_generated, print_proceeding_to_implementation,
-    print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
-    print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
-    BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_phase_banner, print_phase_footer, print_pr_already_exists, print_pr_skipped,
+    print_pr_success, print_spec_generated, print_proceeding_to_implementation, print_project_info,
+    print_review_passed, print_reviewing, print_run_summary, print_skip_review, print_spec_loaded,
+    print_state_transition, print_story_complete, print_tasks_progress, BannerColor, StoryResult,
+    BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::spec::Spec;
 use crate::progress::{AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer};
@@ -512,6 +514,9 @@ impl Runner {
                     // Print breadcrumb trail after commit phase completion
                     print_breadcrumb_trail(&breadcrumb);
 
+                    // Track whether commits were made for PR creation
+                    let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+
                     match commit_result {
                         CommitResult::Success(hash) => {
                             print_info(&format!("Changes committed successfully ({})", hash))
@@ -527,7 +532,42 @@ impl Runner {
                         }
                     }
 
-                    print_state_transition(MachineState::Committing, MachineState::Completed);
+                    // PR Creation step
+                    print_state_transition(MachineState::Committing, MachineState::CreatingPR);
+                    state.transition_to(MachineState::CreatingPR);
+                    self.state_manager.save(&state)?;
+
+                    match create_pull_request(&spec, commits_were_made) {
+                        Ok(PRResult::Success(url)) => {
+                            print_pr_success(&url);
+                            print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                        }
+                        Ok(PRResult::Skipped(reason)) => {
+                            print_pr_skipped(&reason);
+                            print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                        }
+                        Ok(PRResult::AlreadyExists(url)) => {
+                            print_pr_already_exists(&url);
+                            print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                        }
+                        Ok(PRResult::Error(msg)) => {
+                            print_error_panel("PR Creation Failed", &msg, None, None);
+                            print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                            state.transition_to(MachineState::Failed);
+                            self.state_manager.save(&state)?;
+                            return Err(Autom8Error::ClaudeError(format!(
+                                "PR creation failed: {}",
+                                msg
+                            )));
+                        }
+                        Err(e) => {
+                            print_error_panel("PR Creation Error", &e.to_string(), None, None);
+                            print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                            state.transition_to(MachineState::Failed);
+                            self.state_manager.save(&state)?;
+                            return Err(e);
+                        }
+                    }
                 } else {
                     print_state_transition(state.machine_state, MachineState::Completed);
                 }
@@ -929,6 +969,9 @@ impl Runner {
                         // Print breadcrumb trail after commit phase completion
                         print_breadcrumb_trail(&breadcrumb);
 
+                        // Track whether commits were made for PR creation
+                        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+
                         match commit_result {
                             CommitResult::Success(hash) => {
                                 print_info(&format!("Changes committed successfully ({})", hash))
@@ -944,7 +987,42 @@ impl Runner {
                             }
                         }
 
-                        print_state_transition(MachineState::Committing, MachineState::Completed);
+                        // PR Creation step
+                        print_state_transition(MachineState::Committing, MachineState::CreatingPR);
+                        state.transition_to(MachineState::CreatingPR);
+                        self.state_manager.save(&state)?;
+
+                        match create_pull_request(&spec, commits_were_made) {
+                            Ok(PRResult::Success(url)) => {
+                                print_pr_success(&url);
+                                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                            }
+                            Ok(PRResult::Skipped(reason)) => {
+                                print_pr_skipped(&reason);
+                                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                            }
+                            Ok(PRResult::AlreadyExists(url)) => {
+                                print_pr_already_exists(&url);
+                                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                            }
+                            Ok(PRResult::Error(msg)) => {
+                                print_error_panel("PR Creation Failed", &msg, None, None);
+                                print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                                state.transition_to(MachineState::Failed);
+                                self.state_manager.save(&state)?;
+                                return Err(Autom8Error::ClaudeError(format!(
+                                    "PR creation failed: {}",
+                                    msg
+                                )));
+                            }
+                            Err(e) => {
+                                print_error_panel("PR Creation Error", &e.to_string(), None, None);
+                                print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                                state.transition_to(MachineState::Failed);
+                                self.state_manager.save(&state)?;
+                                return Err(e);
+                            }
+                        }
                     } else {
                         print_state_transition(state.machine_state, MachineState::Completed);
                     }
@@ -1274,5 +1352,60 @@ mod tests {
         // that it reads from the config directory (no error means path resolution works)
         let status_result = runner.status();
         assert!(status_result.is_ok(), "Runner should use valid config directory paths");
+    }
+
+    // ========================================================================
+    // US-006: PR creation integration tests
+    // ========================================================================
+
+    #[test]
+    fn test_pr_result_success_variant_accessible() {
+        // Verify PRResult::Success is properly imported and usable
+        let result = PRResult::Success("https://github.com/owner/repo/pull/1".to_string());
+        assert!(matches!(result, PRResult::Success(_)));
+    }
+
+    #[test]
+    fn test_pr_result_skipped_variant_accessible() {
+        // Verify PRResult::Skipped is properly imported and usable
+        let result = PRResult::Skipped("No commits were made".to_string());
+        assert!(matches!(result, PRResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_pr_result_already_exists_variant_accessible() {
+        // Verify PRResult::AlreadyExists is properly imported and usable
+        let result = PRResult::AlreadyExists("https://github.com/owner/repo/pull/99".to_string());
+        assert!(matches!(result, PRResult::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn test_pr_result_error_variant_accessible() {
+        // Verify PRResult::Error is properly imported and usable
+        let result = PRResult::Error("Failed to create PR".to_string());
+        assert!(matches!(result, PRResult::Error(_)));
+    }
+
+    #[test]
+    fn test_commits_were_made_detection_success() {
+        // Test that CommitResult::Success is properly detected as commits_were_made = true
+        let commit_result = CommitResult::Success("abc123".to_string());
+        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+        assert!(commits_were_made, "Success should indicate commits were made");
+    }
+
+    #[test]
+    fn test_commits_were_made_detection_nothing_to_commit() {
+        // Test that CommitResult::NothingToCommit is properly detected as commits_were_made = false
+        let commit_result = CommitResult::NothingToCommit;
+        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+        assert!(!commits_were_made, "NothingToCommit should indicate no commits were made");
+    }
+
+    #[test]
+    fn test_creating_pr_state_accessible() {
+        // Verify MachineState::CreatingPR is properly accessible for transitions
+        let state = MachineState::CreatingPR;
+        assert!(matches!(state, MachineState::CreatingPR));
     }
 }
