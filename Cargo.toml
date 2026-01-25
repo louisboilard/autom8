@@ -12,7 +12,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "1"
-indicatif = "0.17"
+indicatif = "0.18"
 dirs = "5"
 terminal_size = "0.4"
 
