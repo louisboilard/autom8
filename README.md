@@ -6,18 +6,18 @@ A CLI automation tool for orchestrating Claude-powered development. Define your 
 
 autom8 bridges the gap between product requirements and working code. You describe what you want to build, and autom8 orchestrates Claude to implement it story by story, tracking progress and managing state throughout.
 
-### Key Features
-
 - **Spec-driven development** - Define features as structured user stories with acceptance criteria
-- **Iterative implementation** - Claude implements one story at a time, marking progress as it goes
 - **State persistence** - Interrupt and resume runs at any time
 - **Git integration** - Automatic branch management for feature development
-- **Progress tracking** - Visual feedback on implementation progress
+- **Progress tracking** - Feedback on implementation progress, without noise
+- **Deterministic when possible** - Only leverage LLM's for what they're good for, autom8 for the rest
 
 ## Installation
 
+Assuming you cloned this repo and have `cargo` installed:
+
 ```bash
-cargo install --path .
+cargo install --force --path .
 ```
 
 Requires the `claude` CLI to be installed and configured.
