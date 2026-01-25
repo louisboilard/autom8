@@ -135,6 +135,83 @@ pub fn latest_commit_short() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Result type for push operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushResult {
+    /// Push succeeded
+    Success,
+    /// Branch already up-to-date on remote
+    AlreadyUpToDate,
+    /// Push failed with error message
+    Error(String),
+}
+
+/// Push the current branch to origin with upstream tracking
+///
+/// Uses `git push --set-upstream origin <branch>` to push the branch
+/// and set up tracking. If the branch already exists on remote, it will
+/// still push any new commits.
+///
+/// # Arguments
+/// * `branch` - The branch name to push
+///
+/// # Returns
+/// * `PushResult::Success` - Push completed successfully
+/// * `PushResult::AlreadyUpToDate` - Branch is already up-to-date
+/// * `PushResult::Error(msg)` - Push failed with error message
+pub fn push_branch(branch: &str) -> Result<PushResult> {
+    let output = Command::new("git")
+        .args(["push", "--set-upstream", "origin", branch])
+        .output()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if output.status.success() {
+        // Check if already up-to-date (git push outputs this to stderr)
+        if stderr.contains("Everything up-to-date") {
+            return Ok(PushResult::AlreadyUpToDate);
+        }
+        return Ok(PushResult::Success);
+    }
+
+    // Handle specific error cases
+    let error_msg = if stderr.is_empty() {
+        stdout.trim().to_string()
+    } else {
+        stderr.trim().to_string()
+    };
+
+    // Check for non-fast-forward (branch exists but diverged)
+    if error_msg.contains("non-fast-forward")
+        || error_msg.contains("rejected")
+        || error_msg.contains("failed to push")
+    {
+        // Try with --force-with-lease for safe force push
+        let force_output = Command::new("git")
+            .args([
+                "push",
+                "--force-with-lease",
+                "--set-upstream",
+                "origin",
+                branch,
+            ])
+            .output()?;
+
+        if force_output.status.success() {
+            return Ok(PushResult::Success);
+        }
+
+        let force_stderr = String::from_utf8_lossy(&force_output.stderr);
+        return Ok(PushResult::Error(format!(
+            "Failed to push branch (even with --force-with-lease): {}",
+            force_stderr.trim()
+        )));
+    }
+
+    Ok(PushResult::Error(error_msg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,4 +241,56 @@ mod tests {
         assert!(hash.len() >= 7);
         assert!(hash.chars().all(|c| c.is_ascii_alphanumeric()));
     }
+
+    // ========================================================================
+    // PushResult enum tests
+    // ========================================================================
+
+    #[test]
+    fn test_push_result_success_variant() {
+        let result = PushResult::Success;
+        assert!(matches!(result, PushResult::Success));
+    }
+
+    #[test]
+    fn test_push_result_already_up_to_date_variant() {
+        let result = PushResult::AlreadyUpToDate;
+        assert!(matches!(result, PushResult::AlreadyUpToDate));
+    }
+
+    #[test]
+    fn test_push_result_error_contains_message() {
+        let msg = "permission denied".to_string();
+        let result = PushResult::Error(msg.clone());
+        assert_eq!(result, PushResult::Error(msg));
+    }
+
+    #[test]
+    fn test_push_result_variants_are_distinct() {
+        let success = PushResult::Success;
+        let up_to_date = PushResult::AlreadyUpToDate;
+        let error = PushResult::Error("error".to_string());
+
+        assert_ne!(success, up_to_date);
+        assert_ne!(success, error);
+        assert_ne!(up_to_date, error);
+    }
+
+    #[test]
+    fn test_push_result_clone() {
+        let original = PushResult::Error("test error".to_string());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_push_result_debug() {
+        let result = PushResult::Success;
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("Success"));
+    }
+
+    // Note: We don't test push_branch directly because it requires network access
+    // and would actually push to remote. The function is tested via integration
+    // tests or manual testing. The unit tests verify the PushResult enum behavior.
 }

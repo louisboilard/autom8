@@ -1,5 +1,5 @@
-use crate::spec::Spec;
 use crate::progress::Breadcrumb;
+use crate::spec::Spec;
 use crate::state::{MachineState, RunState};
 use terminal_size::{terminal_size, Width};
 
@@ -236,6 +236,23 @@ pub fn print_pr_skipped(reason: &str) {
     println!("{GRAY}PR creation skipped: {}{RESET}", reason);
 }
 
+/// Print a status message when pushing branch to remote.
+///
+/// This displays a simple status line indicating the push operation is in progress.
+pub fn print_pushing_branch(branch: &str) {
+    println!("{CYAN}Pushing branch '{}'...{RESET}", branch);
+}
+
+/// Print a success message when branch push completes.
+pub fn print_push_success() {
+    println!("{GREEN}Branch pushed successfully.{RESET}");
+}
+
+/// Print a message when branch is already up-to-date on remote.
+pub fn print_push_already_up_to_date() {
+    println!("{GRAY}Branch already up-to-date on remote.{RESET}");
+}
+
 pub fn print_status(state: &RunState) {
     println!("{BLUE}Run ID:{RESET}    {}", state.run_id);
     println!("{BLUE}Status:{RESET}    {:?}", state.status);
@@ -288,7 +305,11 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
                 format!(
                     " {CYAN}{} incomplete spec{}{RESET}",
                     status.incomplete_spec_count,
-                    if status.incomplete_spec_count == 1 { "" } else { "s" }
+                    if status.incomplete_spec_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 )
             } else {
                 String::new()
@@ -540,7 +561,10 @@ fn print_spec_summary(spec: &crate::config::SpecSummary) {
             format!("{GRAY}○{RESET}")
         };
         let title_color = if story.passes { GREEN } else { RESET };
-        println!("  {} {BOLD}{}{RESET}: {}{}{}", status_icon, story.id, title_color, story.title, RESET);
+        println!(
+            "  {} {BOLD}{}{RESET}: {}{}{}",
+            status_icon, story.id, title_color, story.title, RESET
+        );
     }
     println!();
 }
@@ -1065,48 +1089,33 @@ mod tests {
         assert_eq!(MAX_BANNER_WIDTH, 80);
     }
 
-    // Test that print_phase_banner doesn't panic for various inputs
     #[test]
-    fn test_print_phase_banner_running() {
-        // This test verifies the function doesn't panic
-        print_phase_banner("RUNNING", BannerColor::Cyan);
+    fn test_print_phase_banner_all_colors_and_phases() {
+        // Test all standard phase/color combinations don't panic
+        let test_cases: &[(&str, BannerColor)] = &[
+            ("RUNNING", BannerColor::Cyan),
+            ("REVIEWING", BannerColor::Cyan),
+            ("CORRECTING", BannerColor::Yellow),
+            ("COMMITTING", BannerColor::Cyan),
+            ("SUCCESS", BannerColor::Green),
+            ("FAILURE", BannerColor::Red),
+        ];
+
+        for (phase_name, color) in test_cases {
+            print_phase_banner(phase_name, *color);
+        }
     }
 
     #[test]
-    fn test_print_phase_banner_reviewing() {
-        print_phase_banner("REVIEWING", BannerColor::Cyan);
-    }
-
-    #[test]
-    fn test_print_phase_banner_correcting() {
-        print_phase_banner("CORRECTING", BannerColor::Yellow);
-    }
-
-    #[test]
-    fn test_print_phase_banner_committing() {
-        print_phase_banner("COMMITTING", BannerColor::Cyan);
-    }
-
-    #[test]
-    fn test_print_phase_banner_success() {
-        print_phase_banner("SUCCESS", BannerColor::Green);
-    }
-
-    #[test]
-    fn test_print_phase_banner_failure() {
-        print_phase_banner("FAILURE", BannerColor::Red);
-    }
-
-    #[test]
-    fn test_print_phase_banner_empty_name() {
-        // Should not panic even with empty name
+    fn test_print_phase_banner_edge_cases() {
+        // Empty name should not panic
         print_phase_banner("", BannerColor::Cyan);
-    }
 
-    #[test]
-    fn test_print_phase_banner_long_name() {
-        // Should not panic with a very long name
-        print_phase_banner("THIS_IS_A_VERY_LONG_PHASE_NAME_THAT_EXCEEDS_NORMAL_LENGTH", BannerColor::Cyan);
+        // Very long name should not panic
+        print_phase_banner(
+            "THIS_IS_A_VERY_LONG_PHASE_NAME_THAT_EXCEEDS_NORMAL_LENGTH",
+            BannerColor::Cyan,
+        );
     }
 
     // ========================================================================
@@ -1114,27 +1123,16 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_print_phase_footer_cyan() {
-        // Should not panic with cyan color (matches RUNNING/REVIEWING phase banners)
-        print_phase_footer(BannerColor::Cyan);
-    }
-
-    #[test]
-    fn test_print_phase_footer_yellow() {
-        // Should not panic with yellow color (matches CORRECTING phase banner)
-        print_phase_footer(BannerColor::Yellow);
-    }
-
-    #[test]
-    fn test_print_phase_footer_green() {
-        // Should not panic with green color (matches SUCCESS phase banner)
-        print_phase_footer(BannerColor::Green);
-    }
-
-    #[test]
-    fn test_print_phase_footer_red() {
-        // Should not panic with red color (matches FAILURE phase banner)
-        print_phase_footer(BannerColor::Red);
+    fn test_print_phase_footer_all_colors() {
+        // Test all banner colors work with footer
+        for color in &[
+            BannerColor::Cyan,
+            BannerColor::Yellow,
+            BannerColor::Green,
+            BannerColor::Red,
+        ] {
+            print_phase_footer(*color);
+        }
     }
 
     #[test]
@@ -1156,84 +1154,46 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_print_tasks_progress_no_panic() {
-        // Verify the function doesn't panic with various inputs
-        print_tasks_progress(0, 8);
-        print_tasks_progress(3, 8);
-        print_tasks_progress(8, 8);
-    }
+    fn test_print_progress_functions_various_inputs() {
+        // Test progress display functions with various inputs including edge cases
+        let task_cases: &[(usize, usize)] = &[(0, 8), (3, 8), (8, 8), (0, 0)];
+        for (completed, total) in task_cases {
+            print_tasks_progress(*completed, *total);
+        }
 
-    #[test]
-    fn test_print_tasks_progress_zero_total() {
-        // Should not panic when total is zero
-        print_tasks_progress(0, 0);
-    }
+        let review_cases: &[(u32, u32)] = &[(1, 3), (2, 3), (3, 3), (0, 0)];
+        for (current, max) in review_cases {
+            print_review_progress(*current, *max);
+        }
 
-    #[test]
-    fn test_print_review_progress_no_panic() {
-        // Verify the function doesn't panic with various inputs
-        print_review_progress(1, 3);
-        print_review_progress(2, 3);
-        print_review_progress(3, 3);
-    }
-
-    #[test]
-    fn test_print_review_progress_zero() {
-        // Should not panic when values are zero
-        print_review_progress(0, 0);
-    }
-
-    #[test]
-    fn test_print_full_progress_no_panic() {
-        // Verify the function doesn't panic with various inputs
+        // Full progress combines both
         print_full_progress(3, 8, 1, 3);
         print_full_progress(8, 8, 3, 3);
         print_full_progress(0, 10, 1, 3);
-    }
-
-    #[test]
-    fn test_print_full_progress_zero_values() {
-        // Should not panic when values are zero
         print_full_progress(0, 0, 0, 0);
     }
 
     #[test]
-    fn test_make_progress_bar_empty() {
-        let bar = make_progress_bar(0, 8, 12);
-        // Should have 12 chars (all empty)
-        assert!(bar.contains("░"));
-    }
+    fn test_make_progress_bar_states() {
+        // Empty bar
+        let empty = make_progress_bar(0, 8, 12);
+        assert!(empty.contains("░"));
 
-    #[test]
-    fn test_make_progress_bar_full() {
-        let bar = make_progress_bar(8, 8, 12);
-        // Should have 12 filled chars
-        assert!(bar.contains("█"));
-    }
+        // Full bar
+        let full = make_progress_bar(8, 8, 12);
+        assert!(full.contains("█"));
 
-    #[test]
-    fn test_make_progress_bar_partial() {
-        let bar = make_progress_bar(4, 8, 12);
-        // Should have mix of filled and empty
-        assert!(bar.contains("█"));
-        assert!(bar.contains("░"));
-    }
+        // Partial bar
+        let partial = make_progress_bar(4, 8, 12);
+        assert!(partial.contains("█") && partial.contains("░"));
 
-    #[test]
-    fn test_make_progress_bar_zero_total() {
-        let bar = make_progress_bar(0, 0, 12);
-        // Should return spaces when total is zero
-        assert_eq!(bar.len(), 12);
-    }
+        // Zero total returns spaces
+        let zero = make_progress_bar(0, 0, 12);
+        assert_eq!(zero.len(), 12);
 
-    #[test]
-    fn test_make_progress_bar_width() {
-        // Test different widths
-        let bar_8 = make_progress_bar(4, 8, 8);
-        let bar_16 = make_progress_bar(8, 16, 16);
-        // Both should work without panic
-        assert!(!bar_8.is_empty());
-        assert!(!bar_16.is_empty());
+        // Different widths work
+        assert!(!make_progress_bar(4, 8, 8).is_empty());
+        assert!(!make_progress_bar(8, 16, 16).is_empty());
     }
 
     // ========================================================================
@@ -1241,81 +1201,60 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_print_error_panel_basic() {
-        // Should not panic with basic inputs
-        print_error_panel("Claude Process Failed", "The process exited unexpectedly", None, None);
-    }
+    fn test_print_error_panel_various_inputs() {
+        // Test error panel with various combinations of inputs
+        let test_cases: &[(&str, &str, Option<i32>, Option<&str>)] = &[
+            (
+                "Claude Process Failed",
+                "The process exited unexpectedly",
+                None,
+                None,
+            ),
+            (
+                "Claude Process Failed",
+                "The process exited with an error",
+                Some(1),
+                None,
+            ),
+            (
+                "API Error",
+                "Failed to communicate with Claude API",
+                None,
+                Some("Error: connection refused"),
+            ),
+            (
+                "Timeout",
+                "Claude did not respond within the timeout period",
+                Some(124),
+                Some("Process killed after 300 seconds"),
+            ),
+            ("Unknown Error", "", None, None), // empty message
+            ("Test Error", "Test message", None, Some("")), // empty stderr
+            ("Test Error", "Test message", None, Some("   \n\t  ")), // whitespace stderr
+        ];
 
-    #[test]
-    fn test_print_error_panel_with_exit_code() {
-        // Should not panic with exit code
-        print_error_panel(
-            "Claude Process Failed",
-            "The process exited with an error",
-            Some(1),
-            None,
-        );
-    }
+        for (error_type, message, exit_code, stderr) in test_cases {
+            print_error_panel(error_type, message, *exit_code, *stderr);
+        }
 
-    #[test]
-    fn test_print_error_panel_with_stderr() {
-        // Should not panic with stderr
-        print_error_panel(
-            "API Error",
-            "Failed to communicate with Claude API",
-            None,
-            Some("Error: connection refused"),
-        );
-    }
-
-    #[test]
-    fn test_print_error_panel_full_details() {
-        // Should not panic with all details
-        print_error_panel(
-            "Timeout",
-            "Claude did not respond within the timeout period",
-            Some(124),
-            Some("Process killed after 300 seconds"),
-        );
-    }
-
-    #[test]
-    fn test_print_error_panel_empty_message() {
-        // Should not panic with empty message
-        print_error_panel("Unknown Error", "", None, None);
-    }
-
-    #[test]
-    fn test_print_error_panel_long_message() {
-        // Should not panic with long message (should wrap)
+        // Long message that wraps
         let long_message = "This is a very long error message that should be wrapped across multiple lines because it exceeds the panel width significantly and needs proper handling";
         print_error_panel("Test Error", long_message, None, None);
-    }
 
-    #[test]
-    fn test_print_error_panel_multiline_stderr() {
-        // Should not panic with multiline stderr
-        let stderr = "Line 1: Some error occurred\nLine 2: More details here\nLine 3: Stack trace follows";
-        print_error_panel("Process Error", "Multiple errors occurred", Some(1), Some(stderr));
-    }
-
-    #[test]
-    fn test_print_error_panel_empty_stderr() {
-        // Should not panic with empty stderr (should be treated as None)
-        print_error_panel("Test Error", "Test message", None, Some(""));
-    }
-
-    #[test]
-    fn test_print_error_panel_whitespace_stderr() {
-        // Should not panic with whitespace-only stderr (should be treated as empty)
-        print_error_panel("Test Error", "Test message", None, Some("   \n\t  "));
+        // Multiline stderr
+        let stderr =
+            "Line 1: Some error occurred\nLine 2: More details here\nLine 3: Stack trace follows";
+        print_error_panel(
+            "Process Error",
+            "Multiple errors occurred",
+            Some(1),
+            Some(stderr),
+        );
     }
 
     #[test]
     fn test_error_panel_width_constant() {
-        // Verify the error panel width is reasonable
-        assert!(ERROR_PANEL_WIDTH >= 40);
-        assert!(ERROR_PANEL_WIDTH <= 120);
+        assert!(ERROR_PANEL_WIDTH >= 40 && ERROR_PANEL_WIDTH <= 120);
     }
 
     // ========================================================================
@@ -1465,16 +1404,14 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_print_project_tree_empty_no_panic() {
-        // Should not panic with empty list
-        let projects: Vec<crate::config::ProjectTreeInfo> = vec![];
-        print_project_tree(&projects);
-    }
+    fn test_print_project_tree_various_inputs() {
+        use crate::state::RunStatus;
 
-    #[test]
-    fn test_print_project_tree_single_project_no_panic() {
-        // Should not panic with single project
-        let projects = vec![crate::config::ProjectTreeInfo {
+        // Empty list
+        print_project_tree(&[]);
+
+        // Single project
+        print_project_tree(&[crate::config::ProjectTreeInfo {
             name: "test-project".to_string(),
             has_active_run: false,
             run_status: None,
@@ -1482,59 +1419,18 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 2,
             runs_count: 0,
-        }];
-        print_project_tree(&projects);
-    }
+        }]);
 
-    #[test]
-    fn test_print_project_tree_multiple_projects_no_panic() {
-        // Should not panic with multiple projects
-        let projects = vec![
-            crate::config::ProjectTreeInfo {
-                name: "project-a".to_string(),
-                has_active_run: true,
-                run_status: Some(crate::state::RunStatus::Running),
-                spec_count: 1,
-                incomplete_spec_count: 1,
-                spec_md_count: 2,
-                runs_count: 3,
-            },
-            crate::config::ProjectTreeInfo {
-                name: "project-b".to_string(),
-                has_active_run: false,
-                run_status: Some(crate::state::RunStatus::Failed),
-                spec_count: 0,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 1,
-            },
-            crate::config::ProjectTreeInfo {
-                name: "project-c".to_string(),
-                has_active_run: false,
-                run_status: Some(crate::state::RunStatus::Completed),
-                spec_count: 2,
-                incomplete_spec_count: 0,
-                spec_md_count: 1,
-                runs_count: 5,
-            },
-        ];
-        print_project_tree(&projects);
-    }
-
-    #[test]
-    fn test_print_project_tree_all_status_types_no_panic() {
-        // Test all possible status types don't panic
-        use crate::state::RunStatus;
-
+        // Multiple projects with all status types
         let projects = vec![
             crate::config::ProjectTreeInfo {
                 name: "running".to_string(),
                 has_active_run: true,
                 run_status: Some(RunStatus::Running),
                 spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
+                incomplete_spec_count: 1,
+                spec_md_count: 2,
+                runs_count: 3,
             },
             crate::config::ProjectTreeInfo {
                 name: "failed".to_string(),
@@ -1543,16 +1439,16 @@ mod tests {
                 spec_count: 0,
                 incomplete_spec_count: 0,
                 spec_md_count: 0,
-                runs_count: 0,
+                runs_count: 1,
             },
             crate::config::ProjectTreeInfo {
                 name: "complete".to_string(),
                 has_active_run: false,
                 run_status: Some(RunStatus::Completed),
-                spec_count: 1,
+                spec_count: 2,
                 incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
+                spec_md_count: 1,
+                runs_count: 5,
             },
             crate::config::ProjectTreeInfo {
                 name: "incomplete".to_string(),
@@ -1590,11 +1486,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_us008_print_project_description_no_panic() {
-        // Should not panic when printing a project description
+    fn test_print_project_description_various_states() {
         use std::path::PathBuf;
 
-        let desc = crate::config::ProjectDescription {
+        // Empty project
+        print_project_description(&crate::config::ProjectDescription {
             name: "test-project".to_string(),
             path: PathBuf::from("/test/path"),
             has_active_run: false,
@@ -1604,16 +1500,10 @@ mod tests {
             specs: vec![],
             spec_md_count: 0,
             runs_count: 0,
-        };
-        print_project_description(&desc);
-    }
+        });
 
-    #[test]
-    fn test_us008_print_project_description_with_prd_no_panic() {
-        // Should not panic when printing a project with a PRD
-        use std::path::PathBuf;
-
-        let desc = crate::config::ProjectDescription {
+        // Project with PRD and stories (completed status)
+        print_project_description(&crate::config::ProjectDescription {
             name: "test-project".to_string(),
             path: PathBuf::from("/test/path"),
             has_active_run: false,
@@ -1643,16 +1533,10 @@ mod tests {
             }],
             spec_md_count: 1,
             runs_count: 2,
-        };
-        print_project_description(&desc);
-    }
+        });
 
-    #[test]
-    fn test_us008_print_project_description_running_status_no_panic() {
-        // Should not panic when printing a project with running status
-        use std::path::PathBuf;
-
-        let desc = crate::config::ProjectDescription {
+        // Running status
+        print_project_description(&crate::config::ProjectDescription {
             name: "test-project".to_string(),
             path: PathBuf::from("/test/path"),
             has_active_run: true,
@@ -1662,16 +1546,10 @@ mod tests {
             specs: vec![],
             spec_md_count: 0,
             runs_count: 0,
-        };
-        print_project_description(&desc);
-    }
+        });
 
-    #[test]
-    fn test_us008_print_project_description_failed_status_no_panic() {
-        // Should not panic when printing a project with failed status
-        use std::path::PathBuf;
-
-        let desc = crate::config::ProjectDescription {
+        // Failed status
+        print_project_description(&crate::config::ProjectDescription {
             name: "test-project".to_string(),
             path: PathBuf::from("/test/path"),
             has_active_run: false,
@@ -1681,18 +1559,11 @@ mod tests {
             specs: vec![],
             spec_md_count: 0,
             runs_count: 0,
-        };
-        print_project_description(&desc);
-    }
+        });
 
-    #[test]
-    fn test_us008_print_project_description_long_description_no_panic() {
-        // Should not panic with long description (should truncate)
-        use std::path::PathBuf;
-
+        // Long description (truncation test)
         let long_desc = "This is a very long description that goes on and on and on and should be truncated when displayed to the user because it's too long for a single line display in the terminal output.";
-
-        let desc = crate::config::ProjectDescription {
+        print_project_description(&crate::config::ProjectDescription {
             name: "test-project".to_string(),
             path: PathBuf::from("/test/path"),
             has_active_run: false,
@@ -1711,95 +1582,42 @@ mod tests {
             }],
             spec_md_count: 0,
             runs_count: 0,
-        };
-        print_project_description(&desc);
+        });
     }
 
     #[test]
-    fn test_us008_make_progress_bar_simple_empty() {
-        let bar = make_progress_bar_simple(0, 10, 10);
-        assert!(bar.contains("░"), "Empty progress bar should have empty chars");
-    }
-
-    #[test]
-    fn test_us008_make_progress_bar_simple_full() {
-        let bar = make_progress_bar_simple(10, 10, 10);
-        assert!(bar.contains("█"), "Full progress bar should have filled chars");
-    }
-
-    #[test]
-    fn test_us008_make_progress_bar_simple_partial() {
-        let bar = make_progress_bar_simple(5, 10, 10);
-        assert!(bar.contains("█"), "Partial bar should have filled chars");
-        assert!(bar.contains("░"), "Partial bar should have empty chars");
-    }
-
-    #[test]
-    fn test_us008_make_progress_bar_simple_zero_total() {
-        // Should not panic and return empty bar
-        let bar = make_progress_bar_simple(0, 0, 10);
-        assert_eq!(bar.len(), 10);
+    fn test_make_progress_bar_simple_states() {
+        // Empty, full, partial, and zero total
+        assert!(make_progress_bar_simple(0, 10, 10).contains("░"));
+        assert!(make_progress_bar_simple(10, 10, 10).contains("█"));
+        let partial = make_progress_bar_simple(5, 10, 10);
+        assert!(partial.contains("█") && partial.contains("░"));
+        assert_eq!(make_progress_bar_simple(0, 0, 10).len(), 10);
     }
 
     // ========================================================================
-    // US-006: PR success display tests
+    // PR and push output tests
     // ========================================================================
 
     #[test]
-    fn test_print_pr_success_no_panic() {
-        // Should not panic when printing PR success message
-        print_pr_success("https://github.com/owner/repo/pull/42");
+    fn test_pr_output_functions() {
+        // PR success with various URLs
+        for url in &["https://github.com/owner/repo/pull/42", "https://github.com/very-long-organization-name/extremely-long-repository-name-for-testing/pull/12345", ""] {
+            print_pr_success(url);
+            print_pr_already_exists(url);
+        }
+
+        // PR skipped with various reasons
+        for reason in &["No commits were made in this session", "Not authenticated with GitHub CLI - please run 'gh auth login' to authenticate before creating pull requests", ""] {
+            print_pr_skipped(reason);
+        }
     }
 
     #[test]
-    fn test_print_pr_success_with_long_url() {
-        // Should not panic with a long PR URL
-        print_pr_success("https://github.com/very-long-organization-name/extremely-long-repository-name-for-testing/pull/12345");
-    }
-
-    #[test]
-    fn test_print_pr_success_with_empty_url() {
-        // Should not panic with empty URL (edge case)
-        print_pr_success("");
-    }
-
-    // ========================================================================
-    // US-007: PR URL console output tests
-    // ========================================================================
-
-    #[test]
-    fn test_print_pr_already_exists_no_panic() {
-        // Should not panic when printing PR already exists message
-        print_pr_already_exists("https://github.com/owner/repo/pull/42");
-    }
-
-    #[test]
-    fn test_print_pr_already_exists_with_long_url() {
-        // Should not panic with a long PR URL
-        print_pr_already_exists("https://github.com/very-long-organization-name/extremely-long-repository-name-for-testing/pull/12345");
-    }
-
-    #[test]
-    fn test_print_pr_already_exists_with_empty_url() {
-        // Should not panic with empty URL (edge case)
-        print_pr_already_exists("");
-    }
-
-    #[test]
-    fn test_print_pr_skipped_no_panic() {
-        // Should not panic when printing PR skipped message
-        print_pr_skipped("No commits were made in this session");
-    }
-
-    #[test]
-    fn test_print_pr_skipped_with_long_reason() {
-        // Should not panic with a long skip reason
-        print_pr_skipped("Not authenticated with GitHub CLI - please run 'gh auth login' to authenticate before creating pull requests");
-    }
-
-    #[test]
-    fn test_print_pr_skipped_with_empty_reason() {
-        // Should not panic with empty reason (edge case)
-        print_pr_skipped("");
+    fn test_push_output_functions() {
+        print_pushing_branch("feature/test");
+        print_pushing_branch("feature/very-long-branch-name-that-describes-the-feature-in-detail");
+        print_push_success();
+        print_push_already_up_to_date();
     }
 }
