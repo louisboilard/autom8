@@ -10,7 +10,7 @@ use crate::output::{
     print_full_progress, print_generating_spec, print_header, print_info, print_issues_found,
     print_iteration_complete, print_iteration_start, print_max_review_iterations,
     print_phase_banner, print_phase_footer, print_pr_already_exists, print_pr_skipped,
-    print_pr_success, print_proceeding_to_implementation, print_project_info, print_review_passed,
+    print_pr_success, print_pr_updated, print_proceeding_to_implementation, print_project_info, print_review_passed,
     print_reviewing, print_run_summary, print_skip_review, print_spec_generated, print_spec_loaded,
     print_state_transition, print_story_complete, print_tasks_progress, BannerColor, StoryResult,
     BOLD, CYAN, GRAY, RESET, YELLOW,
@@ -400,6 +400,11 @@ impl Runner {
             }
             Ok(PRResult::AlreadyExists(url)) => {
                 print_pr_already_exists(&url);
+                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                Ok(())
+            }
+            Ok(PRResult::Updated(url)) => {
+                print_pr_updated(&url);
                 print_state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
