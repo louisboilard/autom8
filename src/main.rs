@@ -77,7 +77,7 @@ enum Commands {
 /// Determine input type based on file extension
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum InputType {
-    Json, // .json file (spec-<feature>.json)
+    Json,     // .json file (spec-<feature>.json)
     Markdown, // .md or other file (spec-<feature>.md)
 }
 
@@ -208,7 +208,10 @@ fn default_command(verbose: bool) -> autom8::error::Result<()> {
 }
 
 /// Handle existing state file - prompt user to resume or start fresh (US-002)
-fn handle_existing_state(state: autom8::state::RunState, verbose: bool) -> autom8::error::Result<()> {
+fn handle_existing_state(
+    state: autom8::state::RunState,
+    verbose: bool,
+) -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
     print_header();
@@ -282,7 +285,9 @@ fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
     println!("  • Feature requirements and user stories");
     println!("  • Acceptance criteria for each story");
     println!();
-    println!("When you're done, save the spec as {CYAN}spec-<feature>.md{RESET} and exit the session.");
+    println!(
+        "When you're done, save the spec as {CYAN}spec-<feature>.md{RESET} and exit the session."
+    );
     println!("autom8 will automatically proceed to implementation.");
     println!();
     println!("{GRAY}Starting Claude...{RESET}");
@@ -416,7 +421,10 @@ fn clean_spec_files() -> autom8::error::Result<()> {
                 spec_dir.display()
             );
             for spec_path in &specs {
-                let filename = spec_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                let filename = spec_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?");
                 println!("  - {}", filename);
             }
             println!();
@@ -433,7 +441,10 @@ fn clean_spec_files() -> autom8::error::Result<()> {
     }
 
     if !deleted_any {
-        println!("{GRAY}No spec files to clean up in {}.{RESET}", project_config_dir.display());
+        println!(
+            "{GRAY}No spec files to clean up in {}.{RESET}",
+            project_config_dir.display()
+        );
     }
 
     Ok(())
@@ -489,7 +500,11 @@ fn list_projects_command() -> autom8::error::Result<()> {
             println!("  {}", project);
         }
         println!();
-        println!("{GRAY}({} project{}){RESET}", projects.len(), if projects.len() == 1 { "" } else { "s" });
+        println!(
+            "{GRAY}({} project{}){RESET}",
+            projects.len(),
+            if projects.len() == 1 { "" } else { "s" }
+        );
     }
 
     Ok(())
@@ -516,7 +531,10 @@ fn describe_command(project_name: &str) -> autom8::error::Result<()> {
             // If multiple specs exist and user might want to select one, handle that case
             if desc.specs.len() > 1 {
                 // Ask user which spec to describe
-                println!("{YELLOW}Multiple specs found for project '{}'{RESET}", project_name);
+                println!(
+                    "{YELLOW}Multiple specs found for project '{}'{RESET}",
+                    project_name
+                );
                 println!();
 
                 let options: Vec<String> = desc
@@ -532,7 +550,8 @@ fn describe_command(project_name: &str) -> autom8::error::Result<()> {
                 let mut all_options: Vec<&str> = vec!["Show all specs"];
                 all_options.extend(options.iter().map(|s| s.as_str()));
 
-                let choice = prompt::select("Which spec would you like to describe?", &all_options, 0);
+                let choice =
+                    prompt::select("Which spec would you like to describe?", &all_options, 0);
 
                 if choice == 0 {
                     // Show all specs
@@ -558,7 +577,10 @@ fn describe_command(project_name: &str) -> autom8::error::Result<()> {
             // Project doesn't exist
             println!("{RED}Project '{}' not found.{RESET}", project_name);
             println!();
-            println!("The project directory {CYAN}~/.config/autom8/{}{RESET} does not exist.", project_name);
+            println!(
+                "The project directory {CYAN}~/.config/autom8/{}{RESET} does not exist.",
+                project_name
+            );
             println!();
 
             // List available projects
@@ -595,7 +617,10 @@ mod tests {
         // (because we have a positional file argument in the CLI)
         let cli = Cli::try_parse_from(["autom8", "new"]).unwrap();
         // It should be treated as a file path, not a command
-        assert!(cli.command.is_none(), "`new` should not be a command anymore");
+        assert!(
+            cli.command.is_none(),
+            "`new` should not be a command anymore"
+        );
         assert!(cli.file.is_some(), "`new` should be treated as a file path");
         assert_eq!(cli.file.unwrap().to_string_lossy(), "new");
     }
@@ -606,7 +631,10 @@ mod tests {
         // which triggers the default flow
         let cli = Cli::try_parse_from(["autom8"]).unwrap();
         assert!(cli.file.is_none(), "No file should be set");
-        assert!(cli.command.is_none(), "No command should be set - triggers default flow");
+        assert!(
+            cli.command.is_none(),
+            "No command should be set - triggers default flow"
+        );
     }
 
     #[test]
@@ -659,7 +687,10 @@ mod tests {
 
         // load_current should return None
         let result = sm.load_current().unwrap();
-        assert!(result.is_none(), "Should return None when no state.json exists");
+        assert!(
+            result.is_none(),
+            "Should return None when no state.json exists"
+        );
     }
 
     #[test]
@@ -676,7 +707,10 @@ mod tests {
 
         // load_current should return the state
         let result = sm.load_current().unwrap();
-        assert!(result.is_some(), "Should return Some when state.json exists");
+        assert!(
+            result.is_some(),
+            "Should return Some when state.json exists"
+        );
         let loaded = result.unwrap();
         assert_eq!(loaded.branch, "feature/test");
     }
@@ -711,7 +745,10 @@ mod tests {
         sm.clear_current().unwrap();
 
         // Verify state is cleared
-        assert!(sm.load_current().unwrap().is_none(), "State should be cleared");
+        assert!(
+            sm.load_current().unwrap().is_none(),
+            "State should be cleared"
+        );
 
         // Verify archive still exists
         assert!(archive_path.exists(), "Archive should remain after clear");
@@ -727,7 +764,10 @@ mod tests {
         // Test that RunState properly stores branch and current_story for display
         use autom8::state::RunState;
 
-        let mut state = RunState::new(PathBuf::from("test.json"), "feature/test-branch".to_string());
+        let mut state = RunState::new(
+            PathBuf::from("test.json"),
+            "feature/test-branch".to_string(),
+        );
         assert_eq!(state.branch, "feature/test-branch");
         assert!(state.current_story.is_none());
 
@@ -787,7 +827,10 @@ mod tests {
         let _: fn() -> autom8::error::Result<SpecSnapshot> = SpecSnapshot::capture;
 
         // The snapshot module is properly exported
-        assert!(true, "SpecSnapshot is available through autom8::SpecSnapshot");
+        assert!(
+            true,
+            "SpecSnapshot is available through autom8::SpecSnapshot"
+        );
     }
 
     #[test]
@@ -801,7 +844,8 @@ mod tests {
 
         // The prompt should contain key instructions for spec creation
         assert!(
-            prompts::SPEC_SKILL_PROMPT.contains("spec") || prompts::SPEC_SKILL_PROMPT.contains("Spec"),
+            prompts::SPEC_SKILL_PROMPT.contains("spec")
+                || prompts::SPEC_SKILL_PROMPT.contains("Spec"),
             "SPEC_SKILL_PROMPT should mention spec"
         );
     }
@@ -866,7 +910,10 @@ mod tests {
         assert!(result.is_ok());
         let cli = result.unwrap();
         assert!(cli.command.is_none(), "`skill` should not be a command");
-        assert!(cli.file.is_some(), "`skill` should be treated as a file path");
+        assert!(
+            cli.file.is_some(),
+            "`skill` should be treated as a file path"
+        );
         assert_eq!(cli.file.unwrap().to_string_lossy(), "skill");
     }
 
@@ -878,7 +925,10 @@ mod tests {
         assert!(result.is_ok());
         let cli = result.unwrap();
         assert!(cli.command.is_none(), "`history` should not be a command");
-        assert!(cli.file.is_some(), "`history` should be treated as a file path");
+        assert!(
+            cli.file.is_some(),
+            "`history` should be treated as a file path"
+        );
     }
 
     #[test]
@@ -889,7 +939,10 @@ mod tests {
         assert!(result.is_ok());
         let cli = result.unwrap();
         assert!(cli.command.is_none(), "`archive` should not be a command");
-        assert!(cli.file.is_some(), "`archive` should be treated as a file path");
+        assert!(
+            cli.file.is_some(),
+            "`archive` should be treated as a file path"
+        );
     }
 
     #[test]
@@ -996,8 +1049,16 @@ mod tests {
 
         // Check that ~/.claude/skills/pdr/SKILL.md is not created by init
         let home = dirs::home_dir().unwrap();
-        let _pdr_skill = home.join(".claude").join("skills").join("pdr").join("SKILL.md");
-        let _pdr_json_skill = home.join(".claude").join("skills").join("pdr-json").join("SKILL.md");
+        let _pdr_skill = home
+            .join(".claude")
+            .join("skills")
+            .join("pdr")
+            .join("SKILL.md");
+        let _pdr_json_skill = home
+            .join(".claude")
+            .join("skills")
+            .join("pdr-json")
+            .join("SKILL.md");
 
         // Note: We cannot test that init doesn't write these files directly
         // without running init, but we can verify the prompts module no longer
@@ -1007,7 +1068,10 @@ mod tests {
 
         // The file may or may not exist from previous runs - we just verify
         // that our current codebase doesn't export those constants anymore
-        assert!(true, "Skill constants removed - no writes to ~/.claude/skills/");
+        assert!(
+            true,
+            "Skill constants removed - no writes to ~/.claude/skills/"
+        );
     }
 
     // ======================================================================
@@ -1074,7 +1138,10 @@ mod tests {
         // Test that get_project_description returns None for a nonexistent project
         let result = autom8::config::get_project_description("nonexistent-project-12345");
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none(), "Should return None for nonexistent project");
+        assert!(
+            result.unwrap().is_none(),
+            "Should return None for nonexistent project"
+        );
     }
 
     #[test]
@@ -1132,5 +1199,45 @@ mod tests {
             let actual_completed = spec.stories.iter().filter(|s| s.passes).count();
             assert_eq!(spec.completed_count, actual_completed);
         }
+    }
+
+    // ======================================================================
+    // Tests for US-010: Semantic Versioning
+    // ======================================================================
+
+    #[test]
+    fn test_us010_version_flag_is_configured() {
+        // Test that --version flag is recognized by clap
+        // Clap returns an error with ErrorKind::DisplayVersion when --version is passed
+        let result = Cli::try_parse_from(["autom8", "--version"]);
+        assert!(result.is_err(), "Should return error for --version flag");
+        // Verify it's a DisplayVersion error (expected behavior)
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayVersion,
+            "Should recognize --version flag"
+        );
+    }
+
+    #[test]
+    fn test_us010_short_version_flag_is_configured() {
+        // Test that -V flag is recognized by clap
+        let result = Cli::try_parse_from(["autom8", "-V"]);
+        assert!(result.is_err(), "Should return error for -V flag");
+        // Verify it's a DisplayVersion error (expected behavior)
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayVersion,
+            "Should recognize -V flag"
+        );
+    }
+
+    #[test]
+    fn test_us010_version_matches_cargo_toml() {
+        // Verify the version constant matches what's in Cargo.toml
+        let cargo_version = env!("CARGO_PKG_VERSION");
+        assert_eq!(cargo_version, "0.2.0", "Version should be 0.2.0");
     }
 }

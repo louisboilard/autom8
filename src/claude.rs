@@ -1,6 +1,8 @@
 use crate::error::{Autom8Error, Result};
 use crate::git;
-use crate::prompts::{COMMIT_PROMPT, CORRECTOR_PROMPT, SPEC_JSON_PROMPT, SPEC_JSON_CORRECTION_PROMPT, REVIEWER_PROMPT};
+use crate::prompts::{
+    COMMIT_PROMPT, CORRECTOR_PROMPT, REVIEWER_PROMPT, SPEC_JSON_CORRECTION_PROMPT, SPEC_JSON_PROMPT,
+};
 use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
 use serde::Deserialize;
@@ -41,10 +43,7 @@ impl ClaudeErrorInfo {
     }
 
     /// Create error info from a process exit status and stderr
-    pub fn from_process_failure(
-        status: std::process::ExitStatus,
-        stderr: Option<String>,
-    ) -> Self {
+    pub fn from_process_failure(status: std::process::ExitStatus, stderr: Option<String>) -> Self {
         let exit_code = status.code();
         let stderr_trimmed = stderr.as_ref().map(|s| s.trim().to_string());
 
@@ -309,7 +308,11 @@ where
             .unwrap_or_default();
         let error_info = ClaudeErrorInfo::from_process_failure(
             status,
-            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
         );
         return Err(Autom8Error::ClaudeError(error_info.message.clone()));
     }
@@ -391,7 +394,11 @@ where
             .unwrap_or_default();
         let error_info = ClaudeErrorInfo::from_process_failure(
             status,
-            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
         );
         return Err(Autom8Error::SpecGenerationFailed(error_info.message));
     }
@@ -485,7 +492,9 @@ where
     Err(Autom8Error::InvalidGeneratedSpec(format!(
         "JSON parse error after {} attempts: {}",
         MAX_JSON_RETRY_ATTEMPTS,
-        last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Unknown error".to_string())
     )))
 }
 
@@ -591,7 +600,11 @@ where
             .unwrap_or_default();
         let error_info = ClaudeErrorInfo::from_process_failure(
             status,
-            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
         );
         return Ok(CommitResult::Error(error_info));
     }
@@ -674,7 +687,11 @@ where
             .unwrap_or_default();
         let error_info = ClaudeErrorInfo::from_process_failure(
             status,
-            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
         );
         return Ok(ReviewResult::Error(error_info));
     }
@@ -757,7 +774,11 @@ where
             .unwrap_or_default();
         let error_info = ClaudeErrorInfo::from_process_failure(
             status,
-            if stderr_content.is_empty() { None } else { Some(stderr_content) },
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
         );
         return Ok(CorrectorResult::Error(error_info));
     }
@@ -888,7 +909,12 @@ pub fn build_previous_context(iterations: &[IterationRecord]) -> Option<String> 
     }
 }
 
-fn build_prompt(spec: &Spec, story: &UserStory, spec_path: &Path, previous_context: Option<&str>) -> String {
+fn build_prompt(
+    spec: &Spec,
+    story: &UserStory,
+    spec_path: &Path,
+    previous_context: Option<&str>,
+) -> String {
     let acceptance_criteria = story
         .acceptance_criteria
         .iter()
@@ -1200,7 +1226,10 @@ End of response"#;
 
         assert_eq!(pass, ReviewResult::Pass);
         assert_eq!(issues, ReviewResult::IssuesFound);
-        assert_eq!(error, ReviewResult::Error(ClaudeErrorInfo::new("test error")));
+        assert_eq!(
+            error,
+            ReviewResult::Error(ClaudeErrorInfo::new("test error"))
+        );
     }
 
     #[test]
@@ -1224,7 +1253,10 @@ End of response"#;
         let error = CorrectorResult::Error(ClaudeErrorInfo::new("test error"));
 
         assert_eq!(complete, CorrectorResult::Complete);
-        assert_eq!(error, CorrectorResult::Error(ClaudeErrorInfo::new("test error")));
+        assert_eq!(
+            error,
+            CorrectorResult::Error(ClaudeErrorInfo::new("test error"))
+        );
     }
 
     #[test]
@@ -1495,7 +1527,9 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
         let summary = extract_work_summary(output);
         assert_eq!(
             summary,
-            Some("Files changed: src/api.rs. Added REST endpoint for user registration.".to_string())
+            Some(
+                "Files changed: src/api.rs. Added REST endpoint for user registration.".to_string()
+            )
         );
     }
 
@@ -1721,7 +1755,8 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
         let result = extract_json(valid_json);
         assert!(result.is_some());
         // Verify it can be parsed as JSON
-        let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&result.unwrap());
+        let parsed: std::result::Result<serde_json::Value, _> =
+            serde_json::from_str(&result.unwrap());
         assert!(parsed.is_ok());
     }
 
@@ -1736,7 +1771,10 @@ Files changed: src/api.rs. Added REST endpoint for user registration.
 Hope that helps!"#;
         let result = extract_json(response);
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), r#"{"project": "Test", "branchName": "main"}"#);
+        assert_eq!(
+            result.unwrap(),
+            r#"{"project": "Test", "branchName": "main"}"#
+        );
     }
 
     #[test]

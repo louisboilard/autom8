@@ -1,0 +1,3 @@
+# Rustfmt configuration for autom8
+# Keep minimal - only deviate from defaults when necessary
+edition = "2021"

@@ -128,7 +128,8 @@ impl SpecSnapshot {
                 }
                 // File was in snapshot - check if modified after snapshot timestamp
                 Some(old_metadata) => {
-                    if metadata.modified > self.timestamp && metadata.modified != old_metadata.modified
+                    if metadata.modified > self.timestamp
+                        && metadata.modified != old_metadata.modified
                     {
                         new_files.push(path);
                     }
@@ -159,7 +160,8 @@ impl SpecSnapshot {
                     new_files.push(path);
                 }
                 Some(old_metadata) => {
-                    if metadata.modified > self.timestamp && metadata.modified != old_metadata.modified
+                    if metadata.modified > self.timestamp
+                        && metadata.modified != old_metadata.modified
                     {
                         new_files.push(path);
                     }
@@ -315,7 +317,11 @@ mod tests {
             temp_dir2.path().to_path_buf(),
         ]);
 
-        assert_eq!(snapshot.len(), 2, "Should capture files from both directories");
+        assert_eq!(
+            snapshot.len(),
+            2,
+            "Should capture files from both directories"
+        );
     }
 
     #[test]
@@ -417,7 +423,10 @@ mod tests {
 
         // No changes - should detect nothing
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
-        assert!(new_files.is_empty(), "Should detect no new files in unchanged directory");
+        assert!(
+            new_files.is_empty(),
+            "Should detect no new files in unchanged directory"
+        );
     }
 
     #[test]
@@ -477,7 +486,10 @@ mod tests {
         // Detect without any changes
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
 
-        assert!(new_files.is_empty(), "Should not detect unchanged files as new");
+        assert!(
+            new_files.is_empty(),
+            "Should not detect unchanged files as new"
+        );
     }
 
     #[test]
@@ -545,7 +557,11 @@ mod tests {
             temp_dir2.path().to_path_buf(),
         ]);
 
-        assert_eq!(new_files.len(), 2, "Should detect new files from both directories");
+        assert_eq!(
+            new_files.len(),
+            2,
+            "Should detect new files from both directories"
+        );
     }
 
     #[test]
@@ -587,12 +603,14 @@ mod tests {
         fs::write(temp_dir.path().join("new.md"), "# New").unwrap();
 
         // Should still work, just ignore the nonexistent directory
-        let new_files = snapshot.detect_new_files_from_dirs(&[
-            temp_dir.path().to_path_buf(),
-            nonexistent,
-        ]);
+        let new_files =
+            snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf(), nonexistent]);
 
-        assert_eq!(new_files.len(), 1, "Should detect file from existing directory");
+        assert_eq!(
+            new_files.len(),
+            1,
+            "Should detect file from existing directory"
+        );
     }
 
     #[test]
@@ -615,7 +633,11 @@ mod tests {
 
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
 
-        assert_eq!(new_files.len(), 2, "Should only detect the 2 new files, not the 2 old ones");
+        assert_eq!(
+            new_files.len(),
+            2,
+            "Should only detect the 2 new files, not the 2 old ones"
+        );
 
         let filenames: Vec<&str> = new_files
             .iter()
@@ -644,6 +666,9 @@ mod tests {
 
         let new_files = snapshot.detect_new_files_from_dirs(&[temp_dir.path().to_path_buf()]);
 
-        assert!(new_files.is_empty(), "Deleted files should not appear in new files list");
+        assert!(
+            new_files.is_empty(),
+            "Deleted files should not appear in new files list"
+        );
     }
 }
