@@ -99,9 +99,7 @@ fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
     let target_len = max_len - 3;
 
     // Try to find a word boundary (space) to truncate at
-    let truncate_at = text[..target_len]
-        .rfind(' ')
-        .unwrap_or(target_len);
+    let truncate_at = text[..target_len].rfind(' ').unwrap_or(target_len);
 
     format!("{}...", text[..truncate_at].trim_end())
 }
@@ -127,16 +125,8 @@ pub fn format_pr_description(spec: &Spec) -> String {
     output.push_str("\n\n");
 
     // Partition stories by completion status
-    let completed: Vec<_> = spec
-        .user_stories
-        .iter()
-        .filter(|s| s.passes)
-        .collect();
-    let incomplete: Vec<_> = spec
-        .user_stories
-        .iter()
-        .filter(|s| !s.passes)
-        .collect();
+    let completed: Vec<_> = spec.user_stories.iter().filter(|s| s.passes).collect();
+    let incomplete: Vec<_> = spec.user_stories.iter().filter(|s| !s.passes).collect();
 
     if completed.is_empty() {
         // No completed stories: show all under "Changes"
@@ -322,13 +312,7 @@ pub fn update_pr_description(spec: &Spec, pr_number: u32) -> Result<PRResult> {
     let body = format_pr_description(spec);
 
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "edit",
-            &pr_number.to_string(),
-            "--body",
-            &body,
-        ])
+        .args(["pr", "edit", &pr_number.to_string(), "--body", &body])
         .output()?;
 
     if !output.status.success() {
@@ -1652,7 +1636,9 @@ mod tests {
         let spec = Spec {
             project: String::new(),
             branch_name: "feature/test".to_string(),
-            description: "Improve PR descriptions\nThis is a longer explanation.\nAnd more details.".to_string(),
+            description:
+                "Improve PR descriptions\nThis is a longer explanation.\nAnd more details."
+                    .to_string(),
             user_stories: vec![],
         };
 
@@ -1666,7 +1652,8 @@ mod tests {
         let spec = Spec {
             project: String::new(),
             branch_name: "feature/test".to_string(),
-            description: "Add feature X. This feature does something important. It helps users.".to_string(),
+            description: "Add feature X. This feature does something important. It helps users."
+                .to_string(),
             user_stories: vec![],
         };
 
