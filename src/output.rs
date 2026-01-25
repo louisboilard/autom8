@@ -236,6 +236,20 @@ pub fn print_pr_skipped(reason: &str) {
     println!("{GRAY}PR creation skipped: {}{RESET}", reason);
 }
 
+/// Print a prominent message when a PR description has been updated.
+///
+/// This displays the PR URL in a visually distinct style similar to
+/// print_pr_success, making it easy for users to find and click.
+pub fn print_pr_updated(url: &str) {
+    println!();
+    println!("{GREEN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{GREEN}{BOLD}║  ✓ Pull Request Updated                                ║{RESET}");
+    println!("{GREEN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{GREEN}{BOLD}  {}{RESET}", url);
+    println!();
+}
+
 /// Print a status message when pushing branch to remote.
 ///
 /// This displays a simple status line indicating the push operation is in progress.
