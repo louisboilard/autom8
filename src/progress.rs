@@ -577,7 +577,8 @@ impl ClaudeSpinner {
                 let prefix = format_display_prefix(&story_id_owned, &iter_info);
                 let fixed_activity = fixed_width_activity(&activity);
 
-                spinner_clone.set_message(format!("{} | {} [{}]", prefix, fixed_activity, time_str));
+                spinner_clone
+                    .set_message(format!("{} | {} [{}]", prefix, fixed_activity, time_str));
             }
         });
 
@@ -634,7 +635,10 @@ impl ClaudeSpinner {
         let prefix = format_display_prefix(&self.story_id, &self.iteration_info);
         // Clear the line first, then print completion message to ensure clean output
         self.spinner.finish_and_clear();
-        println!("{GREEN}\u{2714} {} completed in {}{RESET}", prefix, duration);
+        println!(
+            "{GREEN}\u{2714} {} completed in {}{RESET}",
+            prefix, duration
+        );
     }
 
     pub fn finish_error(&mut self, error: &str) {
@@ -931,7 +935,11 @@ impl Breadcrumb {
         // Add completed states from most recent to oldest until we run out of space
         for state in self.completed.iter().rev() {
             let state_len = state.display_name().chars().count();
-            let sep_len = if fit_parts.is_empty() { 0 } else { plain_separator.len() };
+            let sep_len = if fit_parts.is_empty() {
+                0
+            } else {
+                plain_separator.len()
+            };
 
             if current_len + sep_len + state_len <= available {
                 fit_parts.insert(0, format!("{GREEN}{}{RESET}", state.display_name()));
@@ -2013,7 +2021,10 @@ mod tests {
     #[test]
     fn test_progress_context_format_story_progress() {
         let ctx = ProgressContext::new("US-001", 2, 5);
-        assert_eq!(ctx.format_story_progress(), Some("[US-001 2/5]".to_string()));
+        assert_eq!(
+            ctx.format_story_progress(),
+            Some("[US-001 2/5]".to_string())
+        );
     }
 
     #[test]

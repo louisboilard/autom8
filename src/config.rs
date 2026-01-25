@@ -38,7 +38,9 @@ pub fn current_project_name() -> Result<String> {
     cwd.file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| Autom8Error::Config("Could not determine project name from path".to_string()))
+        .ok_or_else(|| {
+            Autom8Error::Config("Could not determine project name from path".to_string())
+        })
 }
 
 /// Get the project-specific config directory path (~/.config/autom8/<project-name>/).
@@ -98,14 +100,12 @@ pub fn list_projects() -> Result<Vec<String>> {
 
     let mut projects = Vec::new();
 
-    let entries = fs::read_dir(&base).map_err(|e| {
-        Autom8Error::Config(format!("Could not read config directory: {}", e))
-    })?;
+    let entries = fs::read_dir(&base)
+        .map_err(|e| Autom8Error::Config(format!("Could not read config directory: {}", e)))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            Autom8Error::Config(format!("Could not read directory entry: {}", e))
-        })?;
+        let entry = entry
+            .map_err(|e| Autom8Error::Config(format!("Could not read directory entry: {}", e)))?;
 
         let path = entry.path();
         if path.is_dir() {
@@ -126,7 +126,9 @@ pub fn is_in_config_dir(file_path: &std::path::Path) -> Result<bool> {
     let config_dir = project_config_dir()?;
 
     // Canonicalize both paths to handle relative paths and symlinks
-    let canonical_file = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
+    let canonical_file = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
     let canonical_config = config_dir.canonicalize().unwrap_or(config_dir);
 
     Ok(canonical_file.starts_with(&canonical_config))
@@ -151,7 +153,9 @@ pub struct MoveResult {
 pub fn move_to_config_dir(file_path: &std::path::Path) -> Result<MoveResult> {
     // If already in config directory, return original path
     if is_in_config_dir(file_path)? {
-        let canonical = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
         return Ok(MoveResult {
             dest_path: canonical,
             was_moved: false,
@@ -292,9 +296,15 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
         let spec_dir = project_dir.join(SPEC_SUBDIR);
         let spec_md_count = if spec_dir.exists() {
             fs::read_dir(&spec_dir)
-                .map(|entries| entries.filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file() && e.path().extension().map_or(false, |ext| ext == "md"))
-                    .count())
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.path().is_file()
+                                && e.path().extension().map_or(false, |ext| ext == "md")
+                        })
+                        .count()
+                })
                 .unwrap_or(0)
         } else {
             0
@@ -448,7 +458,9 @@ pub fn get_project_description(project_name: &str) -> Result<Option<ProjectDescr
             .map(|entries| {
                 entries
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file() && e.path().extension().map_or(false, |ext| ext == "md"))
+                    .filter(|e| {
+                        e.path().is_file() && e.path().extension().map_or(false, |ext| ext == "md")
+                    })
                     .count()
             })
             .unwrap_or(0)
@@ -579,14 +591,12 @@ fn list_projects_at(base_config_dir: &std::path::Path) -> Result<Vec<String>> {
 
     let mut projects = Vec::new();
 
-    let entries = fs::read_dir(base_config_dir).map_err(|e| {
-        Autom8Error::Config(format!("Could not read config directory: {}", e))
-    })?;
+    let entries = fs::read_dir(base_config_dir)
+        .map_err(|e| Autom8Error::Config(format!("Could not read config directory: {}", e)))?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            Autom8Error::Config(format!("Could not read directory entry: {}", e))
-        })?;
+        let entry = entry
+            .map_err(|e| Autom8Error::Config(format!("Could not read directory entry: {}", e)))?;
 
         let path = entry.path();
         if path.is_dir() {
@@ -624,8 +634,14 @@ fn ensure_config_dir_at(base: &std::path::Path) -> Result<(PathBuf, bool)> {
 ///
 /// Returns the full project path and whether it was newly created.
 #[cfg(test)]
-fn ensure_project_config_dir_at(base: &std::path::Path, project_name: &str) -> Result<(PathBuf, bool)> {
-    let dir = base.join(".config").join(CONFIG_DIR_NAME).join(project_name);
+fn ensure_project_config_dir_at(
+    base: &std::path::Path,
+    project_name: &str,
+) -> Result<(PathBuf, bool)> {
+    let dir = base
+        .join(".config")
+        .join(CONFIG_DIR_NAME)
+        .join(project_name);
     let created = !dir.exists();
 
     fs::create_dir_all(dir.join(SPEC_SUBDIR))?;
@@ -755,11 +771,13 @@ mod tests {
         let project_name = "existing-project";
 
         // Create the directory first
-        let (path1, created1) = ensure_project_config_dir_at(temp_dir.path(), project_name).unwrap();
+        let (path1, created1) =
+            ensure_project_config_dir_at(temp_dir.path(), project_name).unwrap();
         assert!(created1);
 
         // Call again - should report as existing
-        let (path2, created2) = ensure_project_config_dir_at(temp_dir.path(), project_name).unwrap();
+        let (path2, created2) =
+            ensure_project_config_dir_at(temp_dir.path(), project_name).unwrap();
         assert!(!created2);
         assert_eq!(path1, path2);
     }
@@ -858,7 +876,10 @@ mod tests {
 
         assert!(result.was_moved, "File should have been moved");
         assert!(result.dest_path.exists(), "Destination file should exist");
-        assert!(!source_file.exists(), "Source file should be deleted after move");
+        assert!(
+            !source_file.exists(),
+            "Source file should be deleted after move"
+        );
         assert!(
             result.dest_path.parent().unwrap().ends_with("spec"),
             "MD files should go to spec/ directory"
@@ -884,7 +905,10 @@ mod tests {
 
         assert!(result.was_moved, "File should have been moved");
         assert!(result.dest_path.exists(), "Destination file should exist");
-        assert!(!source_file.exists(), "Source file should be deleted after move");
+        assert!(
+            !source_file.exists(),
+            "Source file should be deleted after move"
+        );
         assert!(
             result.dest_path.parent().unwrap().ends_with("spec"),
             "JSON files should go to spec/ directory"
@@ -910,7 +934,10 @@ mod tests {
         let result = move_to_config_dir(&existing_file).unwrap();
 
         assert!(!result.was_moved, "File should not have been moved");
-        assert!(existing_file.exists(), "File should still exist in original location");
+        assert!(
+            existing_file.exists(),
+            "File should still exist in original location"
+        );
         assert_eq!(
             result.dest_path.canonicalize().unwrap(),
             existing_file.canonicalize().unwrap(),
@@ -930,7 +957,10 @@ mod tests {
         let result = move_to_config_dir(&source_file).unwrap();
 
         assert!(result.was_moved, "File should have been moved");
-        assert!(!source_file.exists(), "Source file should be deleted after move");
+        assert!(
+            !source_file.exists(),
+            "Source file should be deleted after move"
+        );
         assert!(
             result.dest_path.parent().unwrap().ends_with("spec"),
             "Unknown extensions should default to spec/ directory"
@@ -953,7 +983,10 @@ mod tests {
             "my-custom-name.md",
             "Filename should be preserved"
         );
-        assert!(!source_file.exists(), "Source file should be deleted after move");
+        assert!(
+            !source_file.exists(),
+            "Source file should be deleted after move"
+        );
 
         // Cleanup
         fs::remove_file(&result.dest_path).ok();
@@ -1016,7 +1049,10 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
 
         let projects = list_projects_at(&config_dir).unwrap();
-        assert!(projects.is_empty(), "Should return empty list when no projects exist");
+        assert!(
+            projects.is_empty(),
+            "Should return empty list when no projects exist"
+        );
     }
 
     #[test]
@@ -1059,7 +1095,10 @@ mod tests {
         let non_existent_dir = temp_dir.path().join("does-not-exist");
 
         let projects = list_projects_at(&non_existent_dir).unwrap();
-        assert!(projects.is_empty(), "Should return empty list for non-existent directory");
+        assert!(
+            projects.is_empty(),
+            "Should return empty list for non-existent directory"
+        );
     }
 
     #[test]
@@ -1110,7 +1149,10 @@ mod tests {
             incomplete_spec_count: 2,
             total_spec_count: 3,
         };
-        assert!(status.needs_attention(), "Incomplete specs should need attention");
+        assert!(
+            status.needs_attention(),
+            "Incomplete specs should need attention"
+        );
         assert!(!status.is_idle());
     }
 
@@ -1123,7 +1165,10 @@ mod tests {
             incomplete_spec_count: 0,
             total_spec_count: 1,
         };
-        assert!(!status.needs_attention(), "Completed project should not need attention");
+        assert!(
+            !status.needs_attention(),
+            "Completed project should not need attention"
+        );
         assert!(status.is_idle());
     }
 
@@ -1147,7 +1192,10 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
 
         let statuses = global_status_at(&config_dir).unwrap();
-        assert!(statuses.is_empty(), "Should return empty list when no projects exist");
+        assert!(
+            statuses.is_empty(),
+            "Should return empty list when no projects exist"
+        );
     }
 
     #[test]
@@ -1184,7 +1232,10 @@ mod tests {
 
         assert_eq!(statuses.len(), 1);
         assert!(statuses[0].has_active_run);
-        assert_eq!(statuses[0].run_status, Some(crate::state::RunStatus::Running));
+        assert_eq!(
+            statuses[0].run_status,
+            Some(crate::state::RunStatus::Running)
+        );
     }
 
     #[test]
@@ -1392,7 +1443,10 @@ mod tests {
         // Test getting description for a nonexistent project
         let result = get_project_description("nonexistent-project-xyz-12345");
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none(), "nonexistent project should return None");
+        assert!(
+            result.unwrap().is_none(),
+            "nonexistent project should return None"
+        );
     }
 
     #[test]
@@ -1425,13 +1479,11 @@ mod tests {
             project_name: "Test Project".to_string(),
             branch_name: "feature/test".to_string(),
             description: "Test description".to_string(),
-            stories: vec![
-                StorySummary {
-                    id: "US-001".to_string(),
-                    title: "Test Story".to_string(),
-                    passes: true,
-                },
-            ],
+            stories: vec![StorySummary {
+                id: "US-001".to_string(),
+                title: "Test Story".to_string(),
+                passes: true,
+            }],
             completed_count: 1,
             total_count: 1,
         };

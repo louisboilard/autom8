@@ -313,22 +313,9 @@ impl StateManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_machine_state_reviewing_exists() {
-        let state = MachineState::Reviewing;
-        assert_eq!(state, MachineState::Reviewing);
-    }
-
-    #[test]
-    fn test_machine_state_correcting_exists() {
-        let state = MachineState::Correcting;
-        assert_eq!(state, MachineState::Correcting);
-    }
 
     #[test]
     fn test_run_state_has_review_iteration() {
@@ -338,7 +325,10 @@ mod tests {
 
     #[test]
     fn test_run_state_from_spec_has_review_iteration() {
-        let state = RunState::from_spec(PathBuf::from("spec-feature.md"), PathBuf::from("spec-feature.json"));
+        let state = RunState::from_spec(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+        );
         assert_eq!(state.review_iteration, 0);
     }
 
@@ -384,41 +374,40 @@ mod tests {
     }
 
     #[test]
-    fn test_machine_state_serialization() {
-        // Test that new states serialize correctly with kebab-case
-        let reviewing = serde_json::to_string(&MachineState::Reviewing).unwrap();
-        assert_eq!(reviewing, "\"reviewing\"");
+    fn test_machine_state_serialization_roundtrip() {
+        // Test all MachineState variants serialize/deserialize correctly with kebab-case
+        let test_cases: &[(MachineState, &str)] = &[
+            (MachineState::Idle, "\"idle\""),
+            (MachineState::LoadingSpec, "\"loading-spec\""),
+            (MachineState::GeneratingSpec, "\"generating-spec\""),
+            (MachineState::Initializing, "\"initializing\""),
+            (MachineState::PickingStory, "\"picking-story\""),
+            (MachineState::RunningClaude, "\"running-claude\""),
+            (MachineState::Reviewing, "\"reviewing\""),
+            (MachineState::Correcting, "\"correcting\""),
+            (MachineState::Committing, "\"committing\""),
+            (MachineState::CreatingPR, "\"creating-pr\""),
+            (MachineState::Completed, "\"completed\""),
+            (MachineState::Failed, "\"failed\""),
+        ];
 
-        let correcting = serde_json::to_string(&MachineState::Correcting).unwrap();
-        assert_eq!(correcting, "\"correcting\"");
-    }
+        for (state, expected_json) in test_cases {
+            // Test serialization
+            let serialized = serde_json::to_string(state).unwrap();
+            assert_eq!(
+                &serialized, *expected_json,
+                "Serialization failed for {:?}",
+                state
+            );
 
-    #[test]
-    fn test_machine_state_deserialization() {
-        let reviewing: MachineState = serde_json::from_str("\"reviewing\"").unwrap();
-        assert_eq!(reviewing, MachineState::Reviewing);
-
-        let correcting: MachineState = serde_json::from_str("\"correcting\"").unwrap();
-        assert_eq!(correcting, MachineState::Correcting);
-    }
-
-    #[test]
-    fn test_machine_state_creating_pr_exists() {
-        let state = MachineState::CreatingPR;
-        assert_eq!(state, MachineState::CreatingPR);
-    }
-
-    #[test]
-    fn test_machine_state_creating_pr_serialization() {
-        // Test that CreatingPR serializes to "creating-pr" (kebab-case)
-        let creating_pr = serde_json::to_string(&MachineState::CreatingPR).unwrap();
-        assert_eq!(creating_pr, "\"creating-pr\"");
-    }
-
-    #[test]
-    fn test_machine_state_creating_pr_deserialization() {
-        let creating_pr: MachineState = serde_json::from_str("\"creating-pr\"").unwrap();
-        assert_eq!(creating_pr, MachineState::CreatingPR);
+            // Test deserialization roundtrip
+            let deserialized: MachineState = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(
+                deserialized, *state,
+                "Deserialization failed for {:?}",
+                state
+            );
+        }
     }
 
     #[test]
@@ -720,7 +709,10 @@ mod tests {
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
         // Save should work (creates in config directory)
-        assert!(sm.save(&state).is_ok(), "Should save state to config directory");
+        assert!(
+            sm.save(&state).is_ok(),
+            "Should save state to config directory"
+        );
 
         // Load should find the state in config directory
         let loaded = sm.load_current().unwrap();
@@ -745,12 +737,20 @@ mod tests {
             "spec_dir should be in ~/.config/autom8/: got {}",
             path_str
         );
-        assert!(spec_dir.ends_with("spec"), "spec_dir should end with 'spec'");
+        assert!(
+            spec_dir.ends_with("spec"),
+            "spec_dir should end with 'spec'"
+        );
 
         // list_specs should work (even if empty)
         let specs = sm.list_specs().unwrap();
-        assert!(specs.is_empty() || specs.iter().all(|p| p.to_string_lossy().contains(".config/autom8/")),
-            "All specs should be in config directory");
+        assert!(
+            specs.is_empty()
+                || specs
+                    .iter()
+                    .all(|p| p.to_string_lossy().contains(".config/autom8/")),
+            "All specs should be in config directory"
+        );
     }
 
     /// Tests that archived runs (used by resume history) are stored in config directory.
@@ -778,7 +778,10 @@ mod tests {
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
         // No active run initially
-        assert!(!sm.has_active_run().unwrap(), "Should have no active run initially");
+        assert!(
+            !sm.has_active_run().unwrap(),
+            "Should have no active run initially"
+        );
 
         // Save a running state
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
@@ -789,7 +792,10 @@ mod tests {
 
         // Clear and verify
         sm.clear_current().unwrap();
-        assert!(!sm.has_active_run().unwrap(), "Should have no active run after clear");
+        assert!(
+            !sm.has_active_run().unwrap(),
+            "Should have no active run after clear"
+        );
     }
 
     /// Tests that clean command can list and delete specs from config directory.

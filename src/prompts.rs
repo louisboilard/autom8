@@ -576,7 +576,8 @@ mod tests {
     #[test]
     fn spec_skill_prompt_specifies_required_save_location() {
         // Must contain the exact save path pattern
-        assert!(SPEC_SKILL_PROMPT.contains("~/.config/autom8/<project-name>/spec/spec-[feature-name].md"));
+        assert!(SPEC_SKILL_PROMPT
+            .contains("~/.config/autom8/<project-name>/spec/spec-[feature-name].md"));
     }
 
     #[test]
