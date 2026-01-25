@@ -301,7 +301,7 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
                         .filter_map(|e| e.ok())
                         .filter(|e| {
                             e.path().is_file()
-                                && e.path().extension().map_or(false, |ext| ext == "md")
+                                && e.path().extension().is_some_and(|ext| ext == "md")
                         })
                         .count()
                 })
@@ -459,7 +459,7 @@ pub fn get_project_description(project_name: &str) -> Result<Option<ProjectDescr
                 entries
                     .filter_map(|e| e.ok())
                     .filter(|e| {
-                        e.path().is_file() && e.path().extension().map_or(false, |ext| ext == "md")
+                        e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md")
                     })
                     .count()
             })
