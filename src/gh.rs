@@ -408,12 +408,7 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
         )));
     }
 
-    // Check: PR already exists for this branch
-    if let Ok(Some(existing_url)) = get_existing_pr_url(&current_branch) {
-        return Ok(PRResult::AlreadyExists(existing_url));
-    }
-
-    // Push branch to remote before creating PR
+    // Push branch to remote before creating PR (or updating existing PR)
     print_pushing_branch(&current_branch);
     match git::push_branch(&current_branch)? {
         PushResult::Success => {
@@ -425,6 +420,11 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
         PushResult::Error(msg) => {
             return Ok(PRResult::Error(format!("Failed to push branch: {}", msg)));
         }
+    }
+
+    // Check: PR already exists for this branch
+    if let Ok(Some(existing_url)) = get_existing_pr_url(&current_branch) {
+        return Ok(PRResult::AlreadyExists(existing_url));
     }
 
     // Create the PR
