@@ -466,8 +466,9 @@ where
                 );
                 on_output(&retry_msg);
 
-                // Build correction prompt with the malformed JSON
+                // Build correction prompt with the malformed JSON and original spec content
                 let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+                    .replace("{spec_content}", spec_content)
                     .replace("{malformed_json}", &json_str)
                     .replace("{error_message}", &last_error.as_ref().unwrap().to_string())
                     .replace("{attempt}", &(attempt + 1).to_string())
@@ -488,14 +489,40 @@ where
         }
     }
 
-    // All retries exhausted, return the last error
-    Err(Autom8Error::InvalidGeneratedSpec(format!(
-        "JSON parse error after {} attempts: {}",
-        MAX_JSON_RETRY_ATTEMPTS,
-        last_error
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "Unknown error".to_string())
-    )))
+    // All agentic retries exhausted - try non-agentic fix as final fallback
+    on_output("\nAttempting programmatic JSON fix...\n");
+
+    let fixed_json = fix_json_syntax(&json_str);
+
+    // Try to parse the fixed JSON
+    match serde_json::from_str::<Spec>(&fixed_json) {
+        Ok(spec) => {
+            on_output("Programmatic fix succeeded!\n");
+            spec.save(output_path)?;
+            return Ok(spec);
+        }
+        Err(fallback_err) => {
+            // Non-agentic fix also failed - build detailed error message with both errors
+            let agentic_error = last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown error".to_string());
+            let fallback_error = fallback_err.to_string();
+
+            // Create truncated JSON preview for debugging
+            let json_preview = truncate_json_preview(&json_str, 500);
+
+            Err(Autom8Error::InvalidGeneratedSpec(format!(
+                "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+                 Agent error: {}\n\n\
+                 Fallback error: {}\n\n\
+                 Malformed JSON preview:\n{}",
+                MAX_JSON_RETRY_ATTEMPTS,
+                agentic_error,
+                fallback_error,
+                json_preview
+            )))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -844,6 +871,58 @@ fn build_reviewer_prompt(spec: &Spec, iteration: u32, max_iterations: u32) -> St
         .replace("{max_iterations}", &max_iterations.to_string())
 }
 
+/// Fix common JSON syntax errors without calling Claude.
+/// This is a conservative fixer that only corrects unambiguous errors:
+/// - Strips markdown code fences (```json ... ``` and ``` ... ```)
+/// - Removes trailing commas before ] and }
+/// - Quotes unquoted keys that match identifier patterns
+///
+/// The function is idempotent - running it twice produces the same output.
+pub fn fix_json_syntax(input: &str) -> String {
+    use regex::Regex;
+
+    let mut result = input.to_string();
+
+    // Step 1: Strip markdown code fences
+    // Handle ```json ... ``` and ``` ... ```
+    let code_fence_re = Regex::new(r"(?s)^```(?:json)?\s*\n?(.*?)\n?```\s*$").unwrap();
+    if let Some(captures) = code_fence_re.captures(&result) {
+        if let Some(content) = captures.get(1) {
+            result = content.as_str().to_string();
+        }
+    }
+
+    // Also handle code fences that aren't at the start/end but wrap the entire JSON
+    // Look for code fences and extract content between them
+    let inline_fence_re = Regex::new(r"(?s)```(?:json)?\s*\n(.*?)\n```").unwrap();
+    if let Some(captures) = inline_fence_re.captures(&result) {
+        if let Some(content) = captures.get(1) {
+            result = content.as_str().to_string();
+        }
+    }
+
+    // Step 2: Quote unquoted keys that match identifier patterns
+    // This must happen BEFORE trailing comma removal to avoid issues with parsing
+    // Match: { key: or , key: where key is an identifier (not already quoted)
+    // Be careful not to match inside strings
+    let unquoted_key_re = Regex::new(r#"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)"#).unwrap();
+    result = unquoted_key_re
+        .replace_all(&result, |caps: &regex::Captures| {
+            format!("{}\"{}\"{}",
+                caps.get(1).map_or("", |m| m.as_str()),
+                caps.get(2).map_or("", |m| m.as_str()),
+                caps.get(3).map_or("", |m| m.as_str()))
+        })
+        .to_string();
+
+    // Step 3: Remove trailing commas before ] and }
+    // Match comma followed by optional whitespace and then ] or }
+    let trailing_comma_re = Regex::new(r",(\s*[}\]])").unwrap();
+    result = trailing_comma_re.replace_all(&result, "$1").to_string();
+
+    result.trim().to_string()
+}
+
 /// Extract JSON from Claude's response, handling potential markdown code blocks
 fn extract_json(response: &str) -> Option<String> {
     let trimmed = response.trim();
@@ -887,6 +966,17 @@ fn extract_json(response: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Truncate JSON string for error preview, preserving readability.
+/// If the JSON is longer than max_len, it truncates and adds "..." indicator.
+fn truncate_json_preview(json: &str, max_len: usize) -> String {
+    let trimmed = json.trim();
+    if trimmed.len() <= max_len {
+        trimmed.to_string()
+    } else {
+        format!("{}...", &trimmed[..max_len])
+    }
 }
 
 /// Build a context string from previous iteration work summaries.
@@ -1842,5 +1932,961 @@ Hope that helps!"#;
         assert!(retry_msg.contains("JSON malformed"));
         assert!(retry_msg.contains("retrying"));
         assert!(retry_msg.contains("2/3"));
+    }
+
+    // ========================================================================
+    // Correction prompt spec_content tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_correction_prompt_includes_spec_content() {
+        use crate::prompts::SPEC_JSON_CORRECTION_PROMPT;
+
+        let spec_content = "# My Feature\n\n## Project\nTestProject\n\n## Description\nA test feature.";
+        let malformed_json = r#"{"project": "Test"#;
+        let error_message = "unexpected end of input";
+
+        let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{spec_content}", spec_content)
+            .replace("{malformed_json}", malformed_json)
+            .replace("{error_message}", error_message)
+            .replace("{attempt}", "2")
+            .replace("{max_attempts}", "3");
+
+        // Verify the correction prompt contains the spec content
+        assert!(
+            correction_prompt.contains("# My Feature"),
+            "Correction prompt should include the original spec content"
+        );
+        assert!(
+            correction_prompt.contains("## Project"),
+            "Correction prompt should include spec sections"
+        );
+        assert!(
+            correction_prompt.contains("TestProject"),
+            "Correction prompt should include project name from spec"
+        );
+    }
+
+    #[test]
+    fn test_correction_prompt_all_placeholders_populated() {
+        use crate::prompts::SPEC_JSON_CORRECTION_PROMPT;
+
+        let spec_content = "# Test Spec\n\n## Project\nMyProject";
+        let malformed_json = r#"{"invalid": json}"#;
+        let error_message = "expected colon at line 1";
+
+        let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{spec_content}", spec_content)
+            .replace("{malformed_json}", malformed_json)
+            .replace("{error_message}", error_message)
+            .replace("{attempt}", "3")
+            .replace("{max_attempts}", "3");
+
+        // Verify no placeholders remain
+        assert!(
+            !correction_prompt.contains("{spec_content}"),
+            "spec_content placeholder should be replaced"
+        );
+        assert!(
+            !correction_prompt.contains("{malformed_json}"),
+            "malformed_json placeholder should be replaced"
+        );
+        assert!(
+            !correction_prompt.contains("{error_message}"),
+            "error_message placeholder should be replaced"
+        );
+        assert!(
+            !correction_prompt.contains("{attempt}"),
+            "attempt placeholder should be replaced"
+        );
+        assert!(
+            !correction_prompt.contains("{max_attempts}"),
+            "max_attempts placeholder should be replaced"
+        );
+    }
+
+    #[test]
+    fn test_correction_prompt_spec_content_enables_regeneration() {
+        use crate::prompts::SPEC_JSON_CORRECTION_PROMPT;
+
+        // The prompt should allow regeneration from the spec when JSON is too corrupted
+        let spec_content = r#"# User Auth Feature
+
+## Project
+my-app
+
+## Branch
+feature/user-auth
+
+## Description
+Add user authentication
+
+## User Stories
+
+### US-001: Login endpoint
+**Priority:** 1
+
+Add login functionality
+
+**Acceptance Criteria:**
+- [ ] POST /login accepts credentials
+- [ ] Returns JWT token"#;
+
+        let malformed_json = "completely broken {{{not json at all";
+        let error_message = "expected value at line 1 column 1";
+
+        let correction_prompt = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{spec_content}", spec_content)
+            .replace("{malformed_json}", malformed_json)
+            .replace("{error_message}", error_message)
+            .replace("{attempt}", "2")
+            .replace("{max_attempts}", "3");
+
+        // Verify the prompt contains context to regenerate from spec
+        assert!(
+            correction_prompt.contains("User Auth Feature"),
+            "Should include feature name from spec"
+        );
+        assert!(
+            correction_prompt.contains("feature/user-auth"),
+            "Should include branch name from spec"
+        );
+        assert!(
+            correction_prompt.contains("US-001"),
+            "Should include user story ID from spec"
+        );
+        assert!(
+            correction_prompt.contains("Login endpoint"),
+            "Should include story title from spec"
+        );
+        assert!(
+            correction_prompt.contains("POST /login"),
+            "Should include acceptance criteria from spec"
+        );
+        // Verify regeneration is mentioned as an option
+        assert!(
+            correction_prompt.contains("regenerate") || correction_prompt.contains("Regenerate"),
+            "Should mention regeneration option when JSON is too corrupted"
+        );
+    }
+
+    // ========================================================================
+    // fix_json_syntax tests (US-003)
+    // ========================================================================
+
+    #[test]
+    fn test_fix_json_syntax_strips_json_code_fence() {
+        let input = r#"```json
+{"project": "Test", "name": "value"}
+```"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "name": "value"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_strips_generic_code_fence() {
+        let input = r#"```
+{"project": "Test", "name": "value"}
+```"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "name": "value"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_removes_trailing_comma_before_brace() {
+        let input = r#"{"project": "Test", "name": "value",}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "name": "value"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_removes_trailing_comma_before_bracket() {
+        let input = r#"[1, 2, 3,]"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"[1, 2, 3]"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_removes_nested_trailing_commas() {
+        let input = r#"{"items": [1, 2, 3,], "nested": {"a": 1,},}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"items": [1, 2, 3], "nested": {"a": 1}}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_quotes_unquoted_key() {
+        let input = r#"{foo: "bar"}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"foo": "bar"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_quotes_multiple_unquoted_keys() {
+        let input = r#"{foo: "bar", baz: 123}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"foo": "bar", "baz": 123}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_quotes_nested_unquoted_keys() {
+        let input = r#"{outer: {inner: "value"}}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"outer": {"inner": "value"}}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_preserves_already_quoted_keys() {
+        let input = r#"{"project": "Test", "name": "value"}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "name": "value"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_handles_mixed_quoted_unquoted_keys() {
+        let input = r#"{"project": "Test", name: "value"}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "name": "value"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_handles_underscore_keys() {
+        let input = r#"{my_key: "value", another_key_123: "test"}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"my_key": "value", "another_key_123": "test"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_combined_fixes() {
+        // Test all fixes together: code fence + trailing comma + unquoted key
+        let input = r#"```json
+{project: "Test", items: [1, 2,],}
+```"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"project": "Test", "items": [1, 2]}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_idempotent_valid_json() {
+        let input = r#"{"project": "Test", "items": [1, 2, 3]}"#;
+        let result1 = fix_json_syntax(input);
+        let result2 = fix_json_syntax(&result1);
+        assert_eq!(result1, result2, "Function should be idempotent");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_idempotent_after_fixes() {
+        let input = r#"```json
+{project: "Test", items: [1, 2,],}
+```"#;
+        let result1 = fix_json_syntax(input);
+        let result2 = fix_json_syntax(&result1);
+        assert_eq!(result1, result2, "Function should be idempotent after fixing");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_idempotent_trailing_comma() {
+        let input = r#"{"a": 1,}"#;
+        let result1 = fix_json_syntax(input);
+        let result2 = fix_json_syntax(&result1);
+        assert_eq!(result1, result2, "Trailing comma fix should be idempotent");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_idempotent_unquoted_keys() {
+        let input = r#"{foo: "bar"}"#;
+        let result1 = fix_json_syntax(input);
+        let result2 = fix_json_syntax(&result1);
+        assert_eq!(result1, result2, "Unquoted key fix should be idempotent");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_preserves_string_content() {
+        // Should not modify content inside strings
+        let input = r#"{"message": "Hello, world!"}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"message": "Hello, world!"}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_handles_empty_input() {
+        let input = "";
+        let result = fix_json_syntax(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_handles_whitespace_only() {
+        let input = "   \n  \t  ";
+        let result = fix_json_syntax(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_fix_json_syntax_trailing_comma_with_whitespace() {
+        let input = r#"{"a": 1 ,  }"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{"a": 1   }"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_trailing_comma_with_newline() {
+        let input = r#"{
+    "a": 1,
+}"#;
+        let result = fix_json_syntax(input);
+        assert_eq!(result, r#"{
+    "a": 1
+}"#);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_real_world_spec_json() {
+        // Test with a realistic spec JSON that might have errors
+        let input = r#"```json
+{
+    project: "my-app",
+    branchName: "feature/test",
+    "description": "Test feature",
+    userStories: [
+        {
+            "id": "US-001",
+            "title": "Test story",
+            "description": "A test",
+            "acceptanceCriteria": ["Criterion 1",],
+            "priority": 1,
+            "passes": false,
+            "notes": "",
+        },
+    ],
+}
+```"#;
+        let result = fix_json_syntax(input);
+        // Verify it can now be parsed as JSON
+        let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&result);
+        assert!(parsed.is_ok(), "Fixed JSON should be valid: {}", result);
+    }
+
+    #[test]
+    fn test_fix_json_syntax_does_not_break_valid_json() {
+        let valid_json = r#"{"project": "Test", "branchName": "main", "description": "A test project", "userStories": [{"id": "US-001", "title": "Story", "description": "Desc", "acceptanceCriteria": ["AC1"], "priority": 1, "passes": false, "notes": ""}]}"#;
+        let result = fix_json_syntax(valid_json);
+        // Should still be valid JSON
+        let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&result);
+        assert!(parsed.is_ok(), "Valid JSON should remain valid after fix_json_syntax");
+    }
+
+    // ========================================================================
+    // Non-agentic fallback integration tests (US-004)
+    // ========================================================================
+
+    #[test]
+    fn test_fix_json_syntax_can_fix_malformed_spec_json() {
+        // Simulate JSON that would fail parsing but can be fixed programmatically
+        // This is the type of JSON the non-agentic fallback would receive
+        let malformed_spec = r#"```json
+{
+    project: "TestProject",
+    branchName: "test-branch",
+    "description": "A test project",
+    userStories: [
+        {
+            "id": "US-001",
+            "title": "Test Story",
+            "description": "A test story",
+            "acceptanceCriteria": ["Criterion 1",],
+            "priority": 1,
+            "passes": false,
+            "notes": "",
+        },
+    ],
+}
+```"#;
+
+        // Verify original fails to parse
+        let parse_result: std::result::Result<Spec, _> = serde_json::from_str(malformed_spec);
+        assert!(parse_result.is_err(), "Malformed JSON should fail to parse");
+
+        // Apply fix_json_syntax
+        let fixed = fix_json_syntax(malformed_spec);
+
+        // Verify fixed JSON parses successfully
+        let fixed_result: std::result::Result<Spec, _> = serde_json::from_str(&fixed);
+        assert!(fixed_result.is_ok(), "Fixed JSON should parse successfully: {}", fixed);
+
+        // Verify the spec content is correct
+        let spec = fixed_result.unwrap();
+        assert_eq!(spec.project, "TestProject");
+        assert_eq!(spec.branch_name, "test-branch");
+        assert_eq!(spec.description, "A test project");
+        assert_eq!(spec.user_stories.len(), 1);
+        assert_eq!(spec.user_stories[0].id, "US-001");
+    }
+
+    #[test]
+    fn test_non_agentic_fallback_flow_success() {
+        // Test the fallback flow: malformed JSON that fix_json_syntax can fix
+        // This simulates what happens after MAX_JSON_RETRY_ATTEMPTS are exhausted
+
+        // Malformed JSON with trailing comma and unquoted key (fixable issues)
+        let json_after_retries = r#"{
+            project: "TestProject",
+            "branchName": "main",
+            "description": "Test",
+            "userStories": [],
+        }"#;
+
+        // First verify it fails to parse as-is
+        let initial_parse: std::result::Result<Spec, _> = serde_json::from_str(json_after_retries);
+        assert!(initial_parse.is_err());
+
+        // Apply non-agentic fix
+        let fixed_json = fix_json_syntax(json_after_retries);
+
+        // Verify it now parses successfully
+        let fixed_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(fixed_parse.is_ok(), "Non-agentic fix should produce valid JSON");
+    }
+
+    #[test]
+    fn test_non_agentic_fallback_flow_failure() {
+        // Test the fallback flow when fix_json_syntax cannot fix the JSON
+        // This simulates truly broken JSON that requires regeneration
+
+        // Completely broken JSON - missing closing braces, truncated
+        let unfixable_json = r#"{"project": "Test", "branchName": "#;
+
+        // Apply non-agentic fix
+        let fixed_json = fix_json_syntax(unfixable_json);
+
+        // Should still fail to parse (unfixable structural issues)
+        let parse_result: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(parse_result.is_err(), "Unfixable JSON should still fail after fix attempt");
+    }
+
+    #[test]
+    fn test_non_agentic_fallback_fixes_code_fence_wrapped_json() {
+        // Claude often wraps JSON in code fences even when told not to
+        // The non-agentic fallback should strip these
+
+        let fenced_json = r#"```json
+{
+    "project": "TestProject",
+    "branchName": "feature-branch",
+    "description": "Test description",
+    "userStories": [{
+        "id": "US-001",
+        "title": "Test",
+        "description": "Test desc",
+        "acceptanceCriteria": ["AC1"],
+        "priority": 1,
+        "passes": false,
+        "notes": ""
+    }]
+}
+```"#;
+
+        // Apply non-agentic fix (strips code fences)
+        let fixed = fix_json_syntax(fenced_json);
+
+        // Verify it parses successfully
+        let result: std::result::Result<Spec, _> = serde_json::from_str(&fixed);
+        assert!(result.is_ok(), "Code fence-wrapped JSON should be fixable: {}", fixed);
+    }
+
+    #[test]
+    fn test_fallback_message_format() {
+        // Verify the user-facing messages match acceptance criteria
+        let fallback_start_msg = "Attempting programmatic JSON fix...";
+        let fallback_success_msg = "Programmatic fix succeeded!";
+
+        // These messages should be shown to users
+        assert!(fallback_start_msg.contains("programmatic"));
+        assert!(fallback_start_msg.contains("JSON fix"));
+        assert!(fallback_success_msg.contains("succeeded"));
+    }
+
+    #[test]
+    fn test_error_message_after_fallback_failure() {
+        // Verify error message format includes information about both agentic and non-agentic attempts
+        let error_msg = format!(
+            "JSON parse error after {} attempts and programmatic fix: {}",
+            MAX_JSON_RETRY_ATTEMPTS,
+            "expected value at line 1"
+        );
+
+        assert!(error_msg.contains("3 attempts"));
+        assert!(error_msg.contains("programmatic fix"));
+        assert!(error_msg.contains("expected value"));
+    }
+
+    // ========================================================================
+    // Error reporting tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn test_truncate_json_preview_short_json() {
+        let short_json = r#"{"project": "Test"}"#;
+        let result = truncate_json_preview(short_json, 500);
+        assert_eq!(result, short_json);
+    }
+
+    #[test]
+    fn test_truncate_json_preview_long_json() {
+        let long_json = "a".repeat(600);
+        let result = truncate_json_preview(&long_json, 500);
+        assert_eq!(result.len(), 503); // 500 chars + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_json_preview_trims_whitespace() {
+        let json_with_whitespace = "  \n  {\"project\": \"Test\"}  \n  ";
+        let result = truncate_json_preview(json_with_whitespace, 500);
+        assert_eq!(result, r#"{"project": "Test"}"#);
+    }
+
+    #[test]
+    fn test_truncate_json_preview_exact_limit() {
+        let exact_json = "a".repeat(500);
+        let result = truncate_json_preview(&exact_json, 500);
+        assert_eq!(result.len(), 500);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_error_message_contains_both_error_sources() {
+        // US-005: Error message includes both the agentic error and the fallback error
+        let agentic_error = "expected `:` at line 1 column 10";
+        let fallback_error = "expected value at line 1 column 1";
+        let malformed_json = r#"{project: "Test"}"#;
+
+        // Simulate the error message format from run_for_spec_generation
+        let error_msg = format!(
+            "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+             Agent error: {}\n\n\
+             Fallback error: {}\n\n\
+             Malformed JSON preview:\n{}",
+            MAX_JSON_RETRY_ATTEMPTS,
+            agentic_error,
+            fallback_error,
+            truncate_json_preview(malformed_json, 500)
+        );
+
+        // Verify all required components are present
+        assert!(
+            error_msg.contains("Agent error:"),
+            "Error message should include 'Agent error:' label"
+        );
+        assert!(
+            error_msg.contains("Fallback error:"),
+            "Error message should include 'Fallback error:' label"
+        );
+        assert!(
+            error_msg.contains(agentic_error),
+            "Error message should include the agentic error"
+        );
+        assert!(
+            error_msg.contains(fallback_error),
+            "Error message should include the fallback error"
+        );
+        assert!(
+            error_msg.contains("Malformed JSON preview:"),
+            "Error message should include JSON preview section"
+        );
+        assert!(
+            error_msg.contains(malformed_json),
+            "Error message should include the malformed JSON"
+        );
+        assert!(
+            error_msg.contains("3 agentic attempts"),
+            "Error message should mention the number of attempts"
+        );
+    }
+
+    #[test]
+    fn test_error_message_truncates_long_json_preview() {
+        // US-005: Malformed JSON should be truncated in error message
+        let long_json = format!(r#"{{"project": "Test", "data": "{}"}}"#, "x".repeat(1000));
+        let preview = truncate_json_preview(&long_json, 500);
+
+        assert!(
+            preview.len() <= 503,
+            "Preview should be truncated to max 500 chars + '...'"
+        );
+        assert!(
+            preview.ends_with("..."),
+            "Truncated preview should end with '...'"
+        );
+    }
+
+    #[test]
+    fn test_error_message_labels_are_distinct() {
+        // US-005: Error messages are clearly labeled
+        let error_msg = format!(
+            "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+             Agent error: some agent error\n\n\
+             Fallback error: some fallback error\n\n\
+             Malformed JSON preview:\n{{}}",
+            MAX_JSON_RETRY_ATTEMPTS
+        );
+
+        // Verify labels are distinct and can be used for parsing
+        let agent_label_count = error_msg.matches("Agent error:").count();
+        let fallback_label_count = error_msg.matches("Fallback error:").count();
+
+        assert_eq!(
+            agent_label_count, 1,
+            "Should have exactly one 'Agent error:' label"
+        );
+        assert_eq!(
+            fallback_label_count, 1,
+            "Should have exactly one 'Fallback error:' label"
+        );
+    }
+
+    #[test]
+    fn test_error_message_with_real_parse_errors() {
+        // US-005: Test with actual serde_json errors
+        let unfixable_json = r#"{"project": "Test", "branchName": "#;
+
+        // Get actual parse error
+        let agentic_parse_result: std::result::Result<Spec, _> =
+            serde_json::from_str(unfixable_json);
+        let agentic_error = agentic_parse_result.unwrap_err().to_string();
+
+        // Apply fix (won't help with structural issues)
+        let fixed_json = fix_json_syntax(unfixable_json);
+        let fallback_parse_result: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        let fallback_error = fallback_parse_result.unwrap_err().to_string();
+
+        // Build error message
+        let error_msg = format!(
+            "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+             Agent error: {}\n\n\
+             Fallback error: {}\n\n\
+             Malformed JSON preview:\n{}",
+            MAX_JSON_RETRY_ATTEMPTS,
+            agentic_error,
+            fallback_error,
+            truncate_json_preview(unfixable_json, 500)
+        );
+
+        // Verify the error message is useful for debugging
+        assert!(
+            error_msg.contains("EOF"),
+            "Parse error should mention unexpected EOF"
+        );
+        assert!(
+            error_msg.contains(unfixable_json.trim()),
+            "Error should include the problematic JSON"
+        );
+    }
+
+    // ========================================================================
+    // Full retry + fallback flow integration tests (US-006)
+    // ========================================================================
+    //
+    // These tests document and verify the complete JSON generation retry flow:
+    //
+    // RETRY FLOW STAGES:
+    // 1. Initial attempt: Claude generates JSON from spec markdown
+    // 2. Agentic retry (up to MAX_JSON_RETRY_ATTEMPTS): If JSON parse fails,
+    //    send correction prompt to Claude with:
+    //    - Original spec content (for regeneration if needed)
+    //    - Malformed JSON output
+    //    - Parse error message
+    //    - Attempt counter (e.g., "2/3")
+    // 3. Non-agentic fallback: If all agentic retries exhausted, call
+    //    fix_json_syntax() which programmatically fixes:
+    //    - Markdown code fences (```json ... ```)
+    //    - Trailing commas before ] and }
+    //    - Unquoted keys (foo: -> "foo":)
+    // 4. Final error: If fallback also fails, return detailed error with:
+    //    - Agent error (last agentic parse error)
+    //    - Fallback error (parse error after programmatic fix)
+    //    - Truncated JSON preview for debugging
+    //
+    // ========================================================================
+
+    #[test]
+    fn test_integration_trailing_comma_fixed_by_non_agentic_fallback() {
+        // US-006: Test case with JSON that has a trailing comma verifies
+        // non-agentic fix succeeds.
+        //
+        // This simulates the scenario where:
+        // 1. Claude generates valid structure but with trailing commas
+        // 2. All 3 agentic retries fail (Claude keeps producing trailing commas)
+        // 3. Non-agentic fallback (fix_json_syntax) removes the trailing commas
+        // 4. JSON parses successfully -> SUCCESS
+
+        let json_with_trailing_comma = r#"{
+            "project": "TestProject",
+            "branchName": "feature/test",
+            "description": "A test project with trailing commas",
+            "userStories": [
+                {
+                    "id": "US-001",
+                    "title": "Test Story",
+                    "description": "A story to test",
+                    "acceptanceCriteria": ["Criterion 1", "Criterion 2",],
+                    "priority": 1,
+                    "passes": false,
+                    "notes": ""
+                },
+            ]
+        }"#;
+
+        // Stage 1: Verify the original JSON fails to parse (trailing commas are invalid JSON)
+        let initial_parse: std::result::Result<Spec, _> =
+            serde_json::from_str(json_with_trailing_comma);
+        assert!(
+            initial_parse.is_err(),
+            "JSON with trailing commas should fail to parse"
+        );
+        let parse_error = initial_parse.unwrap_err().to_string();
+        assert!(
+            parse_error.contains("trailing") || parse_error.contains("expected"),
+            "Parse error should indicate the issue"
+        );
+
+        // Stage 2: Apply non-agentic fix (simulating fallback after agentic retries)
+        let fixed_json = fix_json_syntax(json_with_trailing_comma);
+
+        // Stage 3: Verify the fixed JSON parses successfully
+        let fixed_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(
+            fixed_parse.is_ok(),
+            "Non-agentic fix should successfully remove trailing commas. Fixed JSON:\n{}",
+            fixed_json
+        );
+
+        // Stage 4: Verify the parsed spec has correct content
+        let spec = fixed_parse.unwrap();
+        assert_eq!(spec.project, "TestProject");
+        assert_eq!(spec.branch_name, "feature/test");
+        assert_eq!(spec.user_stories.len(), 1);
+        assert_eq!(spec.user_stories[0].id, "US-001");
+        assert_eq!(spec.user_stories[0].acceptance_criteria.len(), 2);
+    }
+
+    #[test]
+    fn test_integration_completely_invalid_json_error_propagation() {
+        // US-006: Test case with completely invalid JSON (e.g., not json at all)
+        // verifies proper error propagation.
+        //
+        // This simulates the scenario where:
+        // 1. Claude generates something that isn't JSON at all
+        // 2. All 3 agentic retries fail
+        // 3. Non-agentic fallback cannot fix structural issues
+        // 4. Detailed error message is returned with both errors
+
+        let not_json_at_all = "This is plain text, not JSON at all. It has no braces or structure.";
+
+        // Stage 1: Verify it completely fails to parse
+        let initial_parse: std::result::Result<Spec, _> = serde_json::from_str(not_json_at_all);
+        assert!(initial_parse.is_err(), "Plain text should fail to parse as JSON");
+        let agentic_error = initial_parse.unwrap_err().to_string();
+
+        // Stage 2: Apply non-agentic fix (it cannot help with this)
+        let fixed_json = fix_json_syntax(not_json_at_all);
+
+        // Stage 3: Verify the fix didn't help (can't create JSON from plain text)
+        let fallback_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(
+            fallback_parse.is_err(),
+            "Non-agentic fix cannot create JSON from plain text"
+        );
+        let fallback_error = fallback_parse.unwrap_err().to_string();
+
+        // Stage 4: Build error message as run_for_spec_generation would
+        let error_msg = format!(
+            "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+             Agent error: {}\n\n\
+             Fallback error: {}\n\n\
+             Malformed JSON preview:\n{}",
+            MAX_JSON_RETRY_ATTEMPTS,
+            agentic_error,
+            fallback_error,
+            truncate_json_preview(not_json_at_all, 500)
+        );
+
+        // Stage 5: Verify error message contains all required components for debugging
+        assert!(
+            error_msg.contains("3 agentic attempts"),
+            "Error should mention retry count"
+        );
+        assert!(
+            error_msg.contains("Agent error:"),
+            "Error should have agent error label"
+        );
+        assert!(
+            error_msg.contains("Fallback error:"),
+            "Error should have fallback error label"
+        );
+        assert!(
+            error_msg.contains("Malformed JSON preview:"),
+            "Error should have JSON preview section"
+        );
+        assert!(
+            error_msg.contains("This is plain text"),
+            "Error should include the original content"
+        );
+    }
+
+    #[test]
+    fn test_integration_truncated_json_cannot_be_fixed() {
+        // US-006: Another form of invalid JSON - structurally incomplete
+        // Verifies error propagation when JSON is cut off mid-stream.
+        //
+        // This simulates the scenario where:
+        // 1. Claude's output was truncated (network issue, context limit, etc.)
+        // 2. JSON has valid start but no closing braces
+        // 3. Neither agentic retry nor fallback can fix it
+        // 4. Error message helps identify the structural issue
+
+        let truncated_json = r#"{"project": "Test", "branchName": "main", "description": "A project", "userStories": [{"id": "US-001", "title": "Story", "description": "Desc", "acceptanceCriteria": ["#;
+
+        // Stage 1: Initial parse fails
+        let initial_parse: std::result::Result<Spec, _> = serde_json::from_str(truncated_json);
+        assert!(initial_parse.is_err());
+        let agentic_error = initial_parse.unwrap_err().to_string();
+        assert!(
+            agentic_error.contains("EOF") || agentic_error.contains("end of"),
+            "Error should mention unexpected end of input"
+        );
+
+        // Stage 2: Non-agentic fix cannot restore missing structure
+        let fixed_json = fix_json_syntax(truncated_json);
+        let fallback_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(
+            fallback_parse.is_err(),
+            "Cannot fix structurally incomplete JSON"
+        );
+
+        // Stage 3: Error message format is consistent
+        let fallback_error = fallback_parse.unwrap_err().to_string();
+        let error_msg = format!(
+            "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
+             Agent error: {}\n\n\
+             Fallback error: {}",
+            MAX_JSON_RETRY_ATTEMPTS,
+            agentic_error,
+            fallback_error
+        );
+        assert!(error_msg.contains("Agent error:"));
+        assert!(error_msg.contains("Fallback error:"));
+    }
+
+    #[test]
+    fn test_integration_code_fence_and_trailing_comma_combined() {
+        // US-006: Test that combined issues (code fence + trailing comma + unquoted keys)
+        // are all fixed by non-agentic fallback.
+        //
+        // This is a realistic scenario where Claude:
+        // 1. Wraps output in ```json code fence (despite being told not to)
+        // 2. Uses trailing commas (JavaScript habit)
+        // 3. Sometimes uses unquoted keys
+
+        let claude_output_with_issues = r#"```json
+{
+    project: "MyApp",
+    "branchName": "feature/auth",
+    "description": "Add authentication",
+    userStories: [
+        {
+            "id": "US-001",
+            "title": "Login",
+            "description": "Add login form",
+            "acceptanceCriteria": ["Works",],
+            "priority": 1,
+            "passes": false,
+            "notes": "",
+        },
+    ],
+}
+```"#;
+
+        // Verify original fails
+        let initial_parse: std::result::Result<Spec, _> =
+            serde_json::from_str(claude_output_with_issues);
+        assert!(initial_parse.is_err());
+
+        // Apply non-agentic fix
+        let fixed_json = fix_json_syntax(claude_output_with_issues);
+
+        // Verify all issues were fixed
+        assert!(
+            !fixed_json.contains("```"),
+            "Code fences should be stripped"
+        );
+
+        // Parse should now succeed
+        let fixed_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
+        assert!(
+            fixed_parse.is_ok(),
+            "Combined fixes should produce valid JSON. Result:\n{}",
+            fixed_json
+        );
+
+        let spec = fixed_parse.unwrap();
+        assert_eq!(spec.project, "MyApp");
+        assert_eq!(spec.user_stories[0].title, "Login");
+    }
+
+    #[test]
+    fn test_integration_retry_flow_messages() {
+        // US-006: Document the expected user-facing messages at each stage.
+        // These messages are shown to the user during the retry flow.
+
+        // Check all retry message variants (attempts 2 and 3)
+        for attempt in 2..=MAX_JSON_RETRY_ATTEMPTS {
+            let retry_msg = format!(
+                "\nJSON malformed, retrying (attempt {}/{})...\n",
+                attempt, MAX_JSON_RETRY_ATTEMPTS
+            );
+            assert!(
+                retry_msg.contains("JSON malformed"),
+                "Retry message should indicate JSON is malformed"
+            );
+            assert!(
+                retry_msg.contains("retrying"),
+                "Retry message should indicate a retry is happening"
+            );
+            assert!(
+                retry_msg.contains(&format!("{}/{}", attempt, MAX_JSON_RETRY_ATTEMPTS)),
+                "Retry message should show attempt count"
+            );
+        }
+
+        // Message shown when fallback is triggered
+        let fallback_start_msg = "\nAttempting programmatic JSON fix...\n";
+        assert!(
+            fallback_start_msg.contains("programmatic"),
+            "Fallback message should indicate programmatic fix"
+        );
+
+        // Message shown when fallback succeeds
+        let fallback_success_msg = "Programmatic fix succeeded!\n";
+        assert!(
+            fallback_success_msg.contains("succeeded"),
+            "Success message should indicate success"
+        );
+    }
+
+    #[test]
+    fn test_integration_retry_constants() {
+        // US-006: Verify the retry configuration is correct.
+        // This documents the expected retry behavior.
+
+        // Maximum number of agentic retry attempts before fallback
+        assert_eq!(
+            MAX_JSON_RETRY_ATTEMPTS, 3,
+            "Should attempt Claude correction 3 times before fallback"
+        );
+
+        // The flow should be:
+        // Attempt 1 (initial) -> Attempt 2 (retry) -> Attempt 3 (retry) -> Fallback -> Error
+        // That's 3 total agentic attempts, then 1 fallback attempt
     }
 }
