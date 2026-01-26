@@ -929,6 +929,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -954,6 +955,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -970,6 +972,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -983,10 +986,11 @@ mod tests {
     fn test_effective_config_returns_default_when_no_config() {
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         let effective = state.effective_config();
-        // Default config has all options enabled
+        // Default config has review, commit, pull_request enabled, use_tui disabled
         assert!(effective.review);
         assert!(effective.commit);
         assert!(effective.pull_request);
+        assert!(!effective.use_tui);
     }
 
     #[test]
@@ -995,6 +999,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1035,11 +1040,12 @@ mod tests {
         // Config should default to None
         assert!(state.config.is_none());
 
-        // effective_config() should return default (all true)
+        // effective_config() should return default (all true except use_tui)
         let effective = state.effective_config();
         assert!(effective.review);
         assert!(effective.commit);
         assert!(effective.pull_request);
+        assert!(!effective.use_tui);
     }
 
     #[test]
@@ -1048,6 +1054,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1066,6 +1073,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1084,6 +1092,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1105,6 +1114,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
