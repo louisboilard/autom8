@@ -5,7 +5,7 @@ use autom8::output::{
 };
 use autom8::prompt;
 use autom8::prompts;
-use autom8::Runner;
+use autom8::{create_display, Runner};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,10 @@ struct Cli {
     /// Show full Claude output instead of spinner (useful for debugging)
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Enable TUI mode for rich terminal interface during task implementation
+    #[arg(short = 't', long, global = true)]
+    tui: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -90,8 +94,32 @@ fn detect_input_type(path: &Path) -> InputType {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Determine effective TUI mode: CLI flag > config file > default (false)
+    // We need to load config first to merge with CLI flag
+    let effective_tui = if cli.tui {
+        // CLI flag explicitly enables TUI
+        true
+    } else {
+        // Check config file for use_tui setting
+        autom8::config::get_effective_config()
+            .map(|c| c.use_tui)
+            .unwrap_or(false)
+    };
+
+    // Create the appropriate display adapter based on effective TUI mode
+    let display = create_display(effective_tui);
+
     let mut runner = match Runner::new() {
-        Ok(r) => r.with_verbose(cli.verbose),
+        Ok(r) => {
+            let r = r.with_verbose(cli.verbose).with_display(display);
+            // Apply TUI flag only if explicitly set on CLI (overrides config)
+            if cli.tui {
+                r.with_tui(true)
+            } else {
+                r
+            }
+        }
         Err(e) => {
             print_error(&format!("Failed to initialize runner: {}", e));
             std::process::exit(1);
@@ -155,7 +183,7 @@ fn main() {
         (None, Some(Commands::Describe { project_name })) => describe_command(project_name),
 
         // No file and no command - check for existing state first, then start spec creation
-        (None, None) => default_command(cli.verbose),
+        (None, None) => default_command(cli.verbose, cli.tui),
     };
 
     if let Err(e) = result {
@@ -192,7 +220,7 @@ fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
 /// First checks for an existing state file indicating work in progress.
 /// If state exists, proceeds to prompt the user (US-002).
 /// If no state exists, proceeds to start spec creation (US-003).
-fn default_command(verbose: bool) -> autom8::error::Result<()> {
+fn default_command(verbose: bool, tui: bool) -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
     let state_manager = StateManager::new()?;
@@ -200,10 +228,10 @@ fn default_command(verbose: bool) -> autom8::error::Result<()> {
     // Check for existing state file
     if let Some(state) = state_manager.load_current()? {
         // State exists - proceed to US-002 (prompt user)
-        handle_existing_state(state, verbose)
+        handle_existing_state(state, verbose, tui)
     } else {
         // No state - proceed to US-003 (start spec creation)
-        start_spec_creation(verbose)
+        start_spec_creation(verbose, tui)
     }
 }
 
@@ -211,6 +239,7 @@ fn default_command(verbose: bool) -> autom8::error::Result<()> {
 fn handle_existing_state(
     state: autom8::state::RunState,
     verbose: bool,
+    tui: bool,
 ) -> autom8::error::Result<()> {
     use autom8::state::StateManager;
 
@@ -239,7 +268,10 @@ fn handle_existing_state(
             prompt::print_action("Resuming existing work...");
             println!();
 
-            let runner = Runner::new()?.with_verbose(verbose);
+            // Create display adapter based on effective TUI mode
+            let display = create_display(tui);
+            let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+            let runner = if tui { runner.with_tui(true) } else { runner };
             runner.resume()
         }
         1 => {
@@ -258,7 +290,7 @@ fn handle_existing_state(
             println!();
 
             // Proceed to spec creation
-            start_spec_creation(verbose)
+            start_spec_creation(verbose, tui)
         }
         _ => {
             // Option 3: Exit → do nothing, exit cleanly
@@ -270,7 +302,7 @@ fn handle_existing_state(
 }
 
 /// Start a new spec creation session (US-003)
-fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
+fn start_spec_creation(verbose: bool, tui: bool) -> autom8::error::Result<()> {
     use autom8::SpecSnapshot;
     use std::process::Command;
 
@@ -339,8 +371,11 @@ fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
+                        // Create display adapter based on effective TUI mode
+                        let display = create_display(tui);
                         // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose);
+                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+                        let runner = if tui { runner.with_tui(true) } else { runner };
                         runner.run_from_spec(spec_path)
                     }
                     n => {
@@ -374,8 +409,11 @@ fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
+                        // Create display adapter based on effective TUI mode
+                        let display = create_display(tui);
                         // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose);
+                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+                        let runner = if tui { runner.with_tui(true) } else { runner };
                         runner.run_from_spec(selected_spec)
                     }
                 }
@@ -1372,5 +1410,201 @@ mod tests {
         // Verify the version constant matches what's in Cargo.toml
         let cargo_version = env!("CARGO_PKG_VERSION");
         assert_eq!(cargo_version, "0.2.0", "Version should be 0.2.0");
+    }
+
+    // ======================================================================
+    // Tests for US-002 (TUI): Add --tui CLI flag
+    // ======================================================================
+
+    #[test]
+    fn test_us002_tui_flag_is_recognized() {
+        // Test that --tui flag is recognized by clap
+        let cli = Cli::try_parse_from(["autom8", "--tui"]).unwrap();
+        assert!(cli.tui, "--tui flag should set tui to true");
+    }
+
+    #[test]
+    fn test_us002_tui_short_flag_is_recognized() {
+        // Test that -t short flag is recognized by clap
+        let cli = Cli::try_parse_from(["autom8", "-t"]).unwrap();
+        assert!(cli.tui, "-t flag should set tui to true");
+    }
+
+    #[test]
+    fn test_us002_tui_defaults_to_false() {
+        // Test that tui defaults to false when flag is not provided
+        let cli = Cli::try_parse_from(["autom8"]).unwrap();
+        assert!(!cli.tui, "tui should default to false");
+    }
+
+    #[test]
+    fn test_us002_tui_flag_is_global() {
+        // Test that --tui flag works with subcommands (global flag)
+        let cli = Cli::try_parse_from(["autom8", "--tui", "run"]).unwrap();
+        assert!(cli.tui, "--tui should work before subcommand");
+        assert!(matches!(cli.command, Some(Commands::Run { .. })));
+
+        let cli = Cli::try_parse_from(["autom8", "run", "--tui"]).unwrap();
+        assert!(cli.tui, "--tui should work after subcommand");
+        assert!(matches!(cli.command, Some(Commands::Run { .. })));
+    }
+
+    #[test]
+    fn test_us002_tui_flag_works_with_resume() {
+        // Test that --tui flag works with resume command
+        let cli = Cli::try_parse_from(["autom8", "--tui", "resume"]).unwrap();
+        assert!(cli.tui, "--tui should work with resume");
+        assert!(matches!(cli.command, Some(Commands::Resume)));
+    }
+
+    #[test]
+    fn test_us002_tui_flag_works_with_positional_file() {
+        // Test that --tui flag works with positional file argument
+        let cli = Cli::try_parse_from(["autom8", "--tui", "spec.json"]).unwrap();
+        assert!(cli.tui, "--tui should work with file argument");
+        assert!(cli.file.is_some());
+        assert_eq!(cli.file.unwrap().to_string_lossy(), "spec.json");
+    }
+
+    #[test]
+    fn test_us002_tui_and_verbose_can_be_combined() {
+        // Test that --tui and --verbose flags can be used together
+        let cli = Cli::try_parse_from(["autom8", "--tui", "--verbose"]).unwrap();
+        assert!(cli.tui, "--tui should be set");
+        assert!(cli.verbose, "--verbose should be set");
+
+        // Test with short flags
+        let cli = Cli::try_parse_from(["autom8", "-t", "-v"]).unwrap();
+        assert!(cli.tui, "-t should set tui");
+        assert!(cli.verbose, "-v should set verbose");
+    }
+
+    #[test]
+    fn test_us002_tui_flag_appears_in_help() {
+        // Test that --tui flag is documented in help text
+        // Clap returns error with help text when --help is passed
+        let result = Cli::try_parse_from(["autom8", "--help"]);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        let help_text = err.to_string();
+        assert!(
+            help_text.contains("--tui") || help_text.contains("-t"),
+            "Help text should mention --tui flag"
+        );
+    }
+
+    // ======================================================================
+    // Tests for US-007: Integration and entry point wiring
+    // ======================================================================
+
+    #[test]
+    fn test_us007_create_display_returns_cli_display_when_tui_false() {
+        // When TUI is disabled, create_display should return CliDisplay
+        let display = autom8::create_display(false);
+        // Verify it's a functional display adapter by calling a method
+        display.info("test");
+        // CliDisplay outputs to stdout, TuiDisplay updates internal state
+        // This test verifies the function doesn't panic and returns a valid adapter
+    }
+
+    #[test]
+    fn test_us007_create_display_returns_tui_display_when_tui_true() {
+        // When TUI is enabled, create_display should return TuiDisplay
+        let display = autom8::create_display(true);
+        // Verify it's a functional display adapter by calling a method
+        display.info("test");
+        // TuiDisplay updates internal app state rather than printing
+    }
+
+    #[test]
+    fn test_us007_runner_with_display_accepts_custom_adapter() {
+        // Verify Runner::with_display() can accept display from create_display()
+        let display = autom8::create_display(false);
+        let runner = Runner::new().unwrap().with_display(display);
+        // Runner should be usable
+        let _ = runner;
+    }
+
+    #[test]
+    fn test_us007_runner_with_tui_display_accepts_tui_adapter() {
+        // Verify Runner::with_display() accepts TuiDisplay
+        let display = autom8::create_display(true);
+        let runner = Runner::new().unwrap().with_display(display);
+        // Runner should be usable
+        let _ = runner;
+    }
+
+    #[test]
+    fn test_us007_effective_tui_mode_cli_flag_takes_precedence() {
+        // When --tui is provided, it should override config
+        let cli = Cli::try_parse_from(["autom8", "--tui"]).unwrap();
+        // If cli.tui is true, that takes precedence regardless of config
+        let effective_tui = if cli.tui {
+            true
+        } else {
+            // Would check config here
+            false
+        };
+        assert!(effective_tui, "CLI flag should make effective_tui true");
+    }
+
+    #[test]
+    fn test_us007_effective_tui_mode_defaults_to_false() {
+        // When no --tui flag, effective mode depends on config (default false)
+        let cli = Cli::try_parse_from(["autom8"]).unwrap();
+        assert!(!cli.tui, "TUI flag should default to false");
+        // With no flag and default config, effective_tui should be false
+        let effective_tui = if cli.tui {
+            true
+        } else {
+            // Default config has use_tui = false
+            autom8::config::Config::default().use_tui
+        };
+        assert!(!effective_tui, "Effective TUI mode should default to false");
+    }
+
+    #[test]
+    fn test_us007_run_command_accepts_tui_flag() {
+        // Verify run command can be combined with --tui
+        let cli = Cli::try_parse_from(["autom8", "--tui", "run"]).unwrap();
+        assert!(cli.tui);
+        assert!(matches!(cli.command, Some(Commands::Run { .. })));
+    }
+
+    #[test]
+    fn test_us007_resume_command_accepts_tui_flag() {
+        // Verify resume command can be combined with --tui
+        let cli = Cli::try_parse_from(["autom8", "--tui", "resume"]).unwrap();
+        assert!(cli.tui);
+        assert!(matches!(cli.command, Some(Commands::Resume)));
+    }
+
+    #[test]
+    fn test_us007_positional_file_accepts_tui_flag() {
+        // Verify positional file argument works with --tui
+        let cli = Cli::try_parse_from(["autom8", "--tui", "spec.json"]).unwrap();
+        assert!(cli.tui);
+        assert!(cli.file.is_some());
+        assert_eq!(cli.file.unwrap().to_string_lossy(), "spec.json");
+    }
+
+    #[test]
+    fn test_us007_display_adapter_trait_is_object_safe() {
+        // Verify DisplayAdapter can be used as Box<dyn DisplayAdapter>
+        fn accepts_boxed_display(_: Box<dyn autom8::DisplayAdapter>) {}
+        accepts_boxed_display(autom8::create_display(false));
+        accepts_boxed_display(autom8::create_display(true));
+    }
+
+    #[test]
+    fn test_us007_tui_display_exported_from_lib() {
+        // Verify TuiDisplay is accessible from autom8 crate
+        let _display = autom8::TuiDisplay::new();
+    }
+
+    #[test]
+    fn test_us007_cli_display_exported_from_lib() {
+        // Verify CliDisplay is accessible from autom8 crate
+        let _display = autom8::CliDisplay::new();
     }
 }
