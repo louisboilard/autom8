@@ -794,7 +794,8 @@ mod tests {
         );
         assert!(
             SPEC_JSON_CORRECTION_PROMPT.contains("Do NOT wrap")
-                || SPEC_JSON_CORRECTION_PROMPT.contains("Do NOT wrap your output in markdown code fences"),
+                || SPEC_JSON_CORRECTION_PROMPT
+                    .contains("Do NOT wrap your output in markdown code fences"),
             "Should explicitly instruct not to wrap in code fences"
         );
     }

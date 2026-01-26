@@ -853,8 +853,11 @@ impl Runner {
         }
 
         // Initialize state with config snapshot for resume support
-        let state =
-            RunState::new_with_config(spec_json_path.to_path_buf(), spec.branch_name.clone(), config);
+        let state = RunState::new_with_config(
+            spec_json_path.to_path_buf(),
+            spec.branch_name.clone(),
+            config,
+        );
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
         print_project_info(&spec);

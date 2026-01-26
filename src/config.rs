@@ -81,8 +81,8 @@ impl Default for Config {
 // Config Validation
 // ============================================================================
 
-use std::fmt;
 use std::error::Error;
+use std::fmt;
 
 /// Error type for configuration validation failures.
 ///
@@ -228,7 +228,10 @@ pub fn load_global_config() -> Result<Config> {
     // Read and parse the existing config file
     let content = fs::read_to_string(&config_path)?;
     let config: Config = toml::from_str(&content).map_err(|e| {
-        Autom8Error::Config(format!("Failed to parse config file at {:?}: {}", config_path, e))
+        Autom8Error::Config(format!(
+            "Failed to parse config file at {:?}: {}",
+            config_path, e
+        ))
     })?;
 
     Ok(config)
@@ -2152,7 +2155,10 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
 
         let config_path = config_dir.join("config.toml");
-        assert!(!config_path.exists(), "Config file should not exist initially");
+        assert!(
+            !config_path.exists(),
+            "Config file should not exist initially"
+        );
 
         // We can't easily test the real load_global_config because it uses the real home dir,
         // but we can test the underlying logic by simulating it
@@ -2209,7 +2215,10 @@ commit = true
 
         assert!(!loaded.review);
         assert!(loaded.commit);
-        assert!(loaded.pull_request, "Missing pull_request should default to true");
+        assert!(
+            loaded.pull_request,
+            "Missing pull_request should default to true"
+        );
     }
 
     #[test]
@@ -2250,7 +2259,10 @@ commit = true
 
         // Verify it's still readable
         let reloaded = load_global_config().unwrap();
-        assert_eq!(original, reloaded, "Config should be unchanged after save/load cycle");
+        assert_eq!(
+            original, reloaded,
+            "Config should be unchanged after save/load cycle"
+        );
     }
 
     #[test]
@@ -2268,7 +2280,10 @@ commit = true
 
         // Read raw content and verify comments are present
         let raw_content = fs::read_to_string(&config_path).unwrap();
-        assert!(raw_content.contains("#"), "Config file should contain comments");
+        assert!(
+            raw_content.contains("#"),
+            "Config file should contain comments"
+        );
         assert!(
             raw_content.contains("# Autom8 Configuration"),
             "Config file should have header comment"
@@ -2333,8 +2348,12 @@ commit = true
         );
 
         // Verify it matches global config
-        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
-        assert_eq!(loaded, global_config, "Project config should match global config");
+        let loaded: Config =
+            toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        assert_eq!(
+            loaded, global_config,
+            "Project config should match global config"
+        );
     }
 
     #[test]
@@ -2361,7 +2380,10 @@ commit = true
         // Verify comments are present
         let raw_content = fs::read_to_string(&project_config_path).unwrap();
 
-        assert!(raw_content.contains("#"), "Project config should contain comments");
+        assert!(
+            raw_content.contains("#"),
+            "Project config should contain comments"
+        );
         assert!(
             raw_content.contains("# Autom8 Configuration"),
             "Project config should have header comment"
@@ -2395,7 +2417,8 @@ commit = true
         // Verify file exists and can be loaded
         assert!(project_config_path.exists());
 
-        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        let loaded: Config =
+            toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
         assert_eq!(loaded, config);
     }
 
@@ -2414,7 +2437,10 @@ commit = true
 
         let raw_content = fs::read_to_string(&project_config_path).unwrap();
 
-        assert!(raw_content.contains("#"), "Saved config should contain comments");
+        assert!(
+            raw_content.contains("#"),
+            "Saved config should contain comments"
+        );
         assert!(
             raw_content.contains("# Autom8 Configuration"),
             "Saved config should have header comment"
@@ -2442,7 +2468,11 @@ commit = true
         let project_dir = config_dir.join("test-project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_path = project_dir.join("config.toml");
-        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+        fs::write(
+            &project_path,
+            generate_config_with_comments(&project_config),
+        )
+        .unwrap();
 
         // Simulate get_effective_config logic
         let effective_path = if project_path.exists() {
@@ -2451,8 +2481,12 @@ commit = true
             &global_path
         };
 
-        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
-        assert_eq!(effective, project_config, "Should return project config when it exists");
+        let effective: Config =
+            toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert_eq!(
+            effective, project_config,
+            "Should return project config when it exists"
+        );
     }
 
     #[test]
@@ -2478,7 +2512,10 @@ commit = true
         // We can't directly test get_effective_config with temp dirs,
         // but we can verify the logic by checking path existence
         let project_config_path = project_dir.join("config.toml");
-        assert!(!project_config_path.exists(), "Project config should not exist");
+        assert!(
+            !project_config_path.exists(),
+            "Project config should not exist"
+        );
         assert!(global_path.exists(), "Global config should exist");
 
         // Load global config to verify
@@ -2512,7 +2549,11 @@ commit = true
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_path = project_dir.join("config.toml");
-        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+        fs::write(
+            &project_path,
+            generate_config_with_comments(&project_config),
+        )
+        .unwrap();
 
         // Simulate get_effective_config logic: prefer project if exists
         let effective_path = if project_path.exists() {
@@ -2521,7 +2562,8 @@ commit = true
             &global_path
         };
 
-        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        let effective: Config =
+            toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
         assert_eq!(
             effective, project_config,
             "Project config should take precedence over global"
@@ -2550,7 +2592,10 @@ commit = true
         let project_config_path = project_dir.join("config.toml");
 
         // Simulate get_effective_config: it should NOT create project config
-        assert!(!project_config_path.exists(), "Project config should not exist before");
+        assert!(
+            !project_config_path.exists(),
+            "Project config should not exist before"
+        );
 
         // Simulate reading effective config (prefer project if exists, else global)
         let effective_path = if project_config_path.exists() {
@@ -2558,7 +2603,8 @@ commit = true
         } else {
             &global_path
         };
-        let _effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        let _effective: Config =
+            toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
 
         // get_effective_config should NOT have created the project config
         assert!(
@@ -2587,7 +2633,8 @@ commit = true
         fs::write(&project_config_path, &content).unwrap();
 
         // Load
-        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        let loaded: Config =
+            toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
 
         assert_eq!(original, loaded, "Config should survive save/load cycle");
     }
@@ -2610,7 +2657,8 @@ review = false
         fs::write(&project_config_path, partial_content).unwrap();
 
         // Load should fill in defaults for missing fields
-        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        let loaded: Config =
+            toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
 
         assert!(!loaded.review, "review should be false as specified");
         assert!(loaded.commit, "missing commit should default to true");
@@ -2651,8 +2699,12 @@ review = false
 
         // Verify project config exists and matches global
         assert!(project_config_path.exists());
-        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
-        assert_eq!(loaded, global_config, "Project config should inherit from global");
+        let loaded: Config =
+            toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        assert_eq!(
+            loaded, global_config,
+            "Project config should inherit from global"
+        );
 
         // Verify comments were preserved
         let project_content = fs::read_to_string(&project_config_path).unwrap();
@@ -2685,7 +2737,11 @@ review = false
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_path = project_dir.join("config.toml");
-        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+        fs::write(
+            &project_path,
+            generate_config_with_comments(&project_config),
+        )
+        .unwrap();
 
         // Simulate get_effective_config logic: prefer project if exists
         let effective_path = if project_path.exists() {
@@ -2694,8 +2750,12 @@ review = false
             &global_path
         };
 
-        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
-        assert_eq!(effective, project_config, "Project config should take precedence");
+        let effective: Config =
+            toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert_eq!(
+            effective, project_config,
+            "Project config should take precedence"
+        );
         assert_ne!(effective.review, global_config.review);
         assert_ne!(effective.pull_request, global_config.pull_request);
     }
@@ -2811,14 +2871,14 @@ review = false
     fn test_us004_validate_config_all_combinations() {
         // Test all 8 possible boolean combinations
         let combinations = [
-            (false, false, false, true),  // all false - valid
-            (false, false, true, false),  // pr=true, commit=false - invalid
-            (false, true, false, true),   // commit=true, pr=false - valid
-            (false, true, true, true),    // commit=true, pr=true - valid
-            (true, false, false, true),   // review=true, commit=false, pr=false - valid
-            (true, false, true, false),   // review=true, pr=true, commit=false - invalid
-            (true, true, false, true),    // review=true, commit=true, pr=false - valid
-            (true, true, true, true),     // all true - valid
+            (false, false, false, true), // all false - valid
+            (false, false, true, false), // pr=true, commit=false - invalid
+            (false, true, false, true),  // commit=true, pr=false - valid
+            (false, true, true, true),   // commit=true, pr=true - valid
+            (true, false, false, true),  // review=true, commit=false, pr=false - valid
+            (true, false, true, false),  // review=true, pr=true, commit=false - invalid
+            (true, true, false, true),   // review=true, commit=true, pr=false - valid
+            (true, true, true, true),    // all true - valid
         ];
 
         for (review, commit, pull_request, should_be_valid) in combinations {

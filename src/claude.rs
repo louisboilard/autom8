@@ -516,10 +516,7 @@ where
                  Agent error: {}\n\n\
                  Fallback error: {}\n\n\
                  Malformed JSON preview:\n{}",
-                MAX_JSON_RETRY_ATTEMPTS,
-                agentic_error,
-                fallback_error,
-                json_preview
+                MAX_JSON_RETRY_ATTEMPTS, agentic_error, fallback_error, json_preview
             )))
         }
     }
@@ -908,10 +905,12 @@ pub fn fix_json_syntax(input: &str) -> String {
     let unquoted_key_re = Regex::new(r#"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)"#).unwrap();
     result = unquoted_key_re
         .replace_all(&result, |caps: &regex::Captures| {
-            format!("{}\"{}\"{}",
+            format!(
+                "{}\"{}\"{}",
                 caps.get(1).map_or("", |m| m.as_str()),
                 caps.get(2).map_or("", |m| m.as_str()),
-                caps.get(3).map_or("", |m| m.as_str()))
+                caps.get(3).map_or("", |m| m.as_str())
+            )
         })
         .to_string();
 
@@ -1942,7 +1941,8 @@ Hope that helps!"#;
     fn test_correction_prompt_includes_spec_content() {
         use crate::prompts::SPEC_JSON_CORRECTION_PROMPT;
 
-        let spec_content = "# My Feature\n\n## Project\nTestProject\n\n## Description\nA test feature.";
+        let spec_content =
+            "# My Feature\n\n## Project\nTestProject\n\n## Description\nA test feature.";
         let malformed_json = r#"{"project": "Test"#;
         let error_message = "unexpected end of input";
 
@@ -2181,7 +2181,10 @@ Add login functionality
 ```"#;
         let result1 = fix_json_syntax(input);
         let result2 = fix_json_syntax(&result1);
-        assert_eq!(result1, result2, "Function should be idempotent after fixing");
+        assert_eq!(
+            result1, result2,
+            "Function should be idempotent after fixing"
+        );
     }
 
     #[test]
@@ -2235,9 +2238,12 @@ Add login functionality
     "a": 1,
 }"#;
         let result = fix_json_syntax(input);
-        assert_eq!(result, r#"{
+        assert_eq!(
+            result,
+            r#"{
     "a": 1
-}"#);
+}"#
+        );
     }
 
     #[test]
@@ -2273,7 +2279,10 @@ Add login functionality
         let result = fix_json_syntax(valid_json);
         // Should still be valid JSON
         let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&result);
-        assert!(parsed.is_ok(), "Valid JSON should remain valid after fix_json_syntax");
+        assert!(
+            parsed.is_ok(),
+            "Valid JSON should remain valid after fix_json_syntax"
+        );
     }
 
     // ========================================================================
@@ -2312,7 +2321,11 @@ Add login functionality
 
         // Verify fixed JSON parses successfully
         let fixed_result: std::result::Result<Spec, _> = serde_json::from_str(&fixed);
-        assert!(fixed_result.is_ok(), "Fixed JSON should parse successfully: {}", fixed);
+        assert!(
+            fixed_result.is_ok(),
+            "Fixed JSON should parse successfully: {}",
+            fixed
+        );
 
         // Verify the spec content is correct
         let spec = fixed_result.unwrap();
@@ -2345,7 +2358,10 @@ Add login functionality
 
         // Verify it now parses successfully
         let fixed_parse: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
-        assert!(fixed_parse.is_ok(), "Non-agentic fix should produce valid JSON");
+        assert!(
+            fixed_parse.is_ok(),
+            "Non-agentic fix should produce valid JSON"
+        );
     }
 
     #[test]
@@ -2361,7 +2377,10 @@ Add login functionality
 
         // Should still fail to parse (unfixable structural issues)
         let parse_result: std::result::Result<Spec, _> = serde_json::from_str(&fixed_json);
-        assert!(parse_result.is_err(), "Unfixable JSON should still fail after fix attempt");
+        assert!(
+            parse_result.is_err(),
+            "Unfixable JSON should still fail after fix attempt"
+        );
     }
 
     #[test]
@@ -2391,7 +2410,11 @@ Add login functionality
 
         // Verify it parses successfully
         let result: std::result::Result<Spec, _> = serde_json::from_str(&fixed);
-        assert!(result.is_ok(), "Code fence-wrapped JSON should be fixable: {}", fixed);
+        assert!(
+            result.is_ok(),
+            "Code fence-wrapped JSON should be fixable: {}",
+            fixed
+        );
     }
 
     #[test]
@@ -2411,8 +2434,7 @@ Add login functionality
         // Verify error message format includes information about both agentic and non-agentic attempts
         let error_msg = format!(
             "JSON parse error after {} attempts and programmatic fix: {}",
-            MAX_JSON_RETRY_ATTEMPTS,
-            "expected value at line 1"
+            MAX_JSON_RETRY_ATTEMPTS, "expected value at line 1"
         );
 
         assert!(error_msg.contains("3 attempts"));
@@ -2685,7 +2707,10 @@ Add login functionality
 
         // Stage 1: Verify it completely fails to parse
         let initial_parse: std::result::Result<Spec, _> = serde_json::from_str(not_json_at_all);
-        assert!(initial_parse.is_err(), "Plain text should fail to parse as JSON");
+        assert!(
+            initial_parse.is_err(),
+            "Plain text should fail to parse as JSON"
+        );
         let agentic_error = initial_parse.unwrap_err().to_string();
 
         // Stage 2: Apply non-agentic fix (it cannot help with this)
@@ -2770,9 +2795,7 @@ Add login functionality
             "JSON generation failed after {} agentic attempts and programmatic fallback.\n\n\
              Agent error: {}\n\n\
              Fallback error: {}",
-            MAX_JSON_RETRY_ATTEMPTS,
-            agentic_error,
-            fallback_error
+            MAX_JSON_RETRY_ATTEMPTS, agentic_error, fallback_error
         );
         assert!(error_msg.contains("Agent error:"));
         assert!(error_msg.contains("Fallback error:"));
