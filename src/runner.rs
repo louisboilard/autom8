@@ -2,6 +2,7 @@ use crate::claude::{
     run_claude, run_corrector, run_for_commit, run_for_spec_generation, run_reviewer,
     ClaudeOutcome, ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
+use crate::config::get_effective_config;
 use crate::error::{Autom8Error, Result};
 use crate::gh::{create_pull_request, PRResult};
 use crate::git;
@@ -314,12 +315,24 @@ impl Runner {
 
     /// Handle commit and PR creation flow after all stories are complete.
     /// Returns Ok(()) on success, Err on failure.
+    /// Respects config settings: if commit=false, skips commit state entirely.
+    /// If pull_request=false, skips PR creation (ends after commit or immediately if commit=false).
     fn handle_commit_and_pr(
         &self,
         state: &mut RunState,
         spec: &Spec,
         breadcrumb: &mut Breadcrumb,
     ) -> Result<()> {
+        // Get the effective config for this run (US-005)
+        let config = state.effective_config();
+
+        // If commit=false, skip commit state entirely
+        if !config.commit {
+            print_state_transition(state.machine_state, MachineState::Completed);
+            print_info("Skipping commit (commit = false in config)");
+            return Ok(());
+        }
+
         if !git::is_git_repo() {
             print_state_transition(state.machine_state, MachineState::Completed);
             return Ok(());
@@ -370,6 +383,13 @@ impl Runner {
                     e.stderr.as_deref(),
                 );
             }
+        }
+
+        // Skip PR creation if pull_request=false (US-005)
+        if !config.pull_request {
+            print_state_transition(MachineState::Committing, MachineState::Completed);
+            print_info("Skipping PR creation (pull_request = false in config)");
+            return Ok(());
         }
 
         // PR Creation step
@@ -447,15 +467,18 @@ impl Runner {
     ) -> Result<LoopAction> {
         print_all_complete();
 
-        // Skip review if --skip-review flag is set
-        if self.skip_review {
+        // Get the effective config for this run (US-005)
+        let config = state.effective_config();
+
+        // Skip review if --skip-review flag is set OR if review=false in config
+        if self.skip_review || !config.review {
             print_skip_review();
         } else {
             // Run review/correct loop
             self.run_review_correct_loop(state, spec, breadcrumb, story_results, print_summary)?;
         }
 
-        // Commit changes and create PR
+        // Commit changes and create PR (respects commit and pull_request config)
         self.handle_commit_and_pr(state, spec, breadcrumb)?;
 
         state.transition_to(MachineState::Completed);
@@ -636,8 +659,11 @@ impl Runner {
 
         print_all_complete();
 
-        // Skip review if --skip-review flag is set
-        if self.skip_review {
+        // Get the effective config for this run (US-005)
+        let config = state.effective_config();
+
+        // Skip review if --skip-review flag is set OR if review=false in config
+        if self.skip_review || !config.review {
             print_skip_review();
         } else {
             // Run review/correct loop
@@ -650,7 +676,7 @@ impl Runner {
             )?;
         }
 
-        // Commit changes and create PR
+        // Commit changes and create PR (respects commit and pull_request config)
         self.handle_commit_and_pr(state, spec, breadcrumb)?;
 
         state.transition_to(MachineState::Completed);
@@ -722,6 +748,9 @@ impl Runner {
             }
         }
 
+        // Load effective config at startup before constructing state machine (US-005)
+        let config = get_effective_config()?;
+
         // Canonicalize spec path
         let spec_path = spec_path
             .canonicalize()
@@ -735,8 +764,9 @@ impl Runner {
         let spec_dir = self.state_manager.ensure_spec_dir()?;
         let spec_json_path = spec_dir.join(format!("{}.json", stem));
 
-        // Initialize state
-        let mut state = RunState::from_spec(spec_path.clone(), spec_json_path.clone());
+        // Initialize state with config snapshot for resume support
+        let mut state =
+            RunState::from_spec_with_config(spec_path.clone(), spec_json_path.clone(), config);
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -799,6 +829,9 @@ impl Runner {
             }
         }
 
+        // Load effective config at startup before constructing state machine (US-005)
+        let config = get_effective_config()?;
+
         // Canonicalize path so resume works from any directory
         let spec_json_path = spec_json_path
             .canonicalize()
@@ -819,8 +852,9 @@ impl Runner {
             }
         }
 
-        // Initialize state
-        let state = RunState::new(spec_json_path.to_path_buf(), spec.branch_name.clone());
+        // Initialize state with config snapshot for resume support
+        let state =
+            RunState::new_with_config(spec_json_path.to_path_buf(), spec.branch_name.clone(), config);
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
         print_project_info(&spec);
@@ -1030,6 +1064,7 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn test_runner_skip_review_defaults_to_false() {
@@ -1735,5 +1770,257 @@ mod tests {
 
         assert_eq!(runner1.verbose, runner2.verbose);
         assert_eq!(runner1.skip_review, runner2.skip_review);
+    }
+
+    // ========================================================================
+    // US-005: Config integration with state machine tests
+    // ========================================================================
+
+    #[test]
+    fn test_run_state_effective_config_returns_default_when_none() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let config = state.effective_config();
+        // Default config has all options enabled
+        assert!(config.review);
+        assert!(config.commit);
+        assert!(config.pull_request);
+    }
+
+    #[test]
+    fn test_run_state_effective_config_returns_stored_config() {
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+        assert_eq!(state.effective_config(), config);
+    }
+
+    #[test]
+    fn test_run_state_new_with_config_initializes_correctly() {
+        let config = Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("spec.json"),
+            "feature-branch".to_string(),
+            config.clone(),
+        );
+
+        assert_eq!(state.machine_state, MachineState::Initializing);
+        assert_eq!(state.status, RunStatus::Running);
+        assert_eq!(state.branch, "feature-branch");
+        assert!(state.config.is_some());
+        assert_eq!(state.config.unwrap(), config);
+    }
+
+    #[test]
+    fn test_run_state_from_spec_with_config_initializes_correctly() {
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        let state = RunState::from_spec_with_config(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+            config.clone(),
+        );
+
+        assert_eq!(state.machine_state, MachineState::LoadingSpec);
+        assert_eq!(state.status, RunStatus::Running);
+        assert!(state.branch.is_empty()); // Branch set after spec generation
+        assert!(state.config.is_some());
+        assert_eq!(state.config.unwrap(), config);
+    }
+
+    #[test]
+    fn test_config_with_review_false_skips_review_state() {
+        // This tests that when review=false in config, the review state is skipped
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: true,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        let effective = state.effective_config();
+        assert!(
+            !effective.review,
+            "review should be false, state machine should skip review"
+        );
+    }
+
+    #[test]
+    fn test_config_with_commit_false_skips_commit_state() {
+        // This tests that when commit=false in config, the commit state is skipped
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: false, // Must be false when commit is false (validated by US-004)
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        let effective = state.effective_config();
+        assert!(
+            !effective.commit,
+            "commit should be false, state machine should skip commit"
+        );
+    }
+
+    #[test]
+    fn test_config_with_pull_request_false_skips_pr_state() {
+        // This tests that when pull_request=false in config, the PR state is skipped
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        let effective = state.effective_config();
+        assert!(
+            !effective.pull_request,
+            "pull_request should be false, state machine should skip PR creation"
+        );
+    }
+
+    #[test]
+    fn test_state_machine_transitions_with_all_config_disabled() {
+        // Test that state transitions work when all optional states are disabled
+        let config = Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+        };
+        let mut state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        // Simulate the expected flow with all states disabled:
+        // Initializing -> PickingStory -> RunningClaude -> PickingStory -> Completed
+        assert_eq!(state.machine_state, MachineState::Initializing);
+
+        state.transition_to(MachineState::PickingStory);
+        assert_eq!(state.machine_state, MachineState::PickingStory);
+
+        state.start_iteration("US-001");
+        assert_eq!(state.machine_state, MachineState::RunningClaude);
+
+        state.finish_iteration(IterationStatus::Success, String::new());
+        assert_eq!(state.machine_state, MachineState::PickingStory);
+
+        // With all configs disabled, we skip directly to Completed
+        state.transition_to(MachineState::Completed);
+        assert_eq!(state.machine_state, MachineState::Completed);
+        assert_eq!(state.status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn test_state_machine_transitions_with_review_disabled_only() {
+        // Test transitions when only review is disabled
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: true,
+        };
+        let mut state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        // Expected flow:
+        // Initializing -> PickingStory -> RunningClaude -> PickingStory
+        // (skips Reviewing/Correcting) -> Committing -> CreatingPR -> Completed
+        state.transition_to(MachineState::PickingStory);
+        state.start_iteration("US-001");
+        state.finish_iteration(IterationStatus::Success, String::new());
+
+        // Skip review, go to commit
+        state.transition_to(MachineState::Committing);
+        assert_eq!(state.machine_state, MachineState::Committing);
+
+        state.transition_to(MachineState::CreatingPR);
+        assert_eq!(state.machine_state, MachineState::CreatingPR);
+
+        state.transition_to(MachineState::Completed);
+        assert_eq!(state.machine_state, MachineState::Completed);
+    }
+
+    #[test]
+    fn test_state_machine_transitions_with_pr_disabled_only() {
+        // Test transitions when only PR is disabled
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        let mut state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+
+        // Expected flow:
+        // ... -> Reviewing -> Committing -> Completed (skip CreatingPR)
+        state.transition_to(MachineState::Reviewing);
+        state.review_iteration = 1;
+        assert_eq!(state.machine_state, MachineState::Reviewing);
+
+        state.transition_to(MachineState::Committing);
+        assert_eq!(state.machine_state, MachineState::Committing);
+
+        // Skip PR, go directly to completed
+        state.transition_to(MachineState::Completed);
+        assert_eq!(state.machine_state, MachineState::Completed);
+    }
+
+    #[test]
+    fn test_config_preserved_during_resume_workflow() {
+        // Test that config is preserved when state is saved and loaded (resume scenario)
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+
+        // Save state
+        sm.save(&state).unwrap();
+
+        // Load state (simulating resume)
+        let loaded = sm.load_current().unwrap().unwrap();
+
+        // Verify config is preserved
+        assert_eq!(loaded.effective_config(), config);
     }
 }
