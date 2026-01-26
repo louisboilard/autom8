@@ -688,6 +688,7 @@ pub fn print_proceeding_to_implementation() {
     println!();
 }
 
+#[derive(Debug, Clone)]
 pub struct StoryResult {
     pub id: String,
     pub title: String,
