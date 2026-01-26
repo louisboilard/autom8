@@ -1,4 +1,4 @@
-use crate::config;
+use crate::config::{self, Config};
 use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,10 @@ pub struct RunState {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub iterations: Vec<IterationRecord>,
+    /// Configuration snapshot taken at run start.
+    /// This ensures resumed runs use the same config they started with.
+    #[serde(default)]
+    pub config: Option<Config>,
 }
 
 impl RunState {
@@ -91,6 +95,26 @@ impl RunState {
             started_at: Utc::now(),
             finished_at: None,
             iterations: Vec::new(),
+            config: None,
+        }
+    }
+
+    /// Create a new RunState with a config snapshot.
+    pub fn new_with_config(spec_json_path: PathBuf, branch: String, config: Config) -> Self {
+        Self {
+            run_id: Uuid::new_v4().to_string(),
+            status: RunStatus::Running,
+            machine_state: MachineState::Initializing,
+            spec_json_path,
+            spec_md_path: None,
+            branch,
+            current_story: None,
+            iteration: 0,
+            review_iteration: 0,
+            started_at: Utc::now(),
+            finished_at: None,
+            iterations: Vec::new(),
+            config: Some(config),
         }
     }
 
@@ -108,7 +132,37 @@ impl RunState {
             started_at: Utc::now(),
             finished_at: None,
             iterations: Vec::new(),
+            config: None,
         }
+    }
+
+    /// Create a RunState from spec with a config snapshot.
+    pub fn from_spec_with_config(
+        spec_md_path: PathBuf,
+        spec_json_path: PathBuf,
+        config: Config,
+    ) -> Self {
+        Self {
+            run_id: Uuid::new_v4().to_string(),
+            status: RunStatus::Running,
+            machine_state: MachineState::LoadingSpec,
+            spec_json_path,
+            spec_md_path: Some(spec_md_path),
+            branch: String::new(), // Will be set after spec generation
+            current_story: None,
+            iteration: 0,
+            review_iteration: 0,
+            started_at: Utc::now(),
+            finished_at: None,
+            iterations: Vec::new(),
+            config: Some(config),
+        }
+    }
+
+    /// Get the effective config for this run.
+    /// Returns the stored config if available, otherwise the default.
+    pub fn effective_config(&self) -> Config {
+        self.config.clone().unwrap_or_default()
     }
 
     pub fn transition_to(&mut self, state: MachineState) {
@@ -857,5 +911,211 @@ mod tests {
             "spec_dir should be in config directory: got {}",
             path_str
         );
+    }
+
+    // ======================================================================
+    // Tests for US-005: Config integration with RunState
+    // ======================================================================
+
+    #[test]
+    fn test_run_state_new_has_no_config_by_default() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.config.is_none());
+    }
+
+    #[test]
+    fn test_run_state_new_with_config_stores_config() {
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+        assert!(state.config.is_some());
+        assert_eq!(state.config.unwrap(), config);
+    }
+
+    #[test]
+    fn test_run_state_from_spec_has_no_config_by_default() {
+        let state = RunState::from_spec(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+        );
+        assert!(state.config.is_none());
+    }
+
+    #[test]
+    fn test_run_state_from_spec_with_config_stores_config() {
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        let state = RunState::from_spec_with_config(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+            config.clone(),
+        );
+        assert!(state.config.is_some());
+        assert_eq!(state.config.unwrap(), config);
+    }
+
+    #[test]
+    fn test_effective_config_returns_stored_config_when_present() {
+        let config = Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+        assert_eq!(state.effective_config(), config);
+    }
+
+    #[test]
+    fn test_effective_config_returns_default_when_no_config() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let effective = state.effective_config();
+        // Default config has all options enabled
+        assert!(effective.review);
+        assert!(effective.commit);
+        assert!(effective.pull_request);
+    }
+
+    #[test]
+    fn test_run_state_config_serialization_roundtrip() {
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&state).unwrap();
+
+        // Deserialize back
+        let deserialized: RunState = serde_json::from_str(&json).unwrap();
+
+        // Verify config is preserved
+        assert!(deserialized.config.is_some());
+        assert_eq!(deserialized.config.unwrap(), config);
+    }
+
+    #[test]
+    fn test_run_state_backwards_compatible_without_config_field() {
+        // Simulate loading a legacy state.json that doesn't have the config field
+        let legacy_json = r#"{
+            "run_id": "test-123",
+            "status": "running",
+            "machine_state": "initializing",
+            "spec_json_path": "test.json",
+            "branch": "test-branch",
+            "current_story": null,
+            "iteration": 0,
+            "review_iteration": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "iterations": []
+        }"#;
+
+        let state: RunState = serde_json::from_str(legacy_json).unwrap();
+
+        // Config should default to None
+        assert!(state.config.is_none());
+
+        // effective_config() should return default (all true)
+        let effective = state.effective_config();
+        assert!(effective.review);
+        assert!(effective.commit);
+        assert!(effective.pull_request);
+    }
+
+    #[test]
+    fn test_run_state_config_with_review_false() {
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: true,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+        let effective = state.effective_config();
+        assert!(!effective.review);
+        assert!(effective.commit);
+        assert!(effective.pull_request);
+    }
+
+    #[test]
+    fn test_run_state_config_with_commit_false() {
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+        let effective = state.effective_config();
+        assert!(effective.review);
+        assert!(!effective.commit);
+        assert!(!effective.pull_request);
+    }
+
+    #[test]
+    fn test_run_state_config_with_pull_request_false() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+        let effective = state.effective_config();
+        assert!(effective.review);
+        assert!(effective.commit);
+        assert!(!effective.pull_request);
+    }
+
+    #[test]
+    fn test_state_manager_preserves_config_on_save_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+
+        sm.save(&state).unwrap();
+
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert!(loaded.config.is_some());
+        assert_eq!(loaded.config.unwrap(), config);
     }
 }

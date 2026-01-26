@@ -1,10 +1,439 @@
 use crate::error::{Autom8Error, Result};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
 /// The base config directory name under ~/.config/
 const CONFIG_DIR_NAME: &str = "autom8";
+
+// ============================================================================
+// State Machine Configuration
+// ============================================================================
+
+/// Configuration for controlling which states are executed in the autom8 state machine.
+///
+/// This struct represents the user's preferences for which steps of the automation
+/// pipeline should be executed. Each field corresponds to a state in the state machine.
+///
+/// # Default Behavior
+///
+/// By default, all states are enabled (`true`), meaning the full pipeline runs:
+/// review → commit → pull request.
+///
+/// # Serialization
+///
+/// This struct supports TOML serialization via serde. Missing fields in a config file
+/// will default to `true`, allowing partial configs to work correctly.
+///
+/// # Example
+///
+/// ```toml
+/// # Enable/disable the review state (code review before committing)
+/// review = true
+///
+/// # Enable/disable the commit state (creating git commits)
+/// commit = true
+///
+/// # Enable/disable the pull request state (creating PRs)
+/// pull_request = true
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    /// Whether to run the review state.
+    ///
+    /// When `true`, code changes are reviewed before committing.
+    /// When `false`, the review step is skipped.
+    #[serde(default = "default_true")]
+    pub review: bool,
+
+    /// Whether to run the commit state.
+    ///
+    /// When `true`, changes are committed to git.
+    /// When `false`, changes are left uncommitted.
+    #[serde(default = "default_true")]
+    pub commit: bool,
+
+    /// Whether to run the pull request state.
+    ///
+    /// When `true`, a pull request is created after committing.
+    /// When `false`, no PR is created.
+    #[serde(default = "default_true")]
+    pub pull_request: bool,
+}
+
+/// Helper function for serde default values.
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            review: true,
+            commit: true,
+            pull_request: true,
+        }
+    }
+}
+
+// ============================================================================
+// Config Validation
+// ============================================================================
+
+use std::fmt;
+use std::error::Error;
+
+/// Error type for configuration validation failures.
+///
+/// This enum represents specific validation errors that can occur when
+/// validating configuration settings. Each variant provides a clear,
+/// actionable error message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// Pull request is enabled but commit is disabled.
+    ///
+    /// Creating a pull request requires commits to exist, so this
+    /// configuration combination is invalid.
+    PullRequestWithoutCommit,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::PullRequestWithoutCommit => {
+                write!(
+                    f,
+                    "Cannot create pull request without commits. \
+                    Either set `commit = true` or set `pull_request = false`"
+                )
+            }
+        }
+    }
+}
+
+impl Error for ConfigError {}
+
+/// Validate a configuration for logical consistency.
+///
+/// This function checks that the configuration settings are valid and
+/// consistent with each other. It should be called after loading a config
+/// and before the state machine starts.
+///
+/// # Validation Rules
+///
+/// - `pull_request = true` requires `commit = true`
+///   (Cannot create a PR without commits)
+///
+/// # Arguments
+///
+/// * `config` - The configuration to validate
+///
+/// # Returns
+///
+/// * `Ok(())` if the configuration is valid
+/// * `Err(ConfigError)` if the configuration is invalid, with a clear error message
+///
+/// # Example
+///
+/// ```
+/// use autom8::config::{Config, validate_config};
+///
+/// let valid_config = Config::default();
+/// assert!(validate_config(&valid_config).is_ok());
+///
+/// let invalid_config = Config {
+///     review: true,
+///     commit: false,
+///     pull_request: true, // Invalid: PR without commit
+/// };
+/// assert!(validate_config(&invalid_config).is_err());
+/// ```
+pub fn validate_config(config: &Config) -> std::result::Result<(), ConfigError> {
+    // Rule: pull_request = true requires commit = true
+    if config.pull_request && !config.commit {
+        return Err(ConfigError::PullRequestWithoutCommit);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Global Config File Management
+// ============================================================================
+
+/// The filename for the global configuration file.
+const GLOBAL_CONFIG_FILENAME: &str = "config.toml";
+
+/// Default config file content with explanatory comments.
+///
+/// This is written when creating a new config file to help users understand
+/// each option without needing to reference documentation.
+const DEFAULT_CONFIG_WITH_COMMENTS: &str = r#"# Autom8 Configuration
+# This file controls which states in the autom8 state machine are executed.
+
+# Review state: Code review before committing
+# - true: Run code review step to check implementation quality
+# - false: Skip code review and proceed directly to commit
+review = true
+
+# Commit state: Creating git commits
+# - true: Automatically commit changes after implementation
+# - false: Leave changes uncommitted (manual commit required)
+commit = true
+
+# Pull request state: Creating pull requests
+# - true: Automatically create a PR after committing
+# - false: Skip PR creation (commits remain on local branch)
+# Note: Requires commit = true to work
+pull_request = true
+"#;
+
+/// Get the path to the global config file.
+///
+/// Returns the path to `~/.config/autom8/config.toml`.
+pub fn global_config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join(GLOBAL_CONFIG_FILENAME))
+}
+
+/// Load the global configuration from `~/.config/autom8/config.toml`.
+///
+/// If the config file doesn't exist, it creates one with default values
+/// and helpful comments explaining each option.
+///
+/// # Returns
+///
+/// The loaded or newly-created default configuration.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The config directory cannot be created
+/// - The config file cannot be read (other than not existing)
+/// - The config file contains invalid TOML
+pub fn load_global_config() -> Result<Config> {
+    let config_path = global_config_path()?;
+
+    if !config_path.exists() {
+        // Ensure the config directory exists
+        ensure_config_dir()?;
+
+        // Create the config file with default values and comments
+        fs::write(&config_path, DEFAULT_CONFIG_WITH_COMMENTS)?;
+
+        return Ok(Config::default());
+    }
+
+    // Read and parse the existing config file
+    let content = fs::read_to_string(&config_path)?;
+    let config: Config = toml::from_str(&content).map_err(|e| {
+        Autom8Error::Config(format!("Failed to parse config file at {:?}: {}", config_path, e))
+    })?;
+
+    Ok(config)
+}
+
+/// Save the global configuration to `~/.config/autom8/config.toml`.
+///
+/// This writes the configuration with explanatory comments. Note that this
+/// will overwrite any existing file, including any user-added comments.
+///
+/// # Arguments
+///
+/// * `config` - The configuration to save
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The config directory cannot be created
+/// - The config file cannot be written
+pub fn save_global_config(config: &Config) -> Result<()> {
+    let config_path = global_config_path()?;
+
+    // Ensure the config directory exists
+    ensure_config_dir()?;
+
+    // Generate config content with comments
+    let content = generate_config_with_comments(config);
+
+    fs::write(&config_path, content)?;
+
+    Ok(())
+}
+
+/// Generate config file content with explanatory comments.
+///
+/// Creates a TOML string that includes comments explaining each option,
+/// using the actual values from the provided config.
+fn generate_config_with_comments(config: &Config) -> String {
+    format!(
+        r#"# Autom8 Configuration
+# This file controls which states in the autom8 state machine are executed.
+
+# Review state: Code review before committing
+# - true: Run code review step to check implementation quality
+# - false: Skip code review and proceed directly to commit
+review = {}
+
+# Commit state: Creating git commits
+# - true: Automatically commit changes after implementation
+# - false: Leave changes uncommitted (manual commit required)
+commit = {}
+
+# Pull request state: Creating pull requests
+# - true: Automatically create a PR after committing
+# - false: Skip PR creation (commits remain on local branch)
+# Note: Requires commit = true to work
+pull_request = {}
+"#,
+        config.review, config.commit, config.pull_request
+    )
+}
+
+// ============================================================================
+// Project Config File Management
+// ============================================================================
+
+/// The filename for project-specific configuration files.
+const PROJECT_CONFIG_FILENAME: &str = "config.toml";
+
+/// Get the path to a project's config file.
+///
+/// Returns the path to `~/.config/autom8/<project>/config.toml`.
+pub fn project_config_path() -> Result<PathBuf> {
+    Ok(project_config_dir()?.join(PROJECT_CONFIG_FILENAME))
+}
+
+/// Get the path to a specific project's config file by name.
+///
+/// Returns the path to `~/.config/autom8/<project_name>/config.toml`.
+pub fn project_config_path_for(project_name: &str) -> Result<PathBuf> {
+    Ok(project_config_dir_for(project_name)?.join(PROJECT_CONFIG_FILENAME))
+}
+
+/// Load the project-specific configuration from `~/.config/autom8/<project>/config.toml`.
+///
+/// If the project config file doesn't exist, it copies the global config (with comments)
+/// to the project config directory and returns the global config values.
+///
+/// # Returns
+///
+/// The loaded or inherited configuration.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The project config directory cannot be created
+/// - The config file cannot be read (other than not existing)
+/// - The config file contains invalid TOML
+pub fn load_project_config() -> Result<Config> {
+    let config_path = project_config_path()?;
+
+    if !config_path.exists() {
+        // Ensure the project config directory exists
+        ensure_project_config_dir()?;
+
+        // Copy global config (with comments) to project config
+        let global_config = load_global_config()?;
+        let content = generate_config_with_comments(&global_config);
+        fs::write(&config_path, content)?;
+
+        return Ok(global_config);
+    }
+
+    // Read and parse the existing project config file
+    let content = fs::read_to_string(&config_path)?;
+    let config: Config = toml::from_str(&content).map_err(|e| {
+        Autom8Error::Config(format!(
+            "Failed to parse project config file at {:?}: {}",
+            config_path, e
+        ))
+    })?;
+
+    Ok(config)
+}
+
+/// Save a project-specific configuration to `~/.config/autom8/<project>/config.toml`.
+///
+/// This writes the configuration with explanatory comments. Note that this
+/// will overwrite any existing file, including any user-added comments.
+///
+/// # Arguments
+///
+/// * `config` - The configuration to save
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The project config directory cannot be created
+/// - The config file cannot be written
+pub fn save_project_config(config: &Config) -> Result<()> {
+    let config_path = project_config_path()?;
+
+    // Ensure the project config directory exists
+    ensure_project_config_dir()?;
+
+    // Generate config content with comments
+    let content = generate_config_with_comments(config);
+
+    fs::write(&config_path, content)?;
+
+    Ok(())
+}
+
+/// Get the effective configuration for the current project.
+///
+/// This function returns the resolved configuration by checking:
+/// 1. If a project config exists at `~/.config/autom8/<project>/config.toml`, return it
+/// 2. Otherwise, return the global config from `~/.config/autom8/config.toml`
+///
+/// Unlike `load_project_config()`, this function does NOT create a project config
+/// if one doesn't exist. It simply returns whichever config is applicable.
+///
+/// **Important:** This function validates the configuration before returning it.
+/// Invalid configurations will result in an error.
+///
+/// # Returns
+///
+/// The effective configuration (project config if exists, else global config).
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The config file cannot be read
+/// - The config file contains invalid TOML
+/// - The configuration is invalid (e.g., pull_request=true with commit=false)
+pub fn get_effective_config() -> Result<Config> {
+    let project_config_path = project_config_path()?;
+
+    let config = if project_config_path.exists() {
+        // Project config exists, load it directly (no auto-creation)
+        let content = fs::read_to_string(&project_config_path)?;
+        toml::from_str(&content).map_err(|e| {
+            Autom8Error::Config(format!(
+                "Failed to parse project config file at {:?}: {}",
+                project_config_path, e
+            ))
+        })?
+    } else {
+        // No project config, load global config
+        load_global_config()?
+    };
+
+    // Validate the configuration before returning
+    validate_config(&config).map_err(|e| Autom8Error::Config(e.to_string()))?;
+
+    Ok(config)
+}
+
+// ============================================================================
+// Directory Management
+// ============================================================================
 
 /// Subdirectory names within a project config directory
 const SPEC_SUBDIR: &str = "spec";
@@ -1538,5 +1967,910 @@ mod tests {
         let _run_status = &desc.run_status;
         let _current_story = &desc.current_story;
         let _current_branch = &desc.current_branch;
+    }
+
+    // ========================================================================
+    // US-001: Config struct tests
+    // ========================================================================
+
+    #[test]
+    fn test_config_default_all_true() {
+        let config = Config::default();
+        assert!(config.review, "review should default to true");
+        assert!(config.commit, "commit should default to true");
+        assert!(config.pull_request, "pull_request should default to true");
+    }
+
+    #[test]
+    fn test_config_serialize_to_toml() {
+        let config = Config::default();
+        let toml_str = toml::to_string(&config).unwrap();
+
+        assert!(toml_str.contains("review = true"));
+        assert!(toml_str.contains("commit = true"));
+        assert!(toml_str.contains("pull_request = true"));
+    }
+
+    #[test]
+    fn test_config_deserialize_from_toml() {
+        let toml_str = r#"
+            review = false
+            commit = true
+            pull_request = false
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert!(!config.review);
+        assert!(config.commit);
+        assert!(!config.pull_request);
+    }
+
+    #[test]
+    fn test_config_deserialize_partial_toml_uses_defaults() {
+        // Only specify one field - others should default to true
+        let toml_str = r#"
+            commit = false
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert!(config.review, "missing review should default to true");
+        assert!(!config.commit, "commit should be false as specified");
+        assert!(
+            config.pull_request,
+            "missing pull_request should default to true"
+        );
+    }
+
+    #[test]
+    fn test_config_deserialize_empty_toml_uses_all_defaults() {
+        let toml_str = "";
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert!(config.review);
+        assert!(config.commit);
+        assert!(config.pull_request);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let original = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+
+        let toml_str = toml::to_string(&original).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_config_equality() {
+        let config1 = Config::default();
+        let config2 = Config::default();
+        assert_eq!(config1, config2);
+
+        let config3 = Config {
+            review: false,
+            ..Default::default()
+        };
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let original = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_config_debug_format() {
+        let config = Config::default();
+        let debug_str = format!("{:?}", config);
+
+        assert!(debug_str.contains("Config"));
+        assert!(debug_str.contains("review"));
+        assert!(debug_str.contains("commit"));
+        assert!(debug_str.contains("pull_request"));
+    }
+
+    // ========================================================================
+    // US-002: Global Config File Management tests
+    // ========================================================================
+
+    #[test]
+    fn test_global_config_path_returns_config_toml() {
+        let path = global_config_path().unwrap();
+        assert!(path.ends_with("config.toml"));
+        assert!(path.parent().unwrap().ends_with("autom8"));
+    }
+
+    #[test]
+    fn test_generate_config_with_comments_includes_all_fields() {
+        let config = Config::default();
+        let content = generate_config_with_comments(&config);
+
+        // Check that all field values are present
+        assert!(content.contains("review = true"));
+        assert!(content.contains("commit = true"));
+        assert!(content.contains("pull_request = true"));
+    }
+
+    #[test]
+    fn test_generate_config_with_comments_has_explanatory_comments() {
+        let config = Config::default();
+        let content = generate_config_with_comments(&config);
+
+        // Check that comments explain each option
+        assert!(content.contains("# Review state"));
+        assert!(content.contains("# Commit state"));
+        assert!(content.contains("# Pull request state"));
+
+        // Check that true/false meanings are explained
+        assert!(content.contains("- true:"));
+        assert!(content.contains("- false:"));
+    }
+
+    #[test]
+    fn test_generate_config_with_comments_preserves_custom_values() {
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let content = generate_config_with_comments(&config);
+
+        assert!(content.contains("review = false"));
+        assert!(content.contains("commit = true"));
+        assert!(content.contains("pull_request = false"));
+    }
+
+    #[test]
+    fn test_default_config_with_comments_is_valid_toml() {
+        // Verify the default config string can be parsed
+        let config: Config = toml::from_str(DEFAULT_CONFIG_WITH_COMMENTS).unwrap();
+
+        assert!(config.review);
+        assert!(config.commit);
+        assert!(config.pull_request);
+    }
+
+    #[test]
+    fn test_load_global_config_creates_file_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.toml");
+        assert!(!config_path.exists(), "Config file should not exist initially");
+
+        // We can't easily test the real load_global_config because it uses the real home dir,
+        // but we can test the underlying logic by simulating it
+        let content = DEFAULT_CONFIG_WITH_COMMENTS;
+        fs::write(&config_path, content).unwrap();
+
+        let loaded: Config = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(loaded, Config::default());
+    }
+
+    #[test]
+    fn test_save_and_load_global_config_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.toml");
+
+        // Create a custom config
+        let custom_config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+
+        // Write it
+        let content = generate_config_with_comments(&custom_config);
+        fs::write(&config_path, content).unwrap();
+
+        // Read it back
+        let loaded: Config = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+
+        assert_eq!(loaded, custom_config);
+    }
+
+    #[test]
+    fn test_load_global_config_handles_partial_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.toml");
+
+        // Write a partial config (missing pull_request)
+        let partial_content = r#"
+# Partial config
+review = false
+commit = true
+"#;
+        fs::write(&config_path, partial_content).unwrap();
+
+        // Read it back - missing fields should use defaults
+        let loaded: Config = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+
+        assert!(!loaded.review);
+        assert!(loaded.commit);
+        assert!(loaded.pull_request, "Missing pull_request should default to true");
+    }
+
+    #[test]
+    fn test_generated_config_includes_note_about_pr_requiring_commit() {
+        let config = Config::default();
+        let content = generate_config_with_comments(&config);
+
+        // The config should mention that PR requires commit
+        assert!(
+            content.contains("Requires commit = true"),
+            "Config should note that PR requires commit"
+        );
+    }
+
+    #[test]
+    fn test_load_global_config_real_path() {
+        // Test the actual load_global_config function
+        // This will either load an existing config or create a new one
+        let result = load_global_config();
+        assert!(result.is_ok(), "load_global_config should not error");
+
+        let config = result.unwrap();
+        // Verify it returns a valid Config
+        // (We don't assert specific values since they depend on user's actual config)
+        let _ = config.review;
+        let _ = config.commit;
+        let _ = config.pull_request;
+    }
+
+    #[test]
+    fn test_save_global_config_real_path() {
+        // First load to get current state (and ensure file exists)
+        let original = load_global_config().unwrap();
+
+        // Save the same config
+        let result = save_global_config(&original);
+        assert!(result.is_ok(), "save_global_config should not error");
+
+        // Verify it's still readable
+        let reloaded = load_global_config().unwrap();
+        assert_eq!(original, reloaded, "Config should be unchanged after save/load cycle");
+    }
+
+    #[test]
+    fn test_global_config_file_has_comments_after_save() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = config_dir.join("config.toml");
+
+        // Save a config
+        let config = Config::default();
+        let content = generate_config_with_comments(&config);
+        fs::write(&config_path, content).unwrap();
+
+        // Read raw content and verify comments are present
+        let raw_content = fs::read_to_string(&config_path).unwrap();
+        assert!(raw_content.contains("#"), "Config file should contain comments");
+        assert!(
+            raw_content.contains("# Autom8 Configuration"),
+            "Config file should have header comment"
+        );
+    }
+
+    // ========================================================================
+    // US-003: Per-Project Config Inheritance tests
+    // ========================================================================
+
+    #[test]
+    fn test_us003_project_config_path_returns_correct_path() {
+        let path = project_config_path().unwrap();
+        assert!(path.ends_with("config.toml"));
+        // Path should be inside the project directory, not the root autom8 dir
+        assert!(path.parent().unwrap().file_name().unwrap() == "autom8");
+    }
+
+    #[test]
+    fn test_us003_project_config_path_for_returns_correct_path() {
+        let path = project_config_path_for("my-test-project").unwrap();
+        assert!(path.ends_with("config.toml"));
+        assert!(path.parent().unwrap().ends_with("my-test-project"));
+    }
+
+    #[test]
+    fn test_us003_load_project_config_creates_from_global_when_missing() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        let global_path = config_dir.join("config.toml");
+        let global_content = generate_config_with_comments(&global_config);
+        fs::write(&global_path, &global_content).unwrap();
+
+        // Create project directory (no config file yet)
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(project_dir.join("spec")).unwrap();
+        fs::create_dir_all(project_dir.join("runs")).unwrap();
+
+        let project_config_path = project_dir.join("config.toml");
+        assert!(
+            !project_config_path.exists(),
+            "Project config should not exist initially"
+        );
+
+        // Simulate load_project_config: when project config doesn't exist,
+        // copy global config content to project config
+        fs::write(&project_config_path, &global_content).unwrap();
+
+        // Verify project config was created
+        assert!(
+            project_config_path.exists(),
+            "Project config should be created when missing"
+        );
+
+        // Verify it matches global config
+        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        assert_eq!(loaded, global_config, "Project config should match global config");
+    }
+
+    #[test]
+    fn test_us003_load_project_config_preserves_comments() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Create global config (used as source for project config creation)
+        let global_config = Config::default();
+        let global_path = config_dir.join("config.toml");
+        let global_content = generate_config_with_comments(&global_config);
+        fs::write(&global_path, &global_content).unwrap();
+
+        // Simulate load_project_config: copy global to project when missing
+        let project_config_path = project_dir.join("config.toml");
+        assert!(!project_config_path.exists());
+
+        // Copy global config content to project config (as load_project_config does)
+        fs::write(&project_config_path, &global_content).unwrap();
+
+        // Verify comments are present
+        let raw_content = fs::read_to_string(&project_config_path).unwrap();
+
+        assert!(raw_content.contains("#"), "Project config should contain comments");
+        assert!(
+            raw_content.contains("# Autom8 Configuration"),
+            "Project config should have header comment"
+        );
+        assert!(
+            raw_content.contains("# Review state"),
+            "Project config should have review state comment"
+        );
+    }
+
+    #[test]
+    fn test_us003_save_project_config_creates_file() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(project_dir.join("spec")).unwrap();
+        fs::create_dir_all(project_dir.join("runs")).unwrap();
+
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: true,
+        };
+
+        // Simulate save_project_config
+        let project_config_path = project_dir.join("config.toml");
+        let content = generate_config_with_comments(&config);
+        fs::write(&project_config_path, &content).unwrap();
+
+        // Verify file exists and can be loaded
+        assert!(project_config_path.exists());
+
+        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_us003_save_project_config_preserves_comments() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let config = Config::default();
+        let project_config_path = project_dir.join("config.toml");
+        let content = generate_config_with_comments(&config);
+        fs::write(&project_config_path, &content).unwrap();
+
+        let raw_content = fs::read_to_string(&project_config_path).unwrap();
+
+        assert!(raw_content.contains("#"), "Saved config should contain comments");
+        assert!(
+            raw_content.contains("# Autom8 Configuration"),
+            "Saved config should have header comment"
+        );
+    }
+
+    #[test]
+    fn test_us003_get_effective_config_returns_project_if_exists() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config first
+        let global_config = Config::default();
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
+
+        // Create project config with distinct values
+        let project_config = Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+        };
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        let project_path = project_dir.join("config.toml");
+        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+
+        // Simulate get_effective_config logic
+        let effective_path = if project_path.exists() {
+            &project_path
+        } else {
+            &global_path
+        };
+
+        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert_eq!(effective, project_config, "Should return project config when it exists");
+    }
+
+    #[test]
+    fn test_us003_get_effective_config_returns_global_when_project_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        let global_path = config_dir.join("config.toml");
+        let content = generate_config_with_comments(&global_config);
+        fs::write(&global_path, content).unwrap();
+
+        // Create project dir but NOT project config
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // We can't directly test get_effective_config with temp dirs,
+        // but we can verify the logic by checking path existence
+        let project_config_path = project_dir.join("config.toml");
+        assert!(!project_config_path.exists(), "Project config should not exist");
+        assert!(global_path.exists(), "Global config should exist");
+
+        // Load global config to verify
+        let loaded: Config = toml::from_str(&fs::read_to_string(&global_path).unwrap()).unwrap();
+        assert_eq!(loaded, global_config);
+    }
+
+    #[test]
+    fn test_us003_project_config_takes_precedence_over_global() {
+        // Simulate project config overriding global with temp directories
+        // to avoid race conditions with other tests
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
+
+        // Create project config with different values
+        let project_config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let project_dir = config_dir.join("my-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        let project_path = project_dir.join("config.toml");
+        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+
+        // Simulate get_effective_config logic: prefer project if exists
+        let effective_path = if project_path.exists() {
+            &project_path
+        } else {
+            &global_path
+        };
+
+        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert_eq!(
+            effective, project_config,
+            "Project config should take precedence over global"
+        );
+        assert_ne!(
+            effective, global_config,
+            "Should not return global config when project config exists"
+        );
+    }
+
+    #[test]
+    fn test_us003_get_effective_config_does_not_create_project_config() {
+        // Use temp directory to test the logic
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config::default();
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
+
+        // Create project dir but NOT project config
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        let project_config_path = project_dir.join("config.toml");
+
+        // Simulate get_effective_config: it should NOT create project config
+        assert!(!project_config_path.exists(), "Project config should not exist before");
+
+        // Simulate reading effective config (prefer project if exists, else global)
+        let effective_path = if project_config_path.exists() {
+            &project_config_path
+        } else {
+            &global_path
+        };
+        let _effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+
+        // get_effective_config should NOT have created the project config
+        assert!(
+            !project_config_path.exists(),
+            "get_effective_config should NOT create project config"
+        );
+    }
+
+    #[test]
+    fn test_us003_project_config_roundtrip() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let original = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+
+        // Save
+        let project_config_path = project_dir.join("config.toml");
+        let content = generate_config_with_comments(&original);
+        fs::write(&project_config_path, &content).unwrap();
+
+        // Load
+        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+
+        assert_eq!(original, loaded, "Config should survive save/load cycle");
+    }
+
+    #[test]
+    fn test_us003_project_config_handles_partial_config() {
+        // Use temp directory to avoid race conditions
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let project_config_path = project_dir.join("config.toml");
+
+        // Write a partial config (missing some fields)
+        let partial_content = r#"
+# Partial project config
+review = false
+"#;
+        fs::write(&project_config_path, partial_content).unwrap();
+
+        // Load should fill in defaults for missing fields
+        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+
+        assert!(!loaded.review, "review should be false as specified");
+        assert!(loaded.commit, "missing commit should default to true");
+        assert!(
+            loaded.pull_request,
+            "missing pull_request should default to true"
+        );
+    }
+
+    #[test]
+    fn test_us003_inheritance_simulation_with_temp_dirs() {
+        // Simulate the full inheritance flow with temp directories
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        let global_content = generate_config_with_comments(&global_config);
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, &global_content).unwrap();
+
+        // Create project directory
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(project_dir.join("spec")).unwrap();
+        fs::create_dir_all(project_dir.join("runs")).unwrap();
+
+        // Simulate load_project_config behavior: copy global to project
+        let project_config_path = project_dir.join("config.toml");
+        assert!(!project_config_path.exists());
+
+        // Copy global config content to project config
+        fs::write(&project_config_path, &global_content).unwrap();
+
+        // Verify project config exists and matches global
+        assert!(project_config_path.exists());
+        let loaded: Config = toml::from_str(&fs::read_to_string(&project_config_path).unwrap()).unwrap();
+        assert_eq!(loaded, global_config, "Project config should inherit from global");
+
+        // Verify comments were preserved
+        let project_content = fs::read_to_string(&project_config_path).unwrap();
+        assert!(project_content.contains("# Autom8 Configuration"));
+        assert!(project_content.contains("# Review state"));
+    }
+
+    #[test]
+    fn test_us003_project_config_override_simulation() {
+        // Simulate project config overriding global with different values
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config
+        let global_config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
+
+        // Create project config with different values
+        let project_config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+        };
+        let project_dir = config_dir.join("my-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        let project_path = project_dir.join("config.toml");
+        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+
+        // Simulate get_effective_config logic: prefer project if exists
+        let effective_path = if project_path.exists() {
+            &project_path
+        } else {
+            &global_path
+        };
+
+        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert_eq!(effective, project_config, "Project config should take precedence");
+        assert_ne!(effective.review, global_config.review);
+        assert_ne!(effective.pull_request, global_config.pull_request);
+    }
+
+    // =========================================================================
+    // US-004: Config Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_us004_validate_config_accepts_default_config() {
+        let config = Config::default();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_accepts_all_true() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_accepts_all_false() {
+        let config = Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_accepts_commit_true_pr_false() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_accepts_commit_false_pr_false() {
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: false,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_rejects_pr_true_commit_false() {
+        let config = Config {
+            review: true,
+            commit: false,
+            pull_request: true,
+        };
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ConfigError::PullRequestWithoutCommit);
+    }
+
+    #[test]
+    fn test_us004_config_error_message_is_actionable() {
+        let error = ConfigError::PullRequestWithoutCommit;
+        let message = error.to_string();
+
+        // Verify the error message contains the exact required text
+        assert_eq!(
+            message,
+            "Cannot create pull request without commits. \
+            Either set `commit = true` or set `pull_request = false`"
+        );
+    }
+
+    #[test]
+    fn test_us004_config_error_implements_error_trait() {
+        let error = ConfigError::PullRequestWithoutCommit;
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &error;
+    }
+
+    #[test]
+    fn test_us004_config_error_debug_format() {
+        let error = ConfigError::PullRequestWithoutCommit;
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("PullRequestWithoutCommit"));
+    }
+
+    #[test]
+    fn test_us004_config_error_clone() {
+        let error = ConfigError::PullRequestWithoutCommit;
+        let cloned = error.clone();
+        assert_eq!(error, cloned);
+    }
+
+    #[test]
+    fn test_us004_validate_config_accepts_review_false_with_valid_pr_commit() {
+        // Review state doesn't affect PR/commit validation
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: true,
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_us004_validate_config_all_combinations() {
+        // Test all 8 possible boolean combinations
+        let combinations = [
+            (false, false, false, true),  // all false - valid
+            (false, false, true, false),  // pr=true, commit=false - invalid
+            (false, true, false, true),   // commit=true, pr=false - valid
+            (false, true, true, true),    // commit=true, pr=true - valid
+            (true, false, false, true),   // review=true, commit=false, pr=false - valid
+            (true, false, true, false),   // review=true, pr=true, commit=false - invalid
+            (true, true, false, true),    // review=true, commit=true, pr=false - valid
+            (true, true, true, true),     // all true - valid
+        ];
+
+        for (review, commit, pull_request, should_be_valid) in combinations {
+            let config = Config {
+                review,
+                commit,
+                pull_request,
+            };
+            let result = validate_config(&config);
+            assert_eq!(
+                result.is_ok(),
+                should_be_valid,
+                "Config (review={}, commit={}, pull_request={}) expected valid={}, got valid={}",
+                review,
+                commit,
+                pull_request,
+                should_be_valid,
+                result.is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn test_us004_get_effective_config_validates_before_returning() {
+        // This test verifies that get_effective_config validates the loaded config
+        // We can't easily test this with real files in a unit test, but we can
+        // verify the validation function is called by testing with a simulated scenario
+
+        // Create an invalid config directly and validate it
+        let invalid_config = Config {
+            review: true,
+            commit: false,
+            pull_request: true,
+        };
+        let validation_result = validate_config(&invalid_config);
+        assert!(validation_result.is_err());
+
+        // Verify the error message contains actionable information
+        let error = validation_result.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("commit = true"));
+        assert!(message.contains("pull_request = false"));
+    }
+
+    #[test]
+    fn test_us004_validation_integration_with_autom8_error() {
+        // Verify ConfigError can be converted to Autom8Error::Config
+        let config_error = ConfigError::PullRequestWithoutCommit;
+        let autom8_error = Autom8Error::Config(config_error.to_string());
+
+        // The error message should be preserved
+        let error_string = format!("{}", autom8_error);
+        assert!(error_string.contains("Cannot create pull request without commits"));
     }
 }

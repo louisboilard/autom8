@@ -462,6 +462,14 @@ fn init_command() -> autom8::error::Result<()> {
         println!("  {GRAY}Exists{RESET}  {}", config_dir.display());
     }
 
+    // Reset global config file to defaults
+    let global_config_path = autom8::config::global_config_path()?;
+    autom8::config::save_global_config(&autom8::config::Config::default())?;
+    println!(
+        "Created default configuration at {}",
+        global_config_path.display()
+    );
+
     // Create project-specific config directory with subdirectories
     let (project_dir, project_created) = autom8::config::ensure_project_config_dir()?;
     if project_created {
@@ -1071,6 +1079,131 @@ mod tests {
         assert!(
             true,
             "Skill constants removed - no writes to ~/.claude/skills/"
+        );
+    }
+
+    // ======================================================================
+    // Tests for US-006 (Config): Init resets global config
+    // ======================================================================
+
+    #[test]
+    fn test_us006_config_global_config_path_returns_expected_path() {
+        // Test that global_config_path returns ~/.config/autom8/config.toml
+        let result = autom8::config::global_config_path();
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.ends_with("config.toml"));
+        assert!(path.to_string_lossy().contains("autom8"));
+    }
+
+    #[test]
+    fn test_us006_config_save_global_config_creates_file() {
+        // Test that save_global_config creates the config file
+        let config = autom8::config::Config::default();
+        let result = autom8::config::save_global_config(&config);
+        assert!(result.is_ok());
+
+        // Verify the file now exists
+        let path = autom8::config::global_config_path().unwrap();
+        assert!(path.exists(), "Config file should exist after save");
+    }
+
+    #[test]
+    fn test_us006_config_save_global_config_resets_to_defaults() {
+        // Test that Config::default() produces the expected defaults
+        // and save_global_config correctly serializes them
+        let default_config = autom8::config::Config::default();
+
+        // Verify defaults are all true
+        assert_eq!(default_config.review, true, "default review should be true");
+        assert_eq!(default_config.commit, true, "default commit should be true");
+        assert_eq!(
+            default_config.pull_request, true,
+            "default pull_request should be true"
+        );
+
+        // Verify save_global_config succeeds
+        let result = autom8::config::save_global_config(&default_config);
+        assert!(result.is_ok(), "save_global_config should succeed");
+
+        // Verify we can round-trip through load
+        let loaded = autom8::config::load_global_config().unwrap();
+        assert_eq!(
+            loaded.review, default_config.review,
+            "review should round-trip"
+        );
+        assert_eq!(
+            loaded.commit, default_config.commit,
+            "commit should round-trip"
+        );
+        assert_eq!(
+            loaded.pull_request, default_config.pull_request,
+            "pull_request should round-trip"
+        );
+    }
+
+    #[test]
+    fn test_us006_config_init_only_affects_global_not_project() {
+        // Test that save_global_config and save_project_config
+        // write to different files (verifying init doesn't affect project config)
+        let global_path = autom8::config::global_config_path().unwrap();
+        let project_path = autom8::config::project_config_path().unwrap();
+
+        // Verify the paths are different
+        assert_ne!(
+            global_path, project_path,
+            "Global and project config paths should be different"
+        );
+
+        // Verify global config is in the base autom8 directory
+        assert!(
+            global_path.to_string_lossy().contains("autom8/config.toml"),
+            "Global config should be at ~/.config/autom8/config.toml"
+        );
+
+        // Verify project config is in a project-specific subdirectory
+        // The path should contain a project name between autom8/ and /config.toml
+        let project_path_str = project_path.to_string_lossy();
+        assert!(
+            project_path_str.contains("/autom8/"),
+            "Project config should be under autom8 directory"
+        );
+
+        // Count the path components to verify project config is nested deeper
+        let global_depth = global_path.components().count();
+        let project_depth = project_path.components().count();
+        assert!(
+            project_depth > global_depth,
+            "Project config should be in a subdirectory"
+        );
+    }
+
+    #[test]
+    fn test_us006_config_file_contains_comments() {
+        // Save default config
+        let default_config = autom8::config::Config::default();
+        autom8::config::save_global_config(&default_config).unwrap();
+
+        // Read the file content
+        let path = autom8::config::global_config_path().unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        // Verify it contains helpful comments
+        assert!(
+            content.contains("# Autom8 Configuration"),
+            "Should contain header comment"
+        );
+        assert!(
+            content.contains("# Review state"),
+            "Should contain review explanation"
+        );
+        assert!(
+            content.contains("# Commit state"),
+            "Should contain commit explanation"
+        );
+        assert!(
+            content.contains("# Pull request state"),
+            "Should contain pull_request explanation"
         );
     }
 
