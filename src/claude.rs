@@ -499,7 +499,7 @@ where
         Ok(spec) => {
             on_output("Programmatic fix succeeded!\n");
             spec.save(output_path)?;
-            return Ok(spec);
+            Ok(spec)
         }
         Err(fallback_err) => {
             // Non-agentic fix also failed - build detailed error message with both errors

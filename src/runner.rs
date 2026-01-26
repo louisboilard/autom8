@@ -3,19 +3,12 @@ use crate::claude::{
     ClaudeOutcome, ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
 use crate::config::get_effective_config;
+use crate::display::{CliDisplay, DisplayAdapter};
 use crate::error::{Autom8Error, Result};
 use crate::gh::{create_pull_request, PRResult};
 use crate::git;
-use crate::output::{
-    print_all_complete, print_breadcrumb_trail, print_claude_output, print_error_panel,
-    print_full_progress, print_generating_spec, print_header, print_info, print_issues_found,
-    print_iteration_complete, print_iteration_start, print_max_review_iterations,
-    print_phase_banner, print_phase_footer, print_pr_already_exists, print_pr_skipped,
-    print_pr_success, print_pr_updated, print_proceeding_to_implementation, print_project_info,
-    print_review_passed, print_reviewing, print_run_summary, print_skip_review,
-    print_spec_generated, print_spec_loaded, print_state_transition, print_story_complete,
-    print_tasks_progress, BannerColor, StoryResult, BOLD, CYAN, GRAY, RESET, YELLOW,
-};
+use crate::display::{BannerColor, StoryResult};
+use crate::output::{BOLD, CYAN, GRAY, RESET, YELLOW};
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
 };
@@ -45,6 +38,7 @@ const MAX_REVIEW_ITERATIONS: u32 = 3;
 ///
 /// # Arguments
 /// * `verbose` - Whether to use verbose mode (timer) or spinner mode
+/// * `display` - The display adapter for output (used in verbose mode)
 /// * `create_timer` - Factory function to create a VerboseTimer
 /// * `create_spinner` - Factory function to create a ClaudeSpinner
 /// * `run_operation` - The operation to run, receiving a callback for progress updates
@@ -54,6 +48,7 @@ const MAX_REVIEW_ITERATIONS: u32 = 3;
 /// The result of the operation, after the display has been finished with the appropriate outcome.
 fn with_progress_display<T, F, M>(
     verbose: bool,
+    display: &dyn DisplayAdapter,
     create_timer: impl FnOnce() -> VerboseTimer,
     create_spinner: impl FnOnce() -> ClaudeSpinner,
     run_operation: F,
@@ -66,7 +61,7 @@ where
     if verbose {
         let mut timer = create_timer();
         let result = run_operation(&mut |line| {
-            print_claude_output(line);
+            display.claude_output(line);
         });
         let outcome = map_outcome(&result);
         timer.finish_with_outcome(outcome);
@@ -95,6 +90,10 @@ pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
     skip_review: bool,
+    tui_override: Option<bool>,
+    /// Display adapter for all output operations.
+    /// Uses CliDisplay by default, can be swapped for TUI mode.
+    display: Box<dyn DisplayAdapter>,
 }
 
 impl Runner {
@@ -103,6 +102,8 @@ impl Runner {
             state_manager: StateManager::new()?,
             verbose: false,
             skip_review: false,
+            tui_override: None,
+            display: Box::new(CliDisplay::new()),
         })
     }
 
@@ -114,6 +115,35 @@ impl Runner {
     pub fn with_skip_review(mut self, skip_review: bool) -> Self {
         self.skip_review = skip_review;
         self
+    }
+
+    /// Set TUI mode override. When set, this overrides the config file setting.
+    /// If not set (None), the config file setting is used.
+    pub fn with_tui(mut self, tui: bool) -> Self {
+        self.tui_override = Some(tui);
+        self
+    }
+
+    /// Set a custom display adapter.
+    /// This allows injecting different display implementations (CLI, TUI, or mock for testing).
+    pub fn with_display(mut self, display: Box<dyn DisplayAdapter>) -> Self {
+        self.display = display;
+        self
+    }
+
+    /// Get a reference to the display adapter.
+    pub fn display(&self) -> &dyn DisplayAdapter {
+        self.display.as_ref()
+    }
+
+    /// Load the effective config, applying the TUI override if set.
+    /// Priority: CLI flag (tui_override) > project config > global config > default
+    fn load_config_with_override(&self) -> Result<crate::config::Config> {
+        let mut config = get_effective_config()?;
+        if let Some(tui) = self.tui_override {
+            config.use_tui = tui;
+        }
+        Ok(config)
     }
 
     /// Handle a fatal error by transitioning to Failed state, saving, displaying error, and optionally printing summary.
@@ -143,7 +173,7 @@ impl Runner {
 
         // Display error panel (unless title is empty, for cases like max iterations)
         if !error_panel_title.is_empty() {
-            print_error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
+            self.display.error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
         }
 
         // Print summary if provided
@@ -171,7 +201,7 @@ impl Runner {
         loop {
             // Check if we've exceeded max review iterations
             if state.review_iteration > MAX_REVIEW_ITERATIONS {
-                print_max_review_iterations();
+                self.display.max_review_iterations();
                 let iteration = state.iteration;
                 let results = story_results;
                 return Err(self.handle_fatal_error(
@@ -186,20 +216,21 @@ impl Runner {
             }
 
             // Transition to Reviewing state
-            print_state_transition(state.machine_state, MachineState::Reviewing);
+            self.display.state_transition(state.machine_state, MachineState::Reviewing);
             state.transition_to(MachineState::Reviewing);
             self.state_manager.save(state)?;
 
             // Update breadcrumb to enter Review state
             breadcrumb.enter_state(BreadcrumbState::Review);
 
-            print_phase_banner("REVIEWING", BannerColor::Cyan);
-            print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
+            self.display.phase_banner("REVIEWING", BannerColor::Cyan);
+            self.display.reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
             // Run reviewer with progress display
             let review_iter = state.review_iteration;
             let review_result = with_progress_display(
                 self.verbose,
+                self.display.as_ref(),
                 || VerboseTimer::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 || ClaudeSpinner::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 |callback| run_reviewer(spec, review_iter, MAX_REVIEW_ITERATIONS, callback),
@@ -212,19 +243,19 @@ impl Runner {
             )?;
 
             // Print bottom border to close the output frame
-            print_phase_footer(BannerColor::Cyan);
+            self.display.phase_footer(BannerColor::Cyan);
 
             // Print breadcrumb trail after review phase completion
-            print_breadcrumb_trail(breadcrumb);
+            self.display.breadcrumb_trail(breadcrumb);
 
             // Show progress bar after review task completion
-            print_full_progress(
+            self.display.full_progress(
                 spec.completed_count(),
                 spec.total_count(),
                 state.review_iteration,
                 MAX_REVIEW_ITERATIONS,
             );
-            println!();
+            self.display.newline();
 
             match review_result {
                 ReviewResult::Pass => {
@@ -233,24 +264,25 @@ impl Runner {
                     if review_path.exists() {
                         let _ = fs::remove_file(review_path);
                     }
-                    print_review_passed();
+                    self.display.review_passed();
                     return Ok(()); // Exit review loop, proceed to commit
                 }
                 ReviewResult::IssuesFound => {
                     // Transition to Correcting state
-                    print_state_transition(MachineState::Reviewing, MachineState::Correcting);
+                    self.display.state_transition(MachineState::Reviewing, MachineState::Correcting);
                     state.transition_to(MachineState::Correcting);
                     self.state_manager.save(state)?;
 
                     // Update breadcrumb to enter Correct state
                     breadcrumb.enter_state(BreadcrumbState::Correct);
 
-                    print_phase_banner("CORRECTING", BannerColor::Yellow);
-                    print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
+                    self.display.phase_banner("CORRECTING", BannerColor::Yellow);
+                    self.display.issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
                     // Run corrector with progress display
                     let corrector_result = with_progress_display(
                         self.verbose,
+                        self.display.as_ref(),
                         || VerboseTimer::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         || ClaudeSpinner::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         |callback| run_corrector(spec, review_iter, callback),
@@ -262,19 +294,19 @@ impl Runner {
                     )?;
 
                     // Print bottom border to close the output frame
-                    print_phase_footer(BannerColor::Yellow);
+                    self.display.phase_footer(BannerColor::Yellow);
 
                     // Print breadcrumb trail after correct phase completion
-                    print_breadcrumb_trail(breadcrumb);
+                    self.display.breadcrumb_trail(breadcrumb);
 
                     // Show progress bar after correct task completion
-                    print_full_progress(
+                    self.display.full_progress(
                         spec.completed_count(),
                         spec.total_count(),
                         state.review_iteration,
                         MAX_REVIEW_ITERATIONS,
                     );
-                    println!();
+                    self.display.newline();
 
                     match corrector_result {
                         CorrectorResult::Complete => {
@@ -328,28 +360,29 @@ impl Runner {
 
         // If commit=false, skip commit state entirely
         if !config.commit {
-            print_state_transition(state.machine_state, MachineState::Completed);
-            print_info("Skipping commit (commit = false in config)");
+            self.display.state_transition(state.machine_state, MachineState::Completed);
+            self.display.info("Skipping commit (commit = false in config)");
             return Ok(());
         }
 
         if !git::is_git_repo() {
-            print_state_transition(state.machine_state, MachineState::Completed);
+            self.display.state_transition(state.machine_state, MachineState::Completed);
             return Ok(());
         }
 
-        print_state_transition(state.machine_state, MachineState::Committing);
+        self.display.state_transition(state.machine_state, MachineState::Committing);
         state.transition_to(MachineState::Committing);
         self.state_manager.save(state)?;
 
         // Update breadcrumb to enter Commit state
         breadcrumb.enter_state(BreadcrumbState::Commit);
 
-        print_phase_banner("COMMITTING", BannerColor::Cyan);
+        self.display.phase_banner("COMMITTING", BannerColor::Cyan);
 
         // Run commit with progress display
         let commit_result = with_progress_display(
             self.verbose,
+            self.display.as_ref(),
             VerboseTimer::new_for_commit,
             ClaudeSpinner::new_for_commit,
             |callback| run_for_commit(spec, callback),
@@ -362,21 +395,21 @@ impl Runner {
         )?;
 
         // Print bottom border to close the output frame
-        print_phase_footer(BannerColor::Cyan);
+        self.display.phase_footer(BannerColor::Cyan);
 
         // Print breadcrumb trail after commit phase completion
-        print_breadcrumb_trail(breadcrumb);
+        self.display.breadcrumb_trail(breadcrumb);
 
         // Track whether commits were made for PR creation
         let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
 
         match commit_result {
             CommitResult::Success(hash) => {
-                print_info(&format!("Changes committed successfully ({})", hash))
+                self.display.info(&format!("Changes committed successfully ({})", hash))
             }
-            CommitResult::NothingToCommit => print_info("Nothing to commit"),
+            CommitResult::NothingToCommit => self.display.info("Nothing to commit"),
             CommitResult::Error(e) => {
-                print_error_panel(
+                self.display.error_panel(
                     "Commit Failed",
                     &e.message,
                     e.exit_code,
@@ -387,8 +420,8 @@ impl Runner {
 
         // Skip PR creation if pull_request=false (US-005)
         if !config.pull_request {
-            print_state_transition(MachineState::Committing, MachineState::Completed);
-            print_info("Skipping PR creation (pull_request = false in config)");
+            self.display.state_transition(MachineState::Committing, MachineState::Completed);
+            self.display.info("Skipping PR creation (pull_request = false in config)");
             return Ok(());
         }
 
@@ -403,33 +436,33 @@ impl Runner {
         spec: &Spec,
         commits_were_made: bool,
     ) -> Result<()> {
-        print_state_transition(MachineState::Committing, MachineState::CreatingPR);
+        self.display.state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
 
         match create_pull_request(spec, commits_were_made) {
             Ok(PRResult::Success(url)) => {
-                print_pr_success(&url);
-                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display.pr_success(&url);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Skipped(reason)) => {
-                print_pr_skipped(&reason);
-                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display.pr_skipped(&reason);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::AlreadyExists(url)) => {
-                print_pr_already_exists(&url);
-                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display.pr_already_exists(&url);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Updated(url)) => {
-                print_pr_updated(&url);
-                print_state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display.pr_updated(&url);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Error(msg)) => {
-                print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Failed);
                 Err(self.handle_fatal_error(
                     state,
                     "PR Creation Failed",
@@ -441,7 +474,7 @@ impl Runner {
                 ))
             }
             Err(e) => {
-                print_state_transition(MachineState::CreatingPR, MachineState::Failed);
+                self.display.state_transition(MachineState::CreatingPR, MachineState::Failed);
                 Err(self.handle_fatal_error(
                     state,
                     "PR Creation Error",
@@ -465,14 +498,14 @@ impl Runner {
         story_results: &[StoryResult],
         print_summary: &impl Fn(u32, &[StoryResult]) -> Result<()>,
     ) -> Result<LoopAction> {
-        print_all_complete();
+        self.display.all_complete();
 
         // Get the effective config for this run (US-005)
         let config = state.effective_config();
 
         // Skip review if --skip-review flag is set OR if review=false in config
         if self.skip_review || !config.review {
-            print_skip_review();
+            self.display.skip_review();
         } else {
             // Run review/correct loop
             self.run_review_correct_loop(state, spec, breadcrumb, story_results, print_summary)?;
@@ -515,7 +548,7 @@ impl Runner {
             duration_secs: story_start.elapsed().as_secs(),
         });
 
-        print_error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
+        self.display.error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
         print_summary(state.iteration, story_results)?;
         Err(Autom8Error::ClaudeError(error_msg.to_string()))
     }
@@ -548,6 +581,7 @@ impl Runner {
         // Run Claude with progress display
         let result = with_progress_display(
             self.verbose,
+            self.display.as_ref(),
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
             |callback| run_claude(spec, story, spec_json_path, &iterations, callback),
@@ -637,18 +671,18 @@ impl Runner {
         });
 
         // Print bottom border to close the output frame
-        print_phase_footer(BannerColor::Cyan);
+        self.display.phase_footer(BannerColor::Cyan);
 
         // Print breadcrumb trail after story phase completion
-        print_breadcrumb_trail(breadcrumb);
+        self.display.breadcrumb_trail(breadcrumb);
 
         // Show progress bar after story task completion
         let updated_spec = Spec::load(spec_json_path)?;
-        print_tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
-        println!();
+        self.display.tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
+        self.display.newline();
 
         if self.verbose {
-            print_story_complete(&story.id, duration);
+            self.display.story_complete(&story.id, duration);
         }
 
         // Validate that all stories are actually complete
@@ -657,14 +691,14 @@ impl Runner {
             return Ok(LoopAction::Continue);
         }
 
-        print_all_complete();
+        self.display.all_complete();
 
         // Get the effective config for this run (US-005)
         let config = state.effective_config();
 
         // Skip review if --skip-review flag is set OR if review=false in config
         if self.skip_review || !config.review {
-            print_skip_review();
+            self.display.skip_review();
         } else {
             // Run review/correct loop
             self.run_review_correct_loop(
@@ -703,13 +737,13 @@ impl Runner {
         let duration = state.current_iteration_duration();
 
         // Print bottom border to close the output frame
-        print_phase_footer(BannerColor::Cyan);
+        self.display.phase_footer(BannerColor::Cyan);
 
         // Print breadcrumb trail after story phase completion
-        print_breadcrumb_trail(breadcrumb);
+        self.display.breadcrumb_trail(breadcrumb);
 
-        print_state_transition(MachineState::RunningClaude, MachineState::PickingStory);
-        print_iteration_complete(state.iteration);
+        self.display.state_transition(MachineState::RunningClaude, MachineState::PickingStory);
+        self.display.iteration_complete(state.iteration);
 
         // Reload spec and check if current story passed
         let updated_spec = Spec::load(spec_json_path)?;
@@ -727,13 +761,13 @@ impl Runner {
                 duration_secs: duration,
             });
             if self.verbose {
-                print_story_complete(&story.id, duration);
+                self.display.story_complete(&story.id, duration);
             }
         }
 
         // Show progress bar after story task completion
-        print_tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
-        println!();
+        self.display.tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
+        self.display.newline();
 
         // Continue to next iteration
         Ok(LoopAction::Continue)
@@ -748,8 +782,8 @@ impl Runner {
             }
         }
 
-        // Load effective config at startup before constructing state machine (US-005)
-        let config = get_effective_config()?;
+        // Load effective config at startup, applying CLI flag override (US-002, US-005)
+        let config = self.load_config_with_override()?;
 
         // Canonicalize spec path
         let spec_path = spec_path
@@ -770,7 +804,7 @@ impl Runner {
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
-        print_state_transition(MachineState::Idle, MachineState::LoadingSpec);
+        self.display.state_transition(MachineState::Idle, MachineState::LoadingSpec);
 
         // Load spec content
         let spec_content = fs::read_to_string(&spec_path)?;
@@ -779,19 +813,20 @@ impl Runner {
         }
 
         let metadata = fs::metadata(&spec_path)?;
-        print_spec_loaded(&spec_path, metadata.len());
-        println!();
+        self.display.spec_loaded(&spec_path, metadata.len());
+        self.display.newline();
 
         // Transition to GeneratingSpec
         state.transition_to(MachineState::GeneratingSpec);
         self.state_manager.save(&state)?;
-        print_state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
+        self.display.state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
 
-        print_generating_spec();
+        self.display.generating_spec();
 
         // Run Claude to generate spec JSON with progress display
         let spec = match with_progress_display(
             self.verbose,
+            self.display.as_ref(),
             VerboseTimer::new_for_spec,
             ClaudeSpinner::new_for_spec,
             |callback| run_for_spec_generation(&spec_content, &spec_json_path, callback),
@@ -802,20 +837,20 @@ impl Runner {
         ) {
             Ok(spec) => spec,
             Err(e) => {
-                print_error_panel("Spec Generation Failed", &e.to_string(), None, None);
+                self.display.error_panel("Spec Generation Failed", &e.to_string(), None, None);
                 return Err(e);
             }
         };
 
-        print_spec_generated(&spec, &spec_json_path);
+        self.display.spec_generated(&spec, &spec_json_path);
 
         // Update state with branch from generated spec
         state.branch = spec.branch_name.clone();
         state.transition_to(MachineState::Initializing);
         self.state_manager.save(&state)?;
-        print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
+        self.display.state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
-        print_proceeding_to_implementation();
+        self.display.proceeding_to_implementation();
 
         // Continue with normal implementation flow
         self.run_implementation_loop(state, &spec_json_path)
@@ -829,8 +864,8 @@ impl Runner {
             }
         }
 
-        // Load effective config at startup before constructing state machine (US-005)
-        let config = get_effective_config()?;
+        // Load effective config at startup, applying CLI flag override (US-002, US-005)
+        let config = self.load_config_with_override()?;
 
         // Canonicalize path so resume works from any directory
         let spec_json_path = spec_json_path
@@ -844,7 +879,7 @@ impl Runner {
         if git::is_git_repo() {
             let current_branch = git::current_branch()?;
             if current_branch != spec.branch_name {
-                print_info(&format!(
+                self.display.info(&format!(
                     "Switching from '{}' to '{}'",
                     current_branch, spec.branch_name
                 ));
@@ -859,15 +894,15 @@ impl Runner {
             config,
         );
 
-        print_state_transition(MachineState::Idle, MachineState::Initializing);
-        print_project_info(&spec);
+        self.display.state_transition(MachineState::Idle, MachineState::Initializing);
+        self.display.project_info(&spec);
 
         self.run_implementation_loop(state, &spec_json_path)
     }
 
     fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {
         // Transition to PickingStory
-        print_state_transition(state.machine_state, MachineState::PickingStory);
+        self.display.state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
         self.state_manager.save(&state)?;
 
@@ -881,7 +916,7 @@ impl Runner {
         // Helper to print run summary (loads spec and prints)
         let print_summary = |iteration: u32, results: &[StoryResult]| -> Result<()> {
             let spec = Spec::load(spec_json_path)?;
-            print_run_summary(
+            self.display.run_summary(
                 spec.total_count(),
                 spec.completed_count(),
                 iteration,
@@ -920,15 +955,15 @@ impl Runner {
             breadcrumb.reset();
 
             // Start iteration
-            print_state_transition(MachineState::PickingStory, MachineState::RunningClaude);
+            self.display.state_transition(MachineState::PickingStory, MachineState::RunningClaude);
             state.start_iteration(&story.id);
             self.state_manager.save(&state)?;
 
             // Update breadcrumb to enter Story state
             breadcrumb.enter_state(BreadcrumbState::Story);
 
-            print_phase_banner("RUNNING", BannerColor::Cyan);
-            print_iteration_start(state.iteration, &story.id, &story.title);
+            self.display.phase_banner("RUNNING", BannerColor::Cyan);
+            self.display.iteration_start(state.iteration, &story.id, &story.title);
 
             // Process the story iteration
             let story_start = Instant::now();
@@ -996,7 +1031,7 @@ impl Runner {
             return Err(Autom8Error::NoSpecsToResume);
         }
 
-        print_header();
+        self.display.header();
         println!("{YELLOW}[resume]{RESET} No active run found, scanning for incomplete specs...");
         println!();
 
@@ -1795,6 +1830,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1810,6 +1846,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("spec.json"),
@@ -1830,6 +1867,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -1851,6 +1889,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1872,6 +1911,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false, // Must be false when commit is false (validated by US-004)
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1893,6 +1933,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1914,6 +1955,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1947,6 +1989,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1979,6 +2022,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2010,6 +2054,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2025,5 +2070,59 @@ mod tests {
 
         // Verify config is preserved
         assert_eq!(loaded.effective_config(), config);
+    }
+
+    // ========================================================================
+    // US-002 (TUI): CLI flag tests for runner
+    // ========================================================================
+
+    #[test]
+    fn test_runner_tui_override_defaults_to_none() {
+        let runner = Runner::new().unwrap();
+        assert!(runner.tui_override.is_none());
+    }
+
+    #[test]
+    fn test_runner_with_tui_true_sets_override() {
+        let runner = Runner::new().unwrap().with_tui(true);
+        assert_eq!(runner.tui_override, Some(true));
+    }
+
+    #[test]
+    fn test_runner_with_tui_false_sets_override() {
+        let runner = Runner::new().unwrap().with_tui(false);
+        assert_eq!(runner.tui_override, Some(false));
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_preserves_tui_override() {
+        let runner = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_skip_review(true)
+            .with_tui(true);
+        assert!(runner.verbose);
+        assert!(runner.skip_review);
+        assert_eq!(runner.tui_override, Some(true));
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_order_independent() {
+        // Different order should produce same result
+        let runner1 = Runner::new()
+            .unwrap()
+            .with_tui(true)
+            .with_verbose(true)
+            .with_skip_review(true);
+
+        let runner2 = Runner::new()
+            .unwrap()
+            .with_skip_review(true)
+            .with_tui(true)
+            .with_verbose(true);
+
+        assert_eq!(runner1.tui_override, runner2.tui_override);
+        assert_eq!(runner1.verbose, runner2.verbose);
+        assert_eq!(runner1.skip_review, runner2.skip_review);
     }
 }

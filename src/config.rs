@@ -60,11 +60,23 @@ pub struct Config {
     /// When `false`, no PR is created.
     #[serde(default = "default_true")]
     pub pull_request: bool,
+
+    /// Whether to use TUI mode during task implementation.
+    ///
+    /// When `true`, a rich terminal interface is displayed during task implementation.
+    /// When `false`, the standard CLI output is used.
+    #[serde(default = "default_false")]
+    pub use_tui: bool,
 }
 
 /// Helper function for serde default values.
 fn default_true() -> bool {
     true
+}
+
+/// Helper function for serde default values (false).
+fn default_false() -> bool {
+    false
 }
 
 impl Default for Config {
@@ -73,6 +85,7 @@ impl Default for Config {
             review: true,
             commit: true,
             pull_request: true,
+            use_tui: false,
         }
     }
 }
@@ -146,6 +159,7 @@ impl Error for ConfigError {}
 ///     review: true,
 ///     commit: false,
 ///     pull_request: true, // Invalid: PR without commit
+///     use_tui: false,
 /// };
 /// assert!(validate_config(&invalid_config).is_err());
 /// ```
@@ -187,6 +201,11 @@ commit = true
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = true
+
+# TUI mode: Rich terminal interface during task implementation
+# - true: Display progress in a rich terminal UI
+# - false: Use standard CLI output (default)
+use_tui = false
 "#;
 
 /// Get the path to the global config file.
@@ -290,8 +309,13 @@ commit = {}
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = {}
+
+# TUI mode: Rich terminal interface during task implementation
+# - true: Display progress in a rich terminal UI
+# - false: Use standard CLI output (default)
+use_tui = {}
 "#,
-        config.review, config.commit, config.pull_request
+        config.review, config.commit, config.pull_request, config.use_tui
     )
 }
 
@@ -1982,6 +2006,7 @@ mod tests {
         assert!(config.review, "review should default to true");
         assert!(config.commit, "commit should default to true");
         assert!(config.pull_request, "pull_request should default to true");
+        assert!(!config.use_tui, "use_tui should default to false");
     }
 
     #[test]
@@ -1992,6 +2017,7 @@ mod tests {
         assert!(toml_str.contains("review = true"));
         assert!(toml_str.contains("commit = true"));
         assert!(toml_str.contains("pull_request = true"));
+        assert!(toml_str.contains("use_tui = false"));
     }
 
     #[test]
@@ -2000,6 +2026,7 @@ mod tests {
             review = false
             commit = true
             pull_request = false
+            use_tui = true
         "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -2007,11 +2034,12 @@ mod tests {
         assert!(!config.review);
         assert!(config.commit);
         assert!(!config.pull_request);
+        assert!(config.use_tui);
     }
 
     #[test]
     fn test_config_deserialize_partial_toml_uses_defaults() {
-        // Only specify one field - others should default to true
+        // Only specify one field - others should default to their respective defaults
         let toml_str = r#"
             commit = false
         "#;
@@ -2024,6 +2052,7 @@ mod tests {
             config.pull_request,
             "missing pull_request should default to true"
         );
+        assert!(!config.use_tui, "missing use_tui should default to false");
     }
 
     #[test]
@@ -2035,6 +2064,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
+        assert!(!config.use_tui);
     }
 
     #[test]
@@ -2043,6 +2073,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
 
         let toml_str = toml::to_string(&original).unwrap();
@@ -2070,6 +2101,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
 
         let cloned = original.clone();
@@ -2085,6 +2117,7 @@ mod tests {
         assert!(debug_str.contains("review"));
         assert!(debug_str.contains("commit"));
         assert!(debug_str.contains("pull_request"));
+        assert!(debug_str.contains("use_tui"));
     }
 
     // ========================================================================
@@ -2107,6 +2140,7 @@ mod tests {
         assert!(content.contains("review = true"));
         assert!(content.contains("commit = true"));
         assert!(content.contains("pull_request = true"));
+        assert!(content.contains("use_tui = false"));
     }
 
     #[test]
@@ -2118,6 +2152,7 @@ mod tests {
         assert!(content.contains("# Review state"));
         assert!(content.contains("# Commit state"));
         assert!(content.contains("# Pull request state"));
+        assert!(content.contains("# TUI mode"));
 
         // Check that true/false meanings are explained
         assert!(content.contains("- true:"));
@@ -2130,12 +2165,14 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
         let content = generate_config_with_comments(&config);
 
         assert!(content.contains("review = false"));
         assert!(content.contains("commit = true"));
         assert!(content.contains("pull_request = false"));
+        assert!(content.contains("use_tui = true"));
     }
 
     #[test]
@@ -2146,6 +2183,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
+        assert!(!config.use_tui);
     }
 
     #[test]
@@ -2182,6 +2220,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
 
         // Write it
@@ -2202,7 +2241,7 @@ mod tests {
 
         let config_path = config_dir.join("config.toml");
 
-        // Write a partial config (missing pull_request)
+        // Write a partial config (missing pull_request and use_tui)
         let partial_content = r#"
 # Partial config
 review = false
@@ -2219,6 +2258,7 @@ commit = true
             loaded.pull_request,
             "Missing pull_request should default to true"
         );
+        assert!(!loaded.use_tui, "Missing use_tui should default to false");
     }
 
     #[test]
@@ -2321,6 +2361,7 @@ commit = true
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: true,
         };
         let global_path = config_dir.join("config.toml");
         let global_content = generate_config_with_comments(&global_config);
@@ -2407,6 +2448,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: true,
+            use_tui: true,
         };
 
         // Simulate save_project_config
@@ -2464,6 +2506,7 @@ commit = true
             review: false,
             commit: false,
             pull_request: false,
+            use_tui: true,
         };
         let project_dir = config_dir.join("test-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2500,6 +2543,7 @@ commit = true
             review: true,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         let global_path = config_dir.join("config.toml");
         let content = generate_config_with_comments(&global_config);
@@ -2536,6 +2580,7 @@ commit = true
             review: true,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         let global_path = config_dir.join("config.toml");
         fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
@@ -2545,6 +2590,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2625,6 +2671,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
 
         // Save
@@ -2666,6 +2713,7 @@ review = false
             loaded.pull_request,
             "missing pull_request should default to true"
         );
+        assert!(!loaded.use_tui, "missing use_tui should default to false");
     }
 
     #[test]
@@ -2680,6 +2728,7 @@ review = false
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: true,
         };
         let global_content = generate_config_with_comments(&global_config);
         let global_path = config_dir.join("config.toml");
@@ -2724,6 +2773,7 @@ review = false
             review: true,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         let global_path = config_dir.join("config.toml");
         fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
@@ -2733,6 +2783,7 @@ review = false
             review: false,
             commit: true,
             pull_request: false,
+            use_tui: true,
         };
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2758,6 +2809,7 @@ review = false
         );
         assert_ne!(effective.review, global_config.review);
         assert_ne!(effective.pull_request, global_config.pull_request);
+        assert_ne!(effective.use_tui, global_config.use_tui);
     }
 
     // =========================================================================
@@ -2776,6 +2828,7 @@ review = false
             review: true,
             commit: true,
             pull_request: true,
+            use_tui: true,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2786,6 +2839,7 @@ review = false
             review: false,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2796,6 +2850,7 @@ review = false
             review: true,
             commit: true,
             pull_request: false,
+            use_tui: false,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2806,6 +2861,7 @@ review = false
             review: true,
             commit: false,
             pull_request: false,
+            use_tui: false,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2816,6 +2872,7 @@ review = false
             review: true,
             commit: false,
             pull_request: true,
+            use_tui: false,
         };
         let result = validate_config(&config);
         assert!(result.is_err());
@@ -2863,13 +2920,15 @@ review = false
             review: false,
             commit: true,
             pull_request: true,
+            use_tui: false,
         };
         assert!(validate_config(&config).is_ok());
     }
 
     #[test]
     fn test_us004_validate_config_all_combinations() {
-        // Test all 8 possible boolean combinations
+        // Test all 8 possible boolean combinations (for review, commit, pull_request)
+        // use_tui doesn't affect validation, so we test with it set to false
         let combinations = [
             (false, false, false, true), // all false - valid
             (false, false, true, false), // pr=true, commit=false - invalid
@@ -2886,6 +2945,7 @@ review = false
                 review,
                 commit,
                 pull_request,
+                use_tui: false,
             };
             let result = validate_config(&config);
             assert_eq!(
@@ -2912,6 +2972,7 @@ review = false
             review: true,
             commit: false,
             pull_request: true,
+            use_tui: false,
         };
         let validation_result = validate_config(&invalid_config);
         assert!(validation_result.is_err());
@@ -2932,5 +2993,116 @@ review = false
         // The error message should be preserved
         let error_string = format!("{}", autom8_error);
         assert!(error_string.contains("Cannot create pull request without commits"));
+    }
+
+    // =========================================================================
+    // TUI Config Tests (US-001 for TUI feature)
+    // =========================================================================
+
+    #[test]
+    fn test_use_tui_defaults_to_false() {
+        let config = Config::default();
+        assert!(!config.use_tui, "use_tui should default to false");
+    }
+
+    #[test]
+    fn test_use_tui_can_be_set_to_true() {
+        let toml_str = r#"
+            use_tui = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.use_tui, "use_tui should be true when explicitly set");
+    }
+
+    #[test]
+    fn test_use_tui_missing_defaults_to_false() {
+        // Config with all other fields but not use_tui
+        let toml_str = r#"
+            review = true
+            commit = true
+            pull_request = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.use_tui,
+            "Missing use_tui should default to false"
+        );
+    }
+
+    #[test]
+    fn test_use_tui_in_generate_config_with_comments() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            use_tui: true,
+        };
+        let content = generate_config_with_comments(&config);
+
+        assert!(content.contains("use_tui = true"), "Generated config should contain use_tui = true");
+        assert!(content.contains("# TUI mode"), "Generated config should have TUI comment header");
+        assert!(content.contains("rich terminal"), "Generated config should explain TUI purpose");
+    }
+
+    #[test]
+    fn test_use_tui_project_config_overrides_global() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join(".config").join("autom8");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Create global config with use_tui = false
+        let global_config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            use_tui: false,
+        };
+        let global_path = config_dir.join("config.toml");
+        fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
+
+        // Create project config with use_tui = true
+        let project_config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            use_tui: true,
+        };
+        let project_dir = config_dir.join("test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+        let project_path = project_dir.join("config.toml");
+        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+
+        // Simulate get_effective_config logic
+        let effective_path = if project_path.exists() {
+            &project_path
+        } else {
+            &global_path
+        };
+
+        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        assert!(
+            effective.use_tui,
+            "Project config use_tui=true should override global use_tui=false"
+        );
+    }
+
+    #[test]
+    fn test_use_tui_does_not_affect_validation() {
+        // use_tui should not affect config validation regardless of value
+        let config_with_tui = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            use_tui: true,
+        };
+        assert!(validate_config(&config_with_tui).is_ok());
+
+        let config_without_tui = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            use_tui: false,
+        };
+        assert!(validate_config(&config_without_tui).is_ok());
     }
 }
