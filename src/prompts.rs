@@ -234,8 +234,14 @@ Return ONLY the JSON object, no markdown code fences, no explanation. The output
 "####;
 
 /// Prompt for asking Claude to fix malformed JSON from a previous spec generation attempt.
-/// Placeholders: {malformed_json}, {error_message}, {attempt}, {max_attempts}
+/// Placeholders: {spec_content}, {malformed_json}, {error_message}, {attempt}, {max_attempts}
 pub const SPEC_JSON_CORRECTION_PROMPT: &str = r####"The previous JSON generation attempt produced malformed JSON that failed to parse.
+
+## Original Spec
+
+This is the original spec document that the JSON should represent:
+
+{spec_content}
 
 ## Error Details
 
@@ -244,24 +250,65 @@ pub const SPEC_JSON_CORRECTION_PROMPT: &str = r####"The previous JSON generation
 
 ## Malformed JSON
 
-```json
+The following JSON output failed to parse (shown as plain text):
+
+---
 {malformed_json}
-```
+---
+
+## Common Errors to Check
+
+Before fixing, check for these common JSON syntax errors:
+
+1. **Trailing commas** - Remove commas before closing `]` or `}`
+   - Bad: `[1, 2, 3,]` → Good: `[1, 2, 3]`
+2. **Unquoted keys** - All object keys must be double-quoted
+   - Bad: `{foo: "bar"}` → Good: `{"foo": "bar"}`
+3. **Unclosed brackets/braces** - Ensure every `[` has `]` and every `{` has `}`
+4. **Invalid escape sequences** - Use `\\n` not `\n` in strings, escape `"` as `\"`
+5. **Single quotes** - JSON requires double quotes, not single quotes
+   - Bad: `{'key': 'value'}` → Good: `{"key": "value"}`
 
 ## Your Task
 
-Fix the JSON above to make it valid. The JSON should:
+Fix the JSON above OR regenerate it from the original spec if the JSON is too corrupted to fix. The JSON should:
 1. Be syntactically correct (proper quoting, commas, brackets)
-2. Preserve all the original content and meaning
+2. Preserve all the original content and meaning (or regenerate from spec if needed)
 3. Follow the expected schema with these fields:
    - `project` (string)
    - `branchName` (string)
    - `description` (string)
    - `userStories` (array of objects with: id, title, description, acceptanceCriteria, priority, passes, notes)
 
+## Expected Output Format
+
+The output must be a valid JSON object with this exact structure:
+
+{
+  "project": "Project Name",
+  "branchName": "feature/branch-name",
+  "description": "Feature description paragraph(s)",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story title",
+      "description": "What this story accomplishes",
+      "acceptanceCriteria": [
+        "Criterion 1",
+        "Criterion 2"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Implementation hints or empty string"
+    }
+  ]
+}
+
 ## Output
 
-Return ONLY the corrected JSON object, no markdown code fences, no explanation. The output must be valid JSON that can be parsed directly.
+**CRITICAL: Do NOT wrap your output in markdown code fences (```json or ```). Return ONLY the raw JSON object.**
+
+Return ONLY the corrected JSON object, no code fences, no explanation. The output must be valid JSON that can be parsed directly.
 "####;
 
 /// Prompt for the reviewer agent that checks completed work for issues.
@@ -639,12 +686,13 @@ mod tests {
     #[test]
     fn spec_json_correction_prompt_requests_only_json_output() {
         assert!(SPEC_JSON_CORRECTION_PROMPT.contains("Return ONLY the corrected JSON"));
-        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("no markdown code fences"));
+        assert!(SPEC_JSON_CORRECTION_PROMPT.contains("no code fences"));
     }
 
     #[test]
     fn spec_json_correction_prompt_can_be_populated() {
         let populated = SPEC_JSON_CORRECTION_PROMPT
+            .replace("{spec_content}", "# Test Spec\n\n## Project\ntest-project")
             .replace("{malformed_json}", r#"{"project": "test"#)
             .replace("{error_message}", "unexpected end of input")
             .replace("{attempt}", "2")
@@ -653,5 +701,112 @@ mod tests {
         assert!(populated.contains(r#"{"project": "test"#));
         assert!(populated.contains("unexpected end of input"));
         assert!(populated.contains("2/3"));
+        assert!(populated.contains("# Test Spec"));
+    }
+
+    // ========================================================================
+    // JSON correction prompt tests for US-001 (enhanced correction prompt)
+    // ========================================================================
+
+    #[test]
+    fn spec_json_correction_prompt_contains_spec_content_placeholder() {
+        // US-001: Correction prompt includes the original spec markdown content
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("{spec_content}"),
+            "Correction prompt must include {{spec_content}} placeholder for original spec"
+        );
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_contains_common_errors_guidance() {
+        // US-001: Correction prompt lists specific common errors to check
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("Trailing commas"),
+            "Should mention trailing commas error"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("Unquoted keys"),
+            "Should mention unquoted keys error"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("Unclosed brackets")
+                || SPEC_JSON_CORRECTION_PROMPT.contains("Unclosed brackets/braces"),
+            "Should mention unclosed brackets/braces error"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("Invalid escape sequences")
+                || SPEC_JSON_CORRECTION_PROMPT.contains("escape sequences"),
+            "Should mention invalid escape sequences error"
+        );
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_does_not_wrap_malformed_json_in_code_fences() {
+        // US-001: Correction prompt does NOT wrap the malformed JSON in markdown code fences
+        // Check that the malformed JSON section uses plain text block (--- delimiters) not ```json
+        assert!(
+            !SPEC_JSON_CORRECTION_PROMPT.contains("```json\n{malformed_json}"),
+            "Malformed JSON should not be wrapped in ```json code fences"
+        );
+        assert!(
+            !SPEC_JSON_CORRECTION_PROMPT.contains("```\n{malformed_json}"),
+            "Malformed JSON should not be wrapped in ``` code fences"
+        );
+        // The malformed JSON should be shown as plain text with --- delimiters
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("---\n{malformed_json}\n---"),
+            "Malformed JSON should be wrapped in plain text block with --- delimiters"
+        );
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_contains_valid_json_example() {
+        // US-001: Correction prompt includes an example of valid JSON output
+        // The example should match the structure from SPEC_JSON_PROMPT
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains(r#""project": "Project Name""#),
+            "Should include example project field"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains(r#""branchName": "feature/branch-name""#),
+            "Should include example branchName field"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains(r#""userStories": ["#),
+            "Should include example userStories array"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains(r#""id": "US-001""#),
+            "Should include example story id"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains(r#""acceptanceCriteria": ["#),
+            "Should include example acceptanceCriteria array"
+        );
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_uses_stronger_code_fence_warning() {
+        // US-001: Correction prompt uses stronger language about not using code fences
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("CRITICAL"),
+            "Should use CRITICAL keyword for emphasis"
+        );
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("Do NOT wrap")
+                || SPEC_JSON_CORRECTION_PROMPT
+                    .contains("Do NOT wrap your output in markdown code fences"),
+            "Should explicitly instruct not to wrap in code fences"
+        );
+    }
+
+    #[test]
+    fn spec_json_correction_prompt_includes_original_spec_section() {
+        // US-001: The original spec should be clearly labeled
+        assert!(
+            SPEC_JSON_CORRECTION_PROMPT.contains("## Original Spec")
+                || SPEC_JSON_CORRECTION_PROMPT.contains("Original Spec"),
+            "Should have a section for the original spec"
+        );
     }
 }

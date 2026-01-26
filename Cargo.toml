@@ -16,6 +16,7 @@ indicatif = "0.18"
 dirs = "5"
 terminal_size = "0.4"
 toml = "0.8"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
