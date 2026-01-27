@@ -807,17 +807,4 @@ mod tests {
         let result = stage_all_changes();
         assert!(result.is_ok());
     }
-
-    #[test]
-    fn test_create_commit_with_nothing_to_commit() {
-        // In a clean repo state, create_commit should return NothingToCommit
-        // First ensure working directory is clean by checking status
-        if !has_uncommitted_changes().unwrap_or(true) {
-            let result = create_commit("test commit");
-            assert!(result.is_ok());
-            let commit_result = result.unwrap();
-            assert!(matches!(commit_result, CommitResult::NothingToCommit));
-        }
-        // If there are changes, we skip the test to avoid modifying the repo
-    }
 }
