@@ -1209,7 +1209,7 @@ pub fn find_spec_for_branch(branch_name: &str) -> crate::error::Result<Option<(S
         if let Ok(entries) = std::fs::read_dir(&spec_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "json") {
+                if path.extension().is_some_and(|ext| ext == "json") {
                     if let Ok(spec) = Spec::load(&path) {
                         if spec.branch_name == branch_name {
                             return Ok(Some((spec, path)));
