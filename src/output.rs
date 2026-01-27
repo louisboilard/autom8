@@ -267,6 +267,278 @@ pub fn print_push_already_up_to_date() {
     println!("{GRAY}Branch already up-to-date on remote.{RESET}");
 }
 
+// ============================================================================
+// PR Detection Output (US-001: Detect PR from Current Branch)
+// ============================================================================
+
+/// Print a message when no open PRs exist in the repository.
+pub fn print_no_open_prs() {
+    println!();
+    println!("{YELLOW}No open pull requests found in this repository.{RESET}");
+    println!();
+    println!("{GRAY}Create a PR first with 'gh pr create' or push a branch with changes.{RESET}");
+}
+
+/// Print a message when a PR was detected for the current branch.
+pub fn print_pr_detected(pr_number: u32, title: &str, branch: &str) {
+    println!();
+    println!(
+        "{GREEN}Detected PR #{}{RESET} for branch {CYAN}{}{RESET}",
+        pr_number, branch
+    );
+    println!("{BLUE}Title:{RESET} {}", title);
+    println!();
+}
+
+/// Print a message when switching to a different branch.
+pub fn print_switching_branch(from_branch: &str, to_branch: &str) {
+    println!(
+        "{CYAN}Switching{RESET} from {GRAY}{}{RESET} to {CYAN}{}{RESET}...",
+        from_branch, to_branch
+    );
+}
+
+/// Print a success message when branch switch completes.
+pub fn print_branch_switched(branch: &str) {
+    println!("{GREEN}Now on branch:{RESET} {}", branch);
+    println!();
+}
+
+/// Format a PR for display in a selection list.
+///
+/// Returns a formatted string like: "#123 feature/add-auth (Add authentication)"
+pub fn format_pr_for_selection(number: u32, branch: &str, title: &str) -> String {
+    // Truncate title if too long
+    let max_title_len = 50;
+    let display_title = if title.len() > max_title_len {
+        format!("{}...", &title[..max_title_len - 3])
+    } else {
+        title.to_string()
+    };
+
+    format!("#{} {} ({})", number, branch, display_title)
+}
+
+// ============================================================================
+// US-002: PR Context Display (Description, Comments, Reviews)
+// ============================================================================
+
+/// Print a message when no unresolved comments are found on a PR.
+pub fn print_no_unresolved_comments(pr_number: u32, title: &str) {
+    println!();
+    println!(
+        "{GREEN}PR #{}{RESET} has no unresolved comments.",
+        pr_number
+    );
+    println!("{BLUE}Title:{RESET} {}", title);
+    println!();
+    println!("{GRAY}Nothing to review - all feedback has been addressed!{RESET}");
+}
+
+/// Print a summary of the PR context being analyzed.
+pub fn print_pr_context_summary(pr_number: u32, title: &str, comment_count: usize) {
+    println!();
+    println!("{CYAN}Analyzing PR #{}{RESET}: {}", pr_number, title);
+    println!(
+        "{BLUE}Found:{RESET} {} unresolved comment{}",
+        comment_count,
+        if comment_count == 1 { "" } else { "s" }
+    );
+    println!();
+}
+
+/// Print a single PR comment with its context.
+///
+/// Displays the comment author, location (file/line if inline), and content.
+pub fn print_pr_comment(
+    index: usize,
+    author: &str,
+    body: &str,
+    file_path: Option<&str>,
+    line: Option<u32>,
+) {
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+    println!(
+        "{YELLOW}Comment {}{RESET} by {CYAN}{}{RESET}",
+        index + 1,
+        author
+    );
+
+    // Show location context for inline comments
+    if let Some(path) = file_path {
+        if let Some(line_num) = line {
+            println!("{BLUE}Location:{RESET} {}:{}", path, line_num);
+        } else {
+            println!("{BLUE}Location:{RESET} {}", path);
+        }
+    }
+
+    println!();
+    // Print the comment body, preserving formatting
+    for line in body.lines() {
+        println!("  {}", line);
+    }
+    println!();
+}
+
+/// Print the list of all unresolved comments for a PR.
+pub fn print_pr_comments_list(comments: &[crate::gh::PRComment]) {
+    println!("{BOLD}Unresolved Comments:{RESET}");
+    println!();
+
+    for (i, comment) in comments.iter().enumerate() {
+        print_pr_comment(
+            i,
+            &comment.author,
+            &comment.body,
+            comment.file_path.as_deref(),
+            comment.line,
+        );
+    }
+
+    println!("{GRAY}{}{RESET}", "-".repeat(57));
+}
+
+/// Print an error message for PR context gathering failures.
+pub fn print_pr_context_error(message: &str) {
+    println!();
+    println!("{RED}{BOLD}Failed to gather PR context:{RESET}");
+    println!("{RED}  {}{RESET}", message);
+    println!();
+}
+
+// ============================================================================
+// US-003: Branch Context Display (Spec Warning, Commits)
+// ============================================================================
+
+const WARNING_PANEL_WIDTH: usize = 60;
+
+/// Print a prominent warning panel for missing spec file.
+///
+/// This displays a visually distinct yellow warning box that makes it clear
+/// the user is operating with reduced context. This is different from a
+/// simple warning line - it's designed to be highly visible.
+///
+/// # Arguments
+/// * `branch_name` - The branch name that was searched for
+/// * `spec_path` - The path where the spec was expected
+pub fn print_missing_spec_warning(branch_name: &str, spec_path: &str) {
+    let top_border = format!("╔{}╗", "═".repeat(WARNING_PANEL_WIDTH - 2));
+    let bottom_border = format!("╚{}╝", "═".repeat(WARNING_PANEL_WIDTH - 2));
+    let separator = format!("╟{}╢", "─".repeat(WARNING_PANEL_WIDTH - 2));
+
+    println!();
+    println!("{YELLOW}{BOLD}{}{RESET}", top_border);
+
+    // Print header
+    let header = " ⚠  NO SPEC FILE FOUND ";
+    let header_padding = WARNING_PANEL_WIDTH.saturating_sub(header.len() + 2);
+    let left_pad = header_padding / 2;
+    let right_pad = header_padding - left_pad;
+    println!(
+        "{YELLOW}{BOLD}║{}{}{}║{RESET}",
+        " ".repeat(left_pad),
+        header,
+        " ".repeat(right_pad)
+    );
+
+    println!("{YELLOW}{}{RESET}", separator);
+
+    // Print warning message
+    print_warning_panel_line("The PR review will proceed with reduced context.");
+    print_warning_panel_line("");
+    print_warning_panel_line(&format!("Branch: {}", branch_name));
+
+    // Truncate spec path if too long
+    let max_path_len = WARNING_PANEL_WIDTH - 12; // "Expected: " prefix
+    let display_path = if spec_path.len() > max_path_len {
+        format!("...{}", &spec_path[spec_path.len() - max_path_len + 3..])
+    } else {
+        spec_path.to_string()
+    };
+    print_warning_panel_line(&format!("Expected: {}", display_path));
+
+    println!("{YELLOW}{}{RESET}", separator);
+
+    // Print suggestion
+    print_warning_panel_line("Create a spec file to provide full context:");
+    print_warning_panel_line("  autom8 --spec <spec.md>");
+
+    println!("{YELLOW}{BOLD}{}{RESET}", bottom_border);
+    println!();
+}
+
+/// Print a single line within the warning panel borders.
+fn print_warning_panel_line(text: &str) {
+    let max_width = WARNING_PANEL_WIDTH - 4; // Account for "║ " and " ║"
+    let display_text = if text.len() > max_width {
+        &text[..max_width]
+    } else {
+        text
+    };
+    let padding = max_width.saturating_sub(display_text.len());
+    println!(
+        "{YELLOW}║{RESET} {}{} {YELLOW}║{RESET}",
+        display_text,
+        " ".repeat(padding)
+    );
+}
+
+/// Print a summary of the branch context being used.
+pub fn print_branch_context_summary(has_spec: bool, commit_count: usize, branch_name: &str) {
+    println!();
+    println!("{CYAN}Branch Context:{RESET} {}", branch_name);
+
+    if has_spec {
+        println!("{GREEN}  ✓ Spec file loaded{RESET}");
+    } else {
+        println!("{YELLOW}  ⚠ No spec file (reduced context){RESET}");
+    }
+
+    println!(
+        "{BLUE}  {} commit{} on branch{RESET}",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    );
+    println!();
+}
+
+/// Print a list of commits for display.
+pub fn print_commit_list(commits: &[crate::git::CommitInfo], max_display: usize) {
+    if commits.is_empty() {
+        println!("{GRAY}No commits found on this branch.{RESET}");
+        return;
+    }
+
+    let display_count = commits.len().min(max_display);
+    println!("{BOLD}Recent Commits:{RESET}");
+
+    for commit in commits.iter().take(display_count) {
+        // Truncate message if too long
+        let max_msg_len = 50;
+        let display_msg = if commit.message.len() > max_msg_len {
+            format!("{}...", &commit.message[..max_msg_len - 3])
+        } else {
+            commit.message.clone()
+        };
+
+        println!("  {CYAN}{}{RESET} {}", commit.short_hash, display_msg);
+    }
+
+    if commits.len() > max_display {
+        println!(
+            "{GRAY}  ... and {} more commit{}{RESET}",
+            commits.len() - max_display,
+            if commits.len() - max_display == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    }
+    println!();
+}
+
 pub fn print_status(state: &RunState) {
     println!("{BLUE}Run ID:{RESET}    {}", state.run_id);
     println!("{BLUE}Status:{RESET}    {:?}", state.status);
@@ -1070,6 +1342,202 @@ fn print_panel_line(text: &str) {
     );
 }
 
+// ============================================================================
+// PR Review Display Functions (US-005)
+// ============================================================================
+
+/// Print a header when starting PR review analysis.
+pub fn print_pr_review_start(pr_number: u32, title: &str, comment_count: usize) {
+    println!();
+    println!("{CYAN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{CYAN}{BOLD}║  PR Review Analysis                                    ║{RESET}");
+    println!("{CYAN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{BLUE}PR #{}{RESET}: {}", pr_number, title);
+    println!("{BLUE}Comments to analyze:{RESET} {}", comment_count);
+    println!();
+}
+
+/// Print status when spawning the Claude agent for PR review.
+pub fn print_pr_review_spawning() {
+    println!("{GRAY}Spawning Claude agent for PR review...{RESET}");
+    println!();
+}
+
+/// Print the PR review summary results.
+///
+/// Displays a formatted summary box showing:
+/// - Total comments analyzed
+/// - Real issues fixed
+/// - Red herrings identified
+/// - Legitimate suggestions (no action taken)
+pub fn print_pr_review_summary(summary: &crate::claude::PRReviewSummary) {
+    println!();
+    println!("{GRAY}{}{RESET}", "─".repeat(57));
+    println!();
+    println!("{BOLD}PR Review Summary{RESET}");
+    println!();
+
+    // Use colored indicators for each category
+    println!(
+        "  {BLUE}Total comments analyzed:{RESET}    {}",
+        summary.total_comments
+    );
+    println!(
+        "  {GREEN}Real issues fixed:{RESET}         {}",
+        summary.real_issues_fixed
+    );
+    println!(
+        "  {YELLOW}Red herrings identified:{RESET}   {}",
+        summary.red_herrings
+    );
+    println!(
+        "  {GRAY}Legitimate suggestions:{RESET}    {}",
+        summary.legitimate_suggestions
+    );
+    println!();
+}
+
+/// Print a success message when PR review completes with fixes made.
+pub fn print_pr_review_complete_with_fixes(fixes_count: usize) {
+    println!();
+    println!("{GREEN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{GREEN}{BOLD}║  ✓ PR Review Complete                                  ║{RESET}");
+    println!("{GREEN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!(
+        "{GREEN}Fixed {} issue{}.{RESET}",
+        fixes_count,
+        if fixes_count == 1 { "" } else { "s" }
+    );
+    println!();
+}
+
+/// Print a message when PR review completes but no fixes were needed.
+pub fn print_pr_review_no_fixes_needed() {
+    println!();
+    println!("{CYAN}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{CYAN}{BOLD}║  ✓ PR Review Complete - No Fixes Needed                ║{RESET}");
+    println!("{CYAN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{GRAY}All comments were either red herrings or suggestions.{RESET}");
+    println!("{GRAY}No code changes were required.{RESET}");
+    println!();
+}
+
+/// Print an error message when PR review fails.
+pub fn print_pr_review_error(message: &str) {
+    println!();
+    println!("{RED}{BOLD}╔════════════════════════════════════════════════════════╗{RESET}");
+    println!("{RED}{BOLD}║  ✗ PR Review Failed                                    ║{RESET}");
+    println!("{RED}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
+    println!();
+    println!("{RED}Error:{RESET} {}", message);
+    println!();
+}
+
+/// Print a message when starting to stream Claude output for PR review.
+pub fn print_pr_review_streaming() {
+    println!("{GRAY}{}{RESET}", "─".repeat(57));
+    println!("{CYAN}Claude Analysis:{RESET}");
+    println!("{GRAY}{}{RESET}", "─".repeat(57));
+    println!();
+}
+
+/// Print a footer after streaming Claude output for PR review.
+pub fn print_pr_review_streaming_done() {
+    println!();
+    println!("{GRAY}{}{RESET}", "─".repeat(57));
+}
+
+// ============================================================================
+// US-006: Commit and Push Status Display for PR Review
+// ============================================================================
+
+/// Print a message when commit is skipped due to config.
+pub fn print_pr_commit_skipped_config() {
+    println!("{GRAY}Commit skipped (commit disabled in config){RESET}");
+}
+
+/// Print a message when push is skipped due to config.
+pub fn print_pr_push_skipped_config() {
+    println!("{GRAY}Push skipped (push disabled in config){RESET}");
+}
+
+/// Print a message when no fixes were made so no commit is needed.
+pub fn print_pr_no_commit_no_fixes() {
+    println!("{GRAY}No commit created (no fixes were made){RESET}");
+}
+
+/// Print a success message when PR review commit is created.
+pub fn print_pr_commit_success(commit_hash: &str) {
+    println!(
+        "{GREEN}Created commit {}{RESET} with PR review fixes",
+        commit_hash
+    );
+}
+
+/// Print an error message when PR review commit fails.
+pub fn print_pr_commit_error(message: &str) {
+    println!("{RED}Failed to create commit:{RESET} {}", message);
+}
+
+/// Print a success message when PR review push succeeds.
+pub fn print_pr_push_success(branch: &str) {
+    println!("{GREEN}Pushed{RESET} fixes to {CYAN}{}{RESET}", branch);
+}
+
+/// Print an error message when PR review push fails.
+pub fn print_pr_push_error(message: &str) {
+    println!("{RED}Failed to push:{RESET} {}", message);
+}
+
+/// Print a message when push reports already up-to-date.
+pub fn print_pr_push_up_to_date() {
+    println!("{GRAY}Branch already up-to-date on remote{RESET}");
+}
+
+/// Print a summary of what was done based on config.
+///
+/// This provides a clear overview of which actions were performed or skipped.
+pub fn print_pr_review_actions_summary(
+    commit_enabled: bool,
+    push_enabled: bool,
+    commit_made: bool,
+    push_made: bool,
+    no_fixes_needed: bool,
+) {
+    println!();
+    println!("{BOLD}Actions:{RESET}");
+
+    if no_fixes_needed {
+        println!("  {GRAY}• No fixes needed - no commit created{RESET}");
+        return;
+    }
+
+    // Commit status
+    if !commit_enabled {
+        println!("  {GRAY}• Commit: disabled in config{RESET}");
+    } else if commit_made {
+        println!("  {GREEN}• Commit: created{RESET}");
+    } else {
+        println!("  {GRAY}• Commit: no changes to commit{RESET}");
+    }
+
+    // Push status
+    if !push_enabled {
+        println!("  {GRAY}• Push: disabled in config{RESET}");
+    } else if !commit_made {
+        println!("  {GRAY}• Push: skipped (no commit){RESET}");
+    } else if push_made {
+        println!("  {GREEN}• Push: completed{RESET}");
+    } else {
+        println!("  {GRAY}• Push: already up-to-date{RESET}");
+    }
+
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1634,5 +2102,466 @@ mod tests {
         print_pushing_branch("feature/very-long-branch-name-that-describes-the-feature-in-detail");
         print_push_success();
         print_push_already_up_to_date();
+    }
+
+    // ========================================================================
+    // US-001: PR Detection output tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_no_open_prs_does_not_panic() {
+        print_no_open_prs();
+    }
+
+    #[test]
+    fn test_print_pr_detected_various_inputs() {
+        // Normal case
+        print_pr_detected(42, "Add feature X", "feature/x");
+
+        // Long title
+        print_pr_detected(
+            123,
+            "This is a very long PR title that describes the changes in detail",
+            "feature/long-branch-name",
+        );
+
+        // Minimal case
+        print_pr_detected(1, "", "");
+    }
+
+    #[test]
+    fn test_print_switching_branch_various_inputs() {
+        print_switching_branch("main", "feature/test");
+        print_switching_branch("feature/old", "feature/new");
+        print_switching_branch("", "feature/target");
+    }
+
+    #[test]
+    fn test_print_branch_switched_various_inputs() {
+        print_branch_switched("feature/test");
+        print_branch_switched("a-very-long-branch-name-for-testing");
+        print_branch_switched("");
+    }
+
+    #[test]
+    fn test_format_pr_for_selection_normal() {
+        let formatted = format_pr_for_selection(42, "feature/auth", "Add authentication");
+        assert!(formatted.contains("#42"));
+        assert!(formatted.contains("feature/auth"));
+        assert!(formatted.contains("Add authentication"));
+    }
+
+    #[test]
+    fn test_format_pr_for_selection_long_title_truncation() {
+        let long_title = "This is a very long PR title that definitely exceeds the maximum allowed length for display in the selection list";
+        let formatted = format_pr_for_selection(99, "feature/long", long_title);
+
+        assert!(formatted.contains("#99"));
+        assert!(formatted.contains("feature/long"));
+        // Title should be truncated with "..."
+        assert!(formatted.contains("..."));
+        // Should not contain the full title
+        assert!(!formatted.contains("selection list"));
+    }
+
+    #[test]
+    fn test_format_pr_for_selection_short_title() {
+        let short_title = "Fix bug";
+        let formatted = format_pr_for_selection(1, "fix/bug", short_title);
+
+        assert!(formatted.contains("#1"));
+        assert!(formatted.contains("fix/bug"));
+        assert!(formatted.contains("Fix bug"));
+        // Short title should not have ellipsis
+        assert!(!formatted.contains("..."));
+    }
+
+    #[test]
+    fn test_format_pr_for_selection_empty_title() {
+        let formatted = format_pr_for_selection(5, "branch", "");
+        assert!(formatted.contains("#5"));
+        assert!(formatted.contains("branch"));
+    }
+
+    #[test]
+    fn test_format_pr_for_selection_exactly_max_length() {
+        // Title exactly at max length (50 chars) should not be truncated
+        let title = "a".repeat(50);
+        let formatted = format_pr_for_selection(10, "test", &title);
+
+        assert!(formatted.contains("#10"));
+        assert!(formatted.contains("test"));
+        assert!(!formatted.contains("..."));
+    }
+
+    // ========================================================================
+    // US-002: PR Context Display Tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_no_unresolved_comments_does_not_panic() {
+        print_no_unresolved_comments(42, "Test PR");
+        print_no_unresolved_comments(1, "");
+        print_no_unresolved_comments(
+            99999,
+            "A very long PR title that might be too long to display properly",
+        );
+    }
+
+    #[test]
+    fn test_print_pr_context_summary_does_not_panic() {
+        print_pr_context_summary(1, "Small PR", 1);
+        print_pr_context_summary(42, "Test PR", 5);
+        print_pr_context_summary(100, "Large PR", 100);
+        print_pr_context_summary(1, "", 0);
+    }
+
+    #[test]
+    fn test_print_pr_comment_inline_does_not_panic() {
+        // Inline comment with file and line
+        print_pr_comment(
+            0,
+            "reviewer",
+            "This code needs improvement",
+            Some("src/main.rs"),
+            Some(42),
+        );
+    }
+
+    #[test]
+    fn test_print_pr_comment_file_without_line_does_not_panic() {
+        // Comment with file but no line (file-level comment)
+        print_pr_comment(
+            1,
+            "reviewer",
+            "General file feedback",
+            Some("src/lib.rs"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_print_pr_comment_conversation_does_not_panic() {
+        // Conversation comment (no file/line context)
+        print_pr_comment(2, "commenter", "This is great work overall!", None, None);
+    }
+
+    #[test]
+    fn test_print_pr_comment_multiline_body_does_not_panic() {
+        let multiline_body = "First line\nSecond line\nThird line\n\nAfter blank line";
+        print_pr_comment(3, "reviewer", multiline_body, Some("file.rs"), Some(10));
+    }
+
+    #[test]
+    fn test_print_pr_comments_list_does_not_panic() {
+        use crate::gh::PRComment;
+
+        let comments = vec![
+            PRComment {
+                author: "user1".to_string(),
+                body: "First comment".to_string(),
+                file_path: Some("src/main.rs".to_string()),
+                line: Some(10),
+                id: 1,
+                url: "url1".to_string(),
+            },
+            PRComment {
+                author: "user2".to_string(),
+                body: "Second comment".to_string(),
+                file_path: None,
+                line: None,
+                id: 2,
+                url: "url2".to_string(),
+            },
+        ];
+
+        print_pr_comments_list(&comments);
+    }
+
+    #[test]
+    fn test_print_pr_comments_list_empty_does_not_panic() {
+        use crate::gh::PRComment;
+        let empty: Vec<PRComment> = vec![];
+        print_pr_comments_list(&empty);
+    }
+
+    #[test]
+    fn test_print_pr_context_error_does_not_panic() {
+        print_pr_context_error("Something went wrong");
+        print_pr_context_error("");
+        print_pr_context_error(
+            "A very long error message that explains in detail what happened and why it failed",
+        );
+    }
+
+    // ========================================================================
+    // US-003: Branch Context Display Tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_missing_spec_warning_does_not_panic() {
+        print_missing_spec_warning("feature/test", "/path/to/spec.json");
+        print_missing_spec_warning(
+            "feature/pr-review",
+            "~/.config/autom8/project/spec/spec-feature-pr-review.json",
+        );
+        print_missing_spec_warning("", "");
+    }
+
+    #[test]
+    fn test_print_missing_spec_warning_long_path_truncation() {
+        // Very long path should be truncated
+        let long_path = "/very/long/path/to/config/directory/that/exceeds/normal/length/spec-feature-branch.json";
+        print_missing_spec_warning("feature/branch", long_path);
+    }
+
+    #[test]
+    fn test_print_branch_context_summary_does_not_panic() {
+        // With spec
+        print_branch_context_summary(true, 5, "feature/test");
+        // Without spec
+        print_branch_context_summary(false, 10, "feature/other");
+        // No commits
+        print_branch_context_summary(true, 0, "feature/empty");
+        // Single commit
+        print_branch_context_summary(false, 1, "fix/bug");
+    }
+
+    #[test]
+    fn test_print_commit_list_does_not_panic() {
+        use crate::git::CommitInfo;
+
+        // Empty list
+        let empty: Vec<CommitInfo> = vec![];
+        print_commit_list(&empty, 5);
+
+        // Single commit
+        let single = vec![CommitInfo {
+            short_hash: "abc1234".to_string(),
+            full_hash: "abc1234567890".to_string(),
+            message: "Initial commit".to_string(),
+            author: "Test Author".to_string(),
+            date: "2024-01-15".to_string(),
+        }];
+        print_commit_list(&single, 5);
+
+        // Multiple commits under max
+        let multiple = vec![
+            CommitInfo {
+                short_hash: "abc1234".to_string(),
+                full_hash: "abc1234567890".to_string(),
+                message: "First commit".to_string(),
+                author: "Author 1".to_string(),
+                date: "2024-01-15".to_string(),
+            },
+            CommitInfo {
+                short_hash: "def5678".to_string(),
+                full_hash: "def5678901234".to_string(),
+                message: "Second commit".to_string(),
+                author: "Author 2".to_string(),
+                date: "2024-01-16".to_string(),
+            },
+        ];
+        print_commit_list(&multiple, 5);
+
+        // More commits than max (should show "... and X more")
+        let many = (0..10)
+            .map(|i| CommitInfo {
+                short_hash: format!("hash{:03}", i),
+                full_hash: format!("fullhash{:03}", i),
+                message: format!("Commit number {}", i),
+                author: "Author".to_string(),
+                date: "2024-01-15".to_string(),
+            })
+            .collect::<Vec<_>>();
+        print_commit_list(&many, 3);
+    }
+
+    #[test]
+    fn test_print_commit_list_long_message_truncation() {
+        use crate::git::CommitInfo;
+
+        let long_message_commit = vec![CommitInfo {
+            short_hash: "abc1234".to_string(),
+            full_hash: "abc1234567890".to_string(),
+            message: "This is a very long commit message that should be truncated when displayed to fit within the terminal width constraints".to_string(),
+            author: "Test Author".to_string(),
+            date: "2024-01-15".to_string(),
+        }];
+        print_commit_list(&long_message_commit, 5);
+    }
+
+    #[test]
+    fn test_warning_panel_width_constant() {
+        assert!(WARNING_PANEL_WIDTH >= 40 && WARNING_PANEL_WIDTH <= 100);
+    }
+
+    // ========================================================================
+    // US-005: PR Review Display Tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_pr_review_start_does_not_panic() {
+        print_pr_review_start(123, "Test PR Title", 5);
+        print_pr_review_start(1, "Short", 0);
+        print_pr_review_start(
+            999999,
+            "Very Long PR Title That Should Still Display Correctly",
+            100,
+        );
+    }
+
+    #[test]
+    fn test_print_pr_review_spawning_does_not_panic() {
+        print_pr_review_spawning();
+    }
+
+    #[test]
+    fn test_print_pr_review_summary_does_not_panic() {
+        use crate::claude::PRReviewSummary;
+
+        // Zero values
+        let summary_zero = PRReviewSummary {
+            total_comments: 0,
+            real_issues_fixed: 0,
+            red_herrings: 0,
+            legitimate_suggestions: 0,
+        };
+        print_pr_review_summary(&summary_zero);
+
+        // Normal values
+        let summary_normal = PRReviewSummary {
+            total_comments: 10,
+            real_issues_fixed: 3,
+            red_herrings: 5,
+            legitimate_suggestions: 2,
+        };
+        print_pr_review_summary(&summary_normal);
+
+        // Large values
+        let summary_large = PRReviewSummary {
+            total_comments: 1000,
+            real_issues_fixed: 500,
+            red_herrings: 300,
+            legitimate_suggestions: 200,
+        };
+        print_pr_review_summary(&summary_large);
+    }
+
+    #[test]
+    fn test_print_pr_review_complete_with_fixes_does_not_panic() {
+        print_pr_review_complete_with_fixes(0);
+        print_pr_review_complete_with_fixes(1);
+        print_pr_review_complete_with_fixes(5);
+        print_pr_review_complete_with_fixes(100);
+    }
+
+    #[test]
+    fn test_print_pr_review_no_fixes_needed_does_not_panic() {
+        print_pr_review_no_fixes_needed();
+    }
+
+    #[test]
+    fn test_print_pr_review_error_does_not_panic() {
+        print_pr_review_error("Simple error message");
+        print_pr_review_error("A much longer error message that contains a detailed description of what went wrong during the PR review process");
+        print_pr_review_error("");
+    }
+
+    #[test]
+    fn test_print_pr_review_streaming_does_not_panic() {
+        print_pr_review_streaming();
+    }
+
+    #[test]
+    fn test_print_pr_review_streaming_done_does_not_panic() {
+        print_pr_review_streaming_done();
+    }
+
+    #[test]
+    fn test_pr_review_complete_with_fixes_plural_handling() {
+        // Test singular/plural handling in the output
+        // These just verify no panics - we can't easily test the actual output
+        print_pr_review_complete_with_fixes(1); // "1 issue" (singular)
+        print_pr_review_complete_with_fixes(2); // "2 issues" (plural)
+    }
+
+    // ========================================================================
+    // US-006: Commit and Push Status Display Tests
+    // ========================================================================
+
+    #[test]
+    fn test_print_pr_commit_skipped_config_does_not_panic() {
+        print_pr_commit_skipped_config();
+    }
+
+    #[test]
+    fn test_print_pr_push_skipped_config_does_not_panic() {
+        print_pr_push_skipped_config();
+    }
+
+    #[test]
+    fn test_print_pr_no_commit_no_fixes_does_not_panic() {
+        print_pr_no_commit_no_fixes();
+    }
+
+    #[test]
+    fn test_print_pr_commit_success_does_not_panic() {
+        print_pr_commit_success("abc1234");
+        print_pr_commit_success("");
+        print_pr_commit_success("very-long-commit-hash-for-testing");
+    }
+
+    #[test]
+    fn test_print_pr_commit_error_does_not_panic() {
+        print_pr_commit_error("failed to commit");
+        print_pr_commit_error("");
+        print_pr_commit_error("a very long error message that explains in detail what went wrong");
+    }
+
+    #[test]
+    fn test_print_pr_push_success_does_not_panic() {
+        print_pr_push_success("feature/test");
+        print_pr_push_success("main");
+        print_pr_push_success("feature/very-long-branch-name-for-testing");
+    }
+
+    #[test]
+    fn test_print_pr_push_error_does_not_panic() {
+        print_pr_push_error("permission denied");
+        print_pr_push_error("");
+        print_pr_push_error("a very long error message about push failure");
+    }
+
+    #[test]
+    fn test_print_pr_push_up_to_date_does_not_panic() {
+        print_pr_push_up_to_date();
+    }
+
+    #[test]
+    fn test_print_pr_review_actions_summary_all_cases() {
+        // No fixes needed
+        print_pr_review_actions_summary(true, true, false, false, true);
+
+        // Commit disabled
+        print_pr_review_actions_summary(false, true, false, false, false);
+
+        // Push disabled
+        print_pr_review_actions_summary(true, false, true, false, false);
+
+        // Both disabled
+        print_pr_review_actions_summary(false, false, false, false, false);
+
+        // Commit made but push disabled
+        print_pr_review_actions_summary(true, false, true, false, false);
+
+        // Commit made and push made
+        print_pr_review_actions_summary(true, true, true, true, false);
+
+        // Commit made but push already up-to-date
+        print_pr_review_actions_summary(true, true, true, false, false);
+
+        // Commit enabled but nothing to commit
+        print_pr_review_actions_summary(true, true, false, false, false);
     }
 }

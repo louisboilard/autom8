@@ -415,7 +415,11 @@ impl TuiApp {
 
     /// Get the output lines as a joined string.
     pub fn output(&self) -> String {
-        self.output_lines.iter().cloned().collect::<Vec<_>>().join("\n")
+        self.output_lines
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Get the output lines iterator.
@@ -499,10 +503,8 @@ impl TuiApp {
     ///
     /// Returns true if the state is Completed, Failed, or if all_complete is set.
     pub fn is_run_complete(&self) -> bool {
-        matches!(
-            self.state,
-            MachineState::Completed | MachineState::Failed
-        ) || self.all_complete
+        matches!(self.state, MachineState::Completed | MachineState::Failed)
+            || self.all_complete
             || self.run_summary.is_some()
     }
 }
@@ -705,7 +707,9 @@ mod tests {
         // First line should be gone
         assert!(!app.output().contains("Line 0"));
         // Last line should be present
-        assert!(app.output().contains(&format!("Line {}", MAX_OUTPUT_LINES + 99)));
+        assert!(app
+            .output()
+            .contains(&format!("Line {}", MAX_OUTPUT_LINES + 99)));
     }
 
     #[test]

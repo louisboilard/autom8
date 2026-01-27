@@ -3,11 +3,11 @@ use crate::claude::{
     ClaudeOutcome, ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
 };
 use crate::config::get_effective_config;
+use crate::display::{BannerColor, StoryResult};
 use crate::display::{CliDisplay, DisplayAdapter};
 use crate::error::{Autom8Error, Result};
 use crate::gh::{create_pull_request, PRResult};
 use crate::git;
-use crate::display::{BannerColor, StoryResult};
 use crate::output::{BOLD, CYAN, GRAY, RESET, YELLOW};
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
@@ -173,7 +173,8 @@ impl Runner {
 
         // Display error panel (unless title is empty, for cases like max iterations)
         if !error_panel_title.is_empty() {
-            self.display.error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
+            self.display
+                .error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
         }
 
         // Print summary if provided
@@ -216,7 +217,8 @@ impl Runner {
             }
 
             // Transition to Reviewing state
-            self.display.state_transition(state.machine_state, MachineState::Reviewing);
+            self.display
+                .state_transition(state.machine_state, MachineState::Reviewing);
             state.transition_to(MachineState::Reviewing);
             self.state_manager.save(state)?;
 
@@ -224,7 +226,8 @@ impl Runner {
             breadcrumb.enter_state(BreadcrumbState::Review);
 
             self.display.phase_banner("REVIEWING", BannerColor::Cyan);
-            self.display.reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
+            self.display
+                .reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
             // Run reviewer with progress display
             let review_iter = state.review_iteration;
@@ -269,7 +272,8 @@ impl Runner {
                 }
                 ReviewResult::IssuesFound => {
                     // Transition to Correcting state
-                    self.display.state_transition(MachineState::Reviewing, MachineState::Correcting);
+                    self.display
+                        .state_transition(MachineState::Reviewing, MachineState::Correcting);
                     state.transition_to(MachineState::Correcting);
                     self.state_manager.save(state)?;
 
@@ -277,7 +281,8 @@ impl Runner {
                     breadcrumb.enter_state(BreadcrumbState::Correct);
 
                     self.display.phase_banner("CORRECTING", BannerColor::Yellow);
-                    self.display.issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
+                    self.display
+                        .issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
                     // Run corrector with progress display
                     let corrector_result = with_progress_display(
@@ -360,17 +365,21 @@ impl Runner {
 
         // If commit=false, skip commit state entirely
         if !config.commit {
-            self.display.state_transition(state.machine_state, MachineState::Completed);
-            self.display.info("Skipping commit (commit = false in config)");
+            self.display
+                .state_transition(state.machine_state, MachineState::Completed);
+            self.display
+                .info("Skipping commit (commit = false in config)");
             return Ok(());
         }
 
         if !git::is_git_repo() {
-            self.display.state_transition(state.machine_state, MachineState::Completed);
+            self.display
+                .state_transition(state.machine_state, MachineState::Completed);
             return Ok(());
         }
 
-        self.display.state_transition(state.machine_state, MachineState::Committing);
+        self.display
+            .state_transition(state.machine_state, MachineState::Committing);
         state.transition_to(MachineState::Committing);
         self.state_manager.save(state)?;
 
@@ -404,9 +413,9 @@ impl Runner {
         let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
 
         match commit_result {
-            CommitResult::Success(hash) => {
-                self.display.info(&format!("Changes committed successfully ({})", hash))
-            }
+            CommitResult::Success(hash) => self
+                .display
+                .info(&format!("Changes committed successfully ({})", hash)),
             CommitResult::NothingToCommit => self.display.info("Nothing to commit"),
             CommitResult::Error(e) => {
                 self.display.error_panel(
@@ -420,8 +429,10 @@ impl Runner {
 
         // Skip PR creation if pull_request=false (US-005)
         if !config.pull_request {
-            self.display.state_transition(MachineState::Committing, MachineState::Completed);
-            self.display.info("Skipping PR creation (pull_request = false in config)");
+            self.display
+                .state_transition(MachineState::Committing, MachineState::Completed);
+            self.display
+                .info("Skipping PR creation (pull_request = false in config)");
             return Ok(());
         }
 
@@ -436,33 +447,39 @@ impl Runner {
         spec: &Spec,
         commits_were_made: bool,
     ) -> Result<()> {
-        self.display.state_transition(MachineState::Committing, MachineState::CreatingPR);
+        self.display
+            .state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
 
         match create_pull_request(spec, commits_were_made) {
             Ok(PRResult::Success(url)) => {
                 self.display.pr_success(&url);
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Skipped(reason)) => {
                 self.display.pr_skipped(&reason);
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::AlreadyExists(url)) => {
                 self.display.pr_already_exists(&url);
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Updated(url)) => {
                 self.display.pr_updated(&url);
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Completed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Completed);
                 Ok(())
             }
             Ok(PRResult::Error(msg)) => {
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Failed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Failed);
                 Err(self.handle_fatal_error(
                     state,
                     "PR Creation Failed",
@@ -474,7 +491,8 @@ impl Runner {
                 ))
             }
             Err(e) => {
-                self.display.state_transition(MachineState::CreatingPR, MachineState::Failed);
+                self.display
+                    .state_transition(MachineState::CreatingPR, MachineState::Failed);
                 Err(self.handle_fatal_error(
                     state,
                     "PR Creation Error",
@@ -548,7 +566,8 @@ impl Runner {
             duration_secs: story_start.elapsed().as_secs(),
         });
 
-        self.display.error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
+        self.display
+            .error_panel(error_panel_title, error_panel_msg, exit_code, stderr);
         print_summary(state.iteration, story_results)?;
         Err(Autom8Error::ClaudeError(error_msg.to_string()))
     }
@@ -678,7 +697,8 @@ impl Runner {
 
         // Show progress bar after story task completion
         let updated_spec = Spec::load(spec_json_path)?;
-        self.display.tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
+        self.display
+            .tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
         self.display.newline();
 
         if self.verbose {
@@ -742,7 +762,8 @@ impl Runner {
         // Print breadcrumb trail after story phase completion
         self.display.breadcrumb_trail(breadcrumb);
 
-        self.display.state_transition(MachineState::RunningClaude, MachineState::PickingStory);
+        self.display
+            .state_transition(MachineState::RunningClaude, MachineState::PickingStory);
         self.display.iteration_complete(state.iteration);
 
         // Reload spec and check if current story passed
@@ -766,7 +787,8 @@ impl Runner {
         }
 
         // Show progress bar after story task completion
-        self.display.tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
+        self.display
+            .tasks_progress(updated_spec.completed_count(), updated_spec.total_count());
         self.display.newline();
 
         // Continue to next iteration
@@ -804,7 +826,8 @@ impl Runner {
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
-        self.display.state_transition(MachineState::Idle, MachineState::LoadingSpec);
+        self.display
+            .state_transition(MachineState::Idle, MachineState::LoadingSpec);
 
         // Load spec content
         let spec_content = fs::read_to_string(&spec_path)?;
@@ -819,7 +842,8 @@ impl Runner {
         // Transition to GeneratingSpec
         state.transition_to(MachineState::GeneratingSpec);
         self.state_manager.save(&state)?;
-        self.display.state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
+        self.display
+            .state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
 
         self.display.generating_spec();
 
@@ -837,7 +861,8 @@ impl Runner {
         ) {
             Ok(spec) => spec,
             Err(e) => {
-                self.display.error_panel("Spec Generation Failed", &e.to_string(), None, None);
+                self.display
+                    .error_panel("Spec Generation Failed", &e.to_string(), None, None);
                 return Err(e);
             }
         };
@@ -848,7 +873,8 @@ impl Runner {
         state.branch = spec.branch_name.clone();
         state.transition_to(MachineState::Initializing);
         self.state_manager.save(&state)?;
-        self.display.state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
+        self.display
+            .state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         self.display.proceeding_to_implementation();
 
@@ -894,7 +920,8 @@ impl Runner {
             config,
         );
 
-        self.display.state_transition(MachineState::Idle, MachineState::Initializing);
+        self.display
+            .state_transition(MachineState::Idle, MachineState::Initializing);
         self.display.project_info(&spec);
 
         self.run_implementation_loop(state, &spec_json_path)
@@ -902,7 +929,8 @@ impl Runner {
 
     fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {
         // Transition to PickingStory
-        self.display.state_transition(state.machine_state, MachineState::PickingStory);
+        self.display
+            .state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
         self.state_manager.save(&state)?;
 
@@ -955,7 +983,8 @@ impl Runner {
             breadcrumb.reset();
 
             // Start iteration
-            self.display.state_transition(MachineState::PickingStory, MachineState::RunningClaude);
+            self.display
+                .state_transition(MachineState::PickingStory, MachineState::RunningClaude);
             state.start_iteration(&story.id);
             self.state_manager.save(&state)?;
 
@@ -963,7 +992,8 @@ impl Runner {
             breadcrumb.enter_state(BreadcrumbState::Story);
 
             self.display.phase_banner("RUNNING", BannerColor::Cyan);
-            self.display.iteration_start(state.iteration, &story.id, &story.title);
+            self.display
+                .iteration_start(state.iteration, &story.id, &story.title);
 
             // Process the story iteration
             let story_start = Instant::now();
