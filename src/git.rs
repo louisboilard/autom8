@@ -334,9 +334,7 @@ pub fn has_uncommitted_changes() -> Result<bool> {
 ///
 /// Uses `git add -A` to stage all changes in the working directory.
 pub fn stage_all_changes() -> Result<()> {
-    let output = Command::new("git")
-        .args(["add", "-A"])
-        .output()?;
+    let output = Command::new("git").args(["add", "-A"]).output()?;
 
     if !output.status.success() {
         return Err(Autom8Error::GitError(format!(
@@ -670,7 +668,9 @@ mod tests {
         let branch = result.unwrap();
         assert!(!branch.is_empty());
         // Should be either main, master, or some other branch name
-        assert!(branch.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/'));
+        assert!(branch
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/'));
     }
 
     #[test]

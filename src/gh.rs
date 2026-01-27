@@ -863,7 +863,10 @@ fn parse_review_comment(comment: &serde_json::Value) -> Option<PRComment> {
         .and_then(|l| l.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let file_path = comment.get("path").and_then(|p| p.as_str()).map(String::from);
+    let file_path = comment
+        .get("path")
+        .and_then(|p| p.as_str())
+        .map(String::from);
     let line = comment
         .get("line")
         .or_else(|| comment.get("original_line"))
@@ -1096,9 +1099,7 @@ pub fn gather_pr_context(pr_number: u32) -> PRContextResult {
     // Fetch unresolved review comments
     let review_comments = match get_unresolved_review_comments(pr_number) {
         Ok(comments) => comments,
-        Err(e) => {
-            return PRContextResult::Error(format!("Failed to get review comments: {}", e))
-        }
+        Err(e) => return PRContextResult::Error(format!("Failed to get review comments: {}", e)),
     };
 
     // Fetch conversation comments
@@ -1228,7 +1229,10 @@ fn expected_spec_path(branch_name: &str) -> PathBuf {
     if let Ok(spec_dir) = config::spec_dir() {
         spec_dir.join(format!("spec-{}.json", safe_branch_name))
     } else {
-        PathBuf::from(format!("~/.config/autom8/<project>/spec/spec-{}.json", safe_branch_name))
+        PathBuf::from(format!(
+            "~/.config/autom8/<project>/spec/spec-{}.json",
+            safe_branch_name
+        ))
     }
 }
 
@@ -1248,7 +1252,9 @@ pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
     // Get current branch
     let branch_name = match git::current_branch() {
         Ok(name) => name,
-        Err(e) => return BranchContextResult::Error(format!("Failed to get current branch: {}", e)),
+        Err(e) => {
+            return BranchContextResult::Error(format!("Failed to get current branch: {}", e))
+        }
     };
 
     // Try to find and load spec file
@@ -1263,10 +1269,7 @@ pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
         }
         Err(e) => {
             // Spec file exists but failed to parse
-            return BranchContextResult::Error(format!(
-                "Failed to load spec file: {}",
-                e
-            ));
+            return BranchContextResult::Error(format!("Failed to load spec file: {}", e));
         }
     };
 
@@ -1276,7 +1279,11 @@ pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
         Err(e) => {
             // Non-fatal: continue without commits if git log fails
             // This can happen on new branches with no upstream
-            eprintln!("{}: Could not get branch commits: {}", crate::output::YELLOW, e);
+            eprintln!(
+                "{}: Could not get branch commits: {}",
+                crate::output::YELLOW,
+                e
+            );
             Vec::new()
         }
     };
@@ -2873,8 +2880,7 @@ mod tests {
     #[test]
     fn test_pr_info_json_parsing() {
         // Test the JSON parsing logic used by get_pr_info_for_branch
-        let json_str =
-            r#"[{"number":42,"title":"Test PR","headRefName":"feature/test","url":"https://github.com/owner/repo/pull/42"}]"#;
+        let json_str = r#"[{"number":42,"title":"Test PR","headRefName":"feature/test","url":"https://github.com/owner/repo/pull/42"}]"#;
         let parsed: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap();
 
         assert!(!parsed.is_empty());
@@ -3120,7 +3126,10 @@ mod tests {
         };
         let cloned = original.clone();
         assert_eq!(original.number, cloned.number);
-        assert_eq!(original.unresolved_comments.len(), cloned.unresolved_comments.len());
+        assert_eq!(
+            original.unresolved_comments.len(),
+            cloned.unresolved_comments.len()
+        );
     }
 
     #[test]
@@ -3368,15 +3377,13 @@ mod tests {
 
     #[test]
     fn test_branch_context_with_commits() {
-        let commits = vec![
-            git::CommitInfo {
-                short_hash: "abc1234".to_string(),
-                full_hash: "abc1234567890".to_string(),
-                message: "Test commit".to_string(),
-                author: "Author".to_string(),
-                date: "2024-01-15".to_string(),
-            },
-        ];
+        let commits = vec![git::CommitInfo {
+            short_hash: "abc1234".to_string(),
+            full_hash: "abc1234567890".to_string(),
+            message: "Test commit".to_string(),
+            author: "Author".to_string(),
+            date: "2024-01-15".to_string(),
+        }];
 
         let context = BranchContext {
             branch_name: "feature/test".to_string(),
@@ -3498,15 +3505,13 @@ mod tests {
             branch_name: "feature/test".to_string(),
             spec: None,
             spec_path: std::path::PathBuf::from("/path/to/spec.json"),
-            commits: vec![
-                git::CommitInfo {
-                    short_hash: "abc1234".to_string(),
-                    full_hash: "abc1234567890".to_string(),
-                    message: "Test commit".to_string(),
-                    author: "Author".to_string(),
-                    date: "2024-01-15".to_string(),
-                },
-            ],
+            commits: vec![git::CommitInfo {
+                short_hash: "abc1234".to_string(),
+                full_hash: "abc1234567890".to_string(),
+                message: "Test commit".to_string(),
+                author: "Author".to_string(),
+                date: "2024-01-15".to_string(),
+            }],
         };
 
         print_branch_context(&context);

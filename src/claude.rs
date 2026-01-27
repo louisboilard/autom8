@@ -597,7 +597,10 @@ fn parse_summary_number(text: &str, label: &str) -> usize {
         if line_lower.contains(&label_lower) {
             // Look for a number in the line
             for word in line.split_whitespace() {
-                if let Ok(num) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
+                if let Ok(num) = word
+                    .trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<usize>()
+                {
                     return num;
                 }
             }
@@ -3386,7 +3389,10 @@ Analysis complete.
         let prompt = build_pr_review_prompt(&pr_context, &branch_context);
 
         // Verify prompt contains expected content
-        assert!(prompt.contains("TestProject"), "Should contain project name");
+        assert!(
+            prompt.contains("TestProject"),
+            "Should contain project name"
+        );
         assert!(
             prompt.contains("Test PR description"),
             "Should contain PR description"
@@ -3546,8 +3552,14 @@ Analysis complete.
         assert!(prompt.contains("@user1"), "Should have user1");
         assert!(prompt.contains("@user2"), "Should have user2");
         assert!(prompt.contains("@user3"), "Should have user3");
-        assert!(prompt.contains("file1.rs:10"), "Should have file1 with line");
-        assert!(prompt.contains("file2.rs"), "Should have file2 without line");
+        assert!(
+            prompt.contains("file1.rs:10"),
+            "Should have file1 with line"
+        );
+        assert!(
+            prompt.contains("file2.rs"),
+            "Should have file2 without line"
+        );
     }
 
     #[test]

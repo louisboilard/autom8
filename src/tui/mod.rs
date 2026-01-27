@@ -758,7 +758,10 @@ mod tests {
     #[test]
     fn test_tui_display_is_not_running_by_default() {
         let display = TuiDisplay::new();
-        assert!(!display.is_running(), "TUI should not be running by default");
+        assert!(
+            !display.is_running(),
+            "TUI should not be running by default"
+        );
     }
 
     #[test]

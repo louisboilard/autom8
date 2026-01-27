@@ -40,10 +40,10 @@ pub fn render(frame: &mut Frame, app: &TuiApp) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(4),  // Progress
-            Constraint::Min(10),    // Output (takes remaining space)
-            Constraint::Length(3),  // Footer
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Progress
+            Constraint::Min(10),   // Output (takes remaining space)
+            Constraint::Length(3), // Footer
         ])
         .split(frame.area());
 
@@ -103,7 +103,9 @@ fn render_header(frame: &mut Frame, app: &TuiApp, area: Rect) {
         Span::styled("State: ", Style::default().fg(Color::Blue)),
         Span::styled(
             state_name,
-            Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
         ),
     ])];
 
@@ -114,7 +116,9 @@ fn render_header(frame: &mut Frame, app: &TuiApp, area: Rect) {
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " autom8 ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )),
         )
         .style(Style::default());
@@ -131,55 +135,62 @@ fn render_progress(frame: &mut Frame, app: &TuiApp, area: Rect) {
         .split(area);
 
     // Build story info spans with iteration count for review/correct cycles
-    let story_spans = if let (Some(id), Some(title)) =
-        (app.current_story_id(), app.current_story_title())
-    {
-        let mut spans = Vec::new();
+    let story_spans =
+        if let (Some(id), Some(title)) = (app.current_story_id(), app.current_story_title()) {
+            let mut spans = Vec::new();
 
-        // Story progress indicator
-        if app.total_stories() > 0 {
+            // Story progress indicator
+            if app.total_stories() > 0 {
+                spans.push(Span::styled(
+                    format!(
+                        "Story {}/{}",
+                        app.completed_stories() + 1,
+                        app.total_stories()
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::raw(": "));
+            }
+
+            // Story ID and title
             spans.push(Span::styled(
-                format!("Story {}/{}", app.completed_stories() + 1, app.total_stories()),
-                Style::default().fg(Color::Yellow),
+                id.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw(": "));
-        }
-
-        // Story ID and title
-        spans.push(Span::styled(
-            id.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" - "));
-        spans.push(Span::styled(title.to_string(), Style::default().fg(Color::White)));
-
-        // Add iteration count if in review/correct cycle (iteration > 1 or review_max > 0)
-        if app.iteration() > 1 || app.review_max() > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" - "));
             spans.push(Span::styled(
-                format!("(iter {})", app.iteration()),
-                Style::default().fg(Color::Magenta),
+                title.to_string(),
+                Style::default().fg(Color::White),
             ));
-        }
 
-        spans
-    } else if !app.phase().is_empty() {
-        vec![
-            Span::styled("Phase: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                app.phase().to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-        ]
-    } else {
-        vec![Span::styled(
-            "Waiting...",
-            Style::default().fg(Color::Gray),
-        )]
-    };
+            // Add iteration count if in review/correct cycle (iteration > 1 or review_max > 0)
+            if app.iteration() > 1 || app.review_max() > 0 {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("(iter {})", app.iteration()),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
 
-    let story_paragraph = Paragraph::new(Line::from(story_spans))
-        .block(Block::default().borders(Borders::NONE));
+            spans
+        } else if !app.phase().is_empty() {
+            vec![
+                Span::styled("Phase: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    app.phase().to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        } else {
+            vec![Span::styled("Waiting...", Style::default().fg(Color::Gray))]
+        };
+
+    let story_paragraph =
+        Paragraph::new(Line::from(story_spans)).block(Block::default().borders(Borders::NONE));
 
     frame.render_widget(story_paragraph, progress_chunks[0]);
 
@@ -288,9 +299,7 @@ fn render_footer(frame: &mut Frame, app: &TuiApp, area: Rect) {
         status_parts.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
         status_parts.push(Span::styled(
             "⚠ ERROR",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -309,7 +318,9 @@ fn render_footer(frame: &mut Frame, app: &TuiApp, area: Rect) {
     status_parts.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
     status_parts.push(Span::styled(
         "q",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ));
     status_parts.push(Span::styled(" quit", Style::default().fg(Color::Gray)));
 
@@ -461,7 +472,10 @@ mod tests {
         assert_eq!(app.iteration(), 3);
         assert_eq!(app.review_current(), 2);
         assert_eq!(app.review_max(), 3);
-        assert!(app.review_max() > 0, "Review max should trigger iteration display");
+        assert!(
+            app.review_max() > 0,
+            "Review max should trigger iteration display"
+        );
     }
 
     #[test]
@@ -510,7 +524,10 @@ mod tests {
         // Verify review progress values are accessible for footer display
         assert_eq!(app.review_current(), 1);
         assert_eq!(app.review_max(), 3);
-        assert!(app.review_max() > 0, "Should display review progress in footer");
+        assert!(
+            app.review_max() > 0,
+            "Should display review progress in footer"
+        );
     }
 
     #[test]
@@ -528,7 +545,10 @@ mod tests {
         app.set_all_complete();
 
         // Verify completion state is accessible for footer display
-        assert!(app.all_complete(), "Footer should show completion indicator");
+        assert!(
+            app.all_complete(),
+            "Footer should show completion indicator"
+        );
     }
 
     #[test]
@@ -558,7 +578,10 @@ mod tests {
 
         // Test scroll indicator logic
         let shows_scroll = total_lines > visible_height;
-        assert!(shows_scroll, "Should show scroll indicator when lines exceed visible area");
+        assert!(
+            shows_scroll,
+            "Should show scroll indicator when lines exceed visible area"
+        );
     }
 
     #[test]
@@ -575,7 +598,10 @@ mod tests {
 
         // Test scroll indicator logic
         let shows_scroll = total_lines > visible_height;
-        assert!(!shows_scroll, "Should not show scroll indicator when all lines visible");
+        assert!(
+            !shows_scroll,
+            "Should not show scroll indicator when all lines visible"
+        );
     }
 
     #[test]

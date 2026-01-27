@@ -3023,10 +3023,7 @@ review = false
             pull_request = true
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(
-            !config.use_tui,
-            "Missing use_tui should default to false"
-        );
+        assert!(!config.use_tui, "Missing use_tui should default to false");
     }
 
     #[test]
@@ -3039,9 +3036,18 @@ review = false
         };
         let content = generate_config_with_comments(&config);
 
-        assert!(content.contains("use_tui = true"), "Generated config should contain use_tui = true");
-        assert!(content.contains("# TUI mode"), "Generated config should have TUI comment header");
-        assert!(content.contains("rich terminal"), "Generated config should explain TUI purpose");
+        assert!(
+            content.contains("use_tui = true"),
+            "Generated config should contain use_tui = true"
+        );
+        assert!(
+            content.contains("# TUI mode"),
+            "Generated config should have TUI comment header"
+        );
+        assert!(
+            content.contains("rich terminal"),
+            "Generated config should explain TUI purpose"
+        );
     }
 
     #[test]
@@ -3070,7 +3076,11 @@ review = false
         let project_dir = config_dir.join("test-project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_path = project_dir.join("config.toml");
-        fs::write(&project_path, generate_config_with_comments(&project_config)).unwrap();
+        fs::write(
+            &project_path,
+            generate_config_with_comments(&project_config),
+        )
+        .unwrap();
 
         // Simulate get_effective_config logic
         let effective_path = if project_path.exists() {
@@ -3079,7 +3089,8 @@ review = false
             &global_path
         };
 
-        let effective: Config = toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
+        let effective: Config =
+            toml::from_str(&fs::read_to_string(effective_path).unwrap()).unwrap();
         assert!(
             effective.use_tui,
             "Project config use_tui=true should override global use_tui=false"

@@ -460,7 +460,10 @@ pub fn create_display(use_tui: bool) -> Box<dyn DisplayAdapter> {
         // Start the TUI render loop - this initializes the terminal and spawns
         // the render thread. The TUI will be stopped automatically when dropped.
         if let Err(e) = tui.start() {
-            eprintln!("Warning: Failed to start TUI mode: {}. Falling back to CLI.", e);
+            eprintln!(
+                "Warning: Failed to start TUI mode: {}. Falling back to CLI.",
+                e
+            );
             return Box::new(CliDisplay::new());
         }
         Box::new(tui)
@@ -803,7 +806,12 @@ mod tests {
     #[test]
     fn test_cli_display_error_panel_no_panic() {
         let display = CliDisplay::new();
-        display.error_panel("Claude Error", "Process failed", Some(1), Some("stderr output"));
+        display.error_panel(
+            "Claude Error",
+            "Process failed",
+            Some(1),
+            Some("stderr output"),
+        );
         display.error_panel("API Error", "Connection refused", None, None);
     }
 

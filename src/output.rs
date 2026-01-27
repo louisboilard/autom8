@@ -338,10 +338,7 @@ pub fn print_no_unresolved_comments(pr_number: u32, title: &str) {
 /// Print a summary of the PR context being analyzed.
 pub fn print_pr_context_summary(pr_number: u32, title: &str, comment_count: usize) {
     println!();
-    println!(
-        "{CYAN}Analyzing PR #{}{RESET}: {}",
-        pr_number, title
-    );
+    println!("{CYAN}Analyzing PR #{}{RESET}: {}", pr_number, title);
     println!(
         "{BLUE}Found:{RESET} {} unresolved comment{}",
         comment_count,
@@ -488,11 +485,7 @@ fn print_warning_panel_line(text: &str) {
 }
 
 /// Print a summary of the branch context being used.
-pub fn print_branch_context_summary(
-    has_spec: bool,
-    commit_count: usize,
-    branch_name: &str,
-) {
+pub fn print_branch_context_summary(has_spec: bool, commit_count: usize, branch_name: &str) {
     println!();
     println!("{CYAN}Branch Context:{RESET} {}", branch_name);
 
@@ -529,18 +522,18 @@ pub fn print_commit_list(commits: &[crate::git::CommitInfo], max_display: usize)
             commit.message.clone()
         };
 
-        println!(
-            "  {CYAN}{}{RESET} {}",
-            commit.short_hash,
-            display_msg
-        );
+        println!("  {CYAN}{}{RESET} {}", commit.short_hash, display_msg);
     }
 
     if commits.len() > max_display {
         println!(
             "{GRAY}  ... and {} more commit{}{RESET}",
             commits.len() - max_display,
-            if commits.len() - max_display == 1 { "" } else { "s" }
+            if commits.len() - max_display == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
     println!();
@@ -1361,10 +1354,7 @@ pub fn print_pr_review_start(pr_number: u32, title: &str, comment_count: usize) 
     println!("{CYAN}{BOLD}╚════════════════════════════════════════════════════════╝{RESET}");
     println!();
     println!("{BLUE}PR #{}{RESET}: {}", pr_number, title);
-    println!(
-        "{BLUE}Comments to analyze:{RESET} {}",
-        comment_count
-    );
+    println!("{BLUE}Comments to analyze:{RESET} {}", comment_count);
     println!();
 }
 
@@ -2212,7 +2202,10 @@ mod tests {
     fn test_print_no_unresolved_comments_does_not_panic() {
         print_no_unresolved_comments(42, "Test PR");
         print_no_unresolved_comments(1, "");
-        print_no_unresolved_comments(99999, "A very long PR title that might be too long to display properly");
+        print_no_unresolved_comments(
+            99999,
+            "A very long PR title that might be too long to display properly",
+        );
     }
 
     #[test]
@@ -2250,25 +2243,13 @@ mod tests {
     #[test]
     fn test_print_pr_comment_conversation_does_not_panic() {
         // Conversation comment (no file/line context)
-        print_pr_comment(
-            2,
-            "commenter",
-            "This is great work overall!",
-            None,
-            None,
-        );
+        print_pr_comment(2, "commenter", "This is great work overall!", None, None);
     }
 
     #[test]
     fn test_print_pr_comment_multiline_body_does_not_panic() {
         let multiline_body = "First line\nSecond line\nThird line\n\nAfter blank line";
-        print_pr_comment(
-            3,
-            "reviewer",
-            multiline_body,
-            Some("file.rs"),
-            Some(10),
-        );
+        print_pr_comment(3, "reviewer", multiline_body, Some("file.rs"), Some(10));
     }
 
     #[test]
@@ -2308,7 +2289,9 @@ mod tests {
     fn test_print_pr_context_error_does_not_panic() {
         print_pr_context_error("Something went wrong");
         print_pr_context_error("");
-        print_pr_context_error("A very long error message that explains in detail what happened and why it failed");
+        print_pr_context_error(
+            "A very long error message that explains in detail what happened and why it failed",
+        );
     }
 
     // ========================================================================
@@ -2318,7 +2301,10 @@ mod tests {
     #[test]
     fn test_print_missing_spec_warning_does_not_panic() {
         print_missing_spec_warning("feature/test", "/path/to/spec.json");
-        print_missing_spec_warning("feature/pr-review", "~/.config/autom8/project/spec/spec-feature-pr-review.json");
+        print_missing_spec_warning(
+            "feature/pr-review",
+            "~/.config/autom8/project/spec/spec-feature-pr-review.json",
+        );
         print_missing_spec_warning("", "");
     }
 
@@ -2418,7 +2404,11 @@ mod tests {
     fn test_print_pr_review_start_does_not_panic() {
         print_pr_review_start(123, "Test PR Title", 5);
         print_pr_review_start(1, "Short", 0);
-        print_pr_review_start(999999, "Very Long PR Title That Should Still Display Correctly", 100);
+        print_pr_review_start(
+            999999,
+            "Very Long PR Title That Should Still Display Correctly",
+            100,
+        );
     }
 
     #[test]
