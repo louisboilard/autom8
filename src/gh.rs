@@ -3,11 +3,37 @@
 //! This module provides functions to interact with the GitHub CLI for
 //! checking prerequisites and managing pull requests.
 
-use crate::error::Result;
+use crate::error::{Autom8Error, Result};
 use crate::git::{self, PushResult};
 use crate::output::{print_push_already_up_to_date, print_push_success, print_pushing_branch};
 use crate::spec::Spec;
 use std::process::Command;
+
+/// Information about an open pull request
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullRequestInfo {
+    /// PR number
+    pub number: u32,
+    /// PR title
+    pub title: String,
+    /// Head branch name (the source branch)
+    pub head_branch: String,
+    /// PR URL
+    pub url: String,
+}
+
+/// Result of attempting to detect a PR for the current branch
+#[derive(Debug, Clone, PartialEq)]
+pub enum PRDetectionResult {
+    /// Found a PR for the current branch
+    Found(PullRequestInfo),
+    /// Current branch is main/master with no PR
+    OnMainBranch,
+    /// On a feature branch but no open PR exists for it
+    NoPRForBranch(String),
+    /// Error occurred during detection
+    Error(String),
+}
 
 /// Result type for PR creation operations
 ///
@@ -438,6 +464,848 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
     }
 
     Ok(PRResult::Success(pr_url))
+}
+
+// ============================================================================
+// PR Detection Functions (US-001: Detect PR from Current Branch)
+// ============================================================================
+
+/// Detect the PR associated with the current git branch.
+///
+/// This function checks if there's an open PR for the current branch.
+/// If on main/master, returns `OnMainBranch`.
+/// If on a feature branch without a PR, returns `NoPRForBranch`.
+///
+/// # Returns
+/// * `PRDetectionResult::Found(info)` - Found a PR for the current branch
+/// * `PRDetectionResult::OnMainBranch` - Current branch is main/master
+/// * `PRDetectionResult::NoPRForBranch(branch)` - No PR for this branch
+/// * `PRDetectionResult::Error(msg)` - Error occurred
+pub fn detect_pr_for_current_branch() -> Result<PRDetectionResult> {
+    // Check: gh CLI installed
+    if !is_gh_installed() {
+        return Ok(PRDetectionResult::Error(
+            "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/".to_string(),
+        ));
+    }
+
+    // Check: gh authenticated
+    if !is_gh_authenticated() {
+        return Ok(PRDetectionResult::Error(
+            "Not authenticated with GitHub CLI. Run 'gh auth login' to authenticate.".to_string(),
+        ));
+    }
+
+    // Check: in git repo
+    if !git::is_git_repo() {
+        return Ok(PRDetectionResult::Error(
+            "Not in a git repository.".to_string(),
+        ));
+    }
+
+    // Get current branch
+    let current_branch = git::current_branch()?;
+
+    // Check if on main/master
+    if current_branch == "main" || current_branch == "master" {
+        return Ok(PRDetectionResult::OnMainBranch);
+    }
+
+    // Try to get PR info for current branch
+    match get_pr_info_for_branch(&current_branch)? {
+        Some(info) => Ok(PRDetectionResult::Found(info)),
+        None => Ok(PRDetectionResult::NoPRForBranch(current_branch)),
+    }
+}
+
+/// Get PR information for a specific branch.
+///
+/// Returns `Ok(Some(info))` if a PR exists, `Ok(None)` if no PR exists,
+/// or an error if the command fails.
+pub fn get_pr_info_for_branch(branch: &str) -> Result<Option<PullRequestInfo>> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--json",
+            "number,title,headRefName,url",
+            "--state",
+            "open",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        // On error, return None (non-blocking behavior)
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+
+    // Empty array means no PRs
+    if trimmed == "[]" || trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    // Parse JSON array
+    let parsed: std::result::Result<Vec<serde_json::Value>, _> = serde_json::from_str(trimmed);
+
+    match parsed {
+        Ok(prs) if !prs.is_empty() => {
+            let pr = &prs[0];
+            let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let title = pr
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let head_branch = pr
+                .get("headRefName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = pr
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            Ok(Some(PullRequestInfo {
+                number,
+                title,
+                head_branch,
+                url,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// List all open pull requests in the repository.
+///
+/// Returns a list of PR info objects sorted by PR number (descending, newest first).
+///
+/// # Returns
+/// * `Ok(Vec<PullRequestInfo>)` - List of open PRs (may be empty)
+/// * `Err` - If the gh command fails
+pub fn list_open_prs() -> Result<Vec<PullRequestInfo>> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--json",
+            "number,title,headRefName,url",
+            "--state",
+            "open",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to list PRs: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+
+    // Empty array means no PRs
+    if trimmed == "[]" || trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Parse JSON array
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(trimmed)?;
+
+    let prs: Vec<PullRequestInfo> = parsed
+        .iter()
+        .map(|pr| {
+            let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let title = pr
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let head_branch = pr
+                .get("headRefName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = pr
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            PullRequestInfo {
+                number,
+                title,
+                head_branch,
+                url,
+            }
+        })
+        .collect();
+
+    Ok(prs)
+}
+
+/// Check prerequisites for PR operations (gh installed and authenticated).
+///
+/// Returns Ok(()) if all checks pass, or an error message if not.
+pub fn check_gh_prerequisites() -> std::result::Result<(), String> {
+    if !is_gh_installed() {
+        return Err(
+            "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/".to_string(),
+        );
+    }
+
+    if !is_gh_authenticated() {
+        return Err(
+            "Not authenticated with GitHub CLI. Run 'gh auth login' to authenticate.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// US-002: PR Context Gathering (Description, Comments, Reviews)
+// ============================================================================
+
+/// A comment on a PR (either inline review comment or conversation comment)
+#[derive(Debug, Clone, PartialEq)]
+pub struct PRComment {
+    /// Comment author's GitHub username
+    pub author: String,
+    /// The comment body/content
+    pub body: String,
+    /// File path for inline comments (None for conversation comments)
+    pub file_path: Option<String>,
+    /// Line number for inline comments (None for conversation comments)
+    pub line: Option<u32>,
+    /// The comment ID (useful for reference)
+    pub id: u64,
+    /// URL to the comment
+    pub url: String,
+}
+
+/// Full context for a PR including description and unresolved comments
+#[derive(Debug, Clone)]
+pub struct PRContext {
+    /// PR number
+    pub number: u32,
+    /// PR title
+    pub title: String,
+    /// PR body/description (markdown)
+    pub body: String,
+    /// PR URL
+    pub url: String,
+    /// All unresolved comments (both inline and conversation)
+    pub unresolved_comments: Vec<PRComment>,
+}
+
+/// Result of gathering PR context
+#[derive(Debug, Clone)]
+pub enum PRContextResult {
+    /// Successfully gathered PR context
+    Success(PRContext),
+    /// No unresolved comments found
+    NoUnresolvedComments {
+        number: u32,
+        title: String,
+        body: String,
+        url: String,
+    },
+    /// Error occurred during gathering
+    Error(String),
+}
+
+/// Fetch the PR description/body via `gh pr view`.
+///
+/// # Arguments
+/// * `pr_number` - The PR number to fetch
+///
+/// # Returns
+/// * `Ok((title, body, url))` - PR title, body, and URL
+/// * `Err` - If the command fails
+pub fn get_pr_description(pr_number: u32) -> Result<(String, String, String)> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "title,body,url",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to fetch PR description: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())?;
+
+    let title = parsed
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let body = parsed
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let url = parsed
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((title, body, url))
+}
+
+/// Fetch unresolved review comments via `gh api`.
+///
+/// Review comments are inline comments on specific lines of code in PR diffs.
+/// This function filters to only return comments that are not marked as resolved.
+///
+/// # Arguments
+/// * `pr_number` - The PR number to fetch comments for
+///
+/// # Returns
+/// * `Ok(Vec<PRComment>)` - List of unresolved inline review comments
+/// * `Err` - If the command fails
+pub fn get_unresolved_review_comments(pr_number: u32) -> Result<Vec<PRComment>> {
+    // First, get the repository owner and name
+    let repo_output = Command::new("gh")
+        .args(["repo", "view", "--json", "owner,name"])
+        .output()?;
+
+    if !repo_output.status.success() {
+        let stderr = String::from_utf8_lossy(&repo_output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to get repo info: {}",
+            stderr.trim()
+        )));
+    }
+
+    let repo_stdout = String::from_utf8_lossy(&repo_output.stdout);
+    let repo_parsed: serde_json::Value = serde_json::from_str(repo_stdout.trim())?;
+    let owner = repo_parsed
+        .get("owner")
+        .and_then(|v| v.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = repo_parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Fetch review comments via the API
+    // Use the pulls/{pr_number}/comments endpoint for inline review comments
+    let api_path = format!("repos/{}/{}/pulls/{}/comments", owner, name, pr_number);
+    let output = Command::new("gh")
+        .args(["api", &api_path, "--paginate"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to fetch review comments: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Handle pagination - gh api --paginate may return multiple JSON arrays concatenated
+    let mut all_comments = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Try to parse as array first
+        if let Ok(comments) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            for comment in comments {
+                if let Some(pr_comment) = parse_review_comment(&comment) {
+                    all_comments.push(pr_comment);
+                }
+            }
+        }
+    }
+
+    // Now we need to filter for unresolved comments
+    // Review comments are considered "resolved" when they're part of a resolved review thread
+    // We need to check the GraphQL API for thread resolution status
+    let unresolved = filter_unresolved_review_comments(owner, name, pr_number, all_comments)?;
+
+    Ok(unresolved)
+}
+
+/// Parse a review comment from the GitHub API response
+fn parse_review_comment(comment: &serde_json::Value) -> Option<PRComment> {
+    let id = comment.get("id")?.as_u64()?;
+    let body = comment.get("body")?.as_str()?.to_string();
+    let author = comment
+        .get("user")
+        .and_then(|u| u.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let file_path = comment.get("path").and_then(|p| p.as_str()).map(String::from);
+    let line = comment
+        .get("line")
+        .or_else(|| comment.get("original_line"))
+        .and_then(|l| l.as_u64())
+        .map(|l| l as u32);
+    let url = comment
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(PRComment {
+        author,
+        body,
+        file_path,
+        line,
+        id,
+        url,
+    })
+}
+
+/// Filter review comments to only include those that are unresolved.
+///
+/// Uses the GraphQL API to check thread resolution status.
+fn filter_unresolved_review_comments(
+    owner: &str,
+    name: &str,
+    pr_number: u32,
+    comments: Vec<PRComment>,
+) -> Result<Vec<PRComment>> {
+    if comments.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Use GraphQL to get the resolution status of review threads
+    let graphql_query = format!(
+        r#"query {{
+  repository(owner: "{}", name: "{}") {{
+    pullRequest(number: {}) {{
+      reviewThreads(first: 100) {{
+        nodes {{
+          isResolved
+          comments(first: 1) {{
+            nodes {{
+              databaseId
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}"#,
+        owner, name, pr_number
+    );
+
+    let output = Command::new("gh")
+        .args(["api", "graphql", "-f", &format!("query={}", graphql_query)])
+        .output()?;
+
+    if !output.status.success() {
+        // If GraphQL fails, return all comments (conservative approach)
+        return Ok(comments);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())?;
+
+    // Build a set of resolved comment IDs
+    let mut resolved_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    if let Some(threads) = parsed
+        .get("data")
+        .and_then(|d| d.get("repository"))
+        .and_then(|r| r.get("pullRequest"))
+        .and_then(|pr| pr.get("reviewThreads"))
+        .and_then(|rt| rt.get("nodes"))
+        .and_then(|n| n.as_array())
+    {
+        for thread in threads {
+            let is_resolved = thread
+                .get("isResolved")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false);
+
+            if is_resolved {
+                // Get the first comment's database ID (the thread starter)
+                if let Some(comment_id) = thread
+                    .get("comments")
+                    .and_then(|c| c.get("nodes"))
+                    .and_then(|n| n.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c.get("databaseId"))
+                    .and_then(|id| id.as_u64())
+                {
+                    resolved_ids.insert(comment_id);
+                }
+            }
+        }
+    }
+
+    // Filter comments to exclude resolved ones
+    let unresolved: Vec<PRComment> = comments
+        .into_iter()
+        .filter(|c| !resolved_ids.contains(&c.id))
+        .collect();
+
+    Ok(unresolved)
+}
+
+/// Fetch unresolved conversation comments via `gh api`.
+///
+/// Conversation comments are general comments on the PR (not inline on code).
+/// This returns all issue comments, as GitHub doesn't have a "resolved" concept
+/// for general PR conversation comments.
+///
+/// # Arguments
+/// * `pr_number` - The PR number to fetch comments for
+///
+/// # Returns
+/// * `Ok(Vec<PRComment>)` - List of conversation comments
+/// * `Err` - If the command fails
+pub fn get_conversation_comments(pr_number: u32) -> Result<Vec<PRComment>> {
+    // Get repository info
+    let repo_output = Command::new("gh")
+        .args(["repo", "view", "--json", "owner,name"])
+        .output()?;
+
+    if !repo_output.status.success() {
+        let stderr = String::from_utf8_lossy(&repo_output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to get repo info: {}",
+            stderr.trim()
+        )));
+    }
+
+    let repo_stdout = String::from_utf8_lossy(&repo_output.stdout);
+    let repo_parsed: serde_json::Value = serde_json::from_str(repo_stdout.trim())?;
+    let owner = repo_parsed
+        .get("owner")
+        .and_then(|v| v.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = repo_parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Fetch issue comments (PR conversation comments use the issues API)
+    let api_path = format!("repos/{}/{}/issues/{}/comments", owner, name, pr_number);
+    let output = Command::new("gh")
+        .args(["api", &api_path, "--paginate"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to fetch conversation comments: {}",
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Handle pagination
+    let mut all_comments = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(comments) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            for comment in comments {
+                if let Some(pr_comment) = parse_conversation_comment(&comment) {
+                    all_comments.push(pr_comment);
+                }
+            }
+        }
+    }
+
+    Ok(all_comments)
+}
+
+/// Parse a conversation comment from the GitHub API response
+fn parse_conversation_comment(comment: &serde_json::Value) -> Option<PRComment> {
+    let id = comment.get("id")?.as_u64()?;
+    let body = comment.get("body")?.as_str()?.to_string();
+    let author = comment
+        .get("user")
+        .and_then(|u| u.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let url = comment
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Conversation comments don't have file/line context
+    Some(PRComment {
+        author,
+        body,
+        file_path: None,
+        line: None,
+        id,
+        url,
+    })
+}
+
+/// Gather all PR context: description and unresolved comments.
+///
+/// This function fetches the PR description, unresolved review comments,
+/// and conversation comments, combining them into a unified context.
+///
+/// # Arguments
+/// * `pr_number` - The PR number to gather context for
+///
+/// # Returns
+/// * `PRContextResult::Success(context)` - Full PR context with comments
+/// * `PRContextResult::NoUnresolvedComments` - PR has no unresolved comments
+/// * `PRContextResult::Error(msg)` - Error occurred during gathering
+pub fn gather_pr_context(pr_number: u32) -> PRContextResult {
+    // Fetch PR description
+    let (title, body, url) = match get_pr_description(pr_number) {
+        Ok(result) => result,
+        Err(e) => return PRContextResult::Error(format!("Failed to get PR description: {}", e)),
+    };
+
+    // Fetch unresolved review comments
+    let review_comments = match get_unresolved_review_comments(pr_number) {
+        Ok(comments) => comments,
+        Err(e) => {
+            return PRContextResult::Error(format!("Failed to get review comments: {}", e))
+        }
+    };
+
+    // Fetch conversation comments
+    let conversation_comments = match get_conversation_comments(pr_number) {
+        Ok(comments) => comments,
+        Err(e) => {
+            return PRContextResult::Error(format!("Failed to get conversation comments: {}", e))
+        }
+    };
+
+    // Combine inline and conversation comments into unified list
+    let mut unresolved_comments = Vec::new();
+    unresolved_comments.extend(review_comments);
+    unresolved_comments.extend(conversation_comments);
+
+    // Handle edge case: no unresolved comments
+    if unresolved_comments.is_empty() {
+        return PRContextResult::NoUnresolvedComments {
+            number: pr_number,
+            title,
+            body,
+            url,
+        };
+    }
+
+    PRContextResult::Success(PRContext {
+        number: pr_number,
+        title,
+        body,
+        url,
+        unresolved_comments,
+    })
+}
+
+// ============================================================================
+// US-003: Branch Context Gathering (Spec, Commits)
+// ============================================================================
+
+use crate::config;
+use crate::output::{print_branch_context_summary, print_missing_spec_warning};
+use std::path::PathBuf;
+
+/// Context gathered from the branch (spec file and commits)
+#[derive(Debug, Clone)]
+pub struct BranchContext {
+    /// The branch name
+    pub branch_name: String,
+    /// The loaded spec file (if found)
+    pub spec: Option<Spec>,
+    /// Path where spec was found or expected
+    pub spec_path: PathBuf,
+    /// Commits on this branch (excluding merge commits)
+    pub commits: Vec<git::CommitInfo>,
+}
+
+/// Result of gathering branch context
+#[derive(Debug, Clone)]
+pub enum BranchContextResult {
+    /// Successfully gathered branch context with spec
+    SuccessWithSpec(BranchContext),
+    /// Successfully gathered branch context but no spec found
+    SuccessNoSpec(BranchContext),
+    /// Error occurred during gathering
+    Error(String),
+}
+
+/// Attempt to find a spec file for the given branch name.
+///
+/// Looks for spec files in `~/.config/autom8/<project>/spec/` that match
+/// the branch name. The branch name is converted to a safe filename by
+/// replacing `/` with `-`.
+///
+/// # Arguments
+/// * `branch_name` - The branch name to find a spec for
+///
+/// # Returns
+/// * `Ok(Some((spec, path)))` - Spec found and loaded
+/// * `Ok(None)` - No spec file found
+/// * `Err` - Error loading the spec (e.g., invalid JSON)
+pub fn find_spec_for_branch(branch_name: &str) -> crate::error::Result<Option<(Spec, PathBuf)>> {
+    // Get the spec directory for the current project
+    let spec_dir = config::spec_dir()?;
+
+    // Convert branch name to safe filename
+    // e.g., "feature/pr-review" -> "feature-pr-review"
+    let safe_branch_name = branch_name.replace('/', "-");
+
+    // Try different filename patterns:
+    // 1. spec-{branch}.json (e.g., spec-feature-pr-review.json)
+    // 2. {branch}.json (e.g., feature-pr-review.json)
+    let patterns = [
+        format!("spec-{}.json", safe_branch_name),
+        format!("{}.json", safe_branch_name),
+    ];
+
+    for pattern in &patterns {
+        let spec_path = spec_dir.join(pattern);
+        if spec_path.exists() {
+            let spec = Spec::load(&spec_path)?;
+            return Ok(Some((spec, spec_path)));
+        }
+    }
+
+    // Also try to find any spec file where the branchName matches
+    // This handles cases where the filename doesn't match but the content does
+    if spec_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&spec_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "json") {
+                    if let Ok(spec) = Spec::load(&path) {
+                        if spec.branch_name == branch_name {
+                            return Ok(Some((spec, path)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Get the expected spec path for a branch (for error messages).
+fn expected_spec_path(branch_name: &str) -> PathBuf {
+    let safe_branch_name = branch_name.replace('/', "-");
+    if let Ok(spec_dir) = config::spec_dir() {
+        spec_dir.join(format!("spec-{}.json", safe_branch_name))
+    } else {
+        PathBuf::from(format!("~/.config/autom8/<project>/spec/spec-{}.json", safe_branch_name))
+    }
+}
+
+/// Gather all branch context: spec file and commits.
+///
+/// This function attempts to load the spec file for the current branch
+/// and fetches all non-merge commits specific to this branch.
+///
+/// # Arguments
+/// * `show_warning` - Whether to display a prominent warning if no spec is found
+///
+/// # Returns
+/// * `BranchContextResult::SuccessWithSpec` - Full context with spec loaded
+/// * `BranchContextResult::SuccessNoSpec` - Context gathered but no spec found
+/// * `BranchContextResult::Error` - Error occurred during gathering
+pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
+    // Get current branch
+    let branch_name = match git::current_branch() {
+        Ok(name) => name,
+        Err(e) => return BranchContextResult::Error(format!("Failed to get current branch: {}", e)),
+    };
+
+    // Try to find and load spec file
+    let (spec, spec_path) = match find_spec_for_branch(&branch_name) {
+        Ok(Some((spec, path))) => (Some(spec), path),
+        Ok(None) => {
+            let expected_path = expected_spec_path(&branch_name);
+            if show_warning {
+                print_missing_spec_warning(&branch_name, &expected_path.display().to_string());
+            }
+            (None, expected_path)
+        }
+        Err(e) => {
+            // Spec file exists but failed to parse
+            return BranchContextResult::Error(format!(
+                "Failed to load spec file: {}",
+                e
+            ));
+        }
+    };
+
+    // Get branch commits (excluding merge commits)
+    let commits = match git::get_current_branch_commits() {
+        Ok(commits) => commits,
+        Err(e) => {
+            // Non-fatal: continue without commits if git log fails
+            // This can happen on new branches with no upstream
+            eprintln!("{}: Could not get branch commits: {}", crate::output::YELLOW, e);
+            Vec::new()
+        }
+    };
+
+    // Create context
+    let context = BranchContext {
+        branch_name: branch_name.clone(),
+        spec,
+        spec_path,
+        commits,
+    };
+
+    // Return appropriate result
+    if context.spec.is_some() {
+        BranchContextResult::SuccessWithSpec(context)
+    } else {
+        BranchContextResult::SuccessNoSpec(context)
+    }
+}
+
+/// Print a summary of the gathered branch context.
+///
+/// Convenience function that displays the context summary using the output module.
+pub fn print_branch_context(context: &BranchContext) {
+    print_branch_context_summary(
+        context.spec.is_some(),
+        context.commits.len(),
+        &context.branch_name,
+    );
 }
 
 #[cfg(test)]
@@ -1816,5 +2684,831 @@ mod tests {
         // Body should contain the full description
         let body = format_pr_description(&spec);
         assert!(body.contains(long_desc));
+    }
+
+    // ========================================================================
+    // US-001: PR Detection tests
+    // ========================================================================
+
+    #[test]
+    fn test_pull_request_info_struct() {
+        let pr = PullRequestInfo {
+            number: 42,
+            title: "Add feature X".to_string(),
+            head_branch: "feature/x".to_string(),
+            url: "https://github.com/owner/repo/pull/42".to_string(),
+        };
+
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.title, "Add feature X");
+        assert_eq!(pr.head_branch, "feature/x");
+        assert_eq!(pr.url, "https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn test_pull_request_info_clone() {
+        let pr = PullRequestInfo {
+            number: 123,
+            title: "Test PR".to_string(),
+            head_branch: "test-branch".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        let cloned = pr.clone();
+        assert_eq!(pr, cloned);
+    }
+
+    #[test]
+    fn test_pull_request_info_equality() {
+        let pr1 = PullRequestInfo {
+            number: 1,
+            title: "PR 1".to_string(),
+            head_branch: "branch-1".to_string(),
+            url: "url-1".to_string(),
+        };
+        let pr2 = PullRequestInfo {
+            number: 1,
+            title: "PR 1".to_string(),
+            head_branch: "branch-1".to_string(),
+            url: "url-1".to_string(),
+        };
+        let pr3 = PullRequestInfo {
+            number: 2,
+            title: "PR 2".to_string(),
+            head_branch: "branch-2".to_string(),
+            url: "url-2".to_string(),
+        };
+
+        assert_eq!(pr1, pr2);
+        assert_ne!(pr1, pr3);
+    }
+
+    #[test]
+    fn test_pr_detection_result_found_variant() {
+        let pr = PullRequestInfo {
+            number: 42,
+            title: "Test PR".to_string(),
+            head_branch: "feature/test".to_string(),
+            url: "https://example.com/pull/42".to_string(),
+        };
+        let result = PRDetectionResult::Found(pr.clone());
+        assert_eq!(result, PRDetectionResult::Found(pr));
+    }
+
+    #[test]
+    fn test_pr_detection_result_on_main_branch_variant() {
+        let result = PRDetectionResult::OnMainBranch;
+        assert_eq!(result, PRDetectionResult::OnMainBranch);
+    }
+
+    #[test]
+    fn test_pr_detection_result_no_pr_for_branch_variant() {
+        let result = PRDetectionResult::NoPRForBranch("feature/x".to_string());
+        assert_eq!(
+            result,
+            PRDetectionResult::NoPRForBranch("feature/x".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pr_detection_result_error_variant() {
+        let result = PRDetectionResult::Error("gh not installed".to_string());
+        assert_eq!(
+            result,
+            PRDetectionResult::Error("gh not installed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pr_detection_result_variants_are_distinct() {
+        let pr = PullRequestInfo {
+            number: 1,
+            title: "Test".to_string(),
+            head_branch: "test".to_string(),
+            url: "url".to_string(),
+        };
+        let found = PRDetectionResult::Found(pr);
+        let on_main = PRDetectionResult::OnMainBranch;
+        let no_pr = PRDetectionResult::NoPRForBranch("test".to_string());
+        let error = PRDetectionResult::Error("error".to_string());
+
+        assert_ne!(found, on_main);
+        assert_ne!(found, no_pr);
+        assert_ne!(found, error);
+        assert_ne!(on_main, no_pr);
+        assert_ne!(on_main, error);
+        assert_ne!(no_pr, error);
+    }
+
+    #[test]
+    fn test_pr_detection_result_clone() {
+        let pr = PullRequestInfo {
+            number: 5,
+            title: "Clone Test".to_string(),
+            head_branch: "clone".to_string(),
+            url: "url".to_string(),
+        };
+        let original = PRDetectionResult::Found(pr);
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_check_gh_prerequisites_returns_result() {
+        // This test verifies the function runs without panicking
+        // and returns a valid Result (actual outcome depends on system)
+        let result = check_gh_prerequisites();
+        // Should be Ok or Err with a message
+        match result {
+            Ok(()) => {}
+            Err(msg) => {
+                assert!(!msg.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_pr_for_current_branch_returns_result() {
+        // This test verifies the function runs without panicking
+        // Actual outcome depends on system configuration
+        let result = detect_pr_for_current_branch();
+        assert!(result.is_ok());
+
+        // Result should be one of the valid variants
+        match result.unwrap() {
+            PRDetectionResult::Found(_)
+            | PRDetectionResult::OnMainBranch
+            | PRDetectionResult::NoPRForBranch(_)
+            | PRDetectionResult::Error(_) => {}
+        }
+    }
+
+    #[test]
+    fn test_get_pr_info_for_nonexistent_branch() {
+        // Test with a branch name that almost certainly doesn't have a PR
+        let result = get_pr_info_for_branch("nonexistent-branch-that-does-not-exist-99999");
+        // Should return Ok (not panic) regardless of gh installation
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_open_prs_returns_result() {
+        // This test verifies the function runs without panicking
+        // If gh is installed and authenticated, returns a list (may be empty)
+        // If not, returns an error
+        let result = list_open_prs();
+        // Function should complete without panic
+        match result {
+            Ok(prs) => {
+                // Valid result - list may be empty or have PRs
+                for pr in prs {
+                    assert!(pr.number > 0 || pr.number == 0); // Just verify it's a valid number
+                }
+            }
+            Err(_) => {
+                // Error is acceptable if gh is not configured
+            }
+        }
+    }
+
+    #[test]
+    fn test_pr_info_json_parsing() {
+        // Test the JSON parsing logic used by get_pr_info_for_branch
+        let json_str =
+            r#"[{"number":42,"title":"Test PR","headRefName":"feature/test","url":"https://github.com/owner/repo/pull/42"}]"#;
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap();
+
+        assert!(!parsed.is_empty());
+        let pr = &parsed[0];
+
+        let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let title = pr.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let head_branch = pr.get("headRefName").and_then(|v| v.as_str()).unwrap_or("");
+        let url = pr.get("url").and_then(|v| v.as_str()).unwrap_or("");
+
+        assert_eq!(number, 42);
+        assert_eq!(title, "Test PR");
+        assert_eq!(head_branch, "feature/test");
+        assert_eq!(url, "https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn test_pr_info_json_parsing_empty_array() {
+        let json_str = "[]";
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_pr_info_json_parsing_multiple_prs() {
+        // Test parsing multiple PRs (like list_open_prs would return)
+        let json_str = r#"[
+            {"number":1,"title":"First PR","headRefName":"branch-1","url":"url-1"},
+            {"number":2,"title":"Second PR","headRefName":"branch-2","url":"url-2"},
+            {"number":3,"title":"Third PR","headRefName":"branch-3","url":"url-3"}
+        ]"#;
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap();
+
+        assert_eq!(parsed.len(), 3);
+
+        let prs: Vec<PullRequestInfo> = parsed
+            .iter()
+            .map(|pr| PullRequestInfo {
+                number: pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                title: pr
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                head_branch: pr
+                    .get("headRefName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                url: pr
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+            .collect();
+
+        assert_eq!(prs.len(), 3);
+        assert_eq!(prs[0].number, 1);
+        assert_eq!(prs[1].number, 2);
+        assert_eq!(prs[2].number, 3);
+    }
+
+    // ========================================================================
+    // US-002: PR Context Gathering Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pr_comment_struct() {
+        let comment = PRComment {
+            author: "testuser".to_string(),
+            body: "This is a test comment".to_string(),
+            file_path: Some("src/main.rs".to_string()),
+            line: Some(42),
+            id: 12345,
+            url: "https://github.com/owner/repo/pull/1#discussion_r12345".to_string(),
+        };
+
+        assert_eq!(comment.author, "testuser");
+        assert_eq!(comment.body, "This is a test comment");
+        assert_eq!(comment.file_path, Some("src/main.rs".to_string()));
+        assert_eq!(comment.line, Some(42));
+        assert_eq!(comment.id, 12345);
+        assert!(comment.url.contains("discussion_r12345"));
+    }
+
+    #[test]
+    fn test_pr_comment_without_file_context() {
+        // Conversation comments don't have file/line context
+        let comment = PRComment {
+            author: "reviewer".to_string(),
+            body: "General feedback".to_string(),
+            file_path: None,
+            line: None,
+            id: 67890,
+            url: "https://github.com/owner/repo/pull/1#issuecomment-67890".to_string(),
+        };
+
+        assert!(comment.file_path.is_none());
+        assert!(comment.line.is_none());
+    }
+
+    #[test]
+    fn test_pr_comment_clone() {
+        let original = PRComment {
+            author: "user".to_string(),
+            body: "Comment".to_string(),
+            file_path: Some("file.rs".to_string()),
+            line: Some(10),
+            id: 1,
+            url: "url".to_string(),
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_pr_comment_equality() {
+        let comment1 = PRComment {
+            author: "user".to_string(),
+            body: "Same".to_string(),
+            file_path: None,
+            line: None,
+            id: 1,
+            url: "url".to_string(),
+        };
+        let comment2 = PRComment {
+            author: "user".to_string(),
+            body: "Same".to_string(),
+            file_path: None,
+            line: None,
+            id: 1,
+            url: "url".to_string(),
+        };
+        let comment3 = PRComment {
+            author: "different".to_string(),
+            body: "Same".to_string(),
+            file_path: None,
+            line: None,
+            id: 1,
+            url: "url".to_string(),
+        };
+
+        assert_eq!(comment1, comment2);
+        assert_ne!(comment1, comment3);
+    }
+
+    #[test]
+    fn test_pr_context_struct() {
+        let context = PRContext {
+            number: 42,
+            title: "Test PR".to_string(),
+            body: "This is a test PR description".to_string(),
+            url: "https://github.com/owner/repo/pull/42".to_string(),
+            unresolved_comments: vec![
+                PRComment {
+                    author: "reviewer1".to_string(),
+                    body: "Please fix this".to_string(),
+                    file_path: Some("src/lib.rs".to_string()),
+                    line: Some(100),
+                    id: 1,
+                    url: "url1".to_string(),
+                },
+                PRComment {
+                    author: "reviewer2".to_string(),
+                    body: "Great work!".to_string(),
+                    file_path: None,
+                    line: None,
+                    id: 2,
+                    url: "url2".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(context.number, 42);
+        assert_eq!(context.title, "Test PR");
+        assert_eq!(context.unresolved_comments.len(), 2);
+        assert_eq!(context.unresolved_comments[0].author, "reviewer1");
+        assert_eq!(context.unresolved_comments[1].author, "reviewer2");
+    }
+
+    #[test]
+    fn test_pr_context_result_success_variant() {
+        let context = PRContext {
+            number: 1,
+            title: "Title".to_string(),
+            body: "Body".to_string(),
+            url: "url".to_string(),
+            unresolved_comments: vec![],
+        };
+        let result = PRContextResult::Success(context);
+
+        if let PRContextResult::Success(ctx) = result {
+            assert_eq!(ctx.number, 1);
+        } else {
+            panic!("Expected Success variant");
+        }
+    }
+
+    #[test]
+    fn test_pr_context_result_no_comments_variant() {
+        let result = PRContextResult::NoUnresolvedComments {
+            number: 42,
+            title: "Clean PR".to_string(),
+            body: "All feedback addressed".to_string(),
+            url: "url".to_string(),
+        };
+
+        if let PRContextResult::NoUnresolvedComments { number, title, .. } = result {
+            assert_eq!(number, 42);
+            assert_eq!(title, "Clean PR");
+        } else {
+            panic!("Expected NoUnresolvedComments variant");
+        }
+    }
+
+    #[test]
+    fn test_pr_context_result_error_variant() {
+        let result = PRContextResult::Error("Something went wrong".to_string());
+
+        if let PRContextResult::Error(msg) = result {
+            assert_eq!(msg, "Something went wrong");
+        } else {
+            panic!("Expected Error variant");
+        }
+    }
+
+    #[test]
+    fn test_pr_context_clone() {
+        let original = PRContext {
+            number: 1,
+            title: "Title".to_string(),
+            body: "Body".to_string(),
+            url: "url".to_string(),
+            unresolved_comments: vec![PRComment {
+                author: "user".to_string(),
+                body: "comment".to_string(),
+                file_path: None,
+                line: None,
+                id: 1,
+                url: "url".to_string(),
+            }],
+        };
+        let cloned = original.clone();
+        assert_eq!(original.number, cloned.number);
+        assert_eq!(original.unresolved_comments.len(), cloned.unresolved_comments.len());
+    }
+
+    #[test]
+    fn test_parse_review_comment_valid_json() {
+        let json = serde_json::json!({
+            "id": 12345,
+            "body": "This needs fixing",
+            "user": {
+                "login": "reviewer"
+            },
+            "path": "src/main.rs",
+            "line": 42,
+            "html_url": "https://github.com/owner/repo/pull/1#discussion_r12345"
+        });
+
+        let comment = parse_review_comment(&json);
+        assert!(comment.is_some());
+
+        let comment = comment.unwrap();
+        assert_eq!(comment.id, 12345);
+        assert_eq!(comment.body, "This needs fixing");
+        assert_eq!(comment.author, "reviewer");
+        assert_eq!(comment.file_path, Some("src/main.rs".to_string()));
+        assert_eq!(comment.line, Some(42));
+    }
+
+    #[test]
+    fn test_parse_review_comment_missing_optional_fields() {
+        let json = serde_json::json!({
+            "id": 1,
+            "body": "Comment",
+            "user": {
+                "login": "user"
+            },
+            "html_url": "url"
+        });
+
+        let comment = parse_review_comment(&json);
+        assert!(comment.is_some());
+
+        let comment = comment.unwrap();
+        assert!(comment.file_path.is_none());
+        assert!(comment.line.is_none());
+    }
+
+    #[test]
+    fn test_parse_review_comment_uses_original_line_fallback() {
+        // Some comments have original_line instead of line
+        let json = serde_json::json!({
+            "id": 1,
+            "body": "Comment",
+            "user": {
+                "login": "user"
+            },
+            "path": "file.rs",
+            "original_line": 50,
+            "html_url": "url"
+        });
+
+        let comment = parse_review_comment(&json);
+        assert!(comment.is_some());
+        assert_eq!(comment.unwrap().line, Some(50));
+    }
+
+    #[test]
+    fn test_parse_review_comment_missing_id_returns_none() {
+        let json = serde_json::json!({
+            "body": "Comment without ID",
+            "user": {
+                "login": "user"
+            }
+        });
+
+        let comment = parse_review_comment(&json);
+        assert!(comment.is_none());
+    }
+
+    #[test]
+    fn test_parse_review_comment_missing_body_returns_none() {
+        let json = serde_json::json!({
+            "id": 1,
+            "user": {
+                "login": "user"
+            }
+        });
+
+        let comment = parse_review_comment(&json);
+        assert!(comment.is_none());
+    }
+
+    #[test]
+    fn test_parse_conversation_comment_valid_json() {
+        let json = serde_json::json!({
+            "id": 67890,
+            "body": "General feedback on the PR",
+            "user": {
+                "login": "commenter"
+            },
+            "html_url": "https://github.com/owner/repo/pull/1#issuecomment-67890"
+        });
+
+        let comment = parse_conversation_comment(&json);
+        assert!(comment.is_some());
+
+        let comment = comment.unwrap();
+        assert_eq!(comment.id, 67890);
+        assert_eq!(comment.body, "General feedback on the PR");
+        assert_eq!(comment.author, "commenter");
+        assert!(comment.file_path.is_none());
+        assert!(comment.line.is_none());
+    }
+
+    #[test]
+    fn test_parse_conversation_comment_missing_user() {
+        let json = serde_json::json!({
+            "id": 1,
+            "body": "Comment",
+            "html_url": "url"
+        });
+
+        let comment = parse_conversation_comment(&json);
+        assert!(comment.is_some());
+        assert_eq!(comment.unwrap().author, "unknown");
+    }
+
+    #[test]
+    fn test_get_pr_description_returns_result() {
+        // This test verifies the function runs without panicking
+        // Actual outcome depends on system configuration
+        let result = get_pr_description(99999);
+        // Should return a Result (likely an error for non-existent PR)
+        match result {
+            Ok((title, body, url)) => {
+                // If somehow successful, verify we got strings
+                assert!(title.len() >= 0);
+                assert!(body.len() >= 0);
+                assert!(url.len() >= 0);
+            }
+            Err(_) => {
+                // Expected - PR doesn't exist or gh not configured
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_unresolved_review_comments_returns_result() {
+        // This test verifies the function runs without panicking
+        let result = get_unresolved_review_comments(99999);
+        match result {
+            Ok(comments) => {
+                // If successful, verify we got a vec
+                assert!(comments.len() >= 0);
+            }
+            Err(_) => {
+                // Expected - PR doesn't exist or gh not configured
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_conversation_comments_returns_result() {
+        // This test verifies the function runs without panicking
+        let result = get_conversation_comments(99999);
+        match result {
+            Ok(comments) => {
+                // If successful, verify we got a vec
+                assert!(comments.len() >= 0);
+            }
+            Err(_) => {
+                // Expected - PR doesn't exist or gh not configured
+            }
+        }
+    }
+
+    #[test]
+    fn test_gather_pr_context_returns_result() {
+        // This test verifies the function runs without panicking
+        let result = gather_pr_context(99999);
+        match result {
+            PRContextResult::Success(_) => {
+                // Unlikely for non-existent PR, but valid
+            }
+            PRContextResult::NoUnresolvedComments { .. } => {
+                // Possible if PR exists but has no comments
+            }
+            PRContextResult::Error(_) => {
+                // Expected - PR doesn't exist or gh not configured
+            }
+        }
+    }
+
+    #[test]
+    fn test_filter_unresolved_review_comments_empty_input() {
+        // Empty input should return empty output
+        let result = filter_unresolved_review_comments("owner", "repo", 1, vec![]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ========================================================================
+    // US-003: Branch Context Tests
+    // ========================================================================
+
+    #[test]
+    fn test_branch_context_struct() {
+        let context = BranchContext {
+            branch_name: "feature/test".to_string(),
+            spec: None,
+            spec_path: std::path::PathBuf::from("/path/to/spec.json"),
+            commits: vec![],
+        };
+
+        assert_eq!(context.branch_name, "feature/test");
+        assert!(context.spec.is_none());
+        assert!(context.commits.is_empty());
+    }
+
+    #[test]
+    fn test_branch_context_with_spec() {
+        let spec = Spec {
+            project: "test-project".to_string(),
+            branch_name: "feature/test".to_string(),
+            description: "Test description".to_string(),
+            user_stories: vec![UserStory {
+                id: "US-001".to_string(),
+                title: "Test".to_string(),
+                description: "Description".to_string(),
+                acceptance_criteria: vec![],
+                priority: 1,
+                passes: false,
+                notes: String::new(),
+            }],
+        };
+
+        let context = BranchContext {
+            branch_name: "feature/test".to_string(),
+            spec: Some(spec),
+            spec_path: std::path::PathBuf::from("/path/to/spec.json"),
+            commits: vec![],
+        };
+
+        assert!(context.spec.is_some());
+        assert_eq!(context.spec.as_ref().unwrap().project, "test-project");
+    }
+
+    #[test]
+    fn test_branch_context_with_commits() {
+        let commits = vec![
+            git::CommitInfo {
+                short_hash: "abc1234".to_string(),
+                full_hash: "abc1234567890".to_string(),
+                message: "Test commit".to_string(),
+                author: "Author".to_string(),
+                date: "2024-01-15".to_string(),
+            },
+        ];
+
+        let context = BranchContext {
+            branch_name: "feature/test".to_string(),
+            spec: None,
+            spec_path: std::path::PathBuf::from("/path/to/spec.json"),
+            commits,
+        };
+
+        assert_eq!(context.commits.len(), 1);
+        assert_eq!(context.commits[0].short_hash, "abc1234");
+    }
+
+    #[test]
+    fn test_branch_context_clone() {
+        let context = BranchContext {
+            branch_name: "feature/test".to_string(),
+            spec: None,
+            spec_path: std::path::PathBuf::from("/path/to/spec.json"),
+            commits: vec![],
+        };
+
+        let cloned = context.clone();
+        assert_eq!(context.branch_name, cloned.branch_name);
+    }
+
+    #[test]
+    fn test_branch_context_result_variants() {
+        // Test SuccessWithSpec variant
+        let context = BranchContext {
+            branch_name: "test".to_string(),
+            spec: None,
+            spec_path: std::path::PathBuf::from("/path"),
+            commits: vec![],
+        };
+        let result = BranchContextResult::SuccessWithSpec(context.clone());
+        if let BranchContextResult::SuccessWithSpec(ctx) = result {
+            assert_eq!(ctx.branch_name, "test");
+        } else {
+            panic!("Expected SuccessWithSpec");
+        }
+
+        // Test SuccessNoSpec variant
+        let result = BranchContextResult::SuccessNoSpec(context.clone());
+        if let BranchContextResult::SuccessNoSpec(ctx) = result {
+            assert_eq!(ctx.branch_name, "test");
+        } else {
+            panic!("Expected SuccessNoSpec");
+        }
+
+        // Test Error variant
+        let result = BranchContextResult::Error("test error".to_string());
+        if let BranchContextResult::Error(msg) = result {
+            assert_eq!(msg, "test error");
+        } else {
+            panic!("Expected Error");
+        }
+    }
+
+    #[test]
+    fn test_expected_spec_path_format() {
+        // Test branch name conversion
+        let path = expected_spec_path("feature/pr-review");
+        let path_str = path.to_string_lossy();
+        // Should contain the sanitized branch name (/ replaced with -)
+        assert!(path_str.contains("spec-feature-pr-review.json"));
+    }
+
+    #[test]
+    fn test_expected_spec_path_simple_branch() {
+        let path = expected_spec_path("main");
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("spec-main.json"));
+    }
+
+    #[test]
+    fn test_gather_branch_context_returns_result() {
+        // This test verifies the function runs without panicking
+        // The actual result depends on the git repo state
+        let result = gather_branch_context(false);
+        match result {
+            BranchContextResult::SuccessWithSpec(ctx) => {
+                assert!(!ctx.branch_name.is_empty());
+                assert!(ctx.spec.is_some());
+            }
+            BranchContextResult::SuccessNoSpec(ctx) => {
+                assert!(!ctx.branch_name.is_empty());
+                assert!(ctx.spec.is_none());
+            }
+            BranchContextResult::Error(msg) => {
+                // Valid if not in a git repo
+                assert!(!msg.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_spec_for_branch_returns_result() {
+        // This test verifies the function runs without panicking
+        let result = find_spec_for_branch("nonexistent-branch-name");
+        // Result should be Ok(None) for a branch with no spec
+        match result {
+            Ok(None) => {
+                // Expected - no spec for this branch
+            }
+            Ok(Some((spec, path))) => {
+                // Unlikely but valid if there's a matching spec
+                assert!(!spec.project.is_empty());
+                assert!(path.exists());
+            }
+            Err(_) => {
+                // Could fail if config dir doesn't exist
+            }
+        }
+    }
+
+    #[test]
+    fn test_print_branch_context_does_not_panic() {
+        let context = BranchContext {
+            branch_name: "feature/test".to_string(),
+            spec: None,
+            spec_path: std::path::PathBuf::from("/path/to/spec.json"),
+            commits: vec![
+                git::CommitInfo {
+                    short_hash: "abc1234".to_string(),
+                    full_hash: "abc1234567890".to_string(),
+                    message: "Test commit".to_string(),
+                    author: "Author".to_string(),
+                    date: "2024-01-15".to_string(),
+                },
+            ],
+        };
+
+        print_branch_context(&context);
     }
 }

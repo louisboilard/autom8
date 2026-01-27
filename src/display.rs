@@ -453,9 +453,17 @@ impl DisplayAdapter for CliDisplay {
 /// Create a display adapter based on the configuration.
 ///
 /// Returns `CliDisplay` when TUI is disabled, or `TuiDisplay` when TUI mode is enabled.
+/// When TUI mode is enabled, the TUI render loop is automatically started.
 pub fn create_display(use_tui: bool) -> Box<dyn DisplayAdapter> {
     if use_tui {
-        Box::new(crate::tui::TuiDisplay::new())
+        let mut tui = crate::tui::TuiDisplay::new();
+        // Start the TUI render loop - this initializes the terminal and spawns
+        // the render thread. The TUI will be stopped automatically when dropped.
+        if let Err(e) = tui.start() {
+            eprintln!("Warning: Failed to start TUI mode: {}. Falling back to CLI.", e);
+            return Box::new(CliDisplay::new());
+        }
+        Box::new(tui)
     } else {
         Box::new(CliDisplay::new())
     }

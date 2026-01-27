@@ -113,8 +113,8 @@ fn main() {
     let mut runner = match Runner::new() {
         Ok(r) => {
             let r = r.with_verbose(cli.verbose).with_display(display);
-            // Apply TUI flag only if explicitly set on CLI (overrides config)
-            if cli.tui {
+            // Apply TUI mode from CLI flag or config
+            if effective_tui {
                 r.with_tui(true)
             } else {
                 r
@@ -183,7 +183,7 @@ fn main() {
         (None, Some(Commands::Describe { project_name })) => describe_command(project_name),
 
         // No file and no command - check for existing state first, then start spec creation
-        (None, None) => default_command(cli.verbose, cli.tui),
+        (None, None) => default_command(cli.verbose, effective_tui),
     };
 
     if let Err(e) = result {

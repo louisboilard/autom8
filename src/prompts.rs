@@ -407,6 +407,122 @@ Based on your findings:
 5. If typecheck/lint fails, include the errors
 "####;
 
+/// Prompt for the PR review agent that analyzes PR comments and determines if they represent real issues.
+/// Placeholders: {spec_context}, {pr_description}, {commit_history}, {unresolved_comments}
+pub const PR_REVIEW_PROMPT: &str = r####"You are a PR review agent analyzing pull request feedback to determine which comments represent real issues that need to be fixed.
+
+## Your Role
+
+Your job is to analyze unresolved comments on this pull request and determine:
+1. **Is the comment factually correct?** Does it accurately describe the code behavior or a real problem?
+2. **Is this a real issue?** Is it a bug, security vulnerability, performance problem, or legitimate code quality concern?
+3. **Is it a red herring?** Is the reviewer mistaken, looking at outdated code, or misunderstanding the intent?
+
+For each comment that represents a **real issue**, you must fix it.
+
+## Context
+
+{spec_context}
+
+### PR Description
+
+{pr_description}
+
+### Branch Commits
+
+These commits show the changes made in this branch:
+
+{commit_history}
+
+### Unresolved Comments
+
+The following comments are unresolved and require your analysis:
+
+{unresolved_comments}
+
+## Analysis Process
+
+For each comment:
+
+### Step 1: Understand the Comment
+- Read the comment carefully
+- Identify what the reviewer is claiming or suggesting
+- Note the file and line number (if provided)
+
+### Step 2: Verify Against the Code
+- Read the relevant code to verify the claim
+- Check if the code actually behaves as the reviewer describes
+- Consider the context from the spec and PR description
+
+### Step 3: Make a Determination
+Classify each comment as one of:
+
+**REAL ISSUE** - The comment identifies a genuine problem:
+- Code has a bug that could cause incorrect behavior
+- There's a security vulnerability
+- Performance problem that matters
+- Missing error handling for likely failure cases
+- Violation of documented requirements (from spec)
+
+**RED HERRING** - The comment is incorrect or not actionable:
+- Reviewer misread the code
+- Code is correct but reviewer misunderstands the intent
+- Issue was already fixed in a later commit
+- Stylistic preference with no functional impact
+- Hypothetical concern that doesn't apply to this context
+
+**LEGITIMATE SUGGESTION** - Valid improvement but not a bug:
+- Better naming or code organization
+- Additional test coverage
+- Documentation improvement
+
+### Step 4: Act on Real Issues
+For each **REAL ISSUE**:
+1. Read the affected file(s)
+2. Implement the fix
+3. Verify the fix addresses the concern
+
+For **RED HERRINGS** and **LEGITIMATE SUGGESTIONS**: Take no action (the PR author can decide how to respond to reviewers).
+
+## Output Format
+
+For each comment, output your analysis in this format:
+
+```
+### Comment from @{author} ({location})
+> {comment_text}
+
+**Analysis:** [Your reasoning about what the comment claims and whether it's accurate]
+
+**Verdict:** [REAL ISSUE | RED HERRING | LEGITIMATE SUGGESTION]
+
+**Action:** [Description of fix made, or "No action required"]
+```
+
+## Important Guidelines
+
+1. **Be thorough**: Read the actual code before making determinations. Don't guess.
+2. **Trust the spec**: If the spec defines behavior, code that matches the spec is correct.
+3. **Consider context**: A comment might be wrong because the reviewer looked at the wrong commit.
+4. **Fix conservatively**: Only fix issues that are clearly problems. Don't refactor on suggestion.
+5. **Explain your reasoning**: Your analysis helps the PR author respond to reviewers.
+
+## Final Summary
+
+After analyzing all comments, provide a summary:
+
+```
+## Summary
+
+**Total comments analyzed:** X
+**Real issues fixed:** Y
+**Red herrings identified:** Z
+**Legitimate suggestions (no action):** W
+```
+
+Begin your analysis now.
+"####;
+
 /// Prompt for the corrector agent that fixes issues found by the reviewer.
 /// Placeholders: {project}, {feature_description}, {stories_context}, {iteration}, {max_iterations}
 pub const CORRECTOR_PROMPT: &str = r####"You are a corrector agent fixing issues identified during code review.
@@ -807,6 +923,175 @@ mod tests {
             SPEC_JSON_CORRECTION_PROMPT.contains("## Original Spec")
                 || SPEC_JSON_CORRECTION_PROMPT.contains("Original Spec"),
             "Should have a section for the original spec"
+        );
+    }
+
+    // ========================================================================
+    // PR Review Prompt tests (US-004)
+    // ========================================================================
+
+    #[test]
+    fn pr_review_prompt_contains_required_placeholders() {
+        // US-004: Include spec content, PR description, commits, and comments
+        assert!(
+            PR_REVIEW_PROMPT.contains("{spec_context}"),
+            "Must include spec_context placeholder"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("{pr_description}"),
+            "Must include pr_description placeholder"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("{commit_history}"),
+            "Must include commit_history placeholder"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("{unresolved_comments}"),
+            "Must include unresolved_comments placeholder"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_instructs_factual_correctness_check() {
+        // US-004: Instruct agent to analyze each comment for factual correctness
+        assert!(
+            PR_REVIEW_PROMPT.contains("factually correct")
+                || PR_REVIEW_PROMPT.contains("factual")
+                || PR_REVIEW_PROMPT.contains("accurately describe"),
+            "Should instruct agent to check factual correctness"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_instructs_determine_real_issues() {
+        // US-004: Instruct agent to determine if reported issues are actual bugs/problems
+        assert!(
+            PR_REVIEW_PROMPT.contains("real issue") || PR_REVIEW_PROMPT.contains("REAL ISSUE"),
+            "Should instruct agent to identify real issues"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("bug") || PR_REVIEW_PROMPT.contains("Bug"),
+            "Should mention bugs as a type of real issue"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_instructs_fix_confirmed_issues() {
+        // US-004: Instruct agent to fix confirmed real issues
+        assert!(
+            PR_REVIEW_PROMPT.contains("fix") || PR_REVIEW_PROMPT.contains("Fix"),
+            "Should instruct agent to fix issues"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("Implement the fix")
+                || PR_REVIEW_PROMPT.contains("fix it")
+                || PR_REVIEW_PROMPT.contains("Action"),
+            "Should provide instructions for fixing issues"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_distinguishes_red_herrings() {
+        // US-004: The prompt should help distinguish real issues from red herrings
+        assert!(
+            PR_REVIEW_PROMPT.contains("red herring") || PR_REVIEW_PROMPT.contains("RED HERRING"),
+            "Should mention red herrings"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_has_structured_analysis_format() {
+        // US-004: Follow existing prompt patterns - should have structured sections
+        assert!(
+            PR_REVIEW_PROMPT.contains("## ") || PR_REVIEW_PROMPT.contains("### "),
+            "Should use markdown headers for structure"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("Step 1") || PR_REVIEW_PROMPT.contains("step"),
+            "Should have step-by-step analysis process"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_includes_verdict_categories() {
+        // US-004: Should categorize each comment
+        assert!(
+            PR_REVIEW_PROMPT.contains("REAL ISSUE"),
+            "Should have REAL ISSUE verdict category"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("RED HERRING"),
+            "Should have RED HERRING verdict category"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("LEGITIMATE SUGGESTION")
+                || PR_REVIEW_PROMPT.contains("suggestion"),
+            "Should have a category for legitimate suggestions"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_includes_summary_section() {
+        // US-004: Should include a summary of findings
+        assert!(
+            PR_REVIEW_PROMPT.contains("## Summary") || PR_REVIEW_PROMPT.contains("Summary"),
+            "Should include a summary section"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("Total comments analyzed")
+                || PR_REVIEW_PROMPT.contains("comments analyzed"),
+            "Summary should count analyzed comments"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_can_be_populated() {
+        // US-004: Verify placeholders can be replaced
+        let spec_context = "### Spec: Test Feature\n- Story 1: Implement X";
+        let pr_description = "This PR adds feature X";
+        let commit_history = "abc1234 - Add feature X\ndef5678 - Fix tests";
+        let comments = "### Comment from @reviewer (src/main.rs:42)\n> This looks wrong";
+
+        let populated = PR_REVIEW_PROMPT
+            .replace("{spec_context}", spec_context)
+            .replace("{pr_description}", pr_description)
+            .replace("{commit_history}", commit_history)
+            .replace("{unresolved_comments}", comments);
+
+        assert!(populated.contains("### Spec: Test Feature"));
+        assert!(populated.contains("This PR adds feature X"));
+        assert!(populated.contains("abc1234 - Add feature X"));
+        assert!(populated.contains("### Comment from @reviewer"));
+        assert!(!populated.contains("{spec_context}"));
+        assert!(!populated.contains("{pr_description}"));
+        assert!(!populated.contains("{commit_history}"));
+        assert!(!populated.contains("{unresolved_comments}"));
+    }
+
+    #[test]
+    fn pr_review_prompt_mentions_spec_for_context() {
+        // US-004: Should reference the spec for determining correct behavior
+        assert!(
+            PR_REVIEW_PROMPT.contains("spec") || PR_REVIEW_PROMPT.contains("Spec"),
+            "Should reference the spec for context"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("Trust the spec")
+                || PR_REVIEW_PROMPT.contains("spec defines"),
+            "Should instruct to trust the spec for determining correct behavior"
+        );
+    }
+
+    #[test]
+    fn pr_review_prompt_considers_comment_location() {
+        // US-004: Should handle comment author and location context
+        assert!(
+            PR_REVIEW_PROMPT.contains("author") || PR_REVIEW_PROMPT.contains("@{author}"),
+            "Should reference comment author"
+        );
+        assert!(
+            PR_REVIEW_PROMPT.contains("location") || PR_REVIEW_PROMPT.contains("line"),
+            "Should reference comment location"
         );
     }
 }

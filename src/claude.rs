@@ -1,7 +1,9 @@
 use crate::error::{Autom8Error, Result};
+use crate::gh::{BranchContext, PRContext};
 use crate::git;
 use crate::prompts::{
-    COMMIT_PROMPT, CORRECTOR_PROMPT, REVIEWER_PROMPT, SPEC_JSON_CORRECTION_PROMPT, SPEC_JSON_PROMPT,
+    COMMIT_PROMPT, CORRECTOR_PROMPT, PR_REVIEW_PROMPT, REVIEWER_PROMPT,
+    SPEC_JSON_CORRECTION_PROMPT, SPEC_JSON_PROMPT,
 };
 use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
@@ -543,6 +545,78 @@ pub enum CorrectorResult {
     Error(ClaudeErrorInfo),
 }
 
+// ============================================================================
+// PR Review Agent Types and Functions (US-005)
+// ============================================================================
+
+/// Summary of the PR review analysis
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PRReviewSummary {
+    /// Total number of comments analyzed
+    pub total_comments: usize,
+    /// Number of real issues that were fixed
+    pub real_issues_fixed: usize,
+    /// Number of red herrings identified
+    pub red_herrings: usize,
+    /// Number of legitimate suggestions (no action taken)
+    pub legitimate_suggestions: usize,
+}
+
+impl PRReviewSummary {
+    /// Parse summary from Claude's output text.
+    ///
+    /// Looks for patterns like:
+    /// - "Total comments analyzed: X"
+    /// - "Real issues fixed: Y"
+    /// - "Red herrings identified: Z"
+    /// - "Legitimate suggestions: W"
+    pub fn parse_from_output(output: &str) -> Self {
+        let mut summary = PRReviewSummary::default();
+
+        // Look for summary section
+        if let Some(summary_start) = output.find("## Summary") {
+            let summary_text = &output[summary_start..];
+
+            // Parse each metric using regex-like patterns
+            summary.total_comments = parse_summary_number(summary_text, "total comments analyzed");
+            summary.real_issues_fixed = parse_summary_number(summary_text, "real issues fixed");
+            summary.red_herrings = parse_summary_number(summary_text, "red herrings identified");
+            summary.legitimate_suggestions =
+                parse_summary_number(summary_text, "legitimate suggestions");
+        }
+
+        summary
+    }
+}
+
+/// Parse a number from summary text matching a pattern like "**Label:** X"
+fn parse_summary_number(text: &str, label: &str) -> usize {
+    let label_lower = label.to_lowercase();
+    for line in text.lines() {
+        let line_lower = line.to_lowercase();
+        if line_lower.contains(&label_lower) {
+            // Look for a number in the line
+            for word in line.split_whitespace() {
+                if let Ok(num) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
+                    return num;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Result from running the PR review agent
+#[derive(Debug, Clone, PartialEq)]
+pub enum PRReviewResult {
+    /// Review completed successfully with summary of findings
+    Complete(PRReviewSummary),
+    /// Review completed but no fixes were needed
+    NoFixesNeeded(PRReviewSummary),
+    /// Error occurred during review
+    Error(ClaudeErrorInfo),
+}
+
 /// Run Claude to commit changes after all stories are complete
 pub fn run_for_commit<F>(spec: &Spec, mut on_output: F) -> Result<CommitResult>
 where
@@ -808,6 +882,191 @@ where
     }
 
     Ok(CorrectorResult::Complete)
+}
+
+// ============================================================================
+// PR Review Agent Implementation (US-005)
+// ============================================================================
+
+/// Run the PR review agent to analyze PR comments and fix real issues.
+///
+/// This function:
+/// 1. Builds a prompt with PR context, branch context, and unresolved comments
+/// 2. Spawns Claude CLI to analyze comments and determine real issues vs red herrings
+/// 3. Claude fixes any confirmed real issues
+/// 4. Returns a summary of the analysis
+///
+/// # Arguments
+/// * `pr_context` - PR information including description and unresolved comments
+/// * `branch_context` - Branch information including spec and commits
+/// * `on_output` - Callback for streaming output to the terminal
+///
+/// # Returns
+/// * `PRReviewResult::Complete(summary)` - Review completed with fixes made
+/// * `PRReviewResult::NoFixesNeeded(summary)` - Review completed, no fixes needed
+/// * `PRReviewResult::Error(info)` - Error occurred during review
+pub fn run_pr_review<F>(
+    pr_context: &PRContext,
+    branch_context: &BranchContext,
+    mut on_output: F,
+) -> Result<PRReviewResult>
+where
+    F: FnMut(&str),
+{
+    let prompt = build_pr_review_prompt(pr_context, branch_context);
+
+    let mut child = Command::new("claude")
+        .args([
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to spawn claude: {}", e)))?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+    }
+
+    // Take stderr handle before consuming stdout
+    let stderr = child.stderr.take();
+
+    // Stream stdout and accumulate text for summary parsing
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
+
+    let reader = BufReader::new(stdout);
+    let mut accumulated_text = String::new();
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
+
+        // Parse stream-json output and extract text content
+        if let Some(text) = extract_text_from_stream_line(&line) {
+            on_output(&text);
+            accumulated_text.push_str(&text);
+        }
+    }
+
+    // Wait for process to complete
+    let status = child
+        .wait()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Wait error: {}", e)))?;
+
+    if !status.success() {
+        let stderr_content = stderr
+            .map(|s| std::io::read_to_string(s).unwrap_or_default())
+            .unwrap_or_default();
+        let error_info = ClaudeErrorInfo::from_process_failure(
+            status,
+            if stderr_content.is_empty() {
+                None
+            } else {
+                Some(stderr_content)
+            },
+        );
+        return Ok(PRReviewResult::Error(error_info));
+    }
+
+    // Parse the summary from Claude's output
+    let summary = PRReviewSummary::parse_from_output(&accumulated_text);
+
+    // Determine result based on whether fixes were made
+    if summary.real_issues_fixed > 0 {
+        Ok(PRReviewResult::Complete(summary))
+    } else {
+        Ok(PRReviewResult::NoFixesNeeded(summary))
+    }
+}
+
+/// Build the prompt for the PR review agent.
+///
+/// Combines spec context, PR description, commit history, and unresolved comments
+/// into a structured prompt following the PR_REVIEW_PROMPT template.
+fn build_pr_review_prompt(pr_context: &PRContext, branch_context: &BranchContext) -> String {
+    // Build spec context section
+    let spec_context = match &branch_context.spec {
+        Some(spec) => {
+            let stories = spec
+                .user_stories
+                .iter()
+                .map(|s| {
+                    let criteria = s
+                        .acceptance_criteria
+                        .iter()
+                        .map(|c| format!("  - {}", c))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!(
+                        "### {}: {}\n{}\n\n**Acceptance Criteria:**\n{}",
+                        s.id, s.title, s.description, criteria
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            format!(
+                "### Spec: {}\n\n**Description:**\n{}\n\n**User Stories:**\n\n{}",
+                spec.project, spec.description, stories
+            )
+        }
+        None => format!(
+            "*No spec file found for branch `{}`*\n\nThe review will proceed with reduced context.",
+            branch_context.branch_name
+        ),
+    };
+
+    // Build commit history section
+    let commit_history = if branch_context.commits.is_empty() {
+        "No commits found specific to this branch.".to_string()
+    } else {
+        branch_context
+            .commits
+            .iter()
+            .map(|c| format!("{} - {} ({})", c.short_hash, c.message, c.author))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Build unresolved comments section
+    let unresolved_comments = pr_context
+        .unresolved_comments
+        .iter()
+        .enumerate()
+        .map(|(i, comment)| {
+            let location = match (&comment.file_path, comment.line) {
+                (Some(path), Some(line)) => format!("{}:{}", path, line),
+                (Some(path), None) => path.clone(),
+                _ => "PR conversation".to_string(),
+            };
+
+            format!(
+                "### Comment {} from @{} ({})\n\n> {}\n",
+                i + 1,
+                comment.author,
+                location,
+                comment.body.lines().collect::<Vec<_>>().join("\n> ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build the full prompt using the template
+    PR_REVIEW_PROMPT
+        .replace("{spec_context}", &spec_context)
+        .replace("{pr_description}", &pr_context.body)
+        .replace("{commit_history}", &commit_history)
+        .replace("{unresolved_comments}", &unresolved_comments)
 }
 
 /// Build the prompt for the corrector agent
@@ -2911,5 +3170,406 @@ Add login functionality
         // The flow should be:
         // Attempt 1 (initial) -> Attempt 2 (retry) -> Attempt 3 (retry) -> Fallback -> Error
         // That's 3 total agentic attempts, then 1 fallback attempt
+    }
+
+    // ========================================================================
+    // US-005: PR Review Agent Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pr_review_summary_default() {
+        let summary = PRReviewSummary::default();
+        assert_eq!(summary.total_comments, 0);
+        assert_eq!(summary.real_issues_fixed, 0);
+        assert_eq!(summary.red_herrings, 0);
+        assert_eq!(summary.legitimate_suggestions, 0);
+    }
+
+    #[test]
+    fn test_pr_review_summary_parse_from_output_basic() {
+        let output = r#"
+Analysis complete.
+
+## Summary
+
+**Total comments analyzed:** 5
+**Real issues fixed:** 2
+**Red herrings identified:** 2
+**Legitimate suggestions (no action):** 1
+"#;
+        let summary = PRReviewSummary::parse_from_output(output);
+        assert_eq!(summary.total_comments, 5);
+        assert_eq!(summary.real_issues_fixed, 2);
+        assert_eq!(summary.red_herrings, 2);
+        assert_eq!(summary.legitimate_suggestions, 1);
+    }
+
+    #[test]
+    fn test_pr_review_summary_parse_from_output_no_summary_section() {
+        let output = "Just some random text without a summary section.";
+        let summary = PRReviewSummary::parse_from_output(output);
+        // Should return default zeros when no summary found
+        assert_eq!(summary.total_comments, 0);
+        assert_eq!(summary.real_issues_fixed, 0);
+        assert_eq!(summary.red_herrings, 0);
+        assert_eq!(summary.legitimate_suggestions, 0);
+    }
+
+    #[test]
+    fn test_pr_review_summary_parse_from_output_partial() {
+        let output = r#"
+## Summary
+
+**Total comments analyzed:** 3
+**Real issues fixed:** 1
+"#;
+        let summary = PRReviewSummary::parse_from_output(output);
+        assert_eq!(summary.total_comments, 3);
+        assert_eq!(summary.real_issues_fixed, 1);
+        // Missing fields should be 0
+        assert_eq!(summary.red_herrings, 0);
+        assert_eq!(summary.legitimate_suggestions, 0);
+    }
+
+    #[test]
+    fn test_pr_review_summary_equality() {
+        let summary1 = PRReviewSummary {
+            total_comments: 5,
+            real_issues_fixed: 2,
+            red_herrings: 2,
+            legitimate_suggestions: 1,
+        };
+        let summary2 = PRReviewSummary {
+            total_comments: 5,
+            real_issues_fixed: 2,
+            red_herrings: 2,
+            legitimate_suggestions: 1,
+        };
+        let summary3 = PRReviewSummary {
+            total_comments: 3,
+            real_issues_fixed: 1,
+            red_herrings: 1,
+            legitimate_suggestions: 1,
+        };
+        assert_eq!(summary1, summary2);
+        assert_ne!(summary1, summary3);
+    }
+
+    #[test]
+    fn test_pr_review_summary_clone() {
+        let summary = PRReviewSummary {
+            total_comments: 10,
+            real_issues_fixed: 3,
+            red_herrings: 5,
+            legitimate_suggestions: 2,
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary, cloned);
+    }
+
+    #[test]
+    fn test_pr_review_result_complete_variant() {
+        let summary = PRReviewSummary {
+            total_comments: 5,
+            real_issues_fixed: 2,
+            red_herrings: 2,
+            legitimate_suggestions: 1,
+        };
+        let result = PRReviewResult::Complete(summary.clone());
+        match result {
+            PRReviewResult::Complete(s) => assert_eq!(s, summary),
+            _ => panic!("Expected Complete variant"),
+        }
+    }
+
+    #[test]
+    fn test_pr_review_result_no_fixes_needed_variant() {
+        let summary = PRReviewSummary {
+            total_comments: 3,
+            real_issues_fixed: 0,
+            red_herrings: 2,
+            legitimate_suggestions: 1,
+        };
+        let result = PRReviewResult::NoFixesNeeded(summary.clone());
+        match result {
+            PRReviewResult::NoFixesNeeded(s) => assert_eq!(s, summary),
+            _ => panic!("Expected NoFixesNeeded variant"),
+        }
+    }
+
+    #[test]
+    fn test_pr_review_result_error_variant() {
+        let error_info = ClaudeErrorInfo::new("Test error");
+        let result = PRReviewResult::Error(error_info.clone());
+        match result {
+            PRReviewResult::Error(info) => assert_eq!(info, error_info),
+            _ => panic!("Expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_summary_number_basic() {
+        let text = "**Total comments analyzed:** 42";
+        assert_eq!(parse_summary_number(text, "total comments analyzed"), 42);
+    }
+
+    #[test]
+    fn test_parse_summary_number_case_insensitive() {
+        let text = "**TOTAL COMMENTS ANALYZED:** 10";
+        assert_eq!(parse_summary_number(text, "total comments analyzed"), 10);
+    }
+
+    #[test]
+    fn test_parse_summary_number_not_found() {
+        let text = "No matching label here";
+        assert_eq!(parse_summary_number(text, "total comments analyzed"), 0);
+    }
+
+    #[test]
+    fn test_parse_summary_number_multiple_numbers() {
+        // Should return the first number found on the matching line
+        let text = "Total: 5 (was 3 before)";
+        // Ensure it finds a number
+        let result = parse_summary_number(text, "total");
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn test_build_pr_review_prompt_with_spec() {
+        use crate::gh::{BranchContext, PRComment, PRContext};
+        use crate::git::CommitInfo;
+        use std::path::PathBuf;
+
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "feature/test".into(),
+            description: "Test description".into(),
+            user_stories: vec![UserStory {
+                id: "US-001".into(),
+                title: "Test Story".into(),
+                description: "A test story".into(),
+                acceptance_criteria: vec!["Criterion 1".into()],
+                priority: 1,
+                passes: false,
+                notes: String::new(),
+            }],
+        };
+
+        let pr_context = PRContext {
+            number: 123,
+            title: "Test PR".into(),
+            body: "Test PR description".into(),
+            url: "https://github.com/test/repo/pull/123".into(),
+            unresolved_comments: vec![PRComment {
+                author: "reviewer".into(),
+                body: "This looks wrong".into(),
+                file_path: Some("src/main.rs".into()),
+                line: Some(42),
+                id: 1,
+                url: "https://github.com/test/repo/pull/123#comment-1".into(),
+            }],
+        };
+
+        let branch_context = BranchContext {
+            branch_name: "feature/test".into(),
+            spec: Some(spec),
+            spec_path: PathBuf::from("/path/to/spec.json"),
+            commits: vec![CommitInfo {
+                short_hash: "abc1234".into(),
+                full_hash: "abc1234567890".into(),
+                message: "Add feature".into(),
+                author: "developer".into(),
+                date: "2024-01-01".into(),
+            }],
+        };
+
+        let prompt = build_pr_review_prompt(&pr_context, &branch_context);
+
+        // Verify prompt contains expected content
+        assert!(prompt.contains("TestProject"), "Should contain project name");
+        assert!(
+            prompt.contains("Test PR description"),
+            "Should contain PR description"
+        );
+        assert!(prompt.contains("abc1234"), "Should contain commit hash");
+        assert!(
+            prompt.contains("@reviewer"),
+            "Should contain comment author"
+        );
+        assert!(
+            prompt.contains("This looks wrong"),
+            "Should contain comment body"
+        );
+        assert!(
+            prompt.contains("src/main.rs:42"),
+            "Should contain file location"
+        );
+    }
+
+    #[test]
+    fn test_build_pr_review_prompt_without_spec() {
+        use crate::gh::{BranchContext, PRComment, PRContext};
+        use std::path::PathBuf;
+
+        let pr_context = PRContext {
+            number: 456,
+            title: "Another PR".into(),
+            body: "PR without spec".into(),
+            url: "https://github.com/test/repo/pull/456".into(),
+            unresolved_comments: vec![PRComment {
+                author: "tester".into(),
+                body: "Consider refactoring".into(),
+                file_path: None,
+                line: None,
+                id: 2,
+                url: "https://github.com/test/repo/pull/456#comment-2".into(),
+            }],
+        };
+
+        let branch_context = BranchContext {
+            branch_name: "feature/no-spec".into(),
+            spec: None,
+            spec_path: PathBuf::from("/expected/path/spec.json"),
+            commits: vec![],
+        };
+
+        let prompt = build_pr_review_prompt(&pr_context, &branch_context);
+
+        // Verify prompt handles missing spec
+        assert!(
+            prompt.contains("No spec file found"),
+            "Should indicate no spec"
+        );
+        assert!(
+            prompt.contains("reduced context"),
+            "Should mention reduced context"
+        );
+        assert!(
+            prompt.contains("feature/no-spec"),
+            "Should contain branch name"
+        );
+        assert!(
+            prompt.contains("No commits found"),
+            "Should indicate no commits"
+        );
+        assert!(
+            prompt.contains("PR conversation"),
+            "Should use 'PR conversation' for comments without file"
+        );
+    }
+
+    #[test]
+    fn test_build_pr_review_prompt_empty_commits() {
+        use crate::gh::{BranchContext, PRComment, PRContext};
+        use std::path::PathBuf;
+
+        let pr_context = PRContext {
+            number: 789,
+            title: "Empty commits PR".into(),
+            body: "PR body".into(),
+            url: "https://github.com/test/repo/pull/789".into(),
+            unresolved_comments: vec![PRComment {
+                author: "user".into(),
+                body: "Comment".into(),
+                file_path: None,
+                line: None,
+                id: 3,
+                url: "url".into(),
+            }],
+        };
+
+        let branch_context = BranchContext {
+            branch_name: "feature/empty".into(),
+            spec: None,
+            spec_path: PathBuf::from("/path"),
+            commits: vec![],
+        };
+
+        let prompt = build_pr_review_prompt(&pr_context, &branch_context);
+        assert!(
+            prompt.contains("No commits found specific to this branch"),
+            "Should indicate no commits"
+        );
+    }
+
+    #[test]
+    fn test_build_pr_review_prompt_multiple_comments() {
+        use crate::gh::{BranchContext, PRComment, PRContext};
+        use std::path::PathBuf;
+
+        let pr_context = PRContext {
+            number: 100,
+            title: "Multiple comments".into(),
+            body: "Body".into(),
+            url: "url".into(),
+            unresolved_comments: vec![
+                PRComment {
+                    author: "user1".into(),
+                    body: "First comment".into(),
+                    file_path: Some("file1.rs".into()),
+                    line: Some(10),
+                    id: 1,
+                    url: "url1".into(),
+                },
+                PRComment {
+                    author: "user2".into(),
+                    body: "Second comment".into(),
+                    file_path: Some("file2.rs".into()),
+                    line: None,
+                    id: 2,
+                    url: "url2".into(),
+                },
+                PRComment {
+                    author: "user3".into(),
+                    body: "Third comment".into(),
+                    file_path: None,
+                    line: None,
+                    id: 3,
+                    url: "url3".into(),
+                },
+            ],
+        };
+
+        let branch_context = BranchContext {
+            branch_name: "feature/multi".into(),
+            spec: None,
+            spec_path: PathBuf::from("/path"),
+            commits: vec![],
+        };
+
+        let prompt = build_pr_review_prompt(&pr_context, &branch_context);
+
+        // Verify all comments are numbered and included
+        assert!(prompt.contains("Comment 1"), "Should have comment 1");
+        assert!(prompt.contains("Comment 2"), "Should have comment 2");
+        assert!(prompt.contains("Comment 3"), "Should have comment 3");
+        assert!(prompt.contains("@user1"), "Should have user1");
+        assert!(prompt.contains("@user2"), "Should have user2");
+        assert!(prompt.contains("@user3"), "Should have user3");
+        assert!(prompt.contains("file1.rs:10"), "Should have file1 with line");
+        assert!(prompt.contains("file2.rs"), "Should have file2 without line");
+    }
+
+    #[test]
+    fn test_pr_review_result_equality() {
+        let summary = PRReviewSummary::default();
+        let result1 = PRReviewResult::Complete(summary.clone());
+        let result2 = PRReviewResult::Complete(summary.clone());
+        let result3 = PRReviewResult::NoFixesNeeded(summary);
+        assert_eq!(result1, result2);
+        assert_ne!(result1, result3);
+    }
+
+    #[test]
+    fn test_pr_review_result_clone() {
+        let summary = PRReviewSummary {
+            total_comments: 5,
+            real_issues_fixed: 2,
+            red_herrings: 2,
+            legitimate_suggestions: 1,
+        };
+        let result = PRReviewResult::Complete(summary);
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
     }
 }
