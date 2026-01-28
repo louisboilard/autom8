@@ -5,7 +5,9 @@
 use super::views::View;
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
-use crate::state::{RunState, StateManager};
+use crate::spec::Spec;
+use crate::state::{MachineState, RunState, StateManager};
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -16,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -57,11 +59,89 @@ impl From<crate::error::Autom8Error> for MonitorError {
     }
 }
 
+/// Progress information for a run.
+#[derive(Debug, Clone)]
+pub struct RunProgress {
+    /// Number of completed stories
+    pub completed: usize,
+    /// Total number of stories
+    pub total: usize,
+}
+
+impl RunProgress {
+    /// Format progress as a fraction string (e.g., "Story 2/5")
+    pub fn as_fraction(&self) -> String {
+        format!("Story {}/{}", self.completed + 1, self.total)
+    }
+
+    /// Format progress as a percentage (e.g., "40%")
+    pub fn as_percentage(&self) -> String {
+        if self.total == 0 {
+            return "0%".to_string();
+        }
+        let pct = (self.completed * 100) / self.total;
+        format!("{}%", pct)
+    }
+}
+
 /// Data collected from a single project for display.
 #[derive(Debug, Clone)]
 pub struct ProjectData {
     pub info: ProjectTreeInfo,
     pub active_run: Option<RunState>,
+    /// Progress through the spec (loaded from spec file)
+    pub progress: Option<RunProgress>,
+}
+
+/// Format a duration in seconds as a human-readable string (e.g., "5m 32s", "1h 5m")
+pub fn format_duration(started_at: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(started_at);
+    let total_secs = duration.num_seconds().max(0) as u64;
+
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+/// Format a machine state as a human-readable string
+fn format_state(state: MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
+    }
+}
+
+/// Get a color for a machine state
+fn state_color(state: MachineState) -> Color {
+    match state {
+        MachineState::Idle => Color::DarkGray,
+        MachineState::LoadingSpec | MachineState::GeneratingSpec => Color::Yellow,
+        MachineState::Initializing | MachineState::PickingStory => Color::Blue,
+        MachineState::RunningClaude => Color::Cyan,
+        MachineState::Reviewing | MachineState::Correcting => Color::Magenta,
+        MachineState::Committing | MachineState::CreatingPR => Color::Green,
+        MachineState::Completed => Color::Green,
+        MachineState::Failed => Color::Red,
+    }
 }
 
 /// The main monitor application state.
@@ -110,7 +190,7 @@ impl MonitorApp {
             tree_infos
         };
 
-        // Collect project data including active runs
+        // Collect project data including active runs and progress
         self.projects = filtered
             .into_iter()
             .map(|info| {
@@ -121,7 +201,20 @@ impl MonitorApp {
                 } else {
                     None
                 };
-                ProjectData { info, active_run }
+
+                // Load spec to get progress information
+                let progress = active_run.as_ref().and_then(|run| {
+                    Spec::load(&run.spec_json_path).ok().map(|spec| RunProgress {
+                        completed: spec.completed_count(),
+                        total: spec.total_count(),
+                    })
+                });
+
+                ProjectData {
+                    info,
+                    active_run,
+                    progress,
+                }
             })
             .collect();
 
@@ -271,36 +364,184 @@ impl MonitorApp {
             return;
         }
 
+        match active.len() {
+            1 => {
+                // Full screen for single run
+                self.render_run_detail(frame, area, &active[0], true);
+            }
+            2 => {
+                // Vertical split (side by side) for two runs
+                let chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(area);
+
+                self.render_run_detail(frame, chunks[0], &active[0], false);
+                self.render_run_detail(frame, chunks[1], &active[1], false);
+            }
+            _ => {
+                // 3+ runs: list on left, detail on right
+                let chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                    .split(area);
+
+                // Render list on left
+                self.render_active_runs_list(frame, chunks[0], &active);
+
+                // Render detail for selected run on right
+                if let Some(selected) = active.get(self.selected_index) {
+                    self.render_run_detail(frame, chunks[1], selected, true);
+                }
+            }
+        }
+    }
+
+    /// Render the list view for 3+ active runs
+    fn render_active_runs_list(&self, frame: &mut Frame, area: Rect, active: &[&ProjectData]) {
         let items: Vec<ListItem> = active
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let run = p.active_run.as_ref().unwrap();
-                let status = format!(
-                    "{}: {} - {:?} (Story: {})",
-                    p.info.name,
-                    run.branch,
-                    run.machine_state,
-                    run.current_story.as_deref().unwrap_or("N/A")
-                );
-                let style = if i == self.selected_index {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(status).style(style)
+                let state_str = format_state(run.machine_state);
+
+                let line = Line::from(vec![
+                    Span::styled(
+                        if i == self.selected_index {
+                            "▶ "
+                        } else {
+                            "  "
+                        },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        &p.info.name,
+                        if i == self.selected_index {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        },
+                    ),
+                    Span::styled(
+                        format!(" ({})", state_str),
+                        Style::default().fg(state_color(run.machine_state)),
+                    ),
+                ]);
+
+                ListItem::new(line)
             })
             .collect();
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Active Runs "),
-        );
+        let title = format!(" Runs ({}) ", active.len());
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
 
         frame.render_widget(list, area);
+    }
+
+    /// Render detailed view for a single run
+    fn render_run_detail(&self, frame: &mut Frame, area: Rect, project: &ProjectData, full: bool) {
+        let run = project.active_run.as_ref().unwrap();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", project.info.name));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Split into header info and output snippet
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if full { 6 } else { 4 }),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        // Header info
+        let state_str = format_state(run.machine_state);
+        let duration = format_duration(run.started_at);
+        let story = run.current_story.as_deref().unwrap_or("N/A");
+
+        let progress_str = project
+            .progress
+            .as_ref()
+            .map(|p| p.as_fraction())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let mut info_lines = vec![
+            Line::from(vec![
+                Span::styled("State: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(state_str, Style::default().fg(state_color(run.machine_state))),
+            ]),
+            Line::from(vec![
+                Span::styled("Story: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(story, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Progress: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&progress_str, Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(vec![
+                Span::styled("Duration: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&duration, Style::default().fg(Color::Yellow)),
+            ]),
+        ];
+
+        if full {
+            info_lines.push(Line::from(vec![
+                Span::styled("Branch: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&run.branch, Style::default().fg(Color::White)),
+            ]));
+        }
+
+        let info = Paragraph::new(info_lines);
+        frame.render_widget(info, chunks[0]);
+
+        // Output snippet section
+        let output_snippet = self.get_output_snippet(run);
+        let output = Paragraph::new(output_snippet)
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(" Latest Output "),
+            );
+        frame.render_widget(output, chunks[1]);
+    }
+
+    /// Get the latest output snippet from a run
+    fn get_output_snippet(&self, run: &RunState) -> String {
+        // Get output from the current or last iteration
+        if let Some(iter) = run.iterations.last() {
+            if !iter.output_snippet.is_empty() {
+                // Take last few lines of output
+                let lines: Vec<&str> = iter.output_snippet.lines().collect();
+                let take_count = 5.min(lines.len());
+                let start = lines.len().saturating_sub(take_count);
+                return lines[start..].join("\n");
+            }
+        }
+
+        // Fallback to status message based on state
+        match run.machine_state {
+            MachineState::Idle => "Waiting to start...".to_string(),
+            MachineState::LoadingSpec => "Loading spec file...".to_string(),
+            MachineState::GeneratingSpec => "Generating spec from markdown...".to_string(),
+            MachineState::Initializing => "Initializing run...".to_string(),
+            MachineState::PickingStory => "Selecting next story...".to_string(),
+            MachineState::RunningClaude => "Claude is working...".to_string(),
+            MachineState::Reviewing => format!("Reviewing changes (cycle {})...", run.review_iteration),
+            MachineState::Correcting => "Applying corrections...".to_string(),
+            MachineState::Committing => "Committing changes...".to_string(),
+            MachineState::CreatingPR => "Creating pull request...".to_string(),
+            MachineState::Completed => "Run completed successfully!".to_string(),
+            MachineState::Failed => "Run failed.".to_string(),
+        }
     }
 
     fn render_project_list(&self, frame: &mut Frame, area: Rect) {
@@ -591,5 +832,176 @@ mod tests {
         let io_err = MonitorError::Io(io::Error::new(io::ErrorKind::Other, "test error"));
         assert!(io_err.to_string().contains("IO error"));
         assert!(io_err.to_string().contains("test error"));
+    }
+
+    // ===========================================
+    // US-005: Active Runs View Tests
+    // ===========================================
+
+    #[test]
+    fn test_run_progress_as_fraction() {
+        let progress = RunProgress {
+            completed: 1,
+            total: 5,
+        };
+        // completed + 1 because we're working on the next story
+        assert_eq!(progress.as_fraction(), "Story 2/5");
+    }
+
+    #[test]
+    fn test_run_progress_as_fraction_first_story() {
+        let progress = RunProgress {
+            completed: 0,
+            total: 3,
+        };
+        assert_eq!(progress.as_fraction(), "Story 1/3");
+    }
+
+    #[test]
+    fn test_run_progress_as_percentage() {
+        let progress = RunProgress {
+            completed: 2,
+            total: 5,
+        };
+        assert_eq!(progress.as_percentage(), "40%");
+    }
+
+    #[test]
+    fn test_run_progress_as_percentage_zero_total() {
+        let progress = RunProgress {
+            completed: 0,
+            total: 0,
+        };
+        assert_eq!(progress.as_percentage(), "0%");
+    }
+
+    #[test]
+    fn test_run_progress_as_percentage_complete() {
+        let progress = RunProgress {
+            completed: 5,
+            total: 5,
+        };
+        assert_eq!(progress.as_percentage(), "100%");
+    }
+
+    #[test]
+    fn test_format_duration_seconds_only() {
+        let now = Utc::now();
+        let started_at = now - chrono::Duration::seconds(45);
+        let result = format_duration(started_at);
+        assert_eq!(result, "45s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_and_seconds() {
+        let now = Utc::now();
+        let started_at = now - chrono::Duration::seconds(332); // 5m 32s
+        let result = format_duration(started_at);
+        assert_eq!(result, "5m 32s");
+    }
+
+    #[test]
+    fn test_format_duration_hours_and_minutes() {
+        let now = Utc::now();
+        let started_at = now - chrono::Duration::seconds(3900); // 1h 5m
+        let result = format_duration(started_at);
+        assert_eq!(result, "1h 5m");
+    }
+
+    #[test]
+    fn test_format_duration_zero() {
+        let now = Utc::now();
+        let result = format_duration(now);
+        assert_eq!(result, "0s");
+    }
+
+    #[test]
+    fn test_format_state_all_states() {
+        assert_eq!(format_state(MachineState::Idle), "Idle");
+        assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
+        assert_eq!(format_state(MachineState::GeneratingSpec), "Generating Spec");
+        assert_eq!(format_state(MachineState::Initializing), "Initializing");
+        assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
+        assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");
+        assert_eq!(format_state(MachineState::Reviewing), "Reviewing");
+        assert_eq!(format_state(MachineState::Correcting), "Correcting");
+        assert_eq!(format_state(MachineState::Committing), "Committing");
+        assert_eq!(format_state(MachineState::CreatingPR), "Creating PR");
+        assert_eq!(format_state(MachineState::Completed), "Completed");
+        assert_eq!(format_state(MachineState::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_state_color_returns_appropriate_colors() {
+        // Just verify all states have colors and don't panic
+        assert_eq!(state_color(MachineState::Idle), Color::DarkGray);
+        assert_eq!(state_color(MachineState::RunningClaude), Color::Cyan);
+        assert_eq!(state_color(MachineState::Completed), Color::Green);
+        assert_eq!(state_color(MachineState::Failed), Color::Red);
+    }
+
+    #[test]
+    fn test_get_output_snippet_returns_status_message_when_no_iterations() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(1, None);
+        let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let snippet = app.get_output_snippet(&run);
+        assert_eq!(snippet, "Initializing run...");
+    }
+
+    #[test]
+    fn test_get_output_snippet_returns_last_lines_from_iteration() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(1, None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.start_iteration("US-001");
+        run.iterations.last_mut().unwrap().output_snippet =
+            "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7".to_string();
+
+        let snippet = app.get_output_snippet(&run);
+        // Should return last 5 lines
+        assert_eq!(snippet, "Line 3\nLine 4\nLine 5\nLine 6\nLine 7");
+    }
+
+    #[test]
+    fn test_get_output_snippet_with_reviewing_state() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(1, None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::Reviewing;
+        run.review_iteration = 2;
+
+        let snippet = app.get_output_snippet(&run);
+        assert_eq!(snippet, "Reviewing changes (cycle 2)...");
+    }
+
+    #[test]
+    fn test_project_data_includes_progress() {
+        use crate::config::ProjectTreeInfo;
+        use crate::state::RunStatus;
+
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: true,
+                run_status: Some(RunStatus::Running),
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+            },
+            active_run: None,
+            progress: Some(RunProgress {
+                completed: 2,
+                total: 5,
+            }),
+        };
+
+        assert!(project.progress.is_some());
+        assert_eq!(project.progress.as_ref().unwrap().as_fraction(), "Story 3/5");
     }
 }
