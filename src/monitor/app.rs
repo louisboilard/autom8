@@ -204,10 +204,12 @@ impl MonitorApp {
 
                 // Load spec to get progress information
                 let progress = active_run.as_ref().and_then(|run| {
-                    Spec::load(&run.spec_json_path).ok().map(|spec| RunProgress {
-                        completed: spec.completed_count(),
-                        total: spec.total_count(),
-                    })
+                    Spec::load(&run.spec_json_path)
+                        .ok()
+                        .map(|spec| RunProgress {
+                            completed: spec.completed_count(),
+                            total: spec.total_count(),
+                        })
                 });
 
                 ProjectData {
@@ -367,7 +369,7 @@ impl MonitorApp {
         match active.len() {
             1 => {
                 // Full screen for single run
-                self.render_run_detail(frame, area, &active[0], true);
+                self.render_run_detail(frame, area, active[0], true);
             }
             2 => {
                 // Vertical split (side by side) for two runs
@@ -376,8 +378,8 @@ impl MonitorApp {
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(area);
 
-                self.render_run_detail(frame, chunks[0], &active[0], false);
-                self.render_run_detail(frame, chunks[1], &active[1], false);
+                self.render_run_detail(frame, chunks[0], active[0], false);
+                self.render_run_detail(frame, chunks[1], active[1], false);
             }
             _ => {
                 // 3+ runs: list on left, detail on right
@@ -475,7 +477,10 @@ impl MonitorApp {
         let mut info_lines = vec![
             Line::from(vec![
                 Span::styled("State: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(state_str, Style::default().fg(state_color(run.machine_state))),
+                Span::styled(
+                    state_str,
+                    Style::default().fg(state_color(run.machine_state)),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Story: ", Style::default().fg(Color::DarkGray)),
@@ -535,7 +540,9 @@ impl MonitorApp {
             MachineState::Initializing => "Initializing run...".to_string(),
             MachineState::PickingStory => "Selecting next story...".to_string(),
             MachineState::RunningClaude => "Claude is working...".to_string(),
-            MachineState::Reviewing => format!("Reviewing changes (cycle {})...", run.review_iteration),
+            MachineState::Reviewing => {
+                format!("Reviewing changes (cycle {})...", run.review_iteration)
+            }
             MachineState::Correcting => "Applying corrections...".to_string(),
             MachineState::Committing => "Committing changes...".to_string(),
             MachineState::CreatingPR => "Creating pull request...".to_string(),
@@ -919,7 +926,10 @@ mod tests {
     fn test_format_state_all_states() {
         assert_eq!(format_state(MachineState::Idle), "Idle");
         assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
-        assert_eq!(format_state(MachineState::GeneratingSpec), "Generating Spec");
+        assert_eq!(
+            format_state(MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
         assert_eq!(format_state(MachineState::Initializing), "Initializing");
         assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
         assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");
@@ -1002,6 +1012,9 @@ mod tests {
         };
 
         assert!(project.progress.is_some());
-        assert_eq!(project.progress.as_ref().unwrap().as_fraction(), "Story 3/5");
+        assert_eq!(
+            project.progress.as_ref().unwrap().as_fraction(),
+            "Story 3/5"
+        );
     }
 }
