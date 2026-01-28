@@ -90,9 +90,8 @@ pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
     skip_review: bool,
-    tui_override: Option<bool>,
     /// Display adapter for all output operations.
-    /// Uses CliDisplay by default, can be swapped for TUI mode.
+    /// Uses CliDisplay by default.
     display: Box<dyn DisplayAdapter>,
 }
 
@@ -102,7 +101,6 @@ impl Runner {
             state_manager: StateManager::new()?,
             verbose: false,
             skip_review: false,
-            tui_override: None,
             display: Box::new(CliDisplay::new()),
         })
     }
@@ -117,15 +115,8 @@ impl Runner {
         self
     }
 
-    /// Set TUI mode override. When set, this overrides the config file setting.
-    /// If not set (None), the config file setting is used.
-    pub fn with_tui(mut self, tui: bool) -> Self {
-        self.tui_override = Some(tui);
-        self
-    }
-
     /// Set a custom display adapter.
-    /// This allows injecting different display implementations (CLI, TUI, or mock for testing).
+    /// This allows injecting different display implementations (CLI or mock for testing).
     pub fn with_display(mut self, display: Box<dyn DisplayAdapter>) -> Self {
         self.display = display;
         self
@@ -136,14 +127,9 @@ impl Runner {
         self.display.as_ref()
     }
 
-    /// Load the effective config, applying the TUI override if set.
-    /// Priority: CLI flag (tui_override) > project config > global config > default
+    /// Load the effective config.
     fn load_config_with_override(&self) -> Result<crate::config::Config> {
-        let mut config = get_effective_config()?;
-        if let Some(tui) = self.tui_override {
-            config.use_tui = tui;
-        }
-        Ok(config)
+        get_effective_config()
     }
 
     /// Handle a fatal error by transitioning to Failed state, saving, displaying error, and optionally printing summary.
@@ -1860,7 +1846,6 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1876,7 +1861,6 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("spec.json"),
@@ -1897,7 +1881,6 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
-            use_tui: false,
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -1919,7 +1902,6 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1941,7 +1923,6 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false, // Must be false when commit is false (validated by US-004)
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1963,7 +1944,6 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1985,7 +1965,6 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
-            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2019,7 +1998,6 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
-            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2052,7 +2030,6 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
-            use_tui: false,
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2084,7 +2061,6 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
-            use_tui: false,
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2100,59 +2076,5 @@ mod tests {
 
         // Verify config is preserved
         assert_eq!(loaded.effective_config(), config);
-    }
-
-    // ========================================================================
-    // US-002 (TUI): CLI flag tests for runner
-    // ========================================================================
-
-    #[test]
-    fn test_runner_tui_override_defaults_to_none() {
-        let runner = Runner::new().unwrap();
-        assert!(runner.tui_override.is_none());
-    }
-
-    #[test]
-    fn test_runner_with_tui_true_sets_override() {
-        let runner = Runner::new().unwrap().with_tui(true);
-        assert_eq!(runner.tui_override, Some(true));
-    }
-
-    #[test]
-    fn test_runner_with_tui_false_sets_override() {
-        let runner = Runner::new().unwrap().with_tui(false);
-        assert_eq!(runner.tui_override, Some(false));
-    }
-
-    #[test]
-    fn test_runner_builder_pattern_preserves_tui_override() {
-        let runner = Runner::new()
-            .unwrap()
-            .with_verbose(true)
-            .with_skip_review(true)
-            .with_tui(true);
-        assert!(runner.verbose);
-        assert!(runner.skip_review);
-        assert_eq!(runner.tui_override, Some(true));
-    }
-
-    #[test]
-    fn test_runner_builder_pattern_order_independent() {
-        // Different order should produce same result
-        let runner1 = Runner::new()
-            .unwrap()
-            .with_tui(true)
-            .with_verbose(true)
-            .with_skip_review(true);
-
-        let runner2 = Runner::new()
-            .unwrap()
-            .with_skip_review(true)
-            .with_tui(true)
-            .with_verbose(true);
-
-        assert_eq!(runner1.tui_override, runner2.tui_override);
-        assert_eq!(runner1.verbose, runner2.verbose);
-        assert_eq!(runner1.skip_review, runner2.skip_review);
     }
 }
