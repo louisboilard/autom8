@@ -820,42 +820,12 @@ fn pr_review_command(verbose: bool) -> autom8::error::Result<()> {
 
 /// Handle the monitor subcommand.
 ///
-/// Displays a list of all projects with their current status.
-/// This is a placeholder before the full TUI implementation.
+/// Launches the monitor TUI to display real-time status of autom8 activity
+/// across all projects.
 fn monitor_command(project_filter: Option<&str>, interval: u64) -> autom8::error::Result<()> {
-    use autom8::config::list_projects_tree;
+    use autom8::monitor::app::run_monitor;
 
-    let projects = list_projects_tree()?;
-
-    // Filter to specific project if requested
-    let filtered_projects: Vec<_> = if let Some(filter) = project_filter {
-        projects.into_iter().filter(|p| p.name == filter).collect()
-    } else {
-        projects
-    };
-
-    if filtered_projects.is_empty() {
-        if let Some(filter) = project_filter {
-            println!("{RED}Project '{}' not found.{RESET}", filter);
-            println!();
-            println!("Run {CYAN}autom8 list{RESET} to see available projects.");
-        } else {
-            println!("{GRAY}No projects found in ~/.config/autom8/{RESET}");
-            println!();
-            println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
-        }
-        return Ok(());
-    }
-
-    // Print header
-    println!("{BOLD}autom8 monitor{RESET}");
-    println!("{GRAY}(poll interval: {}s){RESET}", interval);
-    println!();
-
-    // Print project list with status using the existing tree printing function
-    autom8::output::print_project_tree(&filtered_projects);
-
-    Ok(())
+    run_monitor(interval, project_filter.map(|s| s.to_string()))
 }
 
 #[cfg(test)]
@@ -1781,7 +1751,10 @@ mod tests {
         let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
         assert!(cli.file.is_none(), "No file should be set");
         if let Some(Commands::Monitor { project, interval }) = cli.command {
-            assert!(project.is_none(), "Project filter should be None by default");
+            assert!(
+                project.is_none(),
+                "Project filter should be None by default"
+            );
             assert_eq!(interval, 1, "Default interval should be 1 second");
         } else {
             panic!("Expected Monitor command");
