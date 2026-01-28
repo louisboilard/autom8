@@ -30,33 +30,36 @@ cargo run -- list               # List available specs
 ```
 CLI (main.rs)
     ↓
+Commands (commands/) - command handlers
+    ↓
 Runner (runner.rs) - orchestration loop
     ↓
 State Machine (state.rs) - state management
     ↓
 Display Adapter (display.rs) - abstraction
-    ├→ CliDisplay (output.rs)
+    ├→ CliDisplay (output/)
     └→ TuiDisplay (tui/)
     ↓
 Domain Logic
     ├→ Spec (spec.rs) - user stories
     ├→ Config (config.rs) - settings
     ├→ Git (git.rs) - git operations
-    ├→ GitHub (gh.rs) - PR management
-    └→ Claude (claude.rs) - LLM integration
+    ├→ GitHub (gh/) - PR management
+    └→ Claude (claude/) - LLM integration
 ```
 
 ## Key Files and Modules
 
-| File | LOC | Purpose |
-|------|-----|---------|
-| `main.rs` | ~1,900 | CLI entry point, command parsing (clap) |
+| File/Module | LOC | Purpose |
+|-------------|-----|---------|
+| `main.rs` | ~1,150 | CLI entry point, command parsing (clap) |
+| `commands/` | ~1,100 | Command handlers (12 files: run, status, resume, etc.) |
 | `runner.rs` | ~2,150 | Main orchestration loop, state transitions |
 | `state.rs` | ~1,100 | State machine (12 states), persistence |
-| `claude.rs` | ~3,500 | Claude CLI subprocess, JSON streaming |
-| `gh.rs` | ~3,500 | GitHub CLI integration, PR operations |
+| `claude/` | ~1,500 | Claude CLI integration (9 files: runner, stream, types, etc.) |
+| `gh/` | ~950 | GitHub CLI integration (7 files: pr, detection, context, etc.) |
 | `config.rs` | ~3,100 | TOML config, validation, defaults |
-| `output.rs` | ~2,500 | CLI formatting, colors, banners |
+| `output/` | ~2,500 | CLI formatting (9 files: banner, messages, status, etc.) |
 | `progress.rs` | ~2,200 | Spinners, progress bars, breadcrumbs |
 | `display.rs` | ~940 | DisplayAdapter trait (strategy pattern) |
 | `spec.rs` | ~430 | Spec/UserStory structs, JSON serialization |
@@ -142,11 +145,11 @@ pull_request = true # Auto-create PR
 
 ## Claude Integration Notes
 
-- Claude CLI subprocess spawning in `claude.rs`
-- Outputs newline-delimited JSON; parsed with stream parser
-- Work summaries extracted from `<work-summary>` tags (max 500 chars)
+- Claude CLI subprocess spawning in `claude/runner.rs`
+- Outputs newline-delimited JSON; parsed with stream parser (`claude/stream.rs`)
+- Work summaries extracted from `<work-summary>` tags (max 500 chars) in `claude/utils.rs`
 - Completion signals use `<promise>COMPLETE</promise>` tag
-- Error info preserved with exit codes and stderr
+- Error info preserved with exit codes and stderr (`claude/types.rs`)
 
 ## Testing
 
@@ -175,8 +178,9 @@ cargo test runner::tests
 
 ### Adding a new CLI command
 1. Add variant to `Commands` enum in `main.rs`
-2. Add handler in `main()` match statement
-3. Add any new module functions needed
+2. Create handler file in `commands/` (e.g., `commands/mycommand.rs`)
+3. Add module declaration and re-export in `commands/mod.rs`
+4. Call the handler from `main()` match statement
 
 ### Adding a new state
 1. Add variant to `MachineState` enum in `state.rs`
@@ -190,7 +194,7 @@ cargo test runner::tests
 
 ### Adding display output
 1. Add method to `DisplayAdapter` trait (`display.rs`)
-2. Implement in `CliDisplay` (using `output.rs`)
+2. Implement in `CliDisplay` (add function to appropriate `output/` submodule)
 3. Implement in `TuiDisplay` (using `tui/app.rs`)
 
 ## File Locations
