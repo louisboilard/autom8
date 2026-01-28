@@ -112,6 +112,27 @@ pub fn format_duration(started_at: DateTime<Utc>) -> String {
     }
 }
 
+/// Format a timestamp as a relative time string (e.g., "2h ago", "3d ago")
+pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(timestamp);
+    let total_secs = duration.num_seconds().max(0) as u64;
+
+    let minutes = total_secs / 60;
+    let hours = total_secs / 3600;
+    let days = total_secs / 86400;
+
+    if days > 0 {
+        format!("{}d ago", days)
+    } else if hours > 0 {
+        format!("{}h ago", hours)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
+    } else {
+        "just now".to_string()
+    }
+}
+
 /// Format a machine state as a human-readable string
 fn format_state(state: MachineState) -> &'static str {
     match state {
@@ -160,6 +181,8 @@ pub struct MonitorApp {
     should_quit: bool,
     /// Selected index for list navigation
     selected_index: usize,
+    /// Project name to filter Run History view (set when pressing Enter on Project List)
+    run_history_filter: Option<String>,
 }
 
 impl MonitorApp {
@@ -173,6 +196,7 @@ impl MonitorApp {
             has_active_runs: false,
             should_quit: false,
             selected_index: 0,
+            run_history_filter: None,
         }
     }
 
@@ -245,6 +269,8 @@ impl MonitorApp {
             }
             KeyCode::Tab => {
                 self.next_view();
+                // Clear run history filter when switching views with Tab
+                self.run_history_filter = None;
             }
             KeyCode::Up => {
                 if self.selected_index > 0 {
@@ -266,8 +292,33 @@ impl MonitorApp {
                     self.selected_index += 1;
                 }
             }
+            KeyCode::Enter => {
+                self.handle_enter();
+            }
             _ => {}
         }
+    }
+
+    /// Handle Enter key press based on current view.
+    fn handle_enter(&mut self) {
+        match self.current_view {
+            View::ProjectList => {
+                // Switch to Run History filtered by selected project
+                if let Some(project) = self.projects.get(self.selected_index) {
+                    self.run_history_filter = Some(project.info.name.clone());
+                    self.current_view = View::RunHistory;
+                    self.selected_index = 0;
+                }
+            }
+            View::ActiveRuns | View::RunHistory => {
+                // No action for now in other views
+            }
+        }
+    }
+
+    /// Get the current run history filter (project name).
+    pub fn run_history_filter(&self) -> Option<&str> {
+        self.run_history_filter.as_deref()
     }
 
     /// Check if the app should quit.
@@ -570,40 +621,39 @@ impl MonitorApp {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let status_indicator = if p.active_run.is_some() { "●" } else { "○" };
-                let status_color = if p.active_run.is_some() {
-                    Color::Green
+                let is_selected = i == self.selected_index;
+
+                // Status indicator and text
+                let (status_indicator, status_text, status_color) = if p.active_run.is_some() {
+                    ("●", "Running".to_string(), Color::Green)
+                } else if let Some(last_run) = p.info.last_run_date {
+                    ("○", format!("Last run: {}", format_relative_time(last_run)), Color::DarkGray)
                 } else {
-                    Color::DarkGray
+                    ("○", "Idle".to_string(), Color::DarkGray)
                 };
 
-                let specs_info = if p.info.incomplete_spec_count > 0 {
-                    format!(
-                        " ({} specs, {} incomplete)",
-                        p.info.spec_count, p.info.incomplete_spec_count
-                    )
-                } else if p.info.spec_count > 0 {
-                    format!(" ({} specs)", p.info.spec_count)
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    String::new()
+                    Style::default().fg(Color::White)
                 };
 
                 let line = Line::from(vec![
                     Span::styled(
+                        if is_selected { "▶ " } else { "  " },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
                         format!("{} ", status_indicator),
                         Style::default().fg(status_color),
                     ),
+                    Span::styled(&p.info.name, name_style),
                     Span::styled(
-                        &p.info.name,
-                        if i == self.selected_index {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::White)
-                        },
+                        format!("  {}", status_text),
+                        Style::default().fg(status_color),
                     ),
-                    Span::styled(specs_info, Style::default().fg(Color::DarkGray)),
                 ]);
 
                 ListItem::new(line)
@@ -618,18 +668,29 @@ impl MonitorApp {
 
     fn render_run_history(&self, frame: &mut Frame, area: Rect) {
         // Placeholder for run history - will be implemented in US-007
-        let message = Paragraph::new("Run history view (coming soon)")
+        let title = if let Some(ref project) = self.run_history_filter {
+            format!(" Run History: {} ", project)
+        } else {
+            " Run History ".to_string()
+        };
+
+        let message = if self.run_history_filter.is_some() {
+            "Run history for this project (coming soon)"
+        } else {
+            "Run history view (coming soon)"
+        };
+
+        let paragraph = Paragraph::new(message)
             .style(Style::default().fg(Color::DarkGray))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Run History "),
-            );
-        frame.render_widget(message, area);
+            .block(Block::default().borders(Borders::ALL).title(title));
+        frame.render_widget(paragraph, area);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help_text = " Tab: switch view | ↑↓: navigate | Q: quit ";
+        let help_text = match self.current_view {
+            View::ProjectList => " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit ",
+            _ => " Tab: switch view | ↑↓: navigate | Q: quit ",
+        };
         let footer = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, area);
     }
@@ -1003,6 +1064,7 @@ mod tests {
                 incomplete_spec_count: 0,
                 spec_md_count: 0,
                 runs_count: 0,
+                last_run_date: None,
             },
             active_run: None,
             progress: Some(RunProgress {
@@ -1016,5 +1078,232 @@ mod tests {
             project.progress.as_ref().unwrap().as_fraction(),
             "Story 3/5"
         );
+    }
+
+    // ===========================================
+    // US-006: Project List View Tests
+    // ===========================================
+
+    #[test]
+    fn test_format_relative_time_just_now() {
+        let now = Utc::now();
+        let result = format_relative_time(now);
+        assert_eq!(result, "just now");
+    }
+
+    #[test]
+    fn test_format_relative_time_minutes_ago() {
+        let now = Utc::now();
+        let timestamp = now - chrono::Duration::minutes(15);
+        let result = format_relative_time(timestamp);
+        assert_eq!(result, "15m ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_hours_ago() {
+        let now = Utc::now();
+        let timestamp = now - chrono::Duration::hours(3);
+        let result = format_relative_time(timestamp);
+        assert_eq!(result, "3h ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_days_ago() {
+        let now = Utc::now();
+        let timestamp = now - chrono::Duration::days(5);
+        let result = format_relative_time(timestamp);
+        assert_eq!(result, "5d ago");
+    }
+
+    #[test]
+    fn test_monitor_app_has_run_history_filter() {
+        let app = MonitorApp::new(1, None);
+        assert!(app.run_history_filter().is_none());
+    }
+
+    #[test]
+    fn test_handle_enter_on_project_list_sets_filter() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "test-project".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+        }];
+        app.selected_index = 0;
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.current_view(), View::RunHistory);
+        assert_eq!(app.run_history_filter(), Some("test-project"));
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_handle_tab_clears_run_history_filter() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("test-project".to_string());
+
+        app.handle_key(KeyCode::Tab);
+
+        assert!(app.run_history_filter().is_none());
+    }
+
+    #[test]
+    fn test_handle_enter_on_empty_project_list_does_nothing() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.projects = vec![]; // Empty
+
+        app.handle_key(KeyCode::Enter);
+
+        // Should still be on ProjectList, no filter set
+        assert_eq!(app.current_view(), View::ProjectList);
+        assert!(app.run_history_filter().is_none());
+    }
+
+    #[test]
+    fn test_handle_enter_on_active_runs_does_nothing() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        app.handle_key(KeyCode::Enter);
+
+        // Should still be on ActiveRuns
+        assert_eq!(app.current_view(), View::ActiveRuns);
+        assert!(app.run_history_filter().is_none());
+    }
+
+    #[test]
+    fn test_project_list_navigation_with_arrow_keys() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-a".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-b".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+            },
+        ];
+
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key(KeyCode::Down);
+        // Should stay at 1 (max index)
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Up);
+        // Should stay at 0
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_project_tree_info_with_last_run_date() {
+        use crate::config::ProjectTreeInfo;
+
+        let last_run = Utc::now() - chrono::Duration::hours(2);
+        let info = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            spec_count: 1,
+            incomplete_spec_count: 0,
+            spec_md_count: 0,
+            runs_count: 5,
+            last_run_date: Some(last_run),
+        };
+
+        assert!(info.last_run_date.is_some());
+        assert_eq!(
+            format_relative_time(info.last_run_date.unwrap()),
+            "2h ago"
+        );
+    }
+
+    #[test]
+    fn test_enter_on_second_project_selects_correct_filter() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "first-project".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "second-project".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+            },
+        ];
+        app.selected_index = 1;
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.run_history_filter(), Some("second-project"));
     }
 }

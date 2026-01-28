@@ -665,6 +665,8 @@ pub struct ProjectTreeInfo {
     pub spec_md_count: usize,
     /// Number of archived runs in runs/ directory.
     pub runs_count: usize,
+    /// The date of the most recent run (archived or current).
+    pub last_run_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ProjectTreeInfo {
@@ -709,7 +711,7 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
             .as_ref()
             .map(|s| s.status == crate::state::RunStatus::Running)
             .unwrap_or(false);
-        let run_status = run_state.map(|s| s.status);
+        let run_status = run_state.as_ref().map(|s| s.status);
 
         // Count specs and incomplete specs
         let specs = sm.list_specs().unwrap_or_default();
@@ -742,8 +744,15 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
             0
         };
 
-        // Count archived runs
-        let runs_count = sm.list_archived().unwrap_or_default().len();
+        // Get archived runs (already sorted by date, most recent first)
+        let archived_runs = sm.list_archived().unwrap_or_default();
+        let runs_count = archived_runs.len();
+
+        // Determine last run date from archived runs or current run
+        let last_run_date = run_state
+            .as_ref()
+            .map(|s| s.started_at)
+            .or_else(|| archived_runs.first().map(|r| r.started_at));
 
         tree_info.push(ProjectTreeInfo {
             name: project_name,
@@ -753,6 +762,7 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
             incomplete_spec_count: incomplete_count,
             spec_md_count,
             runs_count,
+            last_run_date,
         });
     }
 
@@ -1728,6 +1738,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert_eq!(info.status_label(), "running");
     }
@@ -1742,6 +1753,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert_eq!(info.status_label(), "failed");
     }
@@ -1756,6 +1768,7 @@ mod tests {
             incomplete_spec_count: 1,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert_eq!(info.status_label(), "incomplete");
     }
@@ -1770,6 +1783,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 1,
             runs_count: 0,
+            last_run_date: None,
         };
         assert_eq!(info.status_label(), "complete");
     }
@@ -1784,6 +1798,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert_eq!(info.status_label(), "empty");
     }
@@ -1798,6 +1813,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert!(info.has_content());
     }
@@ -1812,6 +1828,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert!(!info.has_content());
     }
@@ -1826,6 +1843,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 0,
             runs_count: 0,
+            last_run_date: None,
         };
         assert!(info.has_content());
     }

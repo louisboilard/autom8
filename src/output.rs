@@ -1902,6 +1902,7 @@ mod tests {
             incomplete_spec_count: 0,
             spec_md_count: 2,
             runs_count: 0,
+            last_run_date: None,
         }]);
 
         // Multiple projects with all status types
@@ -1914,6 +1915,7 @@ mod tests {
                 incomplete_spec_count: 1,
                 spec_md_count: 2,
                 runs_count: 3,
+                last_run_date: None,
             },
             crate::config::ProjectTreeInfo {
                 name: "failed".to_string(),
@@ -1923,6 +1925,7 @@ mod tests {
                 incomplete_spec_count: 0,
                 spec_md_count: 0,
                 runs_count: 1,
+                last_run_date: None,
             },
             crate::config::ProjectTreeInfo {
                 name: "complete".to_string(),
@@ -1932,6 +1935,7 @@ mod tests {
                 incomplete_spec_count: 0,
                 spec_md_count: 1,
                 runs_count: 5,
+                last_run_date: None,
             },
             crate::config::ProjectTreeInfo {
                 name: "incomplete".to_string(),
@@ -1941,6 +1945,7 @@ mod tests {
                 incomplete_spec_count: 1,
                 spec_md_count: 0,
                 runs_count: 0,
+                last_run_date: None,
             },
             crate::config::ProjectTreeInfo {
                 name: "idle".to_string(),
@@ -1950,6 +1955,7 @@ mod tests {
                 incomplete_spec_count: 0,
                 spec_md_count: 1,
                 runs_count: 0,
+                last_run_date: None,
             },
             crate::config::ProjectTreeInfo {
                 name: "empty".to_string(),
@@ -1959,6 +1965,7 @@ mod tests {
                 incomplete_spec_count: 0,
                 spec_md_count: 0,
                 runs_count: 0,
+                last_run_date: None,
             },
         ];
         print_project_tree(&projects);

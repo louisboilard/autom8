@@ -1224,6 +1224,7 @@ mod tests {
             incomplete_spec_count: 1,
             spec_md_count: 3,
             runs_count: 4,
+            last_run_date: None,
         };
         assert_eq!(info.name, "test-project");
         assert!(!info.has_active_run);
