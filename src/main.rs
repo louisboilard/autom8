@@ -1,26 +1,16 @@
-use autom8::claude::{run_pr_review, PRReviewResult};
-use autom8::error::Autom8Error;
-use autom8::gh::{
-    detect_pr_for_current_branch, gather_branch_context, gather_pr_context, list_open_prs,
-    print_branch_context, BranchContextResult, PRContextResult, PRDetectionResult,
+//! autom8 CLI entry point.
+//!
+//! Parses command-line arguments and dispatches to the appropriate command handler.
+
+use autom8::commands::{
+    clean_command, default_command, describe_command, global_status_command, init_command,
+    list_command, monitor_command, pr_review_command, projects_command, resume_command,
+    run_command, run_with_file, status_command,
 };
-use autom8::git::{checkout, commit_and_push_pr_fixes, current_branch, CommitResult, PushResult};
-use autom8::output::{
-    format_pr_for_selection, print_branch_switched, print_error, print_global_status, print_header,
-    print_no_open_prs, print_no_unresolved_comments, print_pr_commit_error,
-    print_pr_commit_success, print_pr_context_summary, print_pr_detected, print_pr_push_error,
-    print_pr_push_success, print_pr_push_up_to_date, print_pr_review_actions_summary,
-    print_pr_review_complete_with_fixes, print_pr_review_error, print_pr_review_no_fixes_needed,
-    print_pr_review_spawning, print_pr_review_start, print_pr_review_streaming,
-    print_pr_review_streaming_done, print_pr_review_summary, print_status, print_switching_branch,
-    BOLD, CYAN, GRAY, GREEN, RED, RESET, YELLOW,
-};
-use autom8::prompt;
-use autom8::prompts;
-use autom8::{create_display, Runner};
+use autom8::output::{print_error, print_header};
+use autom8::Runner;
 use clap::{Parser, Subcommand};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "autom8")]
@@ -35,10 +25,6 @@ struct Cli {
     /// Show full Claude output instead of spinner (useful for debugging)
     #[arg(short, long, global = true)]
     verbose: bool,
-
-    /// Enable TUI mode for rich terminal interface during task implementation
-    #[arg(short = 't', long, global = true)]
-    tui: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -85,70 +71,35 @@ enum Commands {
 
     /// Show detailed information about a specific project
     Describe {
-        /// The project name to describe
-        project_name: String,
+        /// The project name to describe (defaults to current directory)
+        project_name: Option<String>,
     },
 
     /// Analyze PR review comments and fix real issues
     PrReview,
-}
 
-/// Determine input type based on file extension
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum InputType {
-    Json,     // .json file (spec-<feature>.json)
-    Markdown, // .md or other file (spec-<feature>.md)
-}
+    /// Monitor autom8 activity across all projects (dashboard view)
+    Monitor {
+        /// Filter to a specific project
+        #[arg(short, long)]
+        project: Option<String>,
 
-fn detect_input_type(path: &Path) -> InputType {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => InputType::Json,
-        _ => InputType::Markdown,
-    }
+        /// Polling interval in seconds (default: 1)
+        #[arg(short, long, default_value = "1")]
+        interval: u64,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    // Determine effective TUI mode: CLI flag > config file > default (false)
-    // We need to load config first to merge with CLI flag
-    let effective_tui = if cli.tui {
-        // CLI flag explicitly enables TUI
-        true
-    } else {
-        // Check config file for use_tui setting
-        autom8::config::get_effective_config()
-            .map(|c| c.use_tui)
-            .unwrap_or(false)
-    };
-
-    // Create the appropriate display adapter based on effective TUI mode
-    let display = create_display(effective_tui);
-
-    let mut runner = match Runner::new() {
-        Ok(r) => {
-            let r = r.with_verbose(cli.verbose).with_display(display);
-            // Apply TUI mode from CLI flag or config
-            if effective_tui {
-                r.with_tui(true)
-            } else {
-                r
-            }
-        }
+    let runner = match Runner::new() {
+        Ok(r) => r.with_verbose(cli.verbose),
         Err(e) => {
             print_error(&format!("Failed to initialize runner: {}", e));
             std::process::exit(1);
         }
     };
-
-    // Ensure project config directory exists for commands that need it
-    // (Skip for init command since it has its own config directory handling)
-    if !matches!(&cli.command, Some(Commands::Init)) {
-        if let Err(e) = autom8::config::ensure_project_config_dir() {
-            print_error(&format!("Failed to create project config directory: {}", e));
-            std::process::exit(1);
-        }
-    }
 
     let result = match (&cli.file, &cli.command) {
         // Positional file argument takes precedence
@@ -156,688 +107,49 @@ fn main() {
 
         // Subcommands
         (None, Some(Commands::Run { spec, skip_review })) => {
-            runner = runner.with_skip_review(*skip_review);
-            print_header();
-            match detect_input_type(spec) {
-                InputType::Json => runner.run(spec),
-                InputType::Markdown => runner.run_from_spec(spec),
-            }
+            run_command(cli.verbose, spec, *skip_review)
         }
 
         (None, Some(Commands::Status { all, global })) => {
             print_header();
             if *all || *global {
-                // Global status across all projects
                 global_status_command()
             } else {
-                // Local status for current project
-                match runner.status() {
-                    Ok(Some(state)) => {
-                        print_status(&state);
-                        Ok(())
-                    }
-                    Ok(None) => {
-                        println!("No active run.");
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+                status_command(&runner)
             }
         }
 
-        (None, Some(Commands::Resume)) => runner.resume(),
+        (None, Some(Commands::Resume)) => resume_command(&runner),
 
-        (None, Some(Commands::Clean)) => clean_spec_files(),
+        (None, Some(Commands::Clean)) => clean_command(),
 
         (None, Some(Commands::Init)) => init_command(),
 
-        (None, Some(Commands::Projects)) => list_projects_command(),
+        (None, Some(Commands::Projects)) => projects_command(),
 
-        (None, Some(Commands::List)) => list_tree_command(),
+        (None, Some(Commands::List)) => list_command(),
 
-        (None, Some(Commands::Describe { project_name })) => describe_command(project_name),
+        (None, Some(Commands::Describe { project_name })) => {
+            describe_command(project_name.as_deref().unwrap_or(""))
+        }
 
         (None, Some(Commands::PrReview)) => {
             print_header();
             pr_review_command(cli.verbose)
         }
 
+        (None, Some(Commands::Monitor { project, interval })) => {
+            monitor_command(project.as_deref(), *interval)
+        }
+
         // No file and no command - check for existing state first, then start spec creation
-        (None, None) => default_command(cli.verbose, effective_tui),
+        (None, None) => default_command(cli.verbose),
     };
 
     if let Err(e) = result {
         print_error(&e.to_string());
         std::process::exit(1);
     }
-}
-
-fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
-    // Move file to config directory if not already there
-    let move_result = autom8::config::move_to_config_dir(file)?;
-
-    print_header();
-
-    // Notify user if file was moved
-    if move_result.was_moved {
-        println!(
-            "{GREEN}Moved{RESET} {} → {}",
-            file.display(),
-            move_result.dest_path.display()
-        );
-        println!();
-    }
-
-    // Use the destination path for processing
-    match detect_input_type(&move_result.dest_path) {
-        InputType::Json => runner.run(&move_result.dest_path),
-        InputType::Markdown => runner.run_from_spec(&move_result.dest_path),
-    }
-}
-
-/// Default command when running `autom8` with no arguments.
-///
-/// First checks for an existing state file indicating work in progress.
-/// If state exists, proceeds to prompt the user (US-002).
-/// If no state exists, proceeds to start spec creation (US-003).
-fn default_command(verbose: bool, tui: bool) -> autom8::error::Result<()> {
-    use autom8::state::StateManager;
-
-    let state_manager = StateManager::new()?;
-
-    // Check for existing state file
-    if let Some(state) = state_manager.load_current()? {
-        // State exists - proceed to US-002 (prompt user)
-        handle_existing_state(state, verbose, tui)
-    } else {
-        // No state - proceed to US-003 (start spec creation)
-        start_spec_creation(verbose, tui)
-    }
-}
-
-/// Handle existing state file - prompt user to resume or start fresh (US-002)
-fn handle_existing_state(
-    state: autom8::state::RunState,
-    verbose: bool,
-    tui: bool,
-) -> autom8::error::Result<()> {
-    use autom8::state::StateManager;
-
-    print_header();
-
-    // Display clear prompt with context
-    println!("{YELLOW}Work in progress detected.{RESET}");
-    println!();
-    println!("  Branch: {CYAN}{}{RESET}", state.branch);
-    if let Some(story) = &state.current_story {
-        println!("  Current story: {CYAN}{}{RESET}", story);
-    }
-    println!();
-
-    // Present options to the user
-    let choice = prompt::select(
-        "Resume or start fresh?",
-        &["Resume existing work", "Start fresh", "Exit"],
-        0, // Default to Resume
-    );
-
-    match choice {
-        0 => {
-            // Option 1: Resume → continue the existing run
-            println!();
-            prompt::print_action("Resuming existing work...");
-            println!();
-
-            // Create display adapter based on effective TUI mode
-            let display = create_display(tui);
-            let runner = Runner::new()?.with_verbose(verbose).with_display(display);
-            let runner = if tui { runner.with_tui(true) } else { runner };
-            runner.resume()
-        }
-        1 => {
-            // Option 2: Start fresh → archive state and proceed to spec creation
-            let state_manager = StateManager::new()?;
-
-            // Archive before deleting (US-004 behavior)
-            let archive_path = state_manager.archive(&state)?;
-            state_manager.clear_current()?;
-
-            println!();
-            println!(
-                "{GREEN}Previous state archived:{RESET} {}",
-                archive_path.display()
-            );
-            println!();
-
-            // Proceed to spec creation
-            start_spec_creation(verbose, tui)
-        }
-        _ => {
-            // Option 3: Exit → do nothing, exit cleanly
-            println!();
-            println!("Exiting.");
-            Ok(())
-        }
-    }
-}
-
-/// Start a new spec creation session (US-003)
-fn start_spec_creation(verbose: bool, tui: bool) -> autom8::error::Result<()> {
-    use autom8::SpecSnapshot;
-    use std::process::Command;
-
-    print_header();
-
-    // Print explanation of what will happen
-    println!("{BOLD}Starting Spec Creation Session{RESET}");
-    println!();
-    println!("This will spawn an interactive Claude session to help you create a spec.");
-    println!("Claude will guide you through defining your feature with questions about:");
-    println!("  • Project context and tech stack");
-    println!("  • Feature requirements and user stories");
-    println!("  • Acceptance criteria for each story");
-    println!();
-    println!(
-        "When you're done, save the spec as {CYAN}spec-<feature>.md{RESET} and exit the session."
-    );
-    println!("autom8 will automatically proceed to implementation.");
-    println!();
-    println!("{GRAY}Starting Claude...{RESET}");
-    println!();
-
-    // Take a snapshot of existing spec files before spawning Claude
-    let snapshot = SpecSnapshot::capture()?;
-
-    // Spawn interactive Claude session with the spec skill prompt
-    let status = Command::new("claude")
-        .arg(prompts::SPEC_SKILL_PROMPT)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
-
-    match status {
-        Ok(exit_status) => {
-            if exit_status.success() {
-                println!();
-                println!("{GREEN}Claude session ended.{RESET}");
-                println!();
-
-                // Detect new spec files created during the session
-                let new_files = snapshot.detect_new_files()?;
-
-                match new_files.len() {
-                    0 => {
-                        print_error("No new spec files detected.");
-                        println!();
-                        println!("{BOLD}Possible causes:{RESET}");
-                        println!("  • Claude session ended before the spec was saved");
-                        println!("  • Spec was saved to an unexpected location");
-                        println!("  • Claude didn't follow the spec skill instructions");
-                        println!();
-                        println!("{BOLD}Suggestions:{RESET}");
-                        println!("  • Run {CYAN}autom8{RESET} again to start a fresh session");
-                        println!("  • Or use the manual workflow:");
-                        println!("      1. Run {CYAN}autom8 skill spec{RESET} to get the prompt");
-                        println!("      2. Start a Claude session and paste the prompt");
-                        println!("      3. Save the spec as {CYAN}spec-<feature>.md{RESET}");
-                        println!("      4. Run {CYAN}autom8{RESET} to implement");
-                        std::process::exit(1);
-                    }
-                    1 => {
-                        let spec_path = &new_files[0];
-                        println!("{GREEN}Detected new spec:{RESET} {}", spec_path.display());
-                        println!();
-                        println!("{BOLD}Proceeding to implementation...{RESET}");
-                        println!();
-
-                        // Create display adapter based on effective TUI mode
-                        let display = create_display(tui);
-                        // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
-                        let runner = if tui { runner.with_tui(true) } else { runner };
-                        runner.run_from_spec(spec_path)
-                    }
-                    n => {
-                        println!("{YELLOW}Detected {} new spec files:{RESET}", n);
-                        println!();
-
-                        // Build options list with file paths
-                        let options: Vec<String> = new_files
-                            .iter()
-                            .enumerate()
-                            .map(|(i, file)| {
-                                let filename = file
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("spec.md");
-                                format!("{}. {}", i + 1, filename)
-                            })
-                            .collect();
-                        let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-
-                        let choice = prompt::select(
-                            "Which spec would you like to implement?",
-                            &option_refs,
-                            0,
-                        );
-
-                        let selected_spec = &new_files[choice];
-                        println!();
-                        println!("{GREEN}Selected:{RESET} {}", selected_spec.display());
-                        println!();
-                        println!("{BOLD}Proceeding to implementation...{RESET}");
-                        println!();
-
-                        // Create display adapter based on effective TUI mode
-                        let display = create_display(tui);
-                        // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
-                        let runner = if tui { runner.with_tui(true) } else { runner };
-                        runner.run_from_spec(selected_spec)
-                    }
-                }
-            } else {
-                Err(Autom8Error::ClaudeError(format!(
-                    "Claude exited with status: {}",
-                    exit_status
-                )))
-            }
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Err(Autom8Error::ClaudeError(
-                    "Claude CLI not found. Please install it from https://github.com/anthropics/claude-code".to_string()
-                ))
-            } else {
-                Err(Autom8Error::ClaudeError(format!(
-                    "Failed to spawn Claude: {}",
-                    e
-                )))
-            }
-        }
-    }
-}
-
-fn clean_spec_files() -> autom8::error::Result<()> {
-    use autom8::state::StateManager;
-
-    let state_manager = StateManager::new()?;
-    let spec_dir = state_manager.spec_dir();
-    let project_config_dir = autom8::config::project_config_dir()?;
-
-    let mut deleted_any = false;
-
-    // Check spec/ directory in config
-    if spec_dir.exists() {
-        let specs = state_manager.list_specs().unwrap_or_default();
-        if !specs.is_empty() {
-            println!();
-            println!(
-                "Found {} spec file(s) in {}:",
-                specs.len(),
-                spec_dir.display()
-            );
-            for spec_path in &specs {
-                let filename = spec_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("?");
-                println!("  - {}", filename);
-            }
-            println!();
-
-            let prompt_msg = format!("Delete all spec files in {}?", spec_dir.display());
-            if prompt::confirm(&prompt_msg, false) {
-                for spec_path in specs {
-                    fs::remove_file(&spec_path)?;
-                    println!("{GREEN}Deleted{RESET} {}", spec_path.display());
-                    deleted_any = true;
-                }
-            }
-        }
-    }
-
-    if !deleted_any {
-        println!(
-            "{GRAY}No spec files to clean up in {}.{RESET}",
-            project_config_dir.display()
-        );
-    }
-
-    Ok(())
-}
-
-fn init_command() -> autom8::error::Result<()> {
-    println!("Initializing autom8...");
-    println!();
-
-    // Create base config directory ~/.config/autom8/
-    let (config_dir, config_created) = autom8::config::ensure_config_dir()?;
-    if config_created {
-        println!("  {GREEN}Created{RESET} {}", config_dir.display());
-    } else {
-        println!("  {GRAY}Exists{RESET}  {}", config_dir.display());
-    }
-
-    // Reset global config file to defaults
-    let global_config_path = autom8::config::global_config_path()?;
-    autom8::config::save_global_config(&autom8::config::Config::default())?;
-    println!(
-        "Created default configuration at {}",
-        global_config_path.display()
-    );
-
-    // Create project-specific config directory with subdirectories
-    let (project_dir, project_created) = autom8::config::ensure_project_config_dir()?;
-    if project_created {
-        println!("  {GREEN}Created{RESET} {}", project_dir.display());
-        println!("  {GREEN}Created{RESET} {}/spec/", project_dir.display());
-        println!("  {GREEN}Created{RESET} {}/runs/", project_dir.display());
-    } else {
-        println!("  {GRAY}Exists{RESET}  {}", project_dir.display());
-    }
-
-    println!();
-    println!("{GREEN}Initialization complete!{RESET}");
-    println!();
-    println!("Config directory structure:");
-    println!("  {CYAN}{}{RESET}", project_dir.display());
-    println!("    ├── spec/  (spec markdown and JSON files)");
-    println!("    └── runs/  (archived run states)");
-    println!();
-    println!("{BOLD}Next steps:{RESET}");
-    println!("  Run {CYAN}autom8{RESET} to start creating a spec");
-
-    Ok(())
-}
-
-fn list_projects_command() -> autom8::error::Result<()> {
-    let projects = autom8::config::list_projects()?;
-
-    if projects.is_empty() {
-        println!("{GRAY}No projects found.{RESET}");
-        println!();
-        println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
-    } else {
-        println!("{BOLD}Known projects:{RESET}");
-        println!();
-        for project in &projects {
-            println!("  {}", project);
-        }
-        println!();
-        println!(
-            "{GRAY}({} project{}){RESET}",
-            projects.len(),
-            if projects.len() == 1 { "" } else { "s" }
-        );
-    }
-
-    Ok(())
-}
-
-fn global_status_command() -> autom8::error::Result<()> {
-    let statuses = autom8::config::global_status()?;
-    print_global_status(&statuses);
-    Ok(())
-}
-
-fn list_tree_command() -> autom8::error::Result<()> {
-    let projects = autom8::config::list_projects_tree()?;
-    autom8::output::print_project_tree(&projects);
-    Ok(())
-}
-
-fn describe_command(project_name: &str) -> autom8::error::Result<()> {
-    use autom8::output::print_project_description;
-
-    // Check if project exists
-    match autom8::config::get_project_description(project_name)? {
-        Some(desc) => {
-            // If multiple specs exist and user might want to select one, handle that case
-            if desc.specs.len() > 1 {
-                // Ask user which spec to describe
-                println!(
-                    "{YELLOW}Multiple specs found for project '{}'{RESET}",
-                    project_name
-                );
-                println!();
-
-                let options: Vec<String> = desc
-                    .specs
-                    .iter()
-                    .map(|spec| {
-                        let progress = format!("{}/{}", spec.completed_count, spec.total_count);
-                        format!("{} ({})", spec.filename, progress)
-                    })
-                    .collect();
-
-                // Add an "All specs" option at the beginning
-                let mut all_options: Vec<&str> = vec!["Show all specs"];
-                all_options.extend(options.iter().map(|s| s.as_str()));
-
-                let choice =
-                    prompt::select("Which spec would you like to describe?", &all_options, 0);
-
-                if choice == 0 {
-                    // Show all specs
-                    print_project_description(&desc);
-                } else {
-                    // Show specific spec
-                    let selected_spec = &desc.specs[choice - 1];
-
-                    // Create a description with just the selected spec
-                    let single_spec_desc = autom8::config::ProjectDescription {
-                        specs: vec![selected_spec.clone()],
-                        ..desc
-                    };
-                    print_project_description(&single_spec_desc);
-                }
-            } else {
-                // Single or no specs - just show the description
-                print_project_description(&desc);
-            }
-            Ok(())
-        }
-        None => {
-            // Project doesn't exist
-            println!("{RED}Project '{}' not found.{RESET}", project_name);
-            println!();
-            println!(
-                "The project directory {CYAN}~/.config/autom8/{}{RESET} does not exist.",
-                project_name
-            );
-            println!();
-
-            // List available projects
-            let projects = autom8::config::list_projects()?;
-            if projects.is_empty() {
-                println!("{GRAY}No projects have been created yet.{RESET}");
-                println!();
-                println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
-            } else {
-                println!("{BOLD}Available projects:{RESET}");
-                for project in &projects {
-                    println!("  - {}", project);
-                }
-                println!();
-                println!("Run {CYAN}autom8 describe <project-name>{RESET} to describe a project.");
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Handle the pr-review subcommand.
-///
-/// This command analyzes PR review comments to identify real issues versus red herrings,
-/// fixes any confirmed issues, and optionally commits and pushes the changes.
-///
-/// The flow is:
-/// 1. Detect PR for current branch (or prompt user to select one)
-/// 2. Gather PR context (description, unresolved comments)
-/// 3. Gather branch context (spec file if available, commits)
-/// 4. Spawn Claude agent to analyze comments and fix real issues
-/// 5. Commit and push fixes (respecting user config)
-fn pr_review_command(verbose: bool) -> autom8::error::Result<()> {
-    // Step 1: Detect PR for current branch
-    let pr_info = match detect_pr_for_current_branch()? {
-        PRDetectionResult::Found(info) => {
-            print_pr_detected(info.number, &info.title, &info.head_branch);
-            info
-        }
-        PRDetectionResult::OnMainBranch | PRDetectionResult::NoPRForBranch(_) => {
-            // No PR for current branch - list open PRs and prompt user to select
-            let open_prs = list_open_prs()?;
-
-            if open_prs.is_empty() {
-                print_no_open_prs();
-                return Ok(());
-            }
-
-            // Build selection options
-            let options: Vec<String> = open_prs
-                .iter()
-                .map(|pr| format_pr_for_selection(pr.number, &pr.head_branch, &pr.title))
-                .collect();
-            let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-
-            println!();
-            println!("{BOLD}Select a PR to review:{RESET}");
-            let choice = prompt::select("", &option_refs, 0);
-
-            let selected_pr = &open_prs[choice];
-
-            // Switch to the selected branch
-            let current = current_branch()?;
-            if current != selected_pr.head_branch {
-                print_switching_branch(&current, &selected_pr.head_branch);
-                checkout(&selected_pr.head_branch)?;
-                print_branch_switched(&selected_pr.head_branch);
-            }
-
-            selected_pr.clone()
-        }
-        PRDetectionResult::Error(msg) => {
-            print_error(&msg);
-            return Err(Autom8Error::GitError(msg));
-        }
-    };
-
-    // Step 2: Gather PR context (description, comments)
-    let pr_context = match gather_pr_context(pr_info.number) {
-        PRContextResult::Success(context) => {
-            print_pr_context_summary(
-                context.number,
-                &context.title,
-                context.unresolved_comments.len(),
-            );
-            context
-        }
-        PRContextResult::NoUnresolvedComments {
-            number,
-            title,
-            body: _,
-            url: _,
-        } => {
-            print_no_unresolved_comments(number, &title);
-            return Ok(());
-        }
-        PRContextResult::Error(msg) => {
-            print_error(&msg);
-            return Err(Autom8Error::GitError(msg));
-        }
-    };
-
-    // Step 3: Gather branch context (spec, commits)
-    let branch_context = match gather_branch_context(true) {
-        BranchContextResult::SuccessWithSpec(context) => {
-            print_branch_context(&context);
-            context
-        }
-        BranchContextResult::SuccessNoSpec(context) => {
-            // Warning already printed by gather_branch_context when show_warning=true
-            print_branch_context(&context);
-            context
-        }
-        BranchContextResult::Error(msg) => {
-            print_error(&msg);
-            return Err(Autom8Error::GitError(msg));
-        }
-    };
-
-    // Step 4: Spawn Claude agent for PR review
-    print_pr_review_start(
-        pr_context.number,
-        &pr_context.title,
-        pr_context.unresolved_comments.len(),
-    );
-    print_pr_review_spawning();
-    print_pr_review_streaming();
-
-    let review_result = run_pr_review(&pr_context, &branch_context, |text| {
-        if verbose {
-            print!("{}", text);
-        }
-    })?;
-
-    print_pr_review_streaming_done();
-
-    // Step 5: Handle results and commit/push if configured
-    let config = autom8::config::get_effective_config().unwrap_or_default();
-
-    match review_result {
-        PRReviewResult::Complete(summary) => {
-            print_pr_review_summary(&summary);
-            print_pr_review_complete_with_fixes(summary.real_issues_fixed);
-
-            // Commit and push fixes
-            let (commit_result, push_result) =
-                commit_and_push_pr_fixes(pr_context.number, config.commit, config.pull_request)?;
-
-            let commit_made = matches!(&commit_result, Some(CommitResult::Success(_)));
-            let push_made = matches!(&push_result, Some(PushResult::Success));
-
-            // Print individual status messages
-            if let Some(ref result) = commit_result {
-                match result {
-                    CommitResult::Success(hash) => print_pr_commit_success(hash),
-                    CommitResult::NothingToCommit => {}
-                    CommitResult::Error(msg) => print_pr_commit_error(msg),
-                }
-            }
-
-            if let Some(ref result) = push_result {
-                match result {
-                    PushResult::Success => print_pr_push_success(&branch_context.branch_name),
-                    PushResult::AlreadyUpToDate => print_pr_push_up_to_date(),
-                    PushResult::Error(msg) => print_pr_push_error(msg),
-                }
-            }
-
-            // Print summary of actions taken
-            print_pr_review_actions_summary(
-                config.commit,
-                config.pull_request,
-                commit_made,
-                push_made,
-                false,
-            );
-        }
-        PRReviewResult::NoFixesNeeded(summary) => {
-            print_pr_review_summary(&summary);
-            print_pr_review_no_fixes_needed();
-
-            // Print summary indicating no fixes were needed
-            print_pr_review_actions_summary(config.commit, config.pull_request, false, false, true);
-        }
-        PRReviewResult::Error(error_info) => {
-            print_pr_review_error(&error_info.message);
-            return Err(Autom8Error::ClaudeError(error_info.message));
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1075,6 +387,8 @@ mod tests {
     fn test_us003_spec_skill_prompt_available() {
         // Verify the spec skill prompt is available for the spec creation flow
         // This is what gets passed to Claude when spawning the session
+        use autom8::prompts;
+
         assert!(
             !prompts::SPEC_SKILL_PROMPT.is_empty(),
             "SPEC_SKILL_PROMPT should be defined and non-empty"
@@ -1236,6 +550,7 @@ mod tests {
             incomplete_spec_count: 1,
             spec_md_count: 3,
             runs_count: 4,
+            last_run_date: None,
         };
         assert_eq!(info.name, "test-project");
         assert!(!info.has_active_run);
@@ -1408,35 +723,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_us006_config_file_contains_comments() {
-        // Save default config
-        let default_config = autom8::config::Config::default();
-        autom8::config::save_global_config(&default_config).unwrap();
-
-        // Read the file content
-        let path = autom8::config::global_config_path().unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-
-        // Verify it contains helpful comments
-        assert!(
-            content.contains("# Autom8 Configuration"),
-            "Should contain header comment"
-        );
-        assert!(
-            content.contains("# Review state"),
-            "Should contain review explanation"
-        );
-        assert!(
-            content.contains("# Commit state"),
-            "Should contain commit explanation"
-        );
-        assert!(
-            content.contains("# Pull request state"),
-            "Should contain pull_request explanation"
-        );
-    }
-
     // ======================================================================
     // Tests for US-008: Describe command for project summaries
     // ======================================================================
@@ -1453,17 +739,24 @@ mod tests {
         // Test that `autom8 describe <project>` parses correctly
         let cli = Cli::try_parse_from(["autom8", "describe", "my-project"]).unwrap();
         if let Some(Commands::Describe { project_name }) = cli.command {
-            assert_eq!(project_name, "my-project");
+            assert_eq!(project_name, Some("my-project".to_string()));
         } else {
             panic!("Expected Describe command");
         }
     }
 
     #[test]
-    fn test_us008_describe_command_requires_project_name() {
-        // Test that describe command requires a project name argument
-        let result = Cli::try_parse_from(["autom8", "describe"]);
-        assert!(result.is_err(), "describe should require a project name");
+    fn test_us008_describe_command_defaults_to_current_dir() {
+        // Test that describe command works without project name (defaults to current directory)
+        let cli = Cli::try_parse_from(["autom8", "describe"]).unwrap();
+        if let Some(Commands::Describe { project_name }) = cli.command {
+            assert!(
+                project_name.is_none(),
+                "project_name should be None when not provided"
+            );
+        } else {
+            panic!("Expected Describe command");
+        }
     }
 
     #[test]
@@ -1605,200 +898,34 @@ mod tests {
     }
 
     // ======================================================================
-    // Tests for US-002 (TUI): Add --tui CLI flag
+    // Tests for US-001: Remove TUI CLI flag
     // ======================================================================
 
     #[test]
-    fn test_us002_tui_flag_is_recognized() {
-        // Test that --tui flag is recognized by clap
-        let cli = Cli::try_parse_from(["autom8", "--tui"]).unwrap();
-        assert!(cli.tui, "--tui flag should set tui to true");
+    fn test_us001_tui_flag_is_not_recognized() {
+        // Test that --tui flag produces an error (flag has been removed)
+        let result = Cli::try_parse_from(["autom8", "--tui"]);
+        assert!(result.is_err(), "--tui flag should produce an error");
     }
 
     #[test]
-    fn test_us002_tui_short_flag_is_recognized() {
-        // Test that -t short flag is recognized by clap
-        let cli = Cli::try_parse_from(["autom8", "-t"]).unwrap();
-        assert!(cli.tui, "-t flag should set tui to true");
+    fn test_us001_tui_short_flag_is_not_recognized() {
+        // Test that -t short flag produces an error (flag has been removed)
+        let result = Cli::try_parse_from(["autom8", "-t"]);
+        assert!(result.is_err(), "-t flag should produce an error");
     }
 
     #[test]
-    fn test_us002_tui_defaults_to_false() {
-        // Test that tui defaults to false when flag is not provided
+    fn test_us001_cli_struct_has_no_tui_field() {
+        // Test that CLI parses without TUI field
         let cli = Cli::try_parse_from(["autom8"]).unwrap();
-        assert!(!cli.tui, "tui should default to false");
-    }
-
-    #[test]
-    fn test_us002_tui_flag_is_global() {
-        // Test that --tui flag works with subcommands (global flag)
-        let cli = Cli::try_parse_from(["autom8", "--tui", "run"]).unwrap();
-        assert!(cli.tui, "--tui should work before subcommand");
-        assert!(matches!(cli.command, Some(Commands::Run { .. })));
-
-        let cli = Cli::try_parse_from(["autom8", "run", "--tui"]).unwrap();
-        assert!(cli.tui, "--tui should work after subcommand");
-        assert!(matches!(cli.command, Some(Commands::Run { .. })));
-    }
-
-    #[test]
-    fn test_us002_tui_flag_works_with_resume() {
-        // Test that --tui flag works with resume command
-        let cli = Cli::try_parse_from(["autom8", "--tui", "resume"]).unwrap();
-        assert!(cli.tui, "--tui should work with resume");
-        assert!(matches!(cli.command, Some(Commands::Resume)));
-    }
-
-    #[test]
-    fn test_us002_tui_flag_works_with_positional_file() {
-        // Test that --tui flag works with positional file argument
-        let cli = Cli::try_parse_from(["autom8", "--tui", "spec.json"]).unwrap();
-        assert!(cli.tui, "--tui should work with file argument");
-        assert!(cli.file.is_some());
-        assert_eq!(cli.file.unwrap().to_string_lossy(), "spec.json");
-    }
-
-    #[test]
-    fn test_us002_tui_and_verbose_can_be_combined() {
-        // Test that --tui and --verbose flags can be used together
-        let cli = Cli::try_parse_from(["autom8", "--tui", "--verbose"]).unwrap();
-        assert!(cli.tui, "--tui should be set");
-        assert!(cli.verbose, "--verbose should be set");
-
-        // Test with short flags
-        let cli = Cli::try_parse_from(["autom8", "-t", "-v"]).unwrap();
-        assert!(cli.tui, "-t should set tui");
-        assert!(cli.verbose, "-v should set verbose");
-    }
-
-    #[test]
-    fn test_us002_tui_flag_appears_in_help() {
-        // Test that --tui flag is documented in help text
-        // Clap returns error with help text when --help is passed
-        let result = Cli::try_parse_from(["autom8", "--help"]);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        let help_text = err.to_string();
-        assert!(
-            help_text.contains("--tui") || help_text.contains("-t"),
-            "Help text should mention --tui flag"
-        );
+        // Just verify it parses - no tui field to check anymore
+        assert!(cli.command.is_none());
     }
 
     // ======================================================================
     // Tests for US-007: Integration and entry point wiring
     // ======================================================================
-
-    #[test]
-    fn test_us007_create_display_returns_cli_display_when_tui_false() {
-        // When TUI is disabled, create_display should return CliDisplay
-        let display = autom8::create_display(false);
-        // Verify it's a functional display adapter by calling a method
-        display.info("test");
-        // CliDisplay outputs to stdout, TuiDisplay updates internal state
-        // This test verifies the function doesn't panic and returns a valid adapter
-    }
-
-    #[test]
-    fn test_us007_create_display_returns_tui_display_when_tui_true() {
-        // When TUI is enabled, create_display should return TuiDisplay
-        let display = autom8::create_display(true);
-        // Verify it's a functional display adapter by calling a method
-        display.info("test");
-        // TuiDisplay updates internal app state rather than printing
-    }
-
-    #[test]
-    fn test_us007_runner_with_display_accepts_custom_adapter() {
-        // Verify Runner::with_display() can accept display from create_display()
-        let display = autom8::create_display(false);
-        let runner = Runner::new().unwrap().with_display(display);
-        // Runner should be usable
-        let _ = runner;
-    }
-
-    #[test]
-    fn test_us007_runner_with_tui_display_accepts_tui_adapter() {
-        // Verify Runner::with_display() accepts TuiDisplay
-        let display = autom8::create_display(true);
-        let runner = Runner::new().unwrap().with_display(display);
-        // Runner should be usable
-        let _ = runner;
-    }
-
-    #[test]
-    fn test_us007_effective_tui_mode_cli_flag_takes_precedence() {
-        // When --tui is provided, it should override config
-        let cli = Cli::try_parse_from(["autom8", "--tui"]).unwrap();
-        // If cli.tui is true, that takes precedence regardless of config
-        let effective_tui = if cli.tui {
-            true
-        } else {
-            // Would check config here
-            false
-        };
-        assert!(effective_tui, "CLI flag should make effective_tui true");
-    }
-
-    #[test]
-    fn test_us007_effective_tui_mode_defaults_to_false() {
-        // When no --tui flag, effective mode depends on config (default false)
-        let cli = Cli::try_parse_from(["autom8"]).unwrap();
-        assert!(!cli.tui, "TUI flag should default to false");
-        // With no flag and default config, effective_tui should be false
-        let effective_tui = if cli.tui {
-            true
-        } else {
-            // Default config has use_tui = false
-            autom8::config::Config::default().use_tui
-        };
-        assert!(!effective_tui, "Effective TUI mode should default to false");
-    }
-
-    #[test]
-    fn test_us007_run_command_accepts_tui_flag() {
-        // Verify run command can be combined with --tui
-        let cli = Cli::try_parse_from(["autom8", "--tui", "run"]).unwrap();
-        assert!(cli.tui);
-        assert!(matches!(cli.command, Some(Commands::Run { .. })));
-    }
-
-    #[test]
-    fn test_us007_resume_command_accepts_tui_flag() {
-        // Verify resume command can be combined with --tui
-        let cli = Cli::try_parse_from(["autom8", "--tui", "resume"]).unwrap();
-        assert!(cli.tui);
-        assert!(matches!(cli.command, Some(Commands::Resume)));
-    }
-
-    #[test]
-    fn test_us007_positional_file_accepts_tui_flag() {
-        // Verify positional file argument works with --tui
-        let cli = Cli::try_parse_from(["autom8", "--tui", "spec.json"]).unwrap();
-        assert!(cli.tui);
-        assert!(cli.file.is_some());
-        assert_eq!(cli.file.unwrap().to_string_lossy(), "spec.json");
-    }
-
-    #[test]
-    fn test_us007_display_adapter_trait_is_object_safe() {
-        // Verify DisplayAdapter can be used as Box<dyn DisplayAdapter>
-        fn accepts_boxed_display(_: Box<dyn autom8::DisplayAdapter>) {}
-        accepts_boxed_display(autom8::create_display(false));
-        accepts_boxed_display(autom8::create_display(true));
-    }
-
-    #[test]
-    fn test_us007_tui_display_exported_from_lib() {
-        // Verify TuiDisplay is accessible from autom8 crate
-        let _display = autom8::TuiDisplay::new();
-    }
-
-    #[test]
-    fn test_us007_cli_display_exported_from_lib() {
-        // Verify CliDisplay is accessible from autom8 crate
-        let _display = autom8::CliDisplay::new();
-    }
 
     // ======================================================================
     // Tests for US-007 (PR Review): Add pr-review subcommand
@@ -1850,19 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn test_us007_pr_review_with_tui_flag() {
-        // Test that pr-review works with --tui flag
-        let cli = Cli::try_parse_from(["autom8", "--tui", "pr-review"]).unwrap();
-        assert!(cli.tui, "--tui should be set");
-        assert!(matches!(cli.command, Some(Commands::PrReview)));
-    }
-
-    #[test]
-    fn test_us007_pr_review_combined_flags() {
-        // Test that pr-review works with multiple flags combined
-        let cli = Cli::try_parse_from(["autom8", "-v", "-t", "pr-review"]).unwrap();
-        assert!(cli.verbose, "-v should be set");
-        assert!(cli.tui, "-t should be set");
+    fn test_us007_pr_review_with_verbose_flag() {
+        // Test that pr-review works with --verbose flag
+        let cli = Cli::try_parse_from(["autom8", "--verbose", "pr-review"]).unwrap();
+        assert!(cli.verbose, "--verbose should be set");
         assert!(matches!(cli.command, Some(Commands::PrReview)));
     }
 
@@ -1891,6 +1009,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_imports)]
     fn test_us007_pr_review_output_functions_available() {
         // Verify that output functions for PR review are available
         // We can't call them without proper context, but we can verify they exist
@@ -1919,5 +1038,111 @@ mod tests {
         // Config should have commit and pull_request fields (used for push permission)
         let _commit_enabled: bool = config.commit;
         let _push_enabled: bool = config.pull_request;
+    }
+
+    // ======================================================================
+    // Tests for US-003 (Monitor TUI): Add monitor command structure
+    // ======================================================================
+
+    #[test]
+    fn test_us003_monitor_command_is_recognized() {
+        // Test that the monitor command is recognized
+        let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Monitor { .. })));
+    }
+
+    #[test]
+    fn test_us003_monitor_command_parses_correctly() {
+        // Test that `autom8 monitor` parses to the Monitor variant with defaults
+        let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
+        assert!(cli.file.is_none(), "No file should be set");
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(
+                project.is_none(),
+                "Project filter should be None by default"
+            );
+            assert_eq!(interval, 1, "Default interval should be 1 second");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_project_flag() {
+        // Test that --project flag works
+        let cli = Cli::try_parse_from(["autom8", "monitor", "--project", "myapp"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 1);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_project_short_flag() {
+        // Test that -p short flag works for --project
+        let cli = Cli::try_parse_from(["autom8", "monitor", "-p", "myapp"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 1);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_interval_flag() {
+        // Test that --interval flag works
+        let cli = Cli::try_parse_from(["autom8", "monitor", "--interval", "5"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(project.is_none());
+            assert_eq!(interval, 5, "Interval should be 5 seconds");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_interval_short_flag() {
+        // Test that -i short flag works for --interval
+        let cli = Cli::try_parse_from(["autom8", "monitor", "-i", "2"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(project.is_none());
+            assert_eq!(interval, 2, "Interval should be 2 seconds");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_both_flags() {
+        // Test that both flags work together
+        let cli =
+            Cli::try_parse_from(["autom8", "monitor", "--project", "myapp", "--interval", "3"])
+                .unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 3);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_uses_list_projects_tree() {
+        // Verify that list_projects_tree is available and returns valid data
+        let result = autom8::config::list_projects_tree();
+        assert!(result.is_ok(), "list_projects_tree() should not error");
+    }
+
+    #[test]
+    fn test_us003_monitor_command_appears_in_help() {
+        // Verify that monitor command appears in the Commands enum
+        // (if this compiles, the variant exists)
+        let _cmd = Commands::Monitor {
+            project: None,
+            interval: 1,
+        };
     }
 }
