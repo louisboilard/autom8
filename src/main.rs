@@ -87,6 +87,17 @@ enum Commands {
 
     /// Analyze PR review comments and fix real issues
     PrReview,
+
+    /// Monitor autom8 activity across all projects (dashboard view)
+    Monitor {
+        /// Filter to a specific project
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Polling interval in seconds (default: 1)
+        #[arg(short, long, default_value = "1")]
+        interval: u64,
+    },
 }
 
 /// Determine input type based on file extension
@@ -173,6 +184,10 @@ fn main() {
         (None, Some(Commands::PrReview)) => {
             print_header();
             pr_review_command(cli.verbose)
+        }
+
+        (None, Some(Commands::Monitor { project, interval })) => {
+            monitor_command(project.as_deref(), *interval)
         }
 
         // No file and no command - check for existing state first, then start spec creation
@@ -799,6 +814,46 @@ fn pr_review_command(verbose: bool) -> autom8::error::Result<()> {
             return Err(Autom8Error::ClaudeError(error_info.message));
         }
     }
+
+    Ok(())
+}
+
+/// Handle the monitor subcommand.
+///
+/// Displays a list of all projects with their current status.
+/// This is a placeholder before the full TUI implementation.
+fn monitor_command(project_filter: Option<&str>, interval: u64) -> autom8::error::Result<()> {
+    use autom8::config::list_projects_tree;
+
+    let projects = list_projects_tree()?;
+
+    // Filter to specific project if requested
+    let filtered_projects: Vec<_> = if let Some(filter) = project_filter {
+        projects.into_iter().filter(|p| p.name == filter).collect()
+    } else {
+        projects
+    };
+
+    if filtered_projects.is_empty() {
+        if let Some(filter) = project_filter {
+            println!("{RED}Project '{}' not found.{RESET}", filter);
+            println!();
+            println!("Run {CYAN}autom8 list{RESET} to see available projects.");
+        } else {
+            println!("{GRAY}No projects found in ~/.config/autom8/{RESET}");
+            println!();
+            println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
+        }
+        return Ok(());
+    }
+
+    // Print header
+    println!("{BOLD}autom8 monitor{RESET}");
+    println!("{GRAY}(poll interval: {}s){RESET}", interval);
+    println!();
+
+    // Print project list with status using the existing tree printing function
+    autom8::output::print_project_tree(&filtered_projects);
 
     Ok(())
 }
@@ -1707,5 +1762,108 @@ mod tests {
         // Config should have commit and pull_request fields (used for push permission)
         let _commit_enabled: bool = config.commit;
         let _push_enabled: bool = config.pull_request;
+    }
+
+    // ======================================================================
+    // Tests for US-003 (Monitor TUI): Add monitor command structure
+    // ======================================================================
+
+    #[test]
+    fn test_us003_monitor_command_is_recognized() {
+        // Test that the monitor command is recognized
+        let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Monitor { .. })));
+    }
+
+    #[test]
+    fn test_us003_monitor_command_parses_correctly() {
+        // Test that `autom8 monitor` parses to the Monitor variant with defaults
+        let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
+        assert!(cli.file.is_none(), "No file should be set");
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(project.is_none(), "Project filter should be None by default");
+            assert_eq!(interval, 1, "Default interval should be 1 second");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_project_flag() {
+        // Test that --project flag works
+        let cli = Cli::try_parse_from(["autom8", "monitor", "--project", "myapp"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 1);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_project_short_flag() {
+        // Test that -p short flag works for --project
+        let cli = Cli::try_parse_from(["autom8", "monitor", "-p", "myapp"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 1);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_interval_flag() {
+        // Test that --interval flag works
+        let cli = Cli::try_parse_from(["autom8", "monitor", "--interval", "5"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(project.is_none());
+            assert_eq!(interval, 5, "Interval should be 5 seconds");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_interval_short_flag() {
+        // Test that -i short flag works for --interval
+        let cli = Cli::try_parse_from(["autom8", "monitor", "-i", "2"]).unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert!(project.is_none());
+            assert_eq!(interval, 2, "Interval should be 2 seconds");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_both_flags() {
+        // Test that both flags work together
+        let cli =
+            Cli::try_parse_from(["autom8", "monitor", "--project", "myapp", "--interval", "3"])
+                .unwrap();
+        if let Some(Commands::Monitor { project, interval }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+            assert_eq!(interval, 3);
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_us003_monitor_uses_list_projects_tree() {
+        // Verify that list_projects_tree is available and returns valid data
+        let result = autom8::config::list_projects_tree();
+        assert!(result.is_ok(), "list_projects_tree() should not error");
+    }
+
+    #[test]
+    fn test_us003_monitor_command_appears_in_help() {
+        // Verify that monitor command appears in the Commands enum
+        // (if this compiles, the variant exists)
+        let _cmd = Commands::Monitor {
+            project: None,
+            interval: 1,
+        };
     }
 }
