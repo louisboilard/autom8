@@ -569,15 +569,56 @@ fn list_tree_command() -> autom8::error::Result<()> {
 fn describe_command(project_name: &str) -> autom8::error::Result<()> {
     use autom8::output::print_project_description;
 
+    // If no project name passed, try to use current directory
+    let project_name = if project_name.is_empty() {
+        let current = autom8::config::current_project_name()?;
+
+        if autom8::config::project_exists(&current)? {
+            println!(
+                "{GRAY}No project specified, using current directory: {CYAN}{}{RESET}",
+                current
+            );
+            println!();
+            current
+        } else {
+            // Current directory is not an autom8 project - show helpful error
+            println!("{RED}No project specified.{RESET}");
+            println!();
+            println!(
+                "The current directory {CYAN}{}{RESET} is not an autom8 project.",
+                current
+            );
+            println!();
+
+            // List available projects
+            let projects = autom8::config::list_projects()?;
+            if projects.is_empty() {
+                println!("{GRAY}No projects have been created yet.{RESET}");
+                println!();
+                println!("Run {CYAN}autom8{RESET} in a project directory to create a project.");
+            } else {
+                println!("{BOLD}Available projects:{RESET}");
+                for project in &projects {
+                    println!("  - {}", project);
+                }
+                println!();
+                println!("Run {CYAN}autom8 describe <project-name>{RESET} to describe a project.");
+            }
+            return Ok(());
+        }
+    } else {
+        project_name.to_string()
+    };
+
     // Check if project exists
-    match autom8::config::get_project_description(project_name)? {
+    match autom8::config::get_project_description(&project_name)? {
         Some(desc) => {
             // If multiple specs exist and user might want to select one, handle that case
             if desc.specs.len() > 1 {
                 // Ask user which spec to describe
                 println!(
                     "{YELLOW}Multiple specs found for project '{}'{RESET}",
-                    project_name
+                    &project_name
                 );
                 println!();
 
@@ -619,11 +660,11 @@ fn describe_command(project_name: &str) -> autom8::error::Result<()> {
         }
         None => {
             // Project doesn't exist
-            println!("{RED}Project '{}' not found.{RESET}", project_name);
+            println!("{RED}Project '{}' not found.{RESET}", &project_name);
             println!();
             println!(
                 "The project directory {CYAN}~/.config/autom8/{}{RESET} does not exist.",
-                project_name
+                &project_name
             );
             println!();
 
