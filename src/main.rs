@@ -81,8 +81,8 @@ enum Commands {
 
     /// Show detailed information about a specific project
     Describe {
-        /// The project name to describe
-        project_name: String,
+        /// The project name to describe (defaults to current directory)
+        project_name: Option<String>,
     },
 
     /// Analyze PR review comments and fix real issues
@@ -126,8 +126,11 @@ fn main() {
     };
 
     // Ensure project config directory exists for commands that need it
-    // (Skip for init command since it has its own config directory handling)
-    if !matches!(&cli.command, Some(Commands::Init)) {
+    // (Skip for init and describe commands since they have their own config directory handling)
+    if !matches!(
+        &cli.command,
+        Some(Commands::Init) | Some(Commands::Describe { .. })
+    ) {
         if let Err(e) = autom8::config::ensure_project_config_dir() {
             print_error(&format!("Failed to create project config directory: {}", e));
             std::process::exit(1);
@@ -179,7 +182,9 @@ fn main() {
 
         (None, Some(Commands::List)) => list_tree_command(),
 
-        (None, Some(Commands::Describe { project_name })) => describe_command(project_name),
+        (None, Some(Commands::Describe { project_name })) => {
+            describe_command(project_name.as_deref().unwrap_or(""))
+        }
 
         (None, Some(Commands::PrReview)) => {
             print_header();
@@ -1454,17 +1459,24 @@ mod tests {
         // Test that `autom8 describe <project>` parses correctly
         let cli = Cli::try_parse_from(["autom8", "describe", "my-project"]).unwrap();
         if let Some(Commands::Describe { project_name }) = cli.command {
-            assert_eq!(project_name, "my-project");
+            assert_eq!(project_name, Some("my-project".to_string()));
         } else {
             panic!("Expected Describe command");
         }
     }
 
     #[test]
-    fn test_us008_describe_command_requires_project_name() {
-        // Test that describe command requires a project name argument
-        let result = Cli::try_parse_from(["autom8", "describe"]);
-        assert!(result.is_err(), "describe should require a project name");
+    fn test_us008_describe_command_defaults_to_current_dir() {
+        // Test that describe command works without project name (defaults to current directory)
+        let cli = Cli::try_parse_from(["autom8", "describe"]).unwrap();
+        if let Some(Commands::Describe { project_name }) = cli.command {
+            assert!(
+                project_name.is_none(),
+                "project_name should be None when not provided"
+            );
+        } else {
+            panic!("Expected Describe command");
+        }
     }
 
     #[test]
