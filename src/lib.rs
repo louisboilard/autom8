@@ -1,4 +1,28 @@
+//! autom8 - CLI tool for orchestrating Claude-powered development.
+//!
+//! autom8 bridges the gap between product requirements (specs) and working code
+//! by driving Claude through iterative implementation of user stories.
+//!
+//! # Core Workflow
+//!
+//! 1. Define features as structured user stories with acceptance criteria
+//! 2. autom8 orchestrates Claude to implement each story
+//! 3. Reviews for quality and iterates as needed
+//! 4. Commits changes and creates GitHub PRs
+//!
+//! # Modules
+//!
+//! - [`commands`] - CLI command handlers
+//! - [`runner`] - Main orchestration loop
+//! - [`claude`] - Claude CLI integration
+//! - [`gh`] - GitHub CLI integration
+//! - [`output`] - Terminal output formatting
+//! - [`state`] - State machine and persistence
+//! - [`config`] - Configuration management
+//! - [`spec`] - Spec/user story structures
+
 pub mod claude;
+pub mod commands;
 pub mod config;
 pub mod display;
 pub mod error;
