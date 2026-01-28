@@ -5,7 +5,7 @@
 use std::fs;
 
 use crate::error::Result;
-use crate::output::{GREEN, GRAY, RESET};
+use crate::output::{GRAY, GREEN, RESET};
 use crate::prompt;
 use crate::state::StateManager;
 
