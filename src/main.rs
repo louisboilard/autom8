@@ -114,6 +114,12 @@ fn detect_input_type(path: &Path) -> InputType {
     }
 }
 
+/// Ensure project config directory exists. Used by commands that need it.
+fn ensure_project_dir() -> autom8::error::Result<()> {
+    autom8::config::ensure_project_config_dir()?;
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -125,31 +131,19 @@ fn main() {
         }
     };
 
-    // Ensure project config directory exists for commands that need it
-    // (Skip for init and describe commands since they have their own config directory handling)
-    if !matches!(
-        &cli.command,
-        Some(Commands::Init) | Some(Commands::Describe { .. })
-    ) {
-        if let Err(e) = autom8::config::ensure_project_config_dir() {
-            print_error(&format!("Failed to create project config directory: {}", e));
-            std::process::exit(1);
-        }
-    }
-
     let result = match (&cli.file, &cli.command) {
         // Positional file argument takes precedence
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (None, Some(Commands::Run { spec, skip_review })) => {
+        (None, Some(Commands::Run { spec, skip_review })) => ensure_project_dir().and_then(|_| {
             runner = runner.with_skip_review(*skip_review);
             print_header();
             match detect_input_type(spec) {
                 InputType::Json => runner.run(spec),
                 InputType::Markdown => runner.run_from_spec(spec),
             }
-        }
+        }),
 
         (None, Some(Commands::Status { all, global })) => {
             print_header();
@@ -157,8 +151,8 @@ fn main() {
                 // Global status across all projects
                 global_status_command()
             } else {
-                // Local status for current project
-                match runner.status() {
+                // Local status for current project - needs project dir
+                ensure_project_dir().and_then(|_| match runner.status() {
                     Ok(Some(state)) => {
                         print_status(&state);
                         Ok(())
@@ -168,13 +162,13 @@ fn main() {
                         Ok(())
                     }
                     Err(e) => Err(e),
-                }
+                })
             }
         }
 
-        (None, Some(Commands::Resume)) => runner.resume(),
+        (None, Some(Commands::Resume)) => ensure_project_dir().and_then(|_| runner.resume()),
 
-        (None, Some(Commands::Clean)) => clean_spec_files(),
+        (None, Some(Commands::Clean)) => ensure_project_dir().and_then(|_| clean_spec_files()),
 
         (None, Some(Commands::Init)) => init_command(),
 
@@ -186,10 +180,10 @@ fn main() {
             describe_command(project_name.as_deref().unwrap_or(""))
         }
 
-        (None, Some(Commands::PrReview)) => {
+        (None, Some(Commands::PrReview)) => ensure_project_dir().and_then(|_| {
             print_header();
             pr_review_command(cli.verbose)
-        }
+        }),
 
         (None, Some(Commands::Monitor { project, interval })) => {
             monitor_command(project.as_deref(), *interval)
@@ -206,6 +200,8 @@ fn main() {
 }
 
 fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
+    ensure_project_dir()?;
+
     // Move file to config directory if not already there
     let move_result = autom8::config::move_to_config_dir(file)?;
 
@@ -230,11 +226,38 @@ fn run_with_file(runner: &Runner, file: &Path) -> autom8::error::Result<()> {
 
 /// Default command when running `autom8` with no arguments.
 ///
-/// First checks for an existing state file indicating work in progress.
+/// First checks if the project is initialized. If not, prompts the user.
+/// Then checks for an existing state file indicating work in progress.
 /// If state exists, proceeds to prompt the user (US-002).
 /// If no state exists, proceeds to start spec creation (US-003).
 fn default_command(verbose: bool) -> autom8::error::Result<()> {
     use autom8::state::StateManager;
+
+    // Check if this directory is already tracked by autom8
+    let project_name = autom8::config::current_project_name()?;
+    if !autom8::config::project_exists(&project_name)? {
+        // Project not initialized - ask user if they want to initialize
+        print_header();
+        println!(
+            "This directory ({CYAN}{}{RESET}) is not currently tracked by autom8.",
+            project_name
+        );
+        println!();
+
+        if prompt::confirm("Would you like to initialize it?", true) {
+            ensure_project_dir()?;
+            println!();
+            println!("{GREEN}Initialized.{RESET}");
+            println!();
+        } else {
+            println!();
+            println!("Exiting.");
+            return Ok(());
+        }
+    } else {
+        // Project exists, ensure directories are set up
+        ensure_project_dir()?;
+    }
 
     let state_manager = StateManager::new()?;
 
