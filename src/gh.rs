@@ -1102,18 +1102,14 @@ pub fn gather_pr_context(pr_number: u32) -> PRContextResult {
         Err(e) => return PRContextResult::Error(format!("Failed to get review comments: {}", e)),
     };
 
-    // Fetch conversation comments
-    let conversation_comments = match get_conversation_comments(pr_number) {
-        Ok(comments) => comments,
-        Err(e) => {
-            return PRContextResult::Error(format!("Failed to get conversation comments: {}", e))
-        }
-    };
+    // NOTE: We intentionally skip conversation comments (general PR comments).
+    // GitHub has no "resolved" concept for conversation comments, so they would
+    // always appear as "unresolved" and cause infinite loops where PR review
+    // keeps trying to address the same comments repeatedly.
+    // Only inline review comments (which can be marked as resolved) are processed.
 
-    // Combine inline and conversation comments into unified list
-    let mut unresolved_comments = Vec::new();
-    unresolved_comments.extend(review_comments);
-    unresolved_comments.extend(conversation_comments);
+    // Use only inline review comments (conversation comments excluded)
+    let unresolved_comments = review_comments;
 
     // Handle edge case: no unresolved comments
     if unresolved_comments.is_empty() {
