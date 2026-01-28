@@ -1009,6 +1009,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_imports)]
     fn test_us007_pr_review_output_functions_available() {
         // Verify that output functions for PR review are available
         // We can't call them without proper context, but we can verify they exist
