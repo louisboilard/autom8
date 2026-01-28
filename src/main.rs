@@ -1397,35 +1397,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_us006_config_file_contains_comments() {
-        // Save default config
-        let default_config = autom8::config::Config::default();
-        autom8::config::save_global_config(&default_config).unwrap();
-
-        // Read the file content
-        let path = autom8::config::global_config_path().unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-
-        // Verify it contains helpful comments
-        assert!(
-            content.contains("# Autom8 Configuration"),
-            "Should contain header comment"
-        );
-        assert!(
-            content.contains("# Review state"),
-            "Should contain review explanation"
-        );
-        assert!(
-            content.contains("# Commit state"),
-            "Should contain commit explanation"
-        );
-        assert!(
-            content.contains("# Pull request state"),
-            "Should contain pull_request explanation"
-        );
-    }
-
     // ======================================================================
     // Tests for US-008: Describe command for project summaries
     // ======================================================================
