@@ -136,7 +136,6 @@ pub struct Spec { ... }
 review = true       # Enable review step
 commit = true       # Auto-commit changes
 pull_request = true # Auto-create PR
-use_tui = false     # Use TUI vs CLI output
 ```
 
 **State persistence:** `.autom8/state.json` (per-project)

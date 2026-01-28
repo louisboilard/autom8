@@ -17,7 +17,7 @@ use autom8::output::{
 };
 use autom8::prompt;
 use autom8::prompts;
-use autom8::{create_display, Runner};
+use autom8::Runner;
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,11 +106,8 @@ fn detect_input_type(path: &Path) -> InputType {
 fn main() {
     let cli = Cli::parse();
 
-    // Create CLI display adapter (TUI mode has been removed)
-    let display = create_display(false);
-
     let mut runner = match Runner::new() {
-        Ok(r) => r.with_verbose(cli.verbose).with_display(display),
+        Ok(r) => r.with_verbose(cli.verbose),
         Err(e) => {
             print_error(&format!("Failed to initialize runner: {}", e));
             std::process::exit(1);
@@ -263,9 +260,7 @@ fn handle_existing_state(
             prompt::print_action("Resuming existing work...");
             println!();
 
-            // Create CLI display adapter
-            let display = create_display(false);
-            let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+            let runner = Runner::new()?.with_verbose(verbose);
             runner.resume()
         }
         1 => {
@@ -365,10 +360,8 @@ fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
-                        // Create CLI display adapter
-                        let display = create_display(false);
                         // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+                        let runner = Runner::new()?.with_verbose(verbose);
                         runner.run_from_spec(spec_path)
                     }
                     n => {
@@ -402,10 +395,8 @@ fn start_spec_creation(verbose: bool) -> autom8::error::Result<()> {
                         println!("{BOLD}Proceeding to implementation...{RESET}");
                         println!();
 
-                        // Create CLI display adapter
-                        let display = create_display(false);
                         // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose).with_display(display);
+                        let runner = Runner::new()?.with_verbose(verbose);
                         runner.run_from_spec(selected_spec)
                     }
                 }
@@ -1605,36 +1596,6 @@ mod tests {
     // ======================================================================
     // Tests for US-007: Integration and entry point wiring
     // ======================================================================
-
-    #[test]
-    fn test_us007_create_display_returns_cli_display() {
-        // create_display(false) should return CliDisplay
-        let display = autom8::create_display(false);
-        // Verify it's a functional display adapter by calling a method
-        display.info("test");
-    }
-
-    #[test]
-    fn test_us007_runner_with_display_accepts_custom_adapter() {
-        // Verify Runner::with_display() can accept display from create_display()
-        let display = autom8::create_display(false);
-        let runner = Runner::new().unwrap().with_display(display);
-        // Runner should be usable
-        let _ = runner;
-    }
-
-    #[test]
-    fn test_us007_display_adapter_trait_is_object_safe() {
-        // Verify DisplayAdapter can be used as Box<dyn DisplayAdapter>
-        fn accepts_boxed_display(_: Box<dyn autom8::DisplayAdapter>) {}
-        accepts_boxed_display(autom8::create_display(false));
-    }
-
-    #[test]
-    fn test_us007_cli_display_exported_from_lib() {
-        // Verify CliDisplay is accessible from autom8 crate
-        let _display = autom8::CliDisplay::new();
-    }
 
     // ======================================================================
     // Tests for US-007 (PR Review): Add pr-review subcommand
