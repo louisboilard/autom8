@@ -627,7 +627,11 @@ impl MonitorApp {
                 let (status_indicator, status_text, status_color) = if p.active_run.is_some() {
                     ("●", "Running".to_string(), Color::Green)
                 } else if let Some(last_run) = p.info.last_run_date {
-                    ("○", format!("Last run: {}", format_relative_time(last_run)), Color::DarkGray)
+                    (
+                        "○",
+                        format!("Last run: {}", format_relative_time(last_run)),
+                        Color::DarkGray,
+                    )
                 } else {
                     ("○", "Idle".to_string(), Color::DarkGray)
                 };
@@ -688,7 +692,9 @@ impl MonitorApp {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let help_text = match self.current_view {
-            View::ProjectList => " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit ",
+            View::ProjectList => {
+                " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit "
+            }
             _ => " Tab: switch view | ↑↓: navigate | Q: quit ",
         };
         let footer = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
@@ -1258,10 +1264,7 @@ mod tests {
         };
 
         assert!(info.last_run_date.is_some());
-        assert_eq!(
-            format_relative_time(info.last_run_date.unwrap()),
-            "2h ago"
-        );
+        assert_eq!(format_relative_time(info.last_run_date.unwrap()), "2h ago");
     }
 
     #[test]
