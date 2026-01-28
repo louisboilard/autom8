@@ -102,7 +102,10 @@ impl MonitorApp {
 
         // Filter by project if specified
         let filtered: Vec<_> = if let Some(ref filter) = self.project_filter {
-            tree_infos.into_iter().filter(|p| p.name == *filter).collect()
+            tree_infos
+                .into_iter()
+                .filter(|p| p.name == *filter)
+                .collect()
         } else {
             tree_infos
         };
@@ -182,6 +185,11 @@ impl MonitorApp {
         self.current_view
     }
 
+    /// Get the poll interval in seconds.
+    pub fn poll_interval(&self) -> u64 {
+        self.poll_interval
+    }
+
     /// Get available views based on current state.
     fn available_views(&self) -> Vec<View> {
         if self.has_active_runs {
@@ -254,7 +262,11 @@ impl MonitorApp {
         if active.is_empty() {
             let message = Paragraph::new("No active runs")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL).title(" Active Runs "));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Active Runs "),
+                );
             frame.render_widget(message, area);
             return;
         }
@@ -282,8 +294,11 @@ impl MonitorApp {
             })
             .collect();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Active Runs "));
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Active Runs "),
+        );
 
         frame.render_widget(list, area);
     }
@@ -307,11 +322,7 @@ impl MonitorApp {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let status_indicator = if p.active_run.is_some() {
-                    "●"
-                } else {
-                    "○"
-                };
+                let status_indicator = if p.active_run.is_some() { "●" } else { "○" };
                 let status_color = if p.active_run.is_some() {
                     Color::Green
                 } else {
@@ -330,7 +341,10 @@ impl MonitorApp {
                 };
 
                 let line = Line::from(vec![
-                    Span::styled(format!("{} ", status_indicator), Style::default().fg(status_color)),
+                    Span::styled(
+                        format!("{} ", status_indicator),
+                        Style::default().fg(status_color),
+                    ),
                     Span::styled(
                         &p.info.name,
                         if i == self.selected_index {
@@ -368,8 +382,7 @@ impl MonitorApp {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let help_text = " Tab: switch view | ↑↓: navigate | Q: quit ";
-        let footer = Paragraph::new(help_text)
-            .style(Style::default().fg(Color::DarkGray));
+        let footer = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, area);
     }
 }
