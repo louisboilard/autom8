@@ -2,7 +2,6 @@
 
 use std::process::Command;
 
-
 /// A single comment on a PR
 #[derive(Debug, Clone, PartialEq)]
 pub struct PRComment {
@@ -125,10 +124,7 @@ fn gather_unresolved_comments(pr_number: u32) -> Vec<PRComment> {
     let _output = Command::new("gh")
         .args([
             "api",
-            &format!(
-                "repos/{{owner}}/{{repo}}/pulls/{}/reviews",
-                pr_number
-            ),
+            &format!("repos/{{owner}}/{{repo}}/pulls/{}/reviews", pr_number),
             "--jq",
             ".[].body",
         ])
@@ -191,15 +187,17 @@ fn gather_unresolved_comments(pr_number: u32) -> Vec<PRComment> {
                     .get("path")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let line = thread.get("line").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let line = thread
+                    .get("line")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
                 let thread_id = thread
                     .get("id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                if let Some(thread_comments) = thread
-                    .pointer("/comments/nodes")
-                    .and_then(|v| v.as_array())
+                if let Some(thread_comments) =
+                    thread.pointer("/comments/nodes").and_then(|v| v.as_array())
                 {
                     for comment in thread_comments {
                         let author = comment

@@ -103,26 +103,20 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
     }
 
     // Check if PR already exists
-    match pr_exists_for_branch(&branch)? {
-        true => {
-            // PR exists - update description instead
-            if let Some(pr_number) = get_existing_pr_number(&branch)? {
-                return update_pr_description(spec, pr_number);
-            } else if let Some(url) = get_existing_pr_url(&branch)? {
-                return Ok(PRResult::AlreadyExists(url));
-            }
-            return Ok(PRResult::AlreadyExists(format!("PR exists for {}", branch)));
+    if pr_exists_for_branch(&branch)? {
+        // PR exists - update description instead
+        if let Some(pr_number) = get_existing_pr_number(&branch)? {
+            return update_pr_description(spec, pr_number);
+        } else if let Some(url) = get_existing_pr_url(&branch)? {
+            return Ok(PRResult::AlreadyExists(url));
         }
-        false => {}
+        return Ok(PRResult::AlreadyExists(format!("PR exists for {}", branch)));
     }
 
     // Ensure branch is pushed
     let push_result = ensure_branch_pushed(&branch)?;
-    match push_result {
-        PushResult::Error(e) => {
-            return Ok(PRResult::Error(format!("Failed to push branch: {}", e)));
-        }
-        _ => {}
+    if let PushResult::Error(e) = push_result {
+        return Ok(PRResult::Error(format!("Failed to push branch: {}", e)));
     }
 
     // Create the PR

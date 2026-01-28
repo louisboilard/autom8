@@ -36,7 +36,9 @@ pub enum BranchContextResult {
 pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
     let branch_name = match git::current_branch() {
         Ok(b) => b,
-        Err(e) => return BranchContextResult::Error(format!("Failed to get current branch: {}", e)),
+        Err(e) => {
+            return BranchContextResult::Error(format!("Failed to get current branch: {}", e))
+        }
     };
 
     // Try to find spec for this branch
@@ -55,10 +57,7 @@ pub fn gather_branch_context(show_warning: bool) -> BranchContextResult {
         }
         Err(e) => {
             if show_warning {
-                println!(
-                    "{YELLOW}Warning: Failed to load spec: {}{RESET}",
-                    e
-                );
+                println!("{YELLOW}Warning: Failed to load spec: {}{RESET}", e);
             }
             (None, None)
         }
@@ -103,10 +102,7 @@ pub fn find_spec_for_branch(branch: &str) -> Result<Option<(Spec, PathBuf)>> {
         .unwrap_or(branch);
 
     for spec_path in &specs {
-        let filename = spec_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let filename = spec_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
         // Check if spec filename matches branch suffix
         if filename.ends_with(branch_suffix)
