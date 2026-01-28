@@ -294,10 +294,12 @@ impl MonitorApp {
 
                 // Load spec to get progress information (gracefully handle errors)
                 let progress = active_run.as_ref().and_then(|run| {
-                    Spec::load(&run.spec_json_path).ok().map(|spec| RunProgress {
-                        completed: spec.completed_count(),
-                        total: spec.total_count(),
-                    })
+                    Spec::load(&run.spec_json_path)
+                        .ok()
+                        .map(|spec| RunProgress {
+                            completed: spec.completed_count(),
+                            total: spec.total_count(),
+                        })
                 });
 
                 ProjectData {
@@ -644,7 +646,13 @@ impl MonitorApp {
     }
 
     /// Render either a run detail or an error panel for a project
-    fn render_run_or_error(&self, frame: &mut Frame, area: Rect, project: &ProjectData, full: bool) {
+    fn render_run_or_error(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        project: &ProjectData,
+        full: bool,
+    ) {
         if let Some(ref error) = project.load_error {
             self.render_error_panel(frame, area, &project.info.name, error);
         } else {
@@ -698,7 +706,10 @@ impl MonitorApp {
                 let (state_str, state_clr) = if let Some(ref _error) = p.load_error {
                     ("Error", COLOR_ERROR)
                 } else if let Some(ref run) = p.active_run {
-                    (format_state(run.machine_state), state_color(run.machine_state))
+                    (
+                        format_state(run.machine_state),
+                        state_color(run.machine_state),
+                    )
                 } else {
                     ("Unknown", COLOR_DIM)
                 };
@@ -2161,7 +2172,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ProjectList;
         app.selected_index = 3; // Was valid when we had 4 projects
-        // Now only 2 projects
+                                // Now only 2 projects
         app.projects = vec![
             ProjectData {
                 info: ProjectTreeInfo {
@@ -2357,7 +2368,10 @@ mod tests {
         let (state_str, _) = if project_with_error.load_error.is_some() {
             ("Error", COLOR_ERROR)
         } else if let Some(ref run) = project_with_error.active_run {
-            (format_state(run.machine_state), state_color(run.machine_state))
+            (
+                format_state(run.machine_state),
+                state_color(run.machine_state),
+            )
         } else {
             ("Unknown", COLOR_DIM)
         };
