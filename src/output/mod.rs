@@ -48,8 +48,9 @@ pub use header::{
 pub use messages::{print_error, print_info, print_warning};
 pub use pr::{
     format_pr_for_selection, print_branch_switched, print_no_open_prs, print_pr_already_exists,
-    print_pr_detected, print_pr_skipped, print_pr_success, print_pr_updated, print_push_already_up_to_date,
-    print_push_success, print_pushing_branch, print_switching_branch,
+    print_pr_detected, print_pr_skipped, print_pr_success, print_pr_updated,
+    print_push_already_up_to_date, print_push_success, print_pushing_branch,
+    print_switching_branch,
 };
 pub use pr_review::{
     print_no_unresolved_comments, print_pr_comment, print_pr_comments_list, print_pr_commit_error,

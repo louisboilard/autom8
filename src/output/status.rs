@@ -53,7 +53,11 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
                 format!(
                     " {CYAN}{} incomplete spec{}{RESET}",
                     status.incomplete_spec_count,
-                    if status.incomplete_spec_count == 1 { "" } else { "s" }
+                    if status.incomplete_spec_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 )
             } else {
                 String::new()
@@ -406,7 +410,11 @@ pub fn print_commit_list(commits: &[crate::git::CommitInfo], max_display: usize)
         println!(
             "{GRAY}  ... and {} more commit{}{RESET}",
             commits.len() - max_display,
-            if commits.len() - max_display == 1 { "" } else { "s" }
+            if commits.len() - max_display == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
     println!();
