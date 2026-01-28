@@ -93,6 +93,19 @@ pub struct ProjectData {
     pub progress: Option<RunProgress>,
 }
 
+/// A single entry in the run history view.
+#[derive(Debug, Clone)]
+pub struct RunHistoryEntry {
+    /// The project this run belongs to
+    pub project_name: String,
+    /// The run state data
+    pub run: RunState,
+    /// Number of stories that were completed
+    pub completed_stories: usize,
+    /// Total number of stories in the spec
+    pub total_stories: usize,
+}
+
 /// Format a duration in seconds as a human-readable string (e.g., "5m 32s", "1h 5m")
 pub fn format_duration(started_at: DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -175,6 +188,8 @@ pub struct MonitorApp {
     project_filter: Option<String>,
     /// Cached project data
     projects: Vec<ProjectData>,
+    /// Cached run history entries (sorted by date, most recent first)
+    run_history: Vec<RunHistoryEntry>,
     /// Whether there are any active runs
     has_active_runs: bool,
     /// Whether the app should quit
@@ -183,6 +198,10 @@ pub struct MonitorApp {
     selected_index: usize,
     /// Project name to filter Run History view (set when pressing Enter on Project List)
     run_history_filter: Option<String>,
+    /// Scroll offset for run history view
+    history_scroll_offset: usize,
+    /// Whether to show the detail view for a selected run
+    show_run_detail: bool,
 }
 
 impl MonitorApp {
@@ -193,10 +212,13 @@ impl MonitorApp {
             poll_interval,
             project_filter,
             projects: Vec::new(),
+            run_history: Vec::new(),
             has_active_runs: false,
             should_quit: false,
             selected_index: 0,
             run_history_filter: None,
+            history_scroll_offset: 0,
+            show_run_detail: false,
         }
     }
 
@@ -252,6 +274,65 @@ impl MonitorApp {
             self.current_view = View::ProjectList;
         }
 
+        // Load run history
+        self.refresh_run_history()?;
+
+        Ok(())
+    }
+
+    /// Refresh run history from all projects.
+    fn refresh_run_history(&mut self) -> Result<()> {
+        let mut history: Vec<RunHistoryEntry> = Vec::new();
+
+        // Determine which projects to load history from
+        let project_names: Vec<String> = if let Some(ref filter) = self.run_history_filter {
+            // Filtered to a single project
+            vec![filter.clone()]
+        } else if let Some(ref filter) = self.project_filter {
+            // Using the global project filter
+            vec![filter.clone()]
+        } else {
+            // All projects
+            self.projects.iter().map(|p| p.info.name.clone()).collect()
+        };
+
+        // Load archived runs from each project
+        for project_name in project_names {
+            if let Ok(sm) = StateManager::for_project(&project_name) {
+                if let Ok(archived) = sm.list_archived() {
+                    for run in archived {
+                        // Try to load the spec to get story counts
+                        let (completed, total) = Spec::load(&run.spec_json_path)
+                            .map(|spec| (spec.completed_count(), spec.total_count()))
+                            .unwrap_or_else(|_| {
+                                // Fallback: count from iterations
+                                let completed = run
+                                    .iterations
+                                    .iter()
+                                    .filter(|i| i.status == crate::state::IterationStatus::Success)
+                                    .count();
+                                (completed, run.iterations.len().max(completed))
+                            });
+
+                        history.push(RunHistoryEntry {
+                            project_name: project_name.clone(),
+                            run,
+                            completed_stories: completed,
+                            total_stories: total,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by date, most recent first
+        history.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
+
+        // Limit to last 100 runs for performance
+        history.truncate(100);
+
+        self.run_history = history;
+
         Ok(())
     }
 
@@ -263,6 +344,17 @@ impl MonitorApp {
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: KeyCode) {
+        // Handle Escape to close detail view
+        if self.show_run_detail {
+            match key {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.show_run_detail = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.should_quit = true;
@@ -271,10 +363,17 @@ impl MonitorApp {
                 self.next_view();
                 // Clear run history filter when switching views with Tab
                 self.run_history_filter = None;
+                self.history_scroll_offset = 0;
             }
             KeyCode::Up => {
                 if self.selected_index > 0 {
                     self.selected_index -= 1;
+                    // Adjust scroll offset if needed
+                    if self.current_view == View::RunHistory
+                        && self.selected_index < self.history_scroll_offset
+                    {
+                        self.history_scroll_offset = self.selected_index;
+                    }
                 }
             }
             KeyCode::Down => {
@@ -286,7 +385,7 @@ impl MonitorApp {
                         .filter(|p| p.active_run.is_some())
                         .count()
                         .saturating_sub(1),
-                    View::RunHistory => 0, // TODO: Implement run history navigation
+                    View::RunHistory => self.run_history.len().saturating_sub(1),
                 };
                 if self.selected_index < max_index {
                     self.selected_index += 1;
@@ -294,6 +393,14 @@ impl MonitorApp {
             }
             KeyCode::Enter => {
                 self.handle_enter();
+            }
+            KeyCode::Esc => {
+                // In Run History view, clear filter and go back to unfiltered view
+                if self.current_view == View::RunHistory && self.run_history_filter.is_some() {
+                    self.run_history_filter = None;
+                    self.selected_index = 0;
+                    self.history_scroll_offset = 0;
+                }
             }
             _ => {}
         }
@@ -308,12 +415,24 @@ impl MonitorApp {
                     self.run_history_filter = Some(project.info.name.clone());
                     self.current_view = View::RunHistory;
                     self.selected_index = 0;
+                    self.history_scroll_offset = 0;
                 }
             }
-            View::ActiveRuns | View::RunHistory => {
-                // No action for now in other views
+            View::RunHistory => {
+                // Show detail view for selected run
+                if self.selected_index < self.run_history.len() {
+                    self.show_run_detail = true;
+                }
+            }
+            View::ActiveRuns => {
+                // No action for now
             }
         }
+    }
+
+    /// Check if run detail view is shown.
+    pub fn is_showing_run_detail(&self) -> bool {
+        self.show_run_detail
     }
 
     /// Get the current run history filter (project name).
@@ -671,35 +790,306 @@ impl MonitorApp {
     }
 
     fn render_run_history(&self, frame: &mut Frame, area: Rect) {
-        // Placeholder for run history - will be implemented in US-007
+        // Check if we should show the detail view
+        if self.show_run_detail {
+            self.render_run_detail_modal(frame, area);
+            return;
+        }
+
         let title = if let Some(ref project) = self.run_history_filter {
-            format!(" Run History: {} ", project)
+            format!(" Run History: {} ({}) ", project, self.run_history.len())
         } else {
-            " Run History ".to_string()
+            format!(" Run History ({}) ", self.run_history.len())
         };
 
-        let message = if self.run_history_filter.is_some() {
-            "Run history for this project (coming soon)"
-        } else {
-            "Run history view (coming soon)"
+        if self.run_history.is_empty() {
+            let message = if self.run_history_filter.is_some() {
+                "No runs found for this project"
+            } else {
+                "No run history found"
+            };
+            let paragraph = Paragraph::new(message)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(paragraph, area);
+            return;
+        }
+
+        // Calculate visible area (accounting for borders)
+        let inner_height = area.height.saturating_sub(2) as usize;
+
+        // Build list items
+        let items: Vec<ListItem> = self
+            .run_history
+            .iter()
+            .enumerate()
+            .skip(self.history_scroll_offset)
+            .take(inner_height)
+            .map(|(i, entry)| {
+                let is_selected = i == self.selected_index;
+
+                // Status indicator and color
+                let (status_indicator, status_color) = match entry.run.status {
+                    crate::state::RunStatus::Completed => ("✓", Color::Green),
+                    crate::state::RunStatus::Failed => ("✗", Color::Red),
+                    crate::state::RunStatus::Running => ("●", Color::Yellow),
+                };
+
+                // Format date/time
+                let date_str = entry.run.started_at.format("%Y-%m-%d %H:%M").to_string();
+
+                // Story count
+                let story_str = format!("{}/{}", entry.completed_stories, entry.total_stories);
+
+                // Duration if completed
+                let duration_str = if let Some(finished) = entry.run.finished_at {
+                    let duration = finished.signed_duration_since(entry.run.started_at);
+                    let secs = duration.num_seconds().max(0) as u64;
+                    let mins = secs / 60;
+                    let hours = secs / 3600;
+                    if hours > 0 {
+                        format!("{}h {}m", hours, (secs % 3600) / 60)
+                    } else if mins > 0 {
+                        format!("{}m {}s", mins, secs % 60)
+                    } else {
+                        format!("{}s", secs)
+                    }
+                } else {
+                    "—".to_string()
+                };
+
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                // Build line with project name (if unfiltered), date, status, stories, duration
+                let mut spans = vec![
+                    Span::styled(
+                        if is_selected { "▶ " } else { "  " },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!("{} ", status_indicator),
+                        Style::default().fg(status_color),
+                    ),
+                ];
+
+                // Show project name only if not filtered
+                if self.run_history_filter.is_none() {
+                    spans.push(Span::styled(
+                        format!("{:<16} ", truncate_string(&entry.project_name, 15)),
+                        name_style,
+                    ));
+                }
+
+                spans.extend([
+                    Span::styled(date_str, Style::default().fg(Color::Cyan)),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format!("Stories: {:<7}", story_str),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("  Duration: {}", duration_str),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+
+        frame.render_widget(list, area);
+    }
+
+    /// Render detailed view for a selected run history entry
+    fn render_run_detail_modal(&self, frame: &mut Frame, area: Rect) {
+        let entry = match self.run_history.get(self.selected_index) {
+            Some(e) => e,
+            None => return,
         };
 
-        let paragraph = Paragraph::new(message)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(paragraph, area);
+        let title = format!(" Run Details: {} ", entry.project_name);
+
+        // Create a centered modal area
+        let modal_area = centered_rect(80, 80, area);
+
+        // Clear background
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Black)),
+            modal_area,
+        );
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(Style::default().bg(Color::Black));
+
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        // Build detail content
+        let run = &entry.run;
+
+        // Status with color
+        let (status_str, status_color) = match run.status {
+            crate::state::RunStatus::Completed => ("Completed", Color::Green),
+            crate::state::RunStatus::Failed => ("Failed", Color::Red),
+            crate::state::RunStatus::Running => ("Running", Color::Yellow),
+        };
+
+        // Duration
+        let duration_str = if let Some(finished) = run.finished_at {
+            let duration = finished.signed_duration_since(run.started_at);
+            let secs = duration.num_seconds().max(0) as u64;
+            let mins = secs / 60;
+            let hours = secs / 3600;
+            if hours > 0 {
+                format!("{}h {}m {}s", hours, (secs % 3600) / 60, secs % 60)
+            } else if mins > 0 {
+                format!("{}m {}s", mins, secs % 60)
+            } else {
+                format!("{}s", secs)
+            }
+        } else {
+            "In progress".to_string()
+        };
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Status:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(status_str, Style::default().fg(status_color)),
+            ]),
+            Line::from(vec![
+                Span::styled("Started:    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Duration:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&duration_str, Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::styled("Branch:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&run.branch, Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(vec![
+                Span::styled("Stories:    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}/{} completed", entry.completed_stories, entry.total_stories),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Iterations:",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ];
+
+        // Add iteration details
+        for iter in &run.iterations {
+            let iter_status_color = match iter.status {
+                crate::state::IterationStatus::Success => Color::Green,
+                crate::state::IterationStatus::Failed => Color::Red,
+                crate::state::IterationStatus::Running => Color::Yellow,
+            };
+            let iter_status_str = match iter.status {
+                crate::state::IterationStatus::Success => "✓",
+                crate::state::IterationStatus::Failed => "✗",
+                crate::state::IterationStatus::Running => "●",
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{} ", iter_status_str),
+                    Style::default().fg(iter_status_color),
+                ),
+                Span::styled(&iter.story_id, Style::default().fg(Color::White)),
+            ]));
+
+            // Show work summary if available
+            if let Some(ref summary) = iter.work_summary {
+                let truncated = truncate_string(summary, 60);
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(truncated, Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Press Enter or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help_text = match self.current_view {
-            View::ProjectList => {
-                " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit "
+        let help_text = if self.show_run_detail {
+            " Enter/Esc: close detail view "
+        } else {
+            match self.current_view {
+                View::ProjectList => {
+                    " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit "
+                }
+                View::RunHistory => {
+                    if self.run_history_filter.is_some() {
+                        " Tab: switch view | ↑↓: navigate | Enter: details | Esc: clear filter | Q: quit "
+                    } else {
+                        " Tab: switch view | ↑↓: navigate | Enter: details | Q: quit "
+                    }
+                }
+                _ => " Tab: switch view | ↑↓: navigate | Q: quit ",
             }
-            _ => " Tab: switch view | ↑↓: navigate | Q: quit ",
         };
         let footer = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(footer, area);
     }
+}
+
+/// Truncate a string to a maximum length, adding "..." if truncated
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+/// Create a centered rectangle of given percentage width/height
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 /// Initialize the terminal for TUI mode.
@@ -1308,5 +1698,278 @@ mod tests {
         app.handle_key(KeyCode::Enter);
 
         assert_eq!(app.run_history_filter(), Some("second-project"));
+    }
+
+    // ===========================================
+    // US-007: Run History View Tests
+    // ===========================================
+
+    #[test]
+    fn test_run_history_entry_creation() {
+        use std::path::PathBuf;
+
+        let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let entry = RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run,
+            completed_stories: 3,
+            total_stories: 5,
+        };
+
+        assert_eq!(entry.project_name, "test-project");
+        assert_eq!(entry.completed_stories, 3);
+        assert_eq!(entry.total_stories, 5);
+    }
+
+    #[test]
+    fn test_monitor_app_new_initializes_run_history_empty() {
+        let app = MonitorApp::new(1, None);
+        assert!(app.run_history.is_empty());
+        assert_eq!(app.history_scroll_offset, 0);
+        assert!(!app.show_run_detail);
+    }
+
+    #[test]
+    fn test_run_history_navigation_with_arrow_keys() {
+        use std::path::PathBuf;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history = vec![
+            RunHistoryEntry {
+                project_name: "project-a".to_string(),
+                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                completed_stories: 1,
+                total_stories: 2,
+            },
+            RunHistoryEntry {
+                project_name: "project-b".to_string(),
+                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                completed_stories: 2,
+                total_stories: 3,
+            },
+            RunHistoryEntry {
+                project_name: "project-c".to_string(),
+                run: RunState::new(PathBuf::from("c.json"), "branch-c".to_string()),
+                completed_stories: 3,
+                total_stories: 4,
+            },
+        ];
+
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.selected_index, 2);
+
+        app.handle_key(KeyCode::Down);
+        // Should stay at max index
+        assert_eq!(app.selected_index, 2);
+
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.selected_index, 1);
+
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Up);
+        // Should stay at 0
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_enter_on_run_history_shows_detail() {
+        use std::path::PathBuf;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history = vec![RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run: RunState::new(PathBuf::from("test.json"), "test-branch".to_string()),
+            completed_stories: 1,
+            total_stories: 2,
+        }];
+
+        assert!(!app.show_run_detail);
+        assert!(!app.is_showing_run_detail());
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(app.show_run_detail);
+        assert!(app.is_showing_run_detail());
+    }
+
+    #[test]
+    fn test_esc_closes_detail_view() {
+        let mut app = MonitorApp::new(1, None);
+        app.show_run_detail = true;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(!app.show_run_detail);
+    }
+
+    #[test]
+    fn test_enter_closes_detail_view() {
+        let mut app = MonitorApp::new(1, None);
+        app.show_run_detail = true;
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(!app.show_run_detail);
+    }
+
+    #[test]
+    fn test_q_closes_detail_view_instead_of_quitting() {
+        let mut app = MonitorApp::new(1, None);
+        app.show_run_detail = true;
+
+        app.handle_key(KeyCode::Char('q'));
+
+        assert!(!app.show_run_detail);
+        assert!(!app.should_quit()); // Should NOT quit when closing detail
+    }
+
+    #[test]
+    fn test_esc_clears_run_history_filter() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("test-project".to_string());
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.run_history_filter.is_none());
+    }
+
+    #[test]
+    fn test_tab_resets_history_scroll_offset() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.history_scroll_offset = 10;
+
+        app.handle_key(KeyCode::Tab);
+
+        assert_eq!(app.history_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_enter_on_empty_run_history_does_not_show_detail() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history = vec![]; // Empty
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(!app.show_run_detail);
+    }
+
+    #[test]
+    fn test_truncate_string_short_string() {
+        let result = truncate_string("short", 10);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_truncate_string_exact_length() {
+        let result = truncate_string("exact", 5);
+        assert_eq!(result, "exact");
+    }
+
+    #[test]
+    fn test_truncate_string_long_string() {
+        let result = truncate_string("this is a very long string", 15);
+        assert_eq!(result, "this is a ve...");
+    }
+
+    #[test]
+    fn test_enter_from_project_list_resets_scroll_offset() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.history_scroll_offset = 5; // Should be reset
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "test-project".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+        }];
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.current_view, View::RunHistory);
+        assert_eq!(app.history_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_navigation_keys_ignored_when_detail_shown() {
+        let mut app = MonitorApp::new(1, None);
+        app.show_run_detail = true;
+        app.selected_index = 0;
+
+        // These should be ignored when detail is shown
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.selected_index, 0); // Unchanged
+
+        app.handle_key(KeyCode::Tab);
+        // View should not change
+        // (The detail was closed by Esc check earlier, but Tab is not handled in detail mode)
+    }
+
+    #[test]
+    fn test_run_history_entry_with_failed_status() {
+        use std::path::PathBuf;
+
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.transition_to(MachineState::Failed);
+
+        let entry = RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run,
+            completed_stories: 2,
+            total_stories: 5,
+        };
+
+        assert_eq!(entry.run.status, crate::state::RunStatus::Failed);
+    }
+
+    #[test]
+    fn test_run_history_entry_with_completed_status() {
+        use std::path::PathBuf;
+
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.transition_to(MachineState::Completed);
+
+        let entry = RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run,
+            completed_stories: 5,
+            total_stories: 5,
+        };
+
+        assert_eq!(entry.run.status, crate::state::RunStatus::Completed);
+        assert!(entry.run.finished_at.is_some());
+    }
+
+    #[test]
+    fn test_centered_rect() {
+        let area = Rect::new(0, 0, 100, 50);
+        let result = centered_rect(80, 60, area);
+
+        // Should be centered
+        assert!(result.x > 0);
+        assert!(result.y > 0);
+        assert!(result.width < area.width);
+        assert!(result.height < area.height);
     }
 }
