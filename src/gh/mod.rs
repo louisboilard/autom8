@@ -17,6 +17,7 @@ mod context;
 mod detection;
 mod format;
 mod pr;
+mod template;
 mod types;
 
 // Re-export all public types and functions
@@ -34,4 +35,5 @@ pub use pr::{
     create_pull_request, ensure_branch_pushed, is_gh_authenticated, is_gh_installed,
     update_pr_description,
 };
+pub use template::detect_pr_template;
 pub use types::{PRDetectionResult, PRResult, PullRequestInfo};
