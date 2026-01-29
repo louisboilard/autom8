@@ -23,6 +23,7 @@
 
 pub mod claude;
 pub mod commands;
+pub mod completion;
 pub mod config;
 pub mod display;
 pub mod error;

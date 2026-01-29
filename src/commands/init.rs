@@ -2,8 +2,9 @@
 //!
 //! Initializes the autom8 config directory structure for a project.
 
+use crate::completion;
 use crate::error::Result;
-use crate::output::{BOLD, CYAN, GRAY, GREEN, RESET};
+use crate::output::{BOLD, CYAN, GRAY, GREEN, RESET, YELLOW};
 
 /// Initialize autom8 configuration for the current project.
 ///
@@ -55,6 +56,38 @@ pub fn init_command() -> Result<()> {
     println!("  {CYAN}{}{RESET}", project_dir.display());
     println!("    ├── spec/  (spec markdown and JSON files)");
     println!("    └── runs/  (archived run states)");
+    // Install shell completions
+    println!();
+    println!("{BOLD}Shell completions:{RESET}");
+    match completion::install_completions() {
+        Ok(result) => {
+            println!(
+                "  {GREEN}Installed{RESET} {} completions to {}",
+                result.shell,
+                result.path.display()
+            );
+            if let Some(instructions) = result.setup_instructions {
+                println!();
+                println!("{YELLOW}Note:{RESET} {}", instructions);
+            }
+        }
+        Err(e) => {
+            // Don't fail init for completion errors - just inform the user
+            let msg = e.to_string();
+            if msg.contains("Unsupported shell") {
+                println!("  {YELLOW}Skipped{RESET} Shell completions not available for your shell");
+                println!("         Supported shells: bash, zsh, fish");
+            } else if msg.contains("$SHELL") {
+                println!("  {YELLOW}Skipped{RESET} Could not detect shell ($SHELL not set)");
+            } else {
+                println!(
+                    "  {YELLOW}Warning{RESET} Could not install completions: {}",
+                    e
+                );
+            }
+        }
+    }
+
     println!();
     println!("{BOLD}Next steps:{RESET}");
     println!("  Run {CYAN}autom8{RESET} to start creating a spec");

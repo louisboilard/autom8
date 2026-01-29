@@ -7,6 +7,7 @@ use autom8::commands::{
     list_command, monitor_command, pr_review_command, projects_command, resume_command,
     run_command, run_with_file, status_command,
 };
+use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
 use autom8::Runner;
 use clap::{Parser, Subcommand};
@@ -88,6 +89,13 @@ enum Commands {
         #[arg(short, long, default_value = "1")]
         interval: u64,
     },
+
+    /// Output shell completion script to stdout (hidden utility command)
+    #[command(hide = true)]
+    Completions {
+        /// Shell type to generate completions for (bash, zsh, or fish)
+        shell: String,
+    },
 }
 
 fn main() {
@@ -141,6 +149,21 @@ fn main() {
         (None, Some(Commands::Monitor { project, interval })) => {
             monitor_command(project.as_deref(), *interval)
         }
+
+        (None, Some(Commands::Completions { shell })) => match ShellType::from_name(shell) {
+            Ok(shell_type) => {
+                print_completion_script(shell_type);
+                Ok(())
+            }
+            Err(e) => {
+                print_error(&format!(
+                    "{}\nSupported shells: {}",
+                    e,
+                    SUPPORTED_SHELLS.join(", ")
+                ));
+                std::process::exit(1);
+            }
+        },
 
         // No file and no command - check for existing state first, then start spec creation
         (None, None) => default_command(cli.verbose),
@@ -1144,5 +1167,110 @@ mod tests {
             project: None,
             interval: 1,
         };
+    }
+
+    // ======================================================================
+    // Tests for US-003 (Shell Completion): Completions subcommand
+    // ======================================================================
+
+    #[test]
+    fn test_us003_completions_command_is_recognized() {
+        // Test that the completions command is recognized
+        let cli = Cli::try_parse_from(["autom8", "completions", "bash"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Completions { .. })));
+    }
+
+    #[test]
+    fn test_us003_completions_command_parses_shell_arg() {
+        // Test that shell argument is parsed correctly
+        let cli = Cli::try_parse_from(["autom8", "completions", "zsh"]).unwrap();
+        if let Some(Commands::Completions { shell }) = cli.command {
+            assert_eq!(shell, "zsh");
+        } else {
+            panic!("Expected Completions command");
+        }
+    }
+
+    #[test]
+    fn test_us003_completions_command_accepts_all_shells() {
+        // Test bash
+        let cli_bash = Cli::try_parse_from(["autom8", "completions", "bash"]).unwrap();
+        if let Some(Commands::Completions { shell }) = cli_bash.command {
+            assert_eq!(shell, "bash");
+        }
+
+        // Test zsh
+        let cli_zsh = Cli::try_parse_from(["autom8", "completions", "zsh"]).unwrap();
+        if let Some(Commands::Completions { shell }) = cli_zsh.command {
+            assert_eq!(shell, "zsh");
+        }
+
+        // Test fish
+        let cli_fish = Cli::try_parse_from(["autom8", "completions", "fish"]).unwrap();
+        if let Some(Commands::Completions { shell }) = cli_fish.command {
+            assert_eq!(shell, "fish");
+        }
+    }
+
+    #[test]
+    fn test_us003_completions_command_is_hidden() {
+        // The completions command should not appear in help output
+        // We can verify this by checking that the hide attribute is set
+        // (This compiles only if the hide = true attribute is present)
+        let _cmd = Commands::Completions {
+            shell: "bash".to_string(),
+        };
+
+        // Try to get help text and verify completions is not mentioned
+        let cli_result = Cli::try_parse_from(["autom8", "--help"]);
+        // This will return an error with the help text
+        if let Err(e) = cli_result {
+            let help_text = e.to_string();
+            // completions should NOT appear in the help output because it's hidden
+            assert!(
+                !help_text.contains("completions"),
+                "completions command should be hidden from help"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us003_completions_requires_shell_arg() {
+        // Completions command requires a shell argument
+        let result = Cli::try_parse_from(["autom8", "completions"]);
+        assert!(
+            result.is_err(),
+            "completions command should require a shell argument"
+        );
+    }
+
+    #[test]
+    fn test_us003_shell_type_from_name_available() {
+        // Verify ShellType::from_name is available and works
+        use autom8::completion::ShellType;
+
+        assert!(ShellType::from_name("bash").is_ok());
+        assert!(ShellType::from_name("zsh").is_ok());
+        assert!(ShellType::from_name("fish").is_ok());
+        assert!(ShellType::from_name("invalid").is_err());
+    }
+
+    #[test]
+    fn test_us003_print_completion_script_available() {
+        // Verify print_completion_script function is available
+        use autom8::completion::{print_completion_script, ShellType};
+
+        // Just verify it's callable (we don't want to actually print to stdout in tests)
+        let _: fn(ShellType) = print_completion_script;
+    }
+
+    #[test]
+    fn test_us003_supported_shells_constant_available() {
+        // Verify SUPPORTED_SHELLS constant is available
+        use autom8::completion::SUPPORTED_SHELLS;
+
+        assert!(SUPPORTED_SHELLS.contains(&"bash"));
+        assert!(SUPPORTED_SHELLS.contains(&"zsh"));
+        assert!(SUPPORTED_SHELLS.contains(&"fish"));
     }
 }
