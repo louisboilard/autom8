@@ -83,10 +83,7 @@ pub fn format_spec_for_template(spec: &Spec) -> String {
 
     for story in &spec.user_stories {
         let status = if story.passes { "[x]" } else { "[ ]" };
-        output.push_str(&format!(
-            "- {} **{}**: {}\n",
-            status, story.id, story.title
-        ));
+        output.push_str(&format!("- {} **{}**: {}\n", status, story.id, story.title));
         output.push_str(&format!("  {}\n", story.description));
 
         if !story.acceptance_criteria.is_empty() {
@@ -111,7 +108,10 @@ pub fn format_spec_for_template(spec: &Spec) -> String {
 pub fn build_gh_command(title: &str, pr_number: Option<u32>) -> String {
     match pr_number {
         Some(num) => format!("gh pr edit {} --body \"<filled template>\"", num),
-        None => format!("gh pr create --title \"{}\" --body \"<filled template>\"", title),
+        None => format!(
+            "gh pr create --title \"{}\" --body \"<filled template>\"",
+            title
+        ),
     }
 }
 
@@ -558,7 +558,10 @@ mod tests {
     fn test_extract_pr_url_from_simple_output() {
         let output = "https://github.com/owner/repo/pull/123";
         let url = extract_pr_url(output);
-        assert_eq!(url, Some("https://github.com/owner/repo/pull/123".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/pull/123".to_string())
+        );
     }
 
     #[test]
@@ -567,14 +570,20 @@ mod tests {
 Done!
 https://github.com/owner/repo/pull/456"#;
         let url = extract_pr_url(output);
-        assert_eq!(url, Some("https://github.com/owner/repo/pull/456".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/pull/456".to_string())
+        );
     }
 
     #[test]
     fn test_extract_pr_url_from_embedded_text() {
         let output = "PR created at https://github.com/owner/repo/pull/789 successfully";
         let url = extract_pr_url(output);
-        assert_eq!(url, Some("https://github.com/owner/repo/pull/789".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/pull/789".to_string())
+        );
     }
 
     #[test]
@@ -595,7 +604,10 @@ https://github.com/owner/repo/pull/456"#;
     fn test_extract_pr_url_handles_trailing_punctuation() {
         let output = "Created: https://github.com/owner/repo/pull/100.";
         let url = extract_pr_url(output);
-        assert_eq!(url, Some("https://github.com/owner/repo/pull/100".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/pull/100".to_string())
+        );
     }
 
     #[test]
@@ -604,7 +616,10 @@ https://github.com/owner/repo/pull/456"#;
         let output = r#"Opening https://github.com/owner/repo/pull/1
 Updated https://github.com/owner/repo/pull/2"#;
         let url = extract_pr_url(output);
-        assert_eq!(url, Some("https://github.com/owner/repo/pull/2".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/owner/repo/pull/2".to_string())
+        );
     }
 
     // ========================================================================

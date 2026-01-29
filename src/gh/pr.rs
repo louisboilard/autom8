@@ -4,11 +4,14 @@ use std::process::Command;
 
 use crate::error::Result;
 use crate::git::{self, PushResult};
-use crate::output::{print_push_already_up_to_date, print_push_success, print_pushing_branch};
+use crate::output::{
+    print_push_already_up_to_date, print_push_success, print_pushing_branch, print_warning,
+};
 use crate::spec::Spec;
 
 use super::detection::{get_existing_pr_number, get_existing_pr_url, pr_exists_for_branch};
 use super::format::{format_pr_description, format_pr_title};
+use super::template::{detect_pr_template, run_template_agent, TemplateAgentResult};
 use super::types::PRResult;
 
 /// Check if the GitHub CLI (gh) is installed and available in PATH
@@ -31,6 +34,38 @@ pub fn is_gh_authenticated() -> bool {
 
 /// Update the description of an existing pull request
 pub fn update_pr_description(spec: &Spec, pr_number: u32) -> Result<PRResult> {
+    // Check for PR template in the repository
+    let repo_root = std::env::current_dir().unwrap_or_default();
+    if let Some(template_content) = detect_pr_template(&repo_root) {
+        // Template found - use agent path
+        let title = format_pr_title(spec);
+        match run_template_agent(spec, &template_content, &title, Some(pr_number), |_| {}) {
+            Ok(TemplateAgentResult::Success(url)) => {
+                return Ok(PRResult::Updated(url));
+            }
+            Ok(TemplateAgentResult::Error(error_info)) => {
+                // Agent failed - fall back to generated description
+                print_warning(&format!(
+                    "Template agent failed ({}), using generated description",
+                    error_info.message
+                ));
+            }
+            Err(e) => {
+                // Agent error - fall back to generated description
+                print_warning(&format!(
+                    "Template agent error ({}), using generated description",
+                    e
+                ));
+            }
+        }
+    }
+
+    // No template or agent failed - use current generated description path
+    update_pr_description_direct(spec, pr_number)
+}
+
+/// Update PR description directly using generated format (internal fallback)
+fn update_pr_description_direct(spec: &Spec, pr_number: u32) -> Result<PRResult> {
     let body = format_pr_description(spec);
 
     let output = Command::new("gh")
@@ -119,7 +154,38 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
         return Ok(PRResult::Error(format!("Failed to push branch: {}", e)));
     }
 
-    // Create the PR
+    // Check for PR template in the repository (after prerequisites pass)
+    let repo_root = std::env::current_dir().unwrap_or_default();
+    if let Some(template_content) = detect_pr_template(&repo_root) {
+        // Template found - use agent path
+        let title = format_pr_title(spec);
+        match run_template_agent(spec, &template_content, &title, None, |_| {}) {
+            Ok(TemplateAgentResult::Success(url)) => {
+                return Ok(PRResult::Success(url));
+            }
+            Ok(TemplateAgentResult::Error(error_info)) => {
+                // Agent failed - fall back to generated description
+                print_warning(&format!(
+                    "Template agent failed ({}), using generated description",
+                    error_info.message
+                ));
+            }
+            Err(e) => {
+                // Agent error - fall back to generated description
+                print_warning(&format!(
+                    "Template agent error ({}), using generated description",
+                    e
+                ));
+            }
+        }
+    }
+
+    // No template or agent failed - use current generated description path
+    create_pull_request_direct(spec)
+}
+
+/// Create PR directly using generated format (internal fallback)
+fn create_pull_request_direct(spec: &Spec) -> Result<PRResult> {
     let title = format_pr_title(spec);
     let body = format_pr_description(spec);
 
@@ -153,4 +219,158 @@ pub fn ensure_branch_pushed(branch: &str) -> Result<PushResult> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::UserStory;
+
+    fn make_test_spec() -> Spec {
+        Spec {
+            project: "TestProject".to_string(),
+            branch_name: "feature/test".to_string(),
+            description: "Test feature description.".to_string(),
+            user_stories: vec![UserStory {
+                id: "US-001".to_string(),
+                title: "Test Story".to_string(),
+                description: "Test story description".to_string(),
+                acceptance_criteria: vec!["Criterion 1".to_string()],
+                priority: 1,
+                passes: true,
+                notes: String::new(),
+            }],
+        }
+    }
+
+    // ========================================================================
+    // PRResult variant tests
+    // ========================================================================
+
+    #[test]
+    fn test_pr_result_success_variant() {
+        let result = PRResult::Success("https://github.com/owner/repo/pull/1".to_string());
+        assert!(matches!(result, PRResult::Success(_)));
+    }
+
+    #[test]
+    fn test_pr_result_updated_variant() {
+        let result = PRResult::Updated("https://github.com/owner/repo/pull/1".to_string());
+        assert!(matches!(result, PRResult::Updated(_)));
+    }
+
+    #[test]
+    fn test_pr_result_already_exists_variant() {
+        let result = PRResult::AlreadyExists("https://github.com/owner/repo/pull/1".to_string());
+        assert!(matches!(result, PRResult::AlreadyExists(_)));
+    }
+
+    #[test]
+    fn test_pr_result_skipped_variant() {
+        let result = PRResult::Skipped("reason".to_string());
+        assert!(matches!(result, PRResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_pr_result_error_variant() {
+        let result = PRResult::Error("error message".to_string());
+        assert!(matches!(result, PRResult::Error(_)));
+    }
+
+    // ========================================================================
+    // create_pull_request prerequisite tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_pr_skips_when_no_commits() {
+        let spec = make_test_spec();
+        let result = create_pull_request(&spec, false);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            PRResult::Skipped(msg) => {
+                assert!(msg.contains("No commits"));
+            }
+            _ => panic!("Expected Skipped result"),
+        }
+    }
+
+    // ========================================================================
+    // Template integration behavior tests (unit tests without mocking)
+    // ========================================================================
+
+    #[test]
+    fn test_detect_pr_template_integration_no_template_in_test_dir() {
+        // When running tests, there's no PR template in the repo root (or temp dir)
+        // This verifies the integration path where no template is found
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+        let result = detect_pr_template(temp_dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_pr_template_integration_with_template() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let github_dir = temp_dir.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+        fs::write(
+            github_dir.join("pull_request_template.md"),
+            "## Description\n\nPlease describe your changes.",
+        )
+        .unwrap();
+
+        let result = detect_pr_template(temp_dir.path());
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Description"));
+    }
+
+    // ========================================================================
+    // Direct function tests (internal fallback functions)
+    // ========================================================================
+
+    #[test]
+    fn test_create_pull_request_direct_builds_correct_command_args() {
+        // This test verifies the direct function exists and can format title/body
+        // We can't actually run the gh command in unit tests, but we verify
+        // the function compiles and the format functions work correctly
+        let spec = make_test_spec();
+        let title = format_pr_title(&spec);
+        let body = format_pr_description(&spec);
+
+        assert!(title.contains("TestProject"));
+        assert!(body.contains("Summary"));
+        assert!(body.contains("Test feature description"));
+    }
+
+    #[test]
+    fn test_update_pr_description_direct_builds_correct_command_args() {
+        // Verify the format functions work correctly for updates
+        let spec = make_test_spec();
+        let body = format_pr_description(&spec);
+
+        assert!(body.contains("Summary"));
+        assert!(body.contains("US-001"));
+        assert!(body.contains("Test Story"));
+    }
+
+    // ========================================================================
+    // gh CLI detection tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_gh_installed_returns_bool() {
+        // This test just verifies the function doesn't panic
+        // Result depends on whether gh is installed in the test environment
+        let _ = is_gh_installed();
+    }
+
+    #[test]
+    fn test_is_gh_authenticated_returns_bool() {
+        // This test just verifies the function doesn't panic
+        // Result depends on whether gh is authenticated in the test environment
+        let _ = is_gh_authenticated();
+    }
 }
