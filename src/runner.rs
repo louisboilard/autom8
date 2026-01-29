@@ -567,6 +567,7 @@ impl Runner {
             Ok(ClaudeStoryResult {
                 outcome: ClaudeOutcome::AllStoriesComplete,
                 work_summary,
+                full_output,
             }) => self.handle_all_stories_complete_from_story(
                 state,
                 spec,
@@ -575,11 +576,13 @@ impl Runner {
                 breadcrumb,
                 story_results,
                 work_summary,
+                &full_output,
                 print_summary_fn,
             ),
             Ok(ClaudeStoryResult {
                 outcome: ClaudeOutcome::IterationComplete,
                 work_summary,
+                full_output,
             }) => self.handle_iteration_complete(
                 state,
                 spec_json_path,
@@ -587,6 +590,7 @@ impl Runner {
                 breadcrumb,
                 story_results,
                 work_summary,
+                &full_output,
             ),
             Ok(ClaudeStoryResult {
                 outcome: ClaudeOutcome::Error(error_info),
@@ -629,10 +633,15 @@ impl Runner {
         breadcrumb: &mut Breadcrumb,
         story_results: &mut Vec<StoryResult>,
         work_summary: Option<String>,
+        full_output: &str,
         print_summary_fn: &impl Fn(u32, &[StoryResult]) -> Result<()>,
     ) -> Result<LoopAction> {
         state.finish_iteration(IterationStatus::Success, String::new());
-        state.set_work_summary(work_summary);
+        state.set_work_summary(work_summary.clone());
+
+        // Capture story knowledge from git diff and agent output (US-006)
+        state.capture_story_knowledge(&story.id, full_output, None);
+        self.state_manager.save(state)?;
 
         let duration = state.current_iteration_duration();
         story_results.push(StoryResult {
@@ -701,9 +710,13 @@ impl Runner {
         breadcrumb: &mut Breadcrumb,
         story_results: &mut Vec<StoryResult>,
         work_summary: Option<String>,
+        full_output: &str,
     ) -> Result<LoopAction> {
         state.finish_iteration(IterationStatus::Success, String::new());
-        state.set_work_summary(work_summary);
+        state.set_work_summary(work_summary.clone());
+
+        // Capture story knowledge from git diff and agent output (US-006)
+        state.capture_story_knowledge(&story.id, full_output, None);
         self.state_manager.save(state)?;
 
         let duration = state.current_iteration_duration();
@@ -924,6 +937,9 @@ impl Runner {
 
             // Reset breadcrumb trail at start of each new story
             breadcrumb.reset();
+
+            // Capture pre-story state for git diff calculation (US-006)
+            state.capture_pre_story_state();
 
             // Start iteration
             print_state_transition(MachineState::PickingStory, MachineState::RunningClaude);

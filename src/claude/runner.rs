@@ -110,6 +110,7 @@ where
     Ok(ClaudeStoryResult {
         outcome,
         work_summary,
+        full_output: accumulated_text,
     })
 }
 
@@ -180,6 +181,33 @@ Files changed: [list key files]. [Brief description of functionality added/chang
 
 This helps provide context for subsequent tasks.
 
+## Structured Context (Optional)
+
+If helpful for future agents, include any of these optional context blocks:
+
+**Files worked with** (key files and their purpose):
+```
+<files-context>
+path/to/file.rs | Brief purpose description | [key_symbol1, key_symbol2]
+</files-context>
+```
+
+**Architectural decisions** (when you made significant choices):
+```
+<decisions>
+topic | choice made | rationale
+</decisions>
+```
+
+**Patterns established** (conventions future agents should follow):
+```
+<patterns>
+Description of pattern or convention
+</patterns>
+```
+
+These are optional - only include them when they add value for subsequent work.
+
 ## Project Context
 
 {spec_description}{previous_work}
@@ -231,5 +259,128 @@ mod tests {
         assert!(prompt.contains("US-001"));
         assert!(prompt.contains("Criterion 1"));
         assert!(!prompt.contains("Previous Work"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_structured_context_section() {
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "Test Story".into(),
+            description: "A test story".into(),
+            acceptance_criteria: vec!["Test criterion".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let spec_path = Path::new("/tmp/spec-test.json");
+
+        let prompt = build_prompt(&spec, &story, spec_path, None);
+        assert!(prompt.contains("## Structured Context (Optional)"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_files_context_instructions() {
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "Test Story".into(),
+            description: "A test story".into(),
+            acceptance_criteria: vec!["Test criterion".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let spec_path = Path::new("/tmp/spec-test.json");
+
+        let prompt = build_prompt(&spec, &story, spec_path, None);
+        assert!(prompt.contains("<files-context>"));
+        assert!(prompt.contains("</files-context>"));
+        assert!(prompt.contains("path/to/file.rs | Brief purpose description"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_decisions_instructions() {
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "Test Story".into(),
+            description: "A test story".into(),
+            acceptance_criteria: vec!["Test criterion".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let spec_path = Path::new("/tmp/spec-test.json");
+
+        let prompt = build_prompt(&spec, &story, spec_path, None);
+        assert!(prompt.contains("<decisions>"));
+        assert!(prompt.contains("</decisions>"));
+        assert!(prompt.contains("topic | choice made | rationale"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_patterns_instructions() {
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "Test Story".into(),
+            description: "A test story".into(),
+            acceptance_criteria: vec!["Test criterion".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let spec_path = Path::new("/tmp/spec-test.json");
+
+        let prompt = build_prompt(&spec, &story, spec_path, None);
+        assert!(prompt.contains("<patterns>"));
+        assert!(prompt.contains("</patterns>"));
+    }
+
+    #[test]
+    fn test_build_prompt_structured_context_is_optional() {
+        let spec = Spec {
+            project: "TestProject".into(),
+            branch_name: "test-branch".into(),
+            description: "A test project".into(),
+            user_stories: vec![],
+        };
+        let story = UserStory {
+            id: "US-001".into(),
+            title: "Test Story".into(),
+            description: "A test story".into(),
+            acceptance_criteria: vec!["Test criterion".into()],
+            priority: 1,
+            passes: false,
+            notes: String::new(),
+        };
+        let spec_path = Path::new("/tmp/spec-test.json");
+
+        let prompt = build_prompt(&spec, &story, spec_path, None);
+        // Instructions should make it clear that context is optional
+        assert!(prompt.contains("Optional"));
+        assert!(prompt.contains("optional"));
+        assert!(prompt.contains("only include them when they add value"));
     }
 }

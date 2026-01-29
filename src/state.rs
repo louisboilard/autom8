@@ -1,7 +1,11 @@
+use crate::claude::{
+    extract_decisions, extract_files_context, extract_patterns, Decision as AgentDecision,
+    FileContextEntry, Pattern as AgentPattern,
+};
 use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;
-use crate::knowledge::{FileChange, ProjectKnowledge, StoryChanges};
+use crate::knowledge::{Decision, FileChange, FileInfo, Pattern, ProjectKnowledge, StoryChanges};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -299,6 +303,166 @@ impl RunState {
         };
 
         self.knowledge.story_changes.push(story_changes);
+
+        // Clear pre_story_commit after recording
+        self.pre_story_commit = None;
+    }
+
+    /// Capture story knowledge after agent completion.
+    ///
+    /// This method combines two sources of truth:
+    /// 1. Git diff data for empirical knowledge of what files were created/modified
+    /// 2. Agent-provided semantic information (files context, decisions, patterns)
+    ///
+    /// The method:
+    /// - Gets git diff since `pre_story_commit` (if available)
+    /// - Extracts structured context from the agent's output
+    /// - Creates a `StoryChanges` record combining both sources
+    /// - Merges file info into the `knowledge.files` registry
+    /// - Appends decisions and patterns to knowledge
+    ///
+    /// For non-git projects, only agent-provided context is used.
+    ///
+    /// # Arguments
+    /// * `story_id` - The ID of the story that was just implemented
+    /// * `agent_output` - The full output from the Claude agent
+    /// * `commit_hash` - Optional commit hash if the changes were committed
+    pub fn capture_story_knowledge(
+        &mut self,
+        story_id: &str,
+        agent_output: &str,
+        commit_hash: Option<String>,
+    ) {
+        // Extract structured context from agent output
+        let files_context = extract_files_context(agent_output);
+        let agent_decisions = extract_decisions(agent_output);
+        let agent_patterns = extract_patterns(agent_output);
+
+        // Build a map of agent-provided context for enriching git diff data
+        let context_by_path: std::collections::HashMap<PathBuf, &FileContextEntry> = files_context
+            .iter()
+            .map(|fc| (fc.path.clone(), fc))
+            .collect();
+
+        let mut files_created = Vec::new();
+        let mut files_modified = Vec::new();
+        let mut files_deleted: Vec<PathBuf> = Vec::new();
+
+        // If we have a pre-story commit, calculate the diff
+        if let Some(ref base_commit) = self.pre_story_commit {
+            if git::is_git_repo() {
+                if let Ok(entries) = git::get_diff_since(base_commit) {
+                    for entry in entries {
+                        // Enrich with agent-provided context if available
+                        let (purpose, key_symbols) = context_by_path
+                            .get(&entry.path)
+                            .map(|fc| (Some(fc.purpose.clone()), fc.key_symbols.clone()))
+                            .unwrap_or((None, Vec::new()));
+
+                        let file_change = FileChange {
+                            path: entry.path.clone(),
+                            additions: entry.additions,
+                            deletions: entry.deletions,
+                            purpose,
+                            key_symbols,
+                        };
+
+                        match entry.status {
+                            git::DiffStatus::Added => files_created.push(file_change),
+                            git::DiffStatus::Modified => files_modified.push(file_change),
+                            git::DiffStatus::Deleted => files_deleted.push(entry.path),
+                        }
+                    }
+                }
+            }
+        }
+
+        // For non-git projects or when no diff available, use agent context directly
+        if files_created.is_empty() && files_modified.is_empty() && files_deleted.is_empty() {
+            // Create file changes from agent context only
+            for fc in &files_context {
+                // We can't know from agent context alone if a file was created vs modified,
+                // so we treat them as modified (safer assumption)
+                files_modified.push(FileChange {
+                    path: fc.path.clone(),
+                    additions: 0,
+                    deletions: 0,
+                    purpose: Some(fc.purpose.clone()),
+                    key_symbols: fc.key_symbols.clone(),
+                });
+            }
+        }
+
+        // Create and add story changes
+        let story_changes = StoryChanges {
+            story_id: story_id.to_string(),
+            files_created: files_created.clone(),
+            files_modified: files_modified.clone(),
+            files_deleted: files_deleted.clone(),
+            commit_hash,
+        };
+        self.knowledge.story_changes.push(story_changes);
+
+        // Merge file info into the files registry
+        for change in files_created.iter().chain(files_modified.iter()) {
+            let file_info = self
+                .knowledge
+                .files
+                .entry(change.path.clone())
+                .or_insert_with(|| FileInfo {
+                    purpose: change.purpose.clone().unwrap_or_default(),
+                    key_symbols: Vec::new(),
+                    touched_by: Vec::new(),
+                    line_count: 0,
+                });
+
+            // Update purpose if we have a new one
+            if let Some(ref purpose) = change.purpose {
+                file_info.purpose = purpose.clone();
+            }
+
+            // Merge key symbols (avoid duplicates)
+            for symbol in &change.key_symbols {
+                if !file_info.key_symbols.contains(symbol) {
+                    file_info.key_symbols.push(symbol.clone());
+                }
+            }
+
+            // Add story to touched_by if not already present
+            if !file_info.touched_by.contains(&story_id.to_string()) {
+                file_info.touched_by.push(story_id.to_string());
+            }
+
+            // Update line count if available
+            if change.additions > 0 {
+                file_info.line_count = file_info.line_count.saturating_add(change.additions);
+                file_info.line_count = file_info.line_count.saturating_sub(change.deletions);
+            }
+        }
+
+        // Remove deleted files from registry
+        for deleted_path in &files_deleted {
+            self.knowledge.files.remove(deleted_path);
+        }
+
+        // Append decisions to knowledge
+        for agent_decision in agent_decisions {
+            self.knowledge.decisions.push(Decision {
+                story_id: story_id.to_string(),
+                topic: agent_decision.topic,
+                choice: agent_decision.choice,
+                rationale: agent_decision.rationale,
+            });
+        }
+
+        // Append patterns to knowledge
+        for agent_pattern in agent_patterns {
+            self.knowledge.patterns.push(Pattern {
+                story_id: story_id.to_string(),
+                description: agent_pattern.description,
+                example_file: None, // Agent doesn't provide example file in pattern output
+            });
+        }
 
         // Clear pre_story_commit after recording
         self.pre_story_commit = None;
@@ -1453,5 +1617,288 @@ mod tests {
             state.knowledge.story_changes[0].commit_hash,
             Some("new_commit_hash".to_string())
         );
+    }
+
+    // ======================================================================
+    // Tests for US-006: capture_story_knowledge
+    // ======================================================================
+
+    #[test]
+    fn test_capture_story_knowledge_extracts_files_context() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let agent_output = r#"I implemented the feature.
+
+<files-context>
+src/main.rs | Application entry point | [main, run]
+src/lib.rs | Library exports | [Config, Runner]
+</files-context>
+
+Done!"#;
+
+        state.capture_story_knowledge("US-001", agent_output, None);
+
+        // Should have created story changes
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(state.knowledge.story_changes[0].story_id, "US-001");
+
+        // Files should be merged into the registry
+        assert_eq!(state.knowledge.files.len(), 2);
+        let main_info = state
+            .knowledge
+            .files
+            .get(&PathBuf::from("src/main.rs"))
+            .unwrap();
+        assert_eq!(main_info.purpose, "Application entry point");
+        assert_eq!(main_info.key_symbols, vec!["main", "run"]);
+        assert_eq!(main_info.touched_by, vec!["US-001"]);
+
+        let lib_info = state
+            .knowledge
+            .files
+            .get(&PathBuf::from("src/lib.rs"))
+            .unwrap();
+        assert_eq!(lib_info.purpose, "Library exports");
+        assert_eq!(lib_info.key_symbols, vec!["Config", "Runner"]);
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_extracts_decisions() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let agent_output = r#"I made some decisions.
+
+<decisions>
+Error handling | thiserror crate | Provides clean derive macros
+Database | SQLite | Embedded, no setup required
+</decisions>
+
+Done!"#;
+
+        state.capture_story_knowledge("US-001", agent_output, None);
+
+        // Should have extracted decisions
+        assert_eq!(state.knowledge.decisions.len(), 2);
+
+        assert_eq!(state.knowledge.decisions[0].story_id, "US-001");
+        assert_eq!(state.knowledge.decisions[0].topic, "Error handling");
+        assert_eq!(state.knowledge.decisions[0].choice, "thiserror crate");
+        assert_eq!(
+            state.knowledge.decisions[0].rationale,
+            "Provides clean derive macros"
+        );
+
+        assert_eq!(state.knowledge.decisions[1].story_id, "US-001");
+        assert_eq!(state.knowledge.decisions[1].topic, "Database");
+        assert_eq!(state.knowledge.decisions[1].choice, "SQLite");
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_extracts_patterns() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let agent_output = r#"I established some patterns.
+
+<patterns>
+Use Result<T, Error> for all fallible operations
+Prefer explicit error types over Box<dyn Error>
+</patterns>
+
+Done!"#;
+
+        state.capture_story_knowledge("US-001", agent_output, None);
+
+        // Should have extracted patterns
+        assert_eq!(state.knowledge.patterns.len(), 2);
+
+        assert_eq!(state.knowledge.patterns[0].story_id, "US-001");
+        assert_eq!(
+            state.knowledge.patterns[0].description,
+            "Use Result<T, Error> for all fallible operations"
+        );
+
+        assert_eq!(state.knowledge.patterns[1].story_id, "US-001");
+        assert_eq!(
+            state.knowledge.patterns[1].description,
+            "Prefer explicit error types over Box<dyn Error>"
+        );
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_with_empty_output() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Empty output should still create a story changes entry
+        state.capture_story_knowledge("US-001", "", None);
+
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(state.knowledge.story_changes[0].story_id, "US-001");
+        assert!(state.knowledge.story_changes[0].files_created.is_empty());
+        assert!(state.knowledge.story_changes[0].files_modified.is_empty());
+        assert!(state.knowledge.decisions.is_empty());
+        assert!(state.knowledge.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_with_commit_hash() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.capture_story_knowledge("US-001", "Some output", Some("abc123def".to_string()));
+
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(
+            state.knowledge.story_changes[0].commit_hash,
+            Some("abc123def".to_string())
+        );
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_clears_pre_story_commit() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.pre_story_commit = Some("old_commit".to_string());
+
+        state.capture_story_knowledge("US-001", "", None);
+
+        // pre_story_commit should be cleared after capture
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_merges_files_across_stories() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // First story touches main.rs
+        let output1 = r#"<files-context>
+src/main.rs | Entry point | [main]
+</files-context>"#;
+        state.capture_story_knowledge("US-001", output1, None);
+
+        // Second story also touches main.rs and adds lib.rs
+        let output2 = r#"<files-context>
+src/main.rs | Entry point with new feature | [main, new_feature]
+src/lib.rs | Library | [lib_fn]
+</files-context>"#;
+        state.capture_story_knowledge("US-002", output2, None);
+
+        // Should have 2 files in registry
+        assert_eq!(state.knowledge.files.len(), 2);
+
+        // main.rs should have both stories in touched_by
+        let main_info = state
+            .knowledge
+            .files
+            .get(&PathBuf::from("src/main.rs"))
+            .unwrap();
+        assert_eq!(main_info.touched_by, vec!["US-001", "US-002"]);
+
+        // Symbols should be merged (no duplicates)
+        assert!(main_info.key_symbols.contains(&"main".to_string()));
+        assert!(main_info.key_symbols.contains(&"new_feature".to_string()));
+
+        // Purpose should be updated to latest
+        assert_eq!(main_info.purpose, "Entry point with new feature");
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_full_workflow() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let agent_output = r#"I implemented the authentication feature.
+
+<work-summary>
+Files changed: src/auth.rs, src/main.rs. Added JWT authentication module.
+</work-summary>
+
+<files-context>
+src/auth.rs | JWT authentication module | [authenticate, verify_token]
+src/main.rs | Application entry | [main]
+</files-context>
+
+<decisions>
+Auth method | JWT | Stateless, scalable, well-supported
+</decisions>
+
+<patterns>
+Use Result<T, AuthError> for auth operations
+</patterns>
+
+Done!"#;
+
+        state.capture_story_knowledge("US-001", agent_output, Some("commit123".to_string()));
+
+        // Verify story changes
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(state.knowledge.story_changes[0].story_id, "US-001");
+        assert_eq!(
+            state.knowledge.story_changes[0].commit_hash,
+            Some("commit123".to_string())
+        );
+
+        // Verify files registry
+        assert_eq!(state.knowledge.files.len(), 2);
+        let auth_info = state
+            .knowledge
+            .files
+            .get(&PathBuf::from("src/auth.rs"))
+            .unwrap();
+        assert_eq!(auth_info.purpose, "JWT authentication module");
+
+        // Verify decisions
+        assert_eq!(state.knowledge.decisions.len(), 1);
+        assert_eq!(state.knowledge.decisions[0].topic, "Auth method");
+
+        // Verify patterns
+        assert_eq!(state.knowledge.patterns.len(), 1);
+        assert!(state.knowledge.patterns[0]
+            .description
+            .contains("AuthError"));
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_graceful_with_no_context() {
+        // Test graceful degradation when agent provides no structured context
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let agent_output = r#"I implemented the feature but didn't provide any structured context.
+Just plain text output without any special tags."#;
+
+        state.capture_story_knowledge("US-001", agent_output, None);
+
+        // Should still create story changes (empty)
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(state.knowledge.story_changes[0].story_id, "US-001");
+
+        // No files, decisions, or patterns
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.knowledge.decisions.is_empty());
+        assert!(state.knowledge.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_multiple_stories_accumulate() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Story 1
+        let output1 = r#"<decisions>
+Database | SQLite | Simple
+</decisions>"#;
+        state.capture_story_knowledge("US-001", output1, None);
+
+        // Story 2
+        let output2 = r#"<decisions>
+Cache | Redis | Fast
+</decisions>"#;
+        state.capture_story_knowledge("US-002", output2, None);
+
+        // Story 3
+        let output3 = r#"<patterns>
+Use connection pooling
+</patterns>"#;
+        state.capture_story_knowledge("US-003", output3, None);
+
+        // Should have accumulated all knowledge
+        assert_eq!(state.knowledge.story_changes.len(), 3);
+        assert_eq!(state.knowledge.decisions.len(), 2);
+        assert_eq!(state.knowledge.patterns.len(), 1);
     }
 }

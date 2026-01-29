@@ -70,6 +70,8 @@ pub struct ClaudeStoryResult {
     pub outcome: ClaudeOutcome,
     /// Extracted work summary from Claude's output, if present
     pub work_summary: Option<String>,
+    /// Full accumulated text output from Claude, used for knowledge extraction
+    pub full_output: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
