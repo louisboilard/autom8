@@ -614,6 +614,11 @@ impl StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that change the current directory
+    // This prevents race conditions when multiple tests try to change cwd concurrently
+    static CWD_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_run_state_has_review_iteration() {
@@ -1897,5 +1902,148 @@ Use connection pooling
         assert_eq!(state.knowledge.story_changes.len(), 3);
         assert_eq!(state.knowledge.decisions.len(), 2);
         assert_eq!(state.knowledge.patterns.len(), 1);
+    }
+
+    // ======================================================================
+    // Tests for US-009: Non-git project support
+    // ======================================================================
+
+    /// Integration test that verifies the system works in a non-git directory.
+    /// This test:
+    /// 1. Creates a temporary directory (not a git repo)
+    /// 2. Changes to that directory
+    /// 3. Verifies all git-dependent operations work without errors
+    /// 4. Restores the original directory
+    #[test]
+    fn test_system_works_in_non_git_directory() {
+        use std::env;
+
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = env::current_dir().unwrap();
+
+        // Change to the temp directory (not a git repo)
+        env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Verify we're not in a git repo
+        assert!(!git::is_git_repo(), "Temp directory should not be a git repo");
+
+        // Test 1: capture_pre_story_state should be a no-op
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.capture_pre_story_state();
+        assert!(
+            state.pre_story_commit.is_none(),
+            "pre_story_commit should be None in non-git directory"
+        );
+
+        // Test 2: record_story_changes should work (creates empty changes)
+        state.record_story_changes("US-001", Some("fake-commit".to_string()));
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert!(state.knowledge.story_changes[0].files_created.is_empty());
+        assert!(state.knowledge.story_changes[0].files_modified.is_empty());
+        assert!(state.knowledge.story_changes[0].files_deleted.is_empty());
+
+        // Test 3: capture_story_knowledge should work with agent context only
+        let agent_output = r#"<files-context>
+src/main.rs | Application entry | [main]
+</files-context>
+<decisions>
+Framework | Actix | Good performance
+</decisions>
+<patterns>
+Use async/await for all IO
+</patterns>"#;
+        state.capture_story_knowledge("US-002", agent_output, None);
+
+        // Should have used agent context
+        assert_eq!(state.knowledge.story_changes.len(), 2);
+        assert_eq!(state.knowledge.files.len(), 1);
+        assert_eq!(state.knowledge.decisions.len(), 1);
+        assert_eq!(state.knowledge.patterns.len(), 1);
+
+        // The file should be recorded from agent context (as modified since we can't determine)
+        let changes = &state.knowledge.story_changes[1];
+        assert_eq!(changes.files_modified.len(), 1);
+        assert_eq!(
+            changes.files_modified[0].path,
+            PathBuf::from("src/main.rs")
+        );
+
+        // Test 4: git diff functions should return empty results
+        let diff = git::get_diff_since("any-commit").unwrap();
+        assert!(diff.is_empty(), "get_diff_since should return empty in non-git");
+
+        let uncommitted = git::get_uncommitted_changes().unwrap();
+        assert!(
+            uncommitted.is_empty(),
+            "get_uncommitted_changes should return empty in non-git"
+        );
+
+        let new_files = git::get_new_files_since("any-commit").unwrap();
+        assert!(
+            new_files.is_empty(),
+            "get_new_files_since should return empty in non-git"
+        );
+
+        // Restore original directory
+        env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_capture_pre_story_state_no_op_in_non_git() {
+        use std::env;
+
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp_dir.path()).unwrap();
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.capture_pre_story_state();
+
+        // Should remain None - no error, just a no-op
+        assert!(state.pre_story_commit.is_none());
+
+        env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_capture_story_knowledge_uses_agent_context_only_in_non_git() {
+        use std::env;
+
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp_dir.path()).unwrap();
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Even with pre_story_commit set (which shouldn't happen, but test defensively)
+        state.pre_story_commit = Some("fake-commit".to_string());
+
+        let agent_output = r#"<files-context>
+src/lib.rs | Library module | [Config]
+</files-context>"#;
+        state.capture_story_knowledge("US-001", agent_output, None);
+
+        // Should use agent context only (git operations return empty)
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(state.knowledge.files.len(), 1);
+
+        // File comes from agent context, recorded as modified
+        let changes = &state.knowledge.story_changes[0];
+        assert_eq!(changes.files_modified.len(), 1);
+        assert_eq!(changes.files_modified[0].path, PathBuf::from("src/lib.rs"));
+
+        // pre_story_commit should be cleared
+        assert!(state.pre_story_commit.is_none());
+
+        env::set_current_dir(original_dir).unwrap();
     }
 }

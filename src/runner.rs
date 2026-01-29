@@ -557,7 +557,16 @@ impl Runner {
             self.verbose,
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
-            |callback| run_claude(spec, story, spec_json_path, &iterations, &knowledge, callback),
+            |callback| {
+                run_claude(
+                    spec,
+                    story,
+                    spec_json_path,
+                    &iterations,
+                    &knowledge,
+                    callback,
+                )
+            },
             |res| match res {
                 Ok(_) => Outcome::success("Implementation done"),
                 Err(e) => Outcome::failure(e.to_string()),
