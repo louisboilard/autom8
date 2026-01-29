@@ -136,6 +136,264 @@ pub fn latest_commit_short() -> Result<String> {
 }
 
 // ============================================================================
+// US-002: Git Diff Capture Functions
+// ============================================================================
+
+/// Status of a file in a git diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffStatus {
+    /// File was newly created
+    Added,
+    /// File was modified
+    Modified,
+    /// File was deleted
+    Deleted,
+}
+
+/// A single entry from a git diff operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffEntry {
+    /// Path to the changed file
+    pub path: std::path::PathBuf,
+    /// Number of lines added
+    pub additions: u32,
+    /// Number of lines deleted
+    pub deletions: u32,
+    /// The type of change (Added, Modified, Deleted)
+    pub status: DiffStatus,
+}
+
+impl DiffEntry {
+    /// Parse a single line of `git diff --numstat` output.
+    ///
+    /// Format: "additions\tdeletions\tfilepath"
+    /// Binary files show "-" for additions/deletions.
+    ///
+    /// Returns None if the line cannot be parsed.
+    pub fn from_numstat_line(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+
+        let additions = parts[0].parse().unwrap_or(0);
+        let deletions = parts[1].parse().unwrap_or(0);
+        let path = std::path::PathBuf::from(parts[2]);
+
+        // Determine status based on additions/deletions
+        // This is a heuristic - for truly accurate status we'd need --name-status
+        let status = if deletions == 0 && additions > 0 {
+            // Could be new file or modification - we'll refine this with --name-status
+            DiffStatus::Modified
+        } else if additions == 0 && deletions > 0 {
+            // Could be deleted or just lines removed - we'll refine this
+            DiffStatus::Modified
+        } else {
+            DiffStatus::Modified
+        };
+
+        Some(DiffEntry {
+            path,
+            additions,
+            deletions,
+            status,
+        })
+    }
+
+    /// Parse a line from `git diff --name-status` output.
+    ///
+    /// Format: "status\tfilepath" where status is A, M, D, R, C, etc.
+    ///
+    /// Returns the path and status if parseable.
+    fn parse_name_status_line(line: &str) -> Option<(std::path::PathBuf, DiffStatus)> {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let status_char = parts[0].chars().next()?;
+        let status = match status_char {
+            'A' => DiffStatus::Added,
+            'D' => DiffStatus::Deleted,
+            'M' | 'R' | 'C' | 'T' => DiffStatus::Modified,
+            _ => DiffStatus::Modified,
+        };
+
+        // For rename/copy, the path is in parts[2], otherwise parts[1]
+        let path = if status_char == 'R' || status_char == 'C' {
+            parts.get(2).map(|p| std::path::PathBuf::from(*p))?
+        } else {
+            parts.get(1).map(|p| std::path::PathBuf::from(*p))?
+        };
+
+        Some((path, status))
+    }
+}
+
+/// Get the full commit hash of HEAD.
+///
+/// # Returns
+/// * `Ok(String)` - The full 40-character commit hash
+/// * `Err` - If the git command fails (e.g., not in a git repo)
+pub fn get_head_commit() -> Result<String> {
+    let output = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
+
+    if !output.status.success() {
+        return Err(Autom8Error::GitError(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get file changes since a specific commit.
+///
+/// Uses `git diff --numstat` combined with `--name-status` to get accurate
+/// file change information including additions, deletions, and change type.
+///
+/// # Arguments
+/// * `base_commit` - The commit hash to compare against (e.g., "abc1234" or "HEAD~5")
+///
+/// # Returns
+/// * `Ok(Vec<DiffEntry>)` - List of file changes (empty if no changes or not a git repo)
+/// * `Err` - Only on IO errors, not on git command failures
+pub fn get_diff_since(base_commit: &str) -> Result<Vec<DiffEntry>> {
+    // First, check if we're in a git repo
+    if !is_git_repo() {
+        return Ok(Vec::new());
+    }
+
+    // Get numstat for additions/deletions
+    let numstat_output = Command::new("git")
+        .args(["diff", "--numstat", base_commit])
+        .output()?;
+
+    // Get name-status for accurate status info
+    let name_status_output = Command::new("git")
+        .args(["diff", "--name-status", base_commit])
+        .output()?;
+
+    // If either command fails, return empty (graceful degradation)
+    if !numstat_output.status.success() || !name_status_output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    // Build a map of path -> status from name-status output
+    let name_status_stdout = String::from_utf8_lossy(&name_status_output.stdout);
+    let status_map: std::collections::HashMap<std::path::PathBuf, DiffStatus> = name_status_stdout
+        .lines()
+        .filter_map(DiffEntry::parse_name_status_line)
+        .collect();
+
+    // Parse numstat output and apply accurate status
+    let numstat_stdout = String::from_utf8_lossy(&numstat_output.stdout);
+    let entries: Vec<DiffEntry> = numstat_stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut entry = DiffEntry::from_numstat_line(line)?;
+            // Override status with accurate info from name-status
+            if let Some(status) = status_map.get(&entry.path) {
+                entry.status = status.clone();
+            }
+            Some(entry)
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// Get uncommitted changes in the working directory.
+///
+/// This includes both staged and unstaged changes. Uses `git diff HEAD --numstat`
+/// to compare the working directory against HEAD.
+///
+/// # Returns
+/// * `Ok(Vec<DiffEntry>)` - List of uncommitted changes (empty if clean or not a git repo)
+/// * `Err` - Only on IO errors
+pub fn get_uncommitted_changes() -> Result<Vec<DiffEntry>> {
+    // First, check if we're in a git repo
+    if !is_git_repo() {
+        return Ok(Vec::new());
+    }
+
+    // Get numstat for additions/deletions (comparing HEAD to working directory)
+    let numstat_output = Command::new("git")
+        .args(["diff", "HEAD", "--numstat"])
+        .output()?;
+
+    // Get name-status for accurate status info
+    let name_status_output = Command::new("git")
+        .args(["diff", "HEAD", "--name-status"])
+        .output()?;
+
+    // If either command fails, return empty (graceful degradation)
+    if !numstat_output.status.success() || !name_status_output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    // Build a map of path -> status from name-status output
+    let name_status_stdout = String::from_utf8_lossy(&name_status_output.stdout);
+    let status_map: std::collections::HashMap<std::path::PathBuf, DiffStatus> = name_status_stdout
+        .lines()
+        .filter_map(DiffEntry::parse_name_status_line)
+        .collect();
+
+    // Parse numstat output and apply accurate status
+    let numstat_stdout = String::from_utf8_lossy(&numstat_output.stdout);
+    let entries: Vec<DiffEntry> = numstat_stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let mut entry = DiffEntry::from_numstat_line(line)?;
+            if let Some(status) = status_map.get(&entry.path) {
+                entry.status = status.clone();
+            }
+            Some(entry)
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// Get newly created files since a specific commit.
+///
+/// Returns only files that were added (not modified or deleted).
+///
+/// # Arguments
+/// * `base_commit` - The commit hash to compare against
+///
+/// # Returns
+/// * `Ok(Vec<PathBuf>)` - List of newly created file paths (empty if none or not a git repo)
+/// * `Err` - Only on IO errors
+pub fn get_new_files_since(base_commit: &str) -> Result<Vec<std::path::PathBuf>> {
+    // First, check if we're in a git repo
+    if !is_git_repo() {
+        return Ok(Vec::new());
+    }
+
+    // Get name-status with diff-filter=A (added files only)
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=A", base_commit])
+        .output()?;
+
+    // If command fails, return empty (graceful degradation)
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<std::path::PathBuf> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    Ok(files)
+}
+
+// ============================================================================
 // US-003: Branch Commit Gathering
 // ============================================================================
 
@@ -806,5 +1064,278 @@ mod tests {
         // This test runs in a git repo, should not error (even if nothing to stage)
         let result = stage_all_changes();
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // US-002: DiffStatus, DiffEntry and git diff capture tests
+    // ========================================================================
+
+    #[test]
+    fn test_diff_status_enum_variants() {
+        let added = DiffStatus::Added;
+        let modified = DiffStatus::Modified;
+        let deleted = DiffStatus::Deleted;
+
+        assert!(matches!(added, DiffStatus::Added));
+        assert!(matches!(modified, DiffStatus::Modified));
+        assert!(matches!(deleted, DiffStatus::Deleted));
+    }
+
+    #[test]
+    fn test_diff_status_clone() {
+        let original = DiffStatus::Added;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_diff_status_debug() {
+        let status = DiffStatus::Modified;
+        let debug = format!("{:?}", status);
+        assert!(debug.contains("Modified"));
+    }
+
+    #[test]
+    fn test_diff_status_equality() {
+        assert_eq!(DiffStatus::Added, DiffStatus::Added);
+        assert_eq!(DiffStatus::Modified, DiffStatus::Modified);
+        assert_eq!(DiffStatus::Deleted, DiffStatus::Deleted);
+
+        assert_ne!(DiffStatus::Added, DiffStatus::Modified);
+        assert_ne!(DiffStatus::Modified, DiffStatus::Deleted);
+        assert_ne!(DiffStatus::Added, DiffStatus::Deleted);
+    }
+
+    #[test]
+    fn test_diff_entry_creation() {
+        let entry = DiffEntry {
+            path: std::path::PathBuf::from("src/lib.rs"),
+            additions: 50,
+            deletions: 10,
+            status: DiffStatus::Modified,
+        };
+
+        assert_eq!(entry.path, std::path::PathBuf::from("src/lib.rs"));
+        assert_eq!(entry.additions, 50);
+        assert_eq!(entry.deletions, 10);
+        assert_eq!(entry.status, DiffStatus::Modified);
+    }
+
+    #[test]
+    fn test_diff_entry_clone() {
+        let original = DiffEntry {
+            path: std::path::PathBuf::from("src/test.rs"),
+            additions: 100,
+            deletions: 20,
+            status: DiffStatus::Added,
+        };
+
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_diff_entry_debug() {
+        let entry = DiffEntry {
+            path: std::path::PathBuf::from("src/main.rs"),
+            additions: 5,
+            deletions: 3,
+            status: DiffStatus::Modified,
+        };
+
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("DiffEntry"));
+        assert!(debug.contains("main.rs"));
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_basic() {
+        let line = "10\t5\tsrc/lib.rs";
+        let entry = DiffEntry::from_numstat_line(line);
+
+        assert!(entry.is_some());
+        let entry = entry.unwrap();
+        assert_eq!(entry.path, std::path::PathBuf::from("src/lib.rs"));
+        assert_eq!(entry.additions, 10);
+        assert_eq!(entry.deletions, 5);
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_zero_additions() {
+        let line = "0\t15\tsrc/deleted_lines.rs";
+        let entry = DiffEntry::from_numstat_line(line).unwrap();
+
+        assert_eq!(entry.additions, 0);
+        assert_eq!(entry.deletions, 15);
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_zero_deletions() {
+        let line = "25\t0\tsrc/new_lines.rs";
+        let entry = DiffEntry::from_numstat_line(line).unwrap();
+
+        assert_eq!(entry.additions, 25);
+        assert_eq!(entry.deletions, 0);
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_binary_file() {
+        // Binary files show "-" for additions/deletions
+        let line = "-\t-\timage.png";
+        let entry = DiffEntry::from_numstat_line(line).unwrap();
+
+        assert_eq!(entry.path, std::path::PathBuf::from("image.png"));
+        assert_eq!(entry.additions, 0);
+        assert_eq!(entry.deletions, 0);
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_path_with_spaces() {
+        let line = "5\t3\tpath/to/my file.rs";
+        let entry = DiffEntry::from_numstat_line(line).unwrap();
+
+        assert_eq!(entry.path, std::path::PathBuf::from("path/to/my file.rs"));
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_invalid_too_few_parts() {
+        let line = "10\t5";
+        let entry = DiffEntry::from_numstat_line(line);
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_invalid_empty() {
+        let line = "";
+        let entry = DiffEntry::from_numstat_line(line);
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_diff_entry_from_numstat_line_large_numbers() {
+        let line = "9999\t12345\tsrc/big_file.rs";
+        let entry = DiffEntry::from_numstat_line(line).unwrap();
+
+        assert_eq!(entry.additions, 9999);
+        assert_eq!(entry.deletions, 12345);
+    }
+
+    #[test]
+    fn test_diff_entry_parse_name_status_added() {
+        let line = "A\tsrc/new_file.rs";
+        let result = DiffEntry::parse_name_status_line(line);
+
+        assert!(result.is_some());
+        let (path, status) = result.unwrap();
+        assert_eq!(path, std::path::PathBuf::from("src/new_file.rs"));
+        assert_eq!(status, DiffStatus::Added);
+    }
+
+    #[test]
+    fn test_diff_entry_parse_name_status_modified() {
+        let line = "M\tsrc/changed_file.rs";
+        let result = DiffEntry::parse_name_status_line(line);
+
+        assert!(result.is_some());
+        let (path, status) = result.unwrap();
+        assert_eq!(path, std::path::PathBuf::from("src/changed_file.rs"));
+        assert_eq!(status, DiffStatus::Modified);
+    }
+
+    #[test]
+    fn test_diff_entry_parse_name_status_deleted() {
+        let line = "D\tsrc/removed_file.rs";
+        let result = DiffEntry::parse_name_status_line(line);
+
+        assert!(result.is_some());
+        let (path, status) = result.unwrap();
+        assert_eq!(path, std::path::PathBuf::from("src/removed_file.rs"));
+        assert_eq!(status, DiffStatus::Deleted);
+    }
+
+    #[test]
+    fn test_diff_entry_parse_name_status_renamed() {
+        // Rename format: R100\told_name.rs\tnew_name.rs
+        let line = "R100\told_name.rs\tnew_name.rs";
+        let result = DiffEntry::parse_name_status_line(line);
+
+        assert!(result.is_some());
+        let (path, status) = result.unwrap();
+        // For renames, we return the new path
+        assert_eq!(path, std::path::PathBuf::from("new_name.rs"));
+        assert_eq!(status, DiffStatus::Modified);
+    }
+
+    #[test]
+    fn test_diff_entry_parse_name_status_invalid_empty() {
+        let line = "";
+        let result = DiffEntry::parse_name_status_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_head_commit_returns_valid_hash() {
+        // This test runs in a git repo
+        let result = get_head_commit();
+        assert!(result.is_ok());
+
+        let hash = result.unwrap();
+        // Full hash should be 40 hexadecimal characters
+        assert_eq!(hash.len(), 40);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_get_diff_since_returns_vec() {
+        // Test that get_diff_since returns a valid Vec (may have entries if there are changes)
+        if let Ok(head) = get_head_commit() {
+            let result = get_diff_since(&head);
+            assert!(result.is_ok());
+            // We just verify it returns a valid Vec of DiffEntry
+            let entries = result.unwrap();
+            // Verify that any entries have valid fields
+            for entry in entries {
+                assert!(!entry.path.as_os_str().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_diff_since_invalid_commit_returns_empty() {
+        // Invalid commit should return empty vec (graceful degradation)
+        let result = get_diff_since("invalid_commit_hash_xyz");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_uncommitted_changes_returns_vec() {
+        // This test runs in a git repo
+        let result = get_uncommitted_changes();
+        assert!(result.is_ok());
+        // Result could be empty or have entries depending on repo state
+    }
+
+    #[test]
+    fn test_get_new_files_since_returns_vec() {
+        // Test that get_new_files_since returns a valid Vec (may have entries if there are new files)
+        if let Ok(head) = get_head_commit() {
+            let result = get_new_files_since(&head);
+            assert!(result.is_ok());
+            // We just verify it returns a valid Vec of PathBuf
+            let files = result.unwrap();
+            // Verify that any paths are valid
+            for path in files {
+                assert!(!path.as_os_str().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_new_files_since_invalid_commit_returns_empty() {
+        // Invalid commit should return empty vec (graceful degradation)
+        let result = get_new_files_since("invalid_commit_hash_xyz");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }
