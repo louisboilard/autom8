@@ -2,6 +2,7 @@
 //!
 //! Provides helper functions for JSON fixing, context building, and output parsing.
 
+use crate::knowledge::ProjectKnowledge;
 use crate::state::IterationRecord;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -271,6 +272,157 @@ pub fn build_previous_context(iterations: &[IterationRecord]) -> Option<String> 
         None
     } else {
         Some(summaries.join("\n"))
+    }
+}
+
+/// Build a knowledge context string for injection into agent prompts.
+/// Returns None if knowledge is empty (no files, no decisions, no patterns, no story_changes).
+///
+/// The output includes:
+/// - Files Modified in This Run (table format: path, purpose, key symbols, stories)
+/// - Architectural Decisions (topic, choice, rationale)
+/// - Patterns to Follow (list of patterns)
+/// - Recent Work (summary of completed story changes)
+///
+/// Formatting is kept concise to stay under ~1500 tokens.
+pub fn build_knowledge_context(knowledge: &ProjectKnowledge) -> Option<String> {
+    // Check if knowledge is empty
+    if knowledge.files.is_empty()
+        && knowledge.decisions.is_empty()
+        && knowledge.patterns.is_empty()
+        && knowledge.story_changes.is_empty()
+    {
+        return None;
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // Files Modified section (as a table)
+    if !knowledge.files.is_empty() {
+        let mut files_section = String::from("## Files Modified in This Run\n\n");
+        files_section.push_str("| Path | Purpose | Key Symbols | Stories |\n");
+        files_section.push_str("|------|---------|-------------|--------|\n");
+
+        // Sort files by path for consistent output
+        let mut file_entries: Vec<_> = knowledge.files.iter().collect();
+        file_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (path, info) in file_entries {
+            let path_str = abbreviate_path(path.to_string_lossy().as_ref());
+            let purpose = truncate_str(&info.purpose, 40);
+            let symbols = if info.key_symbols.is_empty() {
+                "-".to_string()
+            } else {
+                truncate_str(&info.key_symbols.join(", "), 30)
+            };
+            let stories = if info.touched_by.is_empty() {
+                "-".to_string()
+            } else {
+                info.touched_by.join(", ")
+            };
+
+            files_section.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                path_str, purpose, symbols, stories
+            ));
+        }
+
+        sections.push(files_section);
+    }
+
+    // Architectural Decisions section
+    if !knowledge.decisions.is_empty() {
+        let mut decisions_section = String::from("## Architectural Decisions\n\n");
+
+        for decision in &knowledge.decisions {
+            decisions_section.push_str(&format!(
+                "- **{}**: {} — {}\n",
+                decision.topic,
+                decision.choice,
+                truncate_str(&decision.rationale, 60)
+            ));
+        }
+
+        sections.push(decisions_section);
+    }
+
+    // Patterns to Follow section
+    if !knowledge.patterns.is_empty() {
+        let mut patterns_section = String::from("## Patterns to Follow\n\n");
+
+        for pattern in &knowledge.patterns {
+            let example = pattern
+                .example_file
+                .as_ref()
+                .map(|p| format!(" (see {})", abbreviate_path(p.to_string_lossy().as_ref())))
+                .unwrap_or_default();
+            patterns_section.push_str(&format!("- {}{}\n", pattern.description, example));
+        }
+
+        sections.push(patterns_section);
+    }
+
+    // Recent Work section (story changes summary)
+    if !knowledge.story_changes.is_empty() {
+        let mut work_section = String::from("## Recent Work\n\n");
+
+        for story in &knowledge.story_changes {
+            let mut file_list: Vec<String> = Vec::new();
+
+            for fc in &story.files_created {
+                file_list.push(format!(
+                    "+{}",
+                    abbreviate_path(fc.path.to_string_lossy().as_ref())
+                ));
+            }
+            for fc in &story.files_modified {
+                file_list.push(format!(
+                    "~{}",
+                    abbreviate_path(fc.path.to_string_lossy().as_ref())
+                ));
+            }
+            for path in &story.files_deleted {
+                file_list.push(format!(
+                    "-{}",
+                    abbreviate_path(path.to_string_lossy().as_ref())
+                ));
+            }
+
+            let files_str = if file_list.is_empty() {
+                "no file changes".to_string()
+            } else {
+                truncate_str(&file_list.join(", "), 80)
+            };
+
+            work_section.push_str(&format!("- **{}**: {}\n", story.story_id, files_str));
+        }
+
+        sections.push(work_section);
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n"))
+    }
+}
+
+/// Abbreviate a file path for concise display.
+/// Converts "src/claude/utils.rs" to "s/claude/utils.rs" for paths starting with "src/".
+fn abbreviate_path(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("src/") {
+        format!("s/{}", stripped)
+    } else {
+        path.to_string()
+    }
+}
+
+/// Truncate a string to max_len characters, adding "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
 
@@ -850,5 +1002,387 @@ Done!"#;
 
         let patterns = extract_patterns(output);
         assert!(patterns.is_empty());
+    }
+
+    // ===========================================
+    // build_knowledge_context tests
+    // ===========================================
+
+    use crate::knowledge::{
+        Decision as KnowledgeDecision, FileChange, FileInfo, Pattern as KnowledgePattern,
+        ProjectKnowledge, StoryChanges,
+    };
+
+    #[test]
+    fn test_build_knowledge_context_empty_returns_none() {
+        let knowledge = ProjectKnowledge::default();
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_knowledge_context_with_files_only() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.files.insert(
+            PathBuf::from("src/main.rs"),
+            FileInfo {
+                purpose: "Application entry point".to_string(),
+                key_symbols: vec!["main".to_string(), "run".to_string()],
+                touched_by: vec!["US-001".to_string()],
+                line_count: 100,
+            },
+        );
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("## Files Modified in This Run"));
+        assert!(context.contains("| Path | Purpose | Key Symbols | Stories |"));
+        assert!(context.contains("s/main.rs"));
+        assert!(context.contains("Application entry point"));
+        assert!(context.contains("main, run"));
+        assert!(context.contains("US-001"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_with_decisions_only() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.decisions.push(KnowledgeDecision {
+            story_id: "US-001".to_string(),
+            topic: "Error handling".to_string(),
+            choice: "thiserror crate".to_string(),
+            rationale: "Provides clean derive macros for error types".to_string(),
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("## Architectural Decisions"));
+        assert!(context.contains("**Error handling**"));
+        assert!(context.contains("thiserror crate"));
+        assert!(context.contains("Provides clean derive macros"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_with_patterns_only() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.patterns.push(KnowledgePattern {
+            story_id: "US-001".to_string(),
+            description: "Use Result<T, Error> for all fallible operations".to_string(),
+            example_file: Some(PathBuf::from("src/runner.rs")),
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("## Patterns to Follow"));
+        assert!(context.contains("Use Result<T, Error>"));
+        assert!(context.contains("(see s/runner.rs)"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_with_patterns_no_example() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.patterns.push(KnowledgePattern {
+            story_id: "US-001".to_string(),
+            description: "Use snake_case for function names".to_string(),
+            example_file: None,
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("Use snake_case for function names"));
+        assert!(!context.contains("(see"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_with_story_changes_only() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/knowledge.rs"),
+                additions: 200,
+                deletions: 0,
+                purpose: Some("Knowledge tracking".to_string()),
+                key_symbols: vec!["ProjectKnowledge".to_string()],
+            }],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 1,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![PathBuf::from("src/old.rs")],
+            commit_hash: Some("abc123".to_string()),
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("## Recent Work"));
+        assert!(context.contains("**US-001**"));
+        assert!(context.contains("+s/knowledge.rs")); // + for created
+        assert!(context.contains("~s/lib.rs")); // ~ for modified
+        assert!(context.contains("-s/old.rs")); // - for deleted
+    }
+
+    #[test]
+    fn test_build_knowledge_context_story_changes_no_files() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        assert!(context.contains("no file changes"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_full_knowledge() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        // Add files
+        knowledge.files.insert(
+            PathBuf::from("src/main.rs"),
+            FileInfo {
+                purpose: "Entry point".to_string(),
+                key_symbols: vec!["main".to_string()],
+                touched_by: vec!["US-001".to_string()],
+                line_count: 50,
+            },
+        );
+
+        // Add decisions
+        knowledge.decisions.push(KnowledgeDecision {
+            story_id: "US-001".to_string(),
+            topic: "Database".to_string(),
+            choice: "SQLite".to_string(),
+            rationale: "Embedded, no setup required".to_string(),
+        });
+
+        // Add patterns
+        knowledge.patterns.push(KnowledgePattern {
+            story_id: "US-001".to_string(),
+            description: "Use Result for errors".to_string(),
+            example_file: None,
+        });
+
+        // Add story changes
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/db.rs"),
+                additions: 100,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let result = build_knowledge_context(&knowledge);
+        assert!(result.is_some());
+        let context = result.unwrap();
+
+        // Verify all sections present
+        assert!(context.contains("## Files Modified in This Run"));
+        assert!(context.contains("## Architectural Decisions"));
+        assert!(context.contains("## Patterns to Follow"));
+        assert!(context.contains("## Recent Work"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_files_sorted_by_path() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.files.insert(
+            PathBuf::from("src/z_module.rs"),
+            FileInfo {
+                purpose: "Z module".to_string(),
+                key_symbols: vec![],
+                touched_by: vec![],
+                line_count: 10,
+            },
+        );
+        knowledge.files.insert(
+            PathBuf::from("src/a_module.rs"),
+            FileInfo {
+                purpose: "A module".to_string(),
+                key_symbols: vec![],
+                touched_by: vec![],
+                line_count: 10,
+            },
+        );
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        // A should come before Z
+        let a_pos = result.find("a_module.rs").unwrap();
+        let z_pos = result.find("z_module.rs").unwrap();
+        assert!(a_pos < z_pos);
+    }
+
+    #[test]
+    fn test_build_knowledge_context_truncates_long_purpose() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.files.insert(
+            PathBuf::from("src/main.rs"),
+            FileInfo {
+                purpose: "This is a very long purpose description that should be truncated to fit in the table cell properly".to_string(),
+                key_symbols: vec![],
+                touched_by: vec![],
+                line_count: 10,
+            },
+        );
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        // Should be truncated with ...
+        assert!(result.contains("..."));
+        // Should not contain the full string
+        assert!(!result.contains("properly"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_truncates_long_rationale() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.decisions.push(KnowledgeDecision {
+            story_id: "US-001".to_string(),
+            topic: "Test".to_string(),
+            choice: "Option A".to_string(),
+            rationale: "This is a very long rationale that explains in great detail why we made this particular choice and all the considerations involved".to_string(),
+        });
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        // Should be truncated
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_files_with_empty_symbols() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.files.insert(
+            PathBuf::from("src/main.rs"),
+            FileInfo {
+                purpose: "Entry point".to_string(),
+                key_symbols: vec![],
+                touched_by: vec!["US-001".to_string()],
+                line_count: 10,
+            },
+        );
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        // Empty symbols should show as "-"
+        assert!(result.contains("| - |"));
+    }
+
+    #[test]
+    fn test_build_knowledge_context_files_with_empty_touched_by() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.files.insert(
+            PathBuf::from("src/main.rs"),
+            FileInfo {
+                purpose: "Entry point".to_string(),
+                key_symbols: vec!["main".to_string()],
+                touched_by: vec![],
+                line_count: 10,
+            },
+        );
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        // Empty touched_by should show as "-"
+        // The pattern "| - |" might appear for symbols, so check end of line
+        assert!(result.contains("| - |\n"));
+    }
+
+    #[test]
+    fn test_abbreviate_path_src_prefix() {
+        assert_eq!(abbreviate_path("src/main.rs"), "s/main.rs");
+        assert_eq!(abbreviate_path("src/claude/utils.rs"), "s/claude/utils.rs");
+    }
+
+    #[test]
+    fn test_abbreviate_path_no_src_prefix() {
+        assert_eq!(abbreviate_path("tests/main.rs"), "tests/main.rs");
+        assert_eq!(abbreviate_path("Cargo.toml"), "Cargo.toml");
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_build_knowledge_context_multiple_stories() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/first.rs"),
+                additions: 50,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-002".to_string(),
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/second.rs"),
+                additions: 10,
+                deletions: 5,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_created: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let result = build_knowledge_context(&knowledge).unwrap();
+
+        assert!(result.contains("**US-001**"));
+        assert!(result.contains("**US-002**"));
+        assert!(result.contains("+s/first.rs"));
+        assert!(result.contains("~s/second.rs"));
     }
 }

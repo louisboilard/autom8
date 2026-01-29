@@ -1,7 +1,4 @@
-use crate::claude::{
-    extract_decisions, extract_files_context, extract_patterns, Decision as AgentDecision,
-    FileContextEntry, Pattern as AgentPattern,
-};
+use crate::claude::{extract_decisions, extract_files_context, extract_patterns, FileContextEntry};
 use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;

@@ -702,6 +702,7 @@ impl Runner {
     }
 
     /// Handle a normal iteration completion (story done, more to go).
+    #[allow(clippy::too_many_arguments)]
     fn handle_iteration_complete(
         &self,
         state: &mut RunState,
