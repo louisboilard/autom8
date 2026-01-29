@@ -26,6 +26,9 @@ use clap_complete::{generate, Shell};
 use std::io::Write;
 use std::path::PathBuf;
 
+/// List of supported shell names for error messages.
+pub const SUPPORTED_SHELLS: &[&str] = &["bash", "zsh", "fish"];
+
 /// Supported shell types for completion scripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellType {
@@ -50,6 +53,29 @@ impl ShellType {
             ShellType::Bash => "bash",
             ShellType::Zsh => "zsh",
             ShellType::Fish => "fish",
+        }
+    }
+
+    /// Parse a shell type from a string name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The shell name (e.g., "bash", "zsh", "fish")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ShellType)` - The parsed shell type
+    /// * `Err(Autom8Error)` - If the shell name is not supported
+    pub fn from_name(name: &str) -> Result<ShellType> {
+        match name.to_lowercase().as_str() {
+            "bash" => Ok(ShellType::Bash),
+            "zsh" => Ok(ShellType::Zsh),
+            "fish" => Ok(ShellType::Fish),
+            _ => Err(Autom8Error::ShellCompletion(format!(
+                "Unsupported shell: '{}'. Supported shells are: {}.",
+                name,
+                SUPPORTED_SHELLS.join(", ")
+            ))),
         }
     }
 }
@@ -285,7 +311,8 @@ fn build_cli() -> Command {
 /// Generate a completion script for the specified shell.
 ///
 /// Creates a completion script that includes all autom8 commands, subcommands,
-/// flags, and options.
+/// flags, and options. The script includes dynamic spec file completion that
+/// queries `~/.config/autom8/*/spec/` at completion time.
 ///
 /// # Arguments
 ///
@@ -298,7 +325,225 @@ pub fn generate_completion_script(shell: ShellType) -> String {
     let mut cmd = build_cli();
     let mut buf = Vec::new();
     generate(shell.to_clap_shell(), &mut cmd, "autom8", &mut buf);
-    String::from_utf8(buf).unwrap_or_default()
+    let base_script = String::from_utf8(buf).unwrap_or_default();
+
+    // Append dynamic spec completion functions
+    match shell {
+        ShellType::Bash => format!("{}\n{}", base_script, generate_bash_spec_completion()),
+        ShellType::Zsh => format!("{}\n{}", base_script, generate_zsh_spec_completion()),
+        ShellType::Fish => format!("{}\n{}", base_script, generate_fish_spec_completion()),
+    }
+}
+
+/// Generate bash-specific dynamic spec completion function.
+fn generate_bash_spec_completion() -> &'static str {
+    r#"
+# Dynamic spec file completion for autom8
+_autom8_spec_files() {
+    local config_dir="$HOME/.config/autom8"
+    local project_name=""
+    local specs=()
+
+    # Try to detect current project from git repo
+    if git rev-parse --git-dir &>/dev/null; then
+        project_name=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+    fi
+
+    # If in a project and that project has specs, show only those
+    if [[ -n "$project_name" && -d "$config_dir/$project_name/spec" ]]; then
+        local spec_dir="$config_dir/$project_name/spec"
+        if compgen -G "$spec_dir/*.json" &>/dev/null || compgen -G "$spec_dir/*.md" &>/dev/null; then
+            for f in "$spec_dir"/*.json "$spec_dir"/*.md; do
+                [[ -f "$f" ]] && specs+=("$(basename "$f")")
+            done
+        fi
+    fi
+
+    # If no project specs found, show specs from all projects
+    if [[ ${#specs[@]} -eq 0 && -d "$config_dir" ]]; then
+        for project_dir in "$config_dir"/*/spec; do
+            if [[ -d "$project_dir" ]]; then
+                for f in "$project_dir"/*.json "$project_dir"/*.md; do
+                    [[ -f "$f" ]] && specs+=("$(basename "$f")")
+                done
+            fi
+        done
+    fi
+
+    # Remove duplicates and sort
+    printf '%s\n' "${specs[@]}" | sort -u
+}
+
+# Override completion for --spec flag and positional arguments
+_autom8_complete() {
+    local cur prev words cword
+    _init_completion || return
+
+    # Check if we're completing the --spec flag value
+    if [[ "$prev" == "--spec" ]]; then
+        COMPREPLY=($(compgen -W "$(_autom8_spec_files)" -- "$cur"))
+        return
+    fi
+
+    # Check if completing first positional arg (not a subcommand)
+    if [[ $cword -eq 1 && "$cur" != -* ]]; then
+        # Get subcommands
+        local subcommands="run status resume clean init projects list describe pr-review monitor"
+        # Get spec files
+        local specs=$(_autom8_spec_files)
+        COMPREPLY=($(compgen -W "$subcommands $specs" -- "$cur"))
+        return
+    fi
+
+    # Fall back to default autom8 completion
+    _autom8 "$@"
+}
+
+complete -F _autom8_complete autom8
+"#
+}
+
+/// Generate zsh-specific dynamic spec completion function.
+fn generate_zsh_spec_completion() -> &'static str {
+    r#"
+# Dynamic spec file completion for autom8
+_autom8_spec_files() {
+    local config_dir="$HOME/.config/autom8"
+    local project_name=""
+    local -a specs
+
+    # Try to detect current project from git repo
+    if git rev-parse --git-dir &>/dev/null; then
+        project_name=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+    fi
+
+    # If in a project and that project has specs, show only those
+    if [[ -n "$project_name" && -d "$config_dir/$project_name/spec" ]]; then
+        local spec_dir="$config_dir/$project_name/spec"
+        specs=(${(f)"$(ls "$spec_dir"/*.json "$spec_dir"/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null)"})
+    fi
+
+    # If no project specs found, show specs from all projects
+    if [[ ${#specs[@]} -eq 0 && -d "$config_dir" ]]; then
+        specs=(${(f)"$(ls "$config_dir"/*/spec/*.json "$config_dir"/*/spec/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null)"})
+    fi
+
+    # Remove duplicates and print
+    printf '%s\n' "${(u)specs[@]}"
+}
+
+# Override _autom8 to add spec file completion
+if (( $+functions[_autom8_original] )); then
+    : # Already patched
+else
+    # Save original function if it exists
+    if (( $+functions[_autom8] )); then
+        functions[_autom8_original]=$functions[_autom8]
+    fi
+
+    _autom8() {
+        local curcontext="$curcontext" state line
+        typeset -A opt_args
+
+        # Check if completing --spec value
+        if [[ "${words[$CURRENT-1]}" == "--spec" ]]; then
+            local -a spec_files
+            spec_files=(${(f)"$(_autom8_spec_files)"})
+            _describe 'spec file' spec_files
+            return
+        fi
+
+        # Check if completing first positional argument
+        if [[ $CURRENT -eq 2 && "${words[2]}" != -* ]]; then
+            local -a completions
+            local -a spec_files
+            spec_files=(${(f)"$(_autom8_spec_files)"})
+            completions=(
+                'run:Run the agent loop to implement spec stories'
+                'status:Check the current run status'
+                'resume:Resume a failed or interrupted run'
+                'clean:Clean up spec files from config directory'
+                'init:Initialize autom8 config directory structure'
+                'projects:List all known projects'
+                'list:Show a tree view of all projects with status'
+                'describe:Show detailed information about a specific project'
+                'pr-review:Analyze PR review comments and fix real issues'
+                'monitor:Monitor autom8 activity across all projects'
+            )
+            for spec in "${spec_files[@]}"; do
+                [[ -n "$spec" ]] && completions+=("$spec:Spec file")
+            done
+            _describe 'command or spec' completions
+            return
+        fi
+
+        # Fall back to original completion if it exists
+        if (( $+functions[_autom8_original] )); then
+            _autom8_original "$@"
+        fi
+    }
+
+    compdef _autom8 autom8
+fi
+"#
+}
+
+/// Generate fish-specific dynamic spec completion function.
+fn generate_fish_spec_completion() -> &'static str {
+    r#"
+# Dynamic spec file completion for autom8
+function __autom8_spec_files
+    set -l config_dir "$HOME/.config/autom8"
+    set -l project_name ""
+
+    # Try to detect current project from git repo
+    if git rev-parse --git-dir &>/dev/null
+        set project_name (basename (git rev-parse --show-toplevel 2>/dev/null) 2>/dev/null)
+    end
+
+    # If in a project and that project has specs, show only those
+    if test -n "$project_name"; and test -d "$config_dir/$project_name/spec"
+        set -l spec_dir "$config_dir/$project_name/spec"
+        for f in $spec_dir/*.json $spec_dir/*.md
+            if test -f "$f"
+                basename "$f"
+            end
+        end
+        return
+    end
+
+    # If no project specs found, show specs from all projects
+    if test -d "$config_dir"
+        for spec_dir in $config_dir/*/spec
+            if test -d "$spec_dir"
+                for f in $spec_dir/*.json $spec_dir/*.md
+                    if test -f "$f"
+                        basename "$f"
+                    end
+                end
+            end
+        end | sort -u
+    end
+end
+
+# Add spec file completions for --spec flag
+complete -c autom8 -l spec -xa '(__autom8_spec_files)'
+
+# Add spec file completions for positional argument (first arg that's not a flag)
+complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean init projects list describe pr-review monitor' -xa '(__autom8_spec_files)'
+"#
+}
+
+/// Output the completion script for a shell to stdout.
+///
+/// This is used by the hidden `completions` subcommand to let power users
+/// manually manage their completion scripts.
+///
+/// # Arguments
+///
+/// * `shell` - The target shell type
+pub fn print_completion_script(shell: ShellType) {
+    print!("{}", generate_completion_script(shell));
 }
 
 /// Write a completion script to the specified path.
@@ -387,7 +632,10 @@ fn get_zsh_setup_instructions() -> Option<String> {
 /// Get setup instructions for bash.
 fn get_bash_setup_instructions(path: &std::path::Path) -> Option<String> {
     // Check if bash-completion is likely set up (XDG location)
-    if path.to_string_lossy().contains("bash-completion/completions") {
+    if path
+        .to_string_lossy()
+        .contains("bash-completion/completions")
+    {
         // XDG location should be auto-loaded
         Some("Restart your shell to enable completions.".to_string())
     } else {
@@ -930,5 +1178,207 @@ mod tests {
         // Verify expected content format
         assert!(expected_content.contains("fpath"));
         assert!(expected_content.contains("$fpath"));
+    }
+
+    // ======================================================================
+    // Tests for US-003: Dynamic spec file completion and utility subcommand
+    // ======================================================================
+
+    #[test]
+    fn test_shell_type_from_name_bash() {
+        let result = ShellType::from_name("bash");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ShellType::Bash);
+    }
+
+    #[test]
+    fn test_shell_type_from_name_zsh() {
+        let result = ShellType::from_name("zsh");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ShellType::Zsh);
+    }
+
+    #[test]
+    fn test_shell_type_from_name_fish() {
+        let result = ShellType::from_name("fish");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ShellType::Fish);
+    }
+
+    #[test]
+    fn test_shell_type_from_name_case_insensitive() {
+        // Should handle uppercase
+        assert_eq!(ShellType::from_name("BASH").unwrap(), ShellType::Bash);
+        assert_eq!(ShellType::from_name("ZSH").unwrap(), ShellType::Zsh);
+        assert_eq!(ShellType::from_name("FISH").unwrap(), ShellType::Fish);
+
+        // Should handle mixed case
+        assert_eq!(ShellType::from_name("Bash").unwrap(), ShellType::Bash);
+        assert_eq!(ShellType::from_name("Zsh").unwrap(), ShellType::Zsh);
+        assert_eq!(ShellType::from_name("Fish").unwrap(), ShellType::Fish);
+    }
+
+    #[test]
+    fn test_shell_type_from_name_invalid() {
+        let result = ShellType::from_name("powershell");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unsupported shell"));
+        assert!(err.contains("powershell"));
+    }
+
+    #[test]
+    fn test_shell_type_from_name_error_lists_supported_shells() {
+        let result = ShellType::from_name("invalid");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bash"));
+        assert!(err.contains("zsh"));
+        assert!(err.contains("fish"));
+    }
+
+    #[test]
+    fn test_supported_shells_constant() {
+        assert!(SUPPORTED_SHELLS.contains(&"bash"));
+        assert!(SUPPORTED_SHELLS.contains(&"zsh"));
+        assert!(SUPPORTED_SHELLS.contains(&"fish"));
+        assert_eq!(SUPPORTED_SHELLS.len(), 3);
+    }
+
+    #[test]
+    fn test_bash_completion_includes_dynamic_spec_function() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should include the dynamic spec completion function
+        assert!(
+            script.contains("_autom8_spec_files"),
+            "Bash script should include _autom8_spec_files function"
+        );
+
+        // Should reference the config directory
+        assert!(
+            script.contains(".config/autom8"),
+            "Bash script should reference the config directory"
+        );
+
+        // Should check for .json and .md files
+        assert!(
+            script.contains(".json") && script.contains(".md"),
+            "Bash script should check for both .json and .md files"
+        );
+
+        // Should include git project detection
+        assert!(
+            script.contains("git rev-parse"),
+            "Bash script should include git project detection"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_dynamic_spec_function() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include the dynamic spec completion function
+        assert!(
+            script.contains("_autom8_spec_files"),
+            "Zsh script should include _autom8_spec_files function"
+        );
+
+        // Should reference the config directory
+        assert!(
+            script.contains(".config/autom8"),
+            "Zsh script should reference the config directory"
+        );
+
+        // Should check for .json and .md files
+        assert!(
+            script.contains(".json") && script.contains(".md"),
+            "Zsh script should check for both .json and .md files"
+        );
+
+        // Should include git project detection
+        assert!(
+            script.contains("git rev-parse"),
+            "Zsh script should include git project detection"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_includes_dynamic_spec_function() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should include the dynamic spec completion function
+        assert!(
+            script.contains("__autom8_spec_files"),
+            "Fish script should include __autom8_spec_files function"
+        );
+
+        // Should reference the config directory
+        assert!(
+            script.contains(".config/autom8"),
+            "Fish script should reference the config directory"
+        );
+
+        // Should check for .json and .md files
+        assert!(
+            script.contains(".json") && script.contains(".md"),
+            "Fish script should check for both .json and .md files"
+        );
+
+        // Should include git project detection
+        assert!(
+            script.contains("git rev-parse"),
+            "Fish script should include git project detection"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_includes_spec_flag_completion() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should have completion for --spec flag
+        assert!(
+            script.contains("--spec"),
+            "Bash script should include --spec flag completion"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_spec_flag_completion() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should have completion for --spec flag
+        assert!(
+            script.contains("--spec"),
+            "Zsh script should include --spec flag completion"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_includes_spec_flag_completion() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should have completion for --spec flag
+        assert!(
+            script.contains("--spec") || script.contains("-l spec"),
+            "Fish script should include --spec flag completion"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_includes_subcommands_in_first_arg() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should list subcommands for first argument completion
+        assert!(
+            script.contains("run") && script.contains("status") && script.contains("resume"),
+            "Bash script should include subcommands for first arg completion"
+        );
+    }
+
+    #[test]
+    fn test_print_completion_script_exists() {
+        // Verify the function exists and is callable
+        let _: fn(ShellType) = print_completion_script;
     }
 }

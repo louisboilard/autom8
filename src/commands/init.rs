@@ -75,16 +75,15 @@ pub fn init_command() -> Result<()> {
             // Don't fail init for completion errors - just inform the user
             let msg = e.to_string();
             if msg.contains("Unsupported shell") {
-                println!(
-                    "  {YELLOW}Skipped{RESET} Shell completions not available for your shell"
-                );
+                println!("  {YELLOW}Skipped{RESET} Shell completions not available for your shell");
                 println!("         Supported shells: bash, zsh, fish");
             } else if msg.contains("$SHELL") {
-                println!(
-                    "  {YELLOW}Skipped{RESET} Could not detect shell ($SHELL not set)"
-                );
+                println!("  {YELLOW}Skipped{RESET} Could not detect shell ($SHELL not set)");
             } else {
-                println!("  {YELLOW}Warning{RESET} Could not install completions: {}", e);
+                println!(
+                    "  {YELLOW}Warning{RESET} Could not install completions: {}",
+                    e
+                );
             }
         }
     }
