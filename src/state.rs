@@ -244,9 +244,19 @@ impl RunState {
     ///
     /// This stores the commit hash so we can later calculate what changed
     /// during the story implementation. For non-git projects, this is a no-op.
+    ///
+    /// On the first call (when `baseline_commit` is not set), this also captures
+    /// the baseline commit for the entire run. This is used to track which files
+    /// autom8 touched vs external changes (US-010).
     pub fn capture_pre_story_state(&mut self) {
         if git::is_git_repo() {
-            self.pre_story_commit = git::get_head_commit().ok();
+            if let Ok(head) = git::get_head_commit() {
+                // Capture baseline commit on first story (US-010)
+                if self.knowledge.baseline_commit.is_none() {
+                    self.knowledge.baseline_commit = Some(head.clone());
+                }
+                self.pre_story_commit = Some(head);
+            }
         }
     }
 
@@ -313,6 +323,7 @@ impl RunState {
     ///
     /// The method:
     /// - Gets git diff since `pre_story_commit` (if available)
+    /// - Filters changes to only include files autom8 touched (see US-010)
     /// - Extracts structured context from the agent's output
     /// - Creates a `StoryChanges` record combining both sources
     /// - Merges file info into the `knowledge.files` registry
@@ -348,7 +359,10 @@ impl RunState {
         // If we have a pre-story commit, calculate the diff
         if let Some(ref base_commit) = self.pre_story_commit {
             if git::is_git_repo() {
-                if let Ok(entries) = git::get_diff_since(base_commit) {
+                if let Ok(all_entries) = git::get_diff_since(base_commit) {
+                    // Filter to only include changes autom8 made (US-010)
+                    let entries = self.knowledge.filter_our_changes(&all_entries);
+
                     for entry in entries {
                         // Enrich with agent-provided context if available
                         let (purpose, key_symbols) = context_by_path
@@ -1928,7 +1942,10 @@ Use connection pooling
         env::set_current_dir(temp_dir.path()).unwrap();
 
         // Verify we're not in a git repo
-        assert!(!git::is_git_repo(), "Temp directory should not be a git repo");
+        assert!(
+            !git::is_git_repo(),
+            "Temp directory should not be a git repo"
+        );
 
         // Test 1: capture_pre_story_state should be a no-op
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
@@ -1966,14 +1983,14 @@ Use async/await for all IO
         // The file should be recorded from agent context (as modified since we can't determine)
         let changes = &state.knowledge.story_changes[1];
         assert_eq!(changes.files_modified.len(), 1);
-        assert_eq!(
-            changes.files_modified[0].path,
-            PathBuf::from("src/main.rs")
-        );
+        assert_eq!(changes.files_modified[0].path, PathBuf::from("src/main.rs"));
 
         // Test 4: git diff functions should return empty results
         let diff = git::get_diff_since("any-commit").unwrap();
-        assert!(diff.is_empty(), "get_diff_since should return empty in non-git");
+        assert!(
+            diff.is_empty(),
+            "get_diff_since should return empty in non-git"
+        );
 
         let uncommitted = git::get_uncommitted_changes().unwrap();
         assert!(
@@ -2043,6 +2060,135 @@ src/lib.rs | Library module | [Config]
 
         // pre_story_commit should be cleared
         assert!(state.pre_story_commit.is_none());
+
+        env::set_current_dir(original_dir).unwrap();
+    }
+
+    // ======================================================================
+    // Tests for US-010: Filter changes to only autom8-related files
+    // ======================================================================
+
+    #[test]
+    fn test_capture_pre_story_state_sets_baseline_commit_on_first_call() {
+        // This test runs in a git repo
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Initially baseline_commit should be None
+        assert!(state.knowledge.baseline_commit.is_none());
+
+        // First call should set both pre_story_commit and baseline_commit
+        state.capture_pre_story_state();
+
+        assert!(state.pre_story_commit.is_some());
+        assert!(state.knowledge.baseline_commit.is_some());
+
+        // They should be the same on first call
+        assert_eq!(state.pre_story_commit, state.knowledge.baseline_commit);
+    }
+
+    #[test]
+    fn test_capture_pre_story_state_preserves_baseline_on_subsequent_calls() {
+        // This test runs in a git repo
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // First call
+        state.capture_pre_story_state();
+        let baseline = state.knowledge.baseline_commit.clone();
+        assert!(baseline.is_some());
+
+        // Clear pre_story_commit to simulate finishing a story
+        state.pre_story_commit = None;
+
+        // Second call should set pre_story_commit but not change baseline_commit
+        state.capture_pre_story_state();
+
+        assert!(state.pre_story_commit.is_some());
+        assert_eq!(state.knowledge.baseline_commit, baseline);
+    }
+
+    #[test]
+    fn test_capture_pre_story_state_baseline_persists_through_multiple_stories() {
+        // This test runs in a git repo
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Story 1 start
+        state.capture_pre_story_state();
+        let baseline = state.knowledge.baseline_commit.clone();
+        assert!(baseline.is_some());
+
+        // Story 1 complete
+        state.capture_story_knowledge("US-001", "", None);
+
+        // Story 2 start
+        state.capture_pre_story_state();
+
+        // Baseline should still be the original
+        assert_eq!(state.knowledge.baseline_commit, baseline);
+        assert!(state.pre_story_commit.is_some());
+    }
+
+    #[test]
+    fn test_filter_our_changes_integration_with_capture_story_knowledge() {
+        // This test verifies that capture_story_knowledge properly uses filter_our_changes
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Simulate first story that touched src/a.rs
+        state.knowledge.story_changes.push(crate::knowledge::StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![crate::knowledge::FileChange {
+                path: PathBuf::from("src/a.rs"),
+                additions: 100,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        // Verify our_files returns the file
+        let our_files = state.knowledge.our_files();
+        assert!(our_files.contains(&PathBuf::from("src/a.rs")));
+
+        // Verify filter works as expected
+        let entries = vec![
+            git::DiffEntry {
+                path: PathBuf::from("src/a.rs"),
+                additions: 10,
+                deletions: 5,
+                status: git::DiffStatus::Modified,
+            },
+            git::DiffEntry {
+                path: PathBuf::from("external.txt"),
+                additions: 20,
+                deletions: 0,
+                status: git::DiffStatus::Modified,
+            },
+        ];
+
+        let filtered = state.knowledge.filter_our_changes(&entries);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("src/a.rs"));
+    }
+
+    #[test]
+    fn test_baseline_commit_not_set_in_non_git_directory() {
+        use std::env;
+
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp_dir.path()).unwrap();
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.capture_pre_story_state();
+
+        // In non-git directory, neither should be set
+        assert!(state.pre_story_commit.is_none());
+        assert!(state.knowledge.baseline_commit.is_none());
 
         env::set_current_dir(original_dir).unwrap();
     }

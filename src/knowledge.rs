@@ -5,8 +5,9 @@
 //! multiple story implementations and can be injected into subsequent agent
 //! prompts to provide richer context.
 
+use crate::git::DiffEntry;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Cumulative project knowledge tracked across agent runs.
@@ -31,6 +32,65 @@ pub struct ProjectKnowledge {
 
     /// The baseline commit hash when the run started (for git diff calculations)
     pub baseline_commit: Option<String>,
+}
+
+impl ProjectKnowledge {
+    /// Returns all files touched by any story in this run.
+    ///
+    /// This includes files that were created, modified, or deleted across
+    /// all completed stories. Used to filter out changes from other sources.
+    pub fn our_files(&self) -> HashSet<&PathBuf> {
+        let mut files = HashSet::new();
+
+        for story in &self.story_changes {
+            // Add created files
+            for change in &story.files_created {
+                files.insert(&change.path);
+            }
+
+            // Add modified files
+            for change in &story.files_modified {
+                files.insert(&change.path);
+            }
+
+            // Add deleted files
+            for path in &story.files_deleted {
+                files.insert(path);
+            }
+        }
+
+        files
+    }
+
+    /// Filter diff entries to only include files that autom8 agents touched.
+    ///
+    /// This method filters out changes from external sources by only including
+    /// files that are either:
+    /// - New to the project (DiffStatus::Added)
+    /// - Already in the set of files we've touched in this run
+    ///
+    /// # Arguments
+    /// * `all_changes` - All diff entries to filter
+    ///
+    /// # Returns
+    /// Filtered list of diff entries containing only our changes
+    pub fn filter_our_changes(&self, all_changes: &[DiffEntry]) -> Vec<DiffEntry> {
+        let our_files = self.our_files();
+
+        all_changes
+            .iter()
+            .filter(|entry| {
+                // Include if it's a new file (we created it)
+                if entry.status == crate::git::DiffStatus::Added {
+                    return true;
+                }
+
+                // Include if it's in our files set (we've touched it before)
+                our_files.contains(&entry.path)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// Metadata about a known file in the project.
@@ -527,5 +587,446 @@ mod tests {
         let story_changes = &deserialized.story_changes[0];
         assert_eq!(story_changes.files_created.len(), 1);
         assert_eq!(story_changes.files_created[0].additions, 200);
+    }
+
+    // ===========================================
+    // US-010: our_files() and filter_our_changes() tests
+    // ===========================================
+
+    #[test]
+    fn test_our_files_empty_knowledge() {
+        let knowledge = ProjectKnowledge::default();
+        let files = knowledge.our_files();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_our_files_with_created_files() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/new.rs"),
+                additions: 100,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let files = knowledge.our_files();
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&PathBuf::from("src/new.rs")));
+    }
+
+    #[test]
+    fn test_our_files_with_modified_files() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 10,
+                deletions: 5,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let files = knowledge.our_files();
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&PathBuf::from("src/lib.rs")));
+    }
+
+    #[test]
+    fn test_our_files_with_deleted_files() {
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![],
+            files_modified: vec![],
+            files_deleted: vec![PathBuf::from("src/old.rs")],
+            commit_hash: None,
+        });
+
+        let files = knowledge.our_files();
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&PathBuf::from("src/old.rs")));
+    }
+
+    #[test]
+    fn test_our_files_multiple_stories() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        // First story
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/a.rs"),
+                additions: 50,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 1,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        // Second story
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-002".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/b.rs"),
+                additions: 30,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 2,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![PathBuf::from("src/old.rs")],
+            commit_hash: None,
+        });
+
+        let files = knowledge.our_files();
+        // Should have: src/a.rs, src/lib.rs, src/b.rs, src/old.rs
+        // src/lib.rs appears twice but HashSet deduplicates
+        assert_eq!(files.len(), 4);
+        assert!(files.contains(&PathBuf::from("src/a.rs")));
+        assert!(files.contains(&PathBuf::from("src/b.rs")));
+        assert!(files.contains(&PathBuf::from("src/lib.rs")));
+        assert!(files.contains(&PathBuf::from("src/old.rs")));
+    }
+
+    #[test]
+    fn test_our_files_deduplicates() {
+        let mut knowledge = ProjectKnowledge::default();
+
+        // Same file modified in two stories
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 10,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-002".to_string(),
+            files_created: vec![],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 5,
+                deletions: 2,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let files = knowledge.our_files();
+        // Should only have one entry for src/lib.rs
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&PathBuf::from("src/lib.rs")));
+    }
+
+    #[test]
+    fn test_filter_our_changes_empty_knowledge() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let knowledge = ProjectKnowledge::default();
+        let all_changes = vec![
+            DiffEntry {
+                path: PathBuf::from("src/external.rs"),
+                additions: 10,
+                deletions: 0,
+                status: DiffStatus::Modified,
+            },
+            DiffEntry {
+                path: PathBuf::from("src/new.rs"),
+                additions: 50,
+                deletions: 0,
+                status: DiffStatus::Added,
+            },
+        ];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // With empty knowledge, only Added files should pass through
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("src/new.rs"));
+    }
+
+    #[test]
+    fn test_filter_our_changes_includes_our_modified_files() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/our_file.rs"),
+                additions: 100,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let all_changes = vec![
+            DiffEntry {
+                path: PathBuf::from("src/our_file.rs"),
+                additions: 10,
+                deletions: 5,
+                status: DiffStatus::Modified,
+            },
+            DiffEntry {
+                path: PathBuf::from("src/external.rs"),
+                additions: 20,
+                deletions: 0,
+                status: DiffStatus::Modified,
+            },
+        ];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // Only our_file.rs should be included (external.rs is modified but not in our_files)
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("src/our_file.rs"));
+    }
+
+    #[test]
+    fn test_filter_our_changes_includes_new_files() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/old_new.rs"),
+                additions: 50,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let all_changes = vec![
+            DiffEntry {
+                path: PathBuf::from("src/brand_new.rs"),
+                additions: 100,
+                deletions: 0,
+                status: DiffStatus::Added,
+            },
+            DiffEntry {
+                path: PathBuf::from("src/external.rs"),
+                additions: 20,
+                deletions: 10,
+                status: DiffStatus::Modified,
+            },
+        ];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // brand_new.rs should be included because it's Added (new file)
+        // external.rs should be excluded because it's Modified but not in our_files
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("src/brand_new.rs"));
+    }
+
+    #[test]
+    fn test_filter_our_changes_excludes_external_modifications() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/our.rs"),
+                additions: 50,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let all_changes = vec![
+            DiffEntry {
+                path: PathBuf::from("package-lock.json"),
+                additions: 1000,
+                deletions: 500,
+                status: DiffStatus::Modified,
+            },
+            DiffEntry {
+                path: PathBuf::from(".env"),
+                additions: 1,
+                deletions: 0,
+                status: DiffStatus::Modified,
+            },
+        ];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // Neither file is in our_files and neither is Added, so both excluded
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_our_changes_complex_scenario() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let mut knowledge = ProjectKnowledge::default();
+
+        // Story 1 created src/a.rs and modified src/lib.rs
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![FileChange {
+                path: PathBuf::from("src/a.rs"),
+                additions: 50,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 1,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let all_changes = vec![
+            // Our file, modified further
+            DiffEntry {
+                path: PathBuf::from("src/a.rs"),
+                additions: 10,
+                deletions: 5,
+                status: DiffStatus::Modified,
+            },
+            // Our file (modified before)
+            DiffEntry {
+                path: PathBuf::from("src/lib.rs"),
+                additions: 3,
+                deletions: 1,
+                status: DiffStatus::Modified,
+            },
+            // New file in this story
+            DiffEntry {
+                path: PathBuf::from("src/b.rs"),
+                additions: 100,
+                deletions: 0,
+                status: DiffStatus::Added,
+            },
+            // External modification
+            DiffEntry {
+                path: PathBuf::from("Cargo.lock"),
+                additions: 500,
+                deletions: 100,
+                status: DiffStatus::Modified,
+            },
+            // External new file
+            DiffEntry {
+                path: PathBuf::from(".github/workflows/ci.yml"),
+                additions: 50,
+                deletions: 0,
+                status: DiffStatus::Added,
+            },
+        ];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // Should include:
+        // - src/a.rs (in our_files)
+        // - src/lib.rs (in our_files)
+        // - src/b.rs (Added - new file)
+        // - .github/workflows/ci.yml (Added - new file, even if external)
+        // Should exclude:
+        // - Cargo.lock (Modified, not in our_files)
+        assert_eq!(filtered.len(), 4);
+
+        let paths: Vec<_> = filtered.iter().map(|e| e.path.clone()).collect();
+        assert!(paths.contains(&PathBuf::from("src/a.rs")));
+        assert!(paths.contains(&PathBuf::from("src/lib.rs")));
+        assert!(paths.contains(&PathBuf::from("src/b.rs")));
+        assert!(paths.contains(&PathBuf::from(".github/workflows/ci.yml")));
+        assert!(!paths.contains(&PathBuf::from("Cargo.lock")));
+    }
+
+    #[test]
+    fn test_filter_our_changes_with_deleted_file() {
+        use crate::git::{DiffEntry, DiffStatus};
+
+        let mut knowledge = ProjectKnowledge::default();
+        knowledge.story_changes.push(StoryChanges {
+            story_id: "US-001".to_string(),
+            files_created: vec![],
+            files_modified: vec![FileChange {
+                path: PathBuf::from("src/to_delete.rs"),
+                additions: 5,
+                deletions: 0,
+                purpose: None,
+                key_symbols: vec![],
+            }],
+            files_deleted: vec![],
+            commit_hash: None,
+        });
+
+        let all_changes = vec![DiffEntry {
+            path: PathBuf::from("src/to_delete.rs"),
+            additions: 0,
+            deletions: 50,
+            status: DiffStatus::Deleted,
+        }];
+
+        let filtered = knowledge.filter_our_changes(&all_changes);
+
+        // Deleted file is in our_files, so should be included
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("src/to_delete.rs"));
+        assert_eq!(filtered[0].status, DiffStatus::Deleted);
+    }
+
+    #[test]
+    fn test_filter_our_changes_empty_input() {
+        let knowledge = ProjectKnowledge::default();
+        let filtered = knowledge.filter_our_changes(&[]);
+        assert!(filtered.is_empty());
     }
 }
