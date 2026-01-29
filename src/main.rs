@@ -150,22 +150,20 @@ fn main() {
             monitor_command(project.as_deref(), *interval)
         }
 
-        (None, Some(Commands::Completions { shell })) => {
-            match ShellType::from_name(shell) {
-                Ok(shell_type) => {
-                    print_completion_script(shell_type);
-                    Ok(())
-                }
-                Err(e) => {
-                    print_error(&format!(
-                        "{}\nSupported shells: {}",
-                        e,
-                        SUPPORTED_SHELLS.join(", ")
-                    ));
-                    std::process::exit(1);
-                }
+        (None, Some(Commands::Completions { shell })) => match ShellType::from_name(shell) {
+            Ok(shell_type) => {
+                print_completion_script(shell_type);
+                Ok(())
             }
-        }
+            Err(e) => {
+                print_error(&format!(
+                    "{}\nSupported shells: {}",
+                    e,
+                    SUPPORTED_SHELLS.join(", ")
+                ));
+                std::process::exit(1);
+            }
+        },
 
         // No file and no command - check for existing state first, then start spec creation
         (None, None) => default_command(cli.verbose),
