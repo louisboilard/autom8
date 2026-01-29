@@ -550,13 +550,14 @@ impl Runner {
         let total_stories = spec.total_count() as u32;
         let story_id = story.id.clone();
         let iterations = state.iterations.clone();
+        let knowledge = state.knowledge.clone();
 
         // Run Claude with progress display
         let result = with_progress_display(
             self.verbose,
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
-            |callback| run_claude(spec, story, spec_json_path, &iterations, callback),
+            |callback| run_claude(spec, story, spec_json_path, &iterations, &knowledge, callback),
             |res| match res {
                 Ok(_) => Outcome::success("Implementation done"),
                 Err(e) => Outcome::failure(e.to_string()),
