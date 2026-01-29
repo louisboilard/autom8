@@ -56,6 +56,9 @@ pub enum Autom8Error {
 
     #[error("No incomplete specs found in spec/")]
     NoSpecsToResume,
+
+    #[error("Shell completion error: {0}")]
+    ShellCompletion(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;
