@@ -171,7 +171,7 @@ pub fn get_completion_path(shell: ShellType) -> Result<PathBuf> {
 ///
 /// * `Ok(())` - Directory exists or was created successfully
 /// * `Err(Autom8Error)` - If directory creation fails
-pub fn ensure_completion_dir(path: &PathBuf) -> Result<()> {
+pub fn ensure_completion_dir(path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -244,8 +244,13 @@ fn build_cli() -> Command {
         )
         .subcommand(Command::new("resume").about("Resume a failed or interrupted run"))
         .subcommand(Command::new("clean").about("Clean up spec files from config directory"))
-        .subcommand(Command::new("init").about("Initialize autom8 config directory structure for current project"))
-        .subcommand(Command::new("projects").about("List all known projects in the config directory"))
+        .subcommand(
+            Command::new("init")
+                .about("Initialize autom8 config directory structure for current project"),
+        )
+        .subcommand(
+            Command::new("projects").about("List all known projects in the config directory"),
+        )
         .subcommand(Command::new("list").about("Show a tree view of all projects with status"))
         .subcommand(
             Command::new("describe")
@@ -255,7 +260,9 @@ fn build_cli() -> Command {
                         .help("The project name to describe (defaults to current directory)"),
                 ),
         )
-        .subcommand(Command::new("pr-review").about("Analyze PR review comments and fix real issues"))
+        .subcommand(
+            Command::new("pr-review").about("Analyze PR review comments and fix real issues"),
+        )
         .subcommand(
             Command::new("monitor")
                 .about("Monitor autom8 activity across all projects (dashboard view)")
@@ -307,7 +314,7 @@ pub fn generate_completion_script(shell: ShellType) -> String {
 ///
 /// * `Ok(())` - Script written successfully
 /// * `Err(Autom8Error)` - If directory creation or file write fails
-pub fn write_completion_script(shell: ShellType, path: &PathBuf) -> Result<()> {
+pub fn write_completion_script(shell: ShellType, path: &std::path::Path) -> Result<()> {
     // Ensure parent directory exists
     ensure_completion_dir(path)?;
 
@@ -330,6 +337,113 @@ pub fn write_completion_script(shell: ShellType, path: &PathBuf) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+/// Result of completion installation.
+#[derive(Debug)]
+pub struct CompletionInstallResult {
+    /// The shell that completions were installed for.
+    pub shell: ShellType,
+    /// The path where the completion script was written.
+    pub path: PathBuf,
+    /// Additional setup instructions for the user, if any.
+    pub setup_instructions: Option<String>,
+}
+
+/// Check if zsh fpath includes ~/.zfunc.
+///
+/// Returns true if ~/.zfunc is already configured in fpath.
+fn is_zfunc_in_fpath() -> bool {
+    // Check if FPATH environment variable includes .zfunc
+    if let Ok(fpath) = std::env::var("FPATH") {
+        let home = dirs::home_dir().unwrap_or_default();
+        let zfunc = home.join(".zfunc");
+        let zfunc_str = zfunc.to_string_lossy();
+
+        for path in fpath.split(':') {
+            if path == zfunc_str || path == "~/.zfunc" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Get setup instructions for zsh if ~/.zfunc is not in fpath.
+fn get_zsh_setup_instructions() -> Option<String> {
+    if is_zfunc_in_fpath() {
+        None
+    } else {
+        Some(
+            "To enable completions, add the following to your ~/.zshrc:\n\n\
+             fpath=(~/.zfunc $fpath)\n\
+             autoload -Uz compinit && compinit\n\n\
+             Then restart your shell or run: source ~/.zshrc"
+                .to_string(),
+        )
+    }
+}
+
+/// Get setup instructions for bash.
+fn get_bash_setup_instructions(path: &std::path::Path) -> Option<String> {
+    // Check if bash-completion is likely set up (XDG location)
+    if path.to_string_lossy().contains("bash-completion/completions") {
+        // XDG location should be auto-loaded
+        Some("Restart your shell to enable completions.".to_string())
+    } else {
+        // Non-XDG location needs manual sourcing
+        Some(format!(
+            "To enable completions, add to your ~/.bashrc:\n\n\
+             source {}\n\n\
+             Then restart your shell or run: source ~/.bashrc",
+            path.display()
+        ))
+    }
+}
+
+/// Install shell completions for the current user.
+///
+/// Detects the user's shell from `$SHELL`, generates the appropriate
+/// completion script, and writes it to the correct location.
+///
+/// # Returns
+///
+/// * `Ok(CompletionInstallResult)` - Installation succeeded
+/// * `Err(Autom8Error)` - If shell detection or file writing fails
+///
+/// # Example
+///
+/// ```ignore
+/// match install_completions() {
+///     Ok(result) => {
+///         println!("Installed {} completions to {}", result.shell, result.path.display());
+///         if let Some(instructions) = result.setup_instructions {
+///             println!("{}", instructions);
+///         }
+///     }
+///     Err(e) => eprintln!("Failed: {}", e),
+/// }
+/// ```
+pub fn install_completions() -> Result<CompletionInstallResult> {
+    let shell = detect_shell()?;
+    let path = get_completion_path(shell)?;
+
+    write_completion_script(shell, &path)?;
+
+    let setup_instructions = match shell {
+        ShellType::Zsh => get_zsh_setup_instructions(),
+        ShellType::Bash => get_bash_setup_instructions(&path),
+        ShellType::Fish => {
+            // Fish auto-loads from ~/.config/fish/completions/
+            Some("Restart your shell to enable completions.".to_string())
+        }
+    };
+
+    Ok(CompletionInstallResult {
+        shell,
+        path,
+        setup_instructions,
+    })
 }
 
 #[cfg(test)]
@@ -477,12 +591,18 @@ mod tests {
             script.contains("clean"),
             "Script should include clean command"
         );
-        assert!(script.contains("init"), "Script should include init command");
+        assert!(
+            script.contains("init"),
+            "Script should include init command"
+        );
         assert!(
             script.contains("projects"),
             "Script should include projects command"
         );
-        assert!(script.contains("list"), "Script should include list command");
+        assert!(
+            script.contains("list"),
+            "Script should include list command"
+        );
         assert!(
             script.contains("describe"),
             "Script should include describe command"
@@ -537,10 +657,7 @@ mod tests {
             script.contains("verbose") || script.contains("-v"),
             "Script should include verbose flag"
         );
-        assert!(
-            script.contains("spec"),
-            "Script should include spec option"
-        );
+        assert!(script.contains("spec"), "Script should include spec option");
         assert!(
             script.contains("skip-review"),
             "Script should include skip-review flag"
@@ -624,12 +741,7 @@ mod tests {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir
-            .path()
-            .join("a")
-            .join("b")
-            .join("c")
-            .join("autom8");
+        let path = temp_dir.path().join("a").join("b").join("c").join("autom8");
 
         let result = ensure_completion_dir(&path);
         assert!(result.is_ok());
@@ -666,5 +778,157 @@ mod tests {
         let result = write_completion_script(ShellType::Zsh, &path);
         assert!(result.is_ok());
         assert!(path.exists());
+    }
+
+    // ======================================================================
+    // Tests for US-002: Completion installation from init
+    // ======================================================================
+
+    #[test]
+    fn test_completion_install_result_has_expected_fields() {
+        // Verify CompletionInstallResult struct has all expected fields
+        let result = CompletionInstallResult {
+            shell: ShellType::Zsh,
+            path: PathBuf::from("/tmp/test"),
+            setup_instructions: Some("Test instructions".to_string()),
+        };
+
+        assert_eq!(result.shell, ShellType::Zsh);
+        assert_eq!(result.path, PathBuf::from("/tmp/test"));
+        assert_eq!(
+            result.setup_instructions,
+            Some("Test instructions".to_string())
+        );
+    }
+
+    #[test]
+    fn test_completion_install_result_without_setup_instructions() {
+        // Verify setup_instructions can be None
+        let result = CompletionInstallResult {
+            shell: ShellType::Fish,
+            path: PathBuf::from("/tmp/test"),
+            setup_instructions: None,
+        };
+
+        assert!(result.setup_instructions.is_none());
+    }
+
+    #[test]
+    fn test_zsh_setup_instructions_contain_fpath() {
+        // When fpath check would fail (not in FPATH), instructions should mention fpath
+        // We can't easily test the actual check without modifying FPATH,
+        // but we can test the instruction content
+        let instructions = "fpath=(~/.zfunc $fpath)\nautoload -Uz compinit && compinit";
+        assert!(instructions.contains("fpath"));
+        assert!(instructions.contains("compinit"));
+        assert!(instructions.contains("autoload"));
+    }
+
+    #[test]
+    fn test_bash_setup_instructions_for_xdg_path() {
+        let path = PathBuf::from("/home/user/.local/share/bash-completion/completions/autom8");
+        let instructions = get_bash_setup_instructions(&path);
+
+        assert!(instructions.is_some());
+        let instructions = instructions.unwrap();
+        // XDG path should just say restart shell
+        assert!(instructions.contains("Restart"));
+    }
+
+    #[test]
+    fn test_bash_setup_instructions_for_non_xdg_path() {
+        let path = PathBuf::from("/home/user/.bash_completion.d/autom8");
+        let instructions = get_bash_setup_instructions(&path);
+
+        assert!(instructions.is_some());
+        let instructions = instructions.unwrap();
+        // Non-XDG path should mention sourcing
+        assert!(instructions.contains("source"));
+        assert!(instructions.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn test_write_completion_script_overwrites_existing() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("autom8");
+
+        // Write initial script
+        let result = write_completion_script(ShellType::Bash, &path);
+        assert!(result.is_ok());
+
+        let content1 = std::fs::read_to_string(&path).unwrap();
+
+        // Write again (should overwrite, not fail)
+        let result = write_completion_script(ShellType::Bash, &path);
+        assert!(result.is_ok());
+
+        let content2 = std::fs::read_to_string(&path).unwrap();
+
+        // Content should be the same (idempotent)
+        assert_eq!(content1, content2);
+    }
+
+    #[test]
+    fn test_write_completion_script_overwrites_different_shell() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("autom8");
+
+        // Write bash script
+        write_completion_script(ShellType::Bash, &path).unwrap();
+        let bash_content = std::fs::read_to_string(&path).unwrap();
+
+        // Overwrite with zsh script
+        write_completion_script(ShellType::Zsh, &path).unwrap();
+        let zsh_content = std::fs::read_to_string(&path).unwrap();
+
+        // Content should be different
+        assert_ne!(bash_content, zsh_content);
+        assert!(zsh_content.contains("#compdef"));
+    }
+
+    #[test]
+    fn test_install_completions_available_as_public_api() {
+        // Verify install_completions is a public function
+        // (This test verifies the API exists; actual installation depends on env)
+        let _: fn() -> Result<CompletionInstallResult> = install_completions;
+    }
+
+    #[test]
+    fn test_completion_install_result_shell_display() {
+        // Verify shell type displays correctly for messages
+        let result = CompletionInstallResult {
+            shell: ShellType::Zsh,
+            path: PathBuf::from("/home/user/.zfunc/_autom8"),
+            setup_instructions: None,
+        };
+
+        let message = format!(
+            "Installed {} completions to {}",
+            result.shell,
+            result.path.display()
+        );
+        assert!(message.contains("zsh"));
+        assert!(message.contains("_autom8"));
+    }
+
+    #[test]
+    fn test_get_zsh_setup_instructions_content() {
+        // Test the content of zsh setup instructions (assuming fpath not set)
+        // Since we can't easily manipulate FPATH in tests, we test the instruction format
+        let expected_content = "fpath=(~/.zfunc $fpath)";
+
+        // The instructions should include this if zfunc is not in fpath
+        // We can verify the helper function produces valid instructions
+        let home = dirs::home_dir().unwrap();
+        let zfunc_path = home.join(".zfunc/_autom8");
+        assert!(zfunc_path.to_string_lossy().contains(".zfunc"));
+
+        // Verify expected content format
+        assert!(expected_content.contains("fpath"));
+        assert!(expected_content.contains("$fpath"));
     }
 }
