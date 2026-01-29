@@ -628,11 +628,9 @@ impl StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Mutex to serialize tests that change the current directory
-    // This prevents race conditions when multiple tests try to change cwd concurrently
-    static CWD_MUTEX: Mutex<()> = Mutex::new(());
+    // Use the shared CWD_MUTEX for tests that depend on or change the current working directory
+    use crate::test_utils::CWD_MUTEX;
 
     #[test]
     fn test_run_state_has_review_iteration() {
@@ -1515,6 +1513,9 @@ mod tests {
 
     #[test]
     fn test_capture_pre_story_state_in_git_repo() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo, so capture_pre_story_state should set pre_story_commit
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         assert!(state.pre_story_commit.is_none());
@@ -1611,6 +1612,9 @@ mod tests {
 
     #[test]
     fn test_capture_and_record_workflow() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test the typical workflow: capture -> implement -> record
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
@@ -2070,6 +2074,9 @@ src/lib.rs | Library module | [Config]
 
     #[test]
     fn test_capture_pre_story_state_sets_baseline_commit_on_first_call() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
@@ -2088,6 +2095,9 @@ src/lib.rs | Library module | [Config]
 
     #[test]
     fn test_capture_pre_story_state_preserves_baseline_on_subsequent_calls() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
@@ -2108,6 +2118,9 @@ src/lib.rs | Library module | [Config]
 
     #[test]
     fn test_capture_pre_story_state_baseline_persists_through_multiple_stories() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 

@@ -760,14 +760,23 @@ pub fn push_branch(branch: &str) -> Result<PushResult> {
 mod tests {
     use super::*;
 
+    // Use the shared CWD_MUTEX for tests that depend on or change the current working directory
+    use crate::test_utils::CWD_MUTEX;
+
     #[test]
     fn test_is_git_repo() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs within a git repo, so should return true
         assert!(is_git_repo());
     }
 
     #[test]
     fn test_current_branch_returns_string() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Should return some branch name (not empty)
         let branch = current_branch();
         assert!(branch.is_ok());
@@ -776,6 +785,9 @@ mod tests {
 
     #[test]
     fn test_latest_commit_short_returns_valid_hash() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // In a git repo, should return a short hash (typically 7 chars)
         let hash = latest_commit_short();
         assert!(hash.is_ok());
@@ -1029,6 +1041,9 @@ mod tests {
 
     #[test]
     fn test_has_uncommitted_changes_returns_bool() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo, should not error
         let result = has_uncommitted_changes();
         assert!(result.is_ok());
@@ -1047,6 +1062,9 @@ mod tests {
 
     #[test]
     fn test_commit_and_push_with_commit_enabled_but_push_disabled() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // When commit is enabled but push disabled, push_result should be None
         // Note: This test doesn't actually create commits to avoid mutating the repo
         // It just verifies the function can be called without panicking
@@ -1061,6 +1079,9 @@ mod tests {
 
     #[test]
     fn test_stage_all_changes_does_not_error() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo, should not error (even if nothing to stage)
         let result = stage_all_changes();
         assert!(result.is_ok());
@@ -1275,6 +1296,9 @@ mod tests {
 
     #[test]
     fn test_get_head_commit_returns_valid_hash() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo
         let result = get_head_commit();
         assert!(result.is_ok());
@@ -1287,6 +1311,9 @@ mod tests {
 
     #[test]
     fn test_get_diff_since_returns_vec() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that get_diff_since returns a valid Vec (may have entries if there are changes)
         if let Ok(head) = get_head_commit() {
             let result = get_diff_since(&head);
@@ -1302,6 +1329,9 @@ mod tests {
 
     #[test]
     fn test_get_diff_since_invalid_commit_returns_empty() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Invalid commit should return empty vec (graceful degradation)
         let result = get_diff_since("invalid_commit_hash_xyz");
         assert!(result.is_ok());
@@ -1310,6 +1340,9 @@ mod tests {
 
     #[test]
     fn test_get_uncommitted_changes_returns_vec() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test runs in a git repo
         let result = get_uncommitted_changes();
         assert!(result.is_ok());
@@ -1318,6 +1351,9 @@ mod tests {
 
     #[test]
     fn test_get_new_files_since_returns_vec() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that get_new_files_since returns a valid Vec (may have entries if there are new files)
         if let Ok(head) = get_head_commit() {
             let result = get_new_files_since(&head);
@@ -1333,6 +1369,9 @@ mod tests {
 
     #[test]
     fn test_get_new_files_since_invalid_commit_returns_empty() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Invalid commit should return empty vec (graceful degradation)
         let result = get_new_files_since("invalid_commit_hash_xyz");
         assert!(result.is_ok());

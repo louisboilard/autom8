@@ -39,6 +39,8 @@ pub mod runner;
 pub mod snapshot;
 pub mod spec;
 pub mod state;
+#[cfg(test)]
+pub mod test_utils;
 
 pub use display::{BannerColor, StoryResult};
 pub use error::{Autom8Error, Result};
