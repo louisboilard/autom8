@@ -2133,19 +2133,22 @@ src/lib.rs | Library module | [Config]
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
         // Simulate first story that touched src/a.rs
-        state.knowledge.story_changes.push(crate::knowledge::StoryChanges {
-            story_id: "US-001".to_string(),
-            files_created: vec![crate::knowledge::FileChange {
-                path: PathBuf::from("src/a.rs"),
-                additions: 100,
-                deletions: 0,
-                purpose: None,
-                key_symbols: vec![],
-            }],
-            files_modified: vec![],
-            files_deleted: vec![],
-            commit_hash: None,
-        });
+        state
+            .knowledge
+            .story_changes
+            .push(crate::knowledge::StoryChanges {
+                story_id: "US-001".to_string(),
+                files_created: vec![crate::knowledge::FileChange {
+                    path: PathBuf::from("src/a.rs"),
+                    additions: 100,
+                    deletions: 0,
+                    purpose: None,
+                    key_symbols: vec![],
+                }],
+                files_modified: vec![],
+                files_deleted: vec![],
+                commit_hash: None,
+            });
 
         // Verify our_files returns the file
         let our_files = state.knowledge.our_files();
