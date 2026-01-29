@@ -35,5 +35,8 @@ pub use pr::{
     create_pull_request, ensure_branch_pushed, is_gh_authenticated, is_gh_installed,
     update_pr_description,
 };
-pub use template::detect_pr_template;
+pub use template::{
+    build_gh_command, detect_pr_template, extract_pr_url, format_spec_for_template,
+    run_template_agent, TemplateAgentResult,
+};
 pub use types::{PRDetectionResult, PRResult, PullRequestInfo};

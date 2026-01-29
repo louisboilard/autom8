@@ -523,6 +523,60 @@ After analyzing all comments, provide a summary:
 Begin your analysis now.
 "####;
 
+/// Prompt for the PR template population agent.
+/// This agent fills in a PR template using spec data and executes the gh command.
+/// Placeholders: {spec_data}, {template_content}, {gh_command}
+pub const PR_TEMPLATE_PROMPT: &str = r####"You are a PR creation agent. Your task is to fill in a pull request template using the provided spec data, then execute the GitHub CLI command to create or update the PR.
+
+## Spec Data
+
+The following is the spec for this feature:
+
+{spec_data}
+
+## PR Template
+
+Fill in the following PR template. Replace placeholder sections with appropriate content based on the spec data above:
+
+```markdown
+{template_content}
+```
+
+## Your Task
+
+1. **Analyze the template**: Identify sections that need to be filled in (e.g., Description, Summary, Changes, etc.)
+
+2. **Fill the template**: Replace template placeholders and sections with content derived from the spec:
+   - Use the spec description for summary/description sections
+   - List user stories as changes or features
+   - Mark completed stories with checkboxes if the template uses them
+   - Keep the template structure intact - only fill in the content areas
+
+3. **Execute the command**: After preparing the filled template, run this exact command with the filled template as the body:
+
+```
+{gh_command}
+```
+
+The `--body` argument should contain your filled-in template content.
+
+## Important Guidelines
+
+- Preserve the template's original structure and section headers
+- Do not add sections that don't exist in the template
+- Do not remove sections from the template
+- If a section doesn't apply, write "N/A" or leave a brief note
+- Use markdown formatting consistent with the template
+
+## Output
+
+After successfully executing the `gh` command, output the PR URL that was created or updated.
+
+If the command fails, output an error message explaining what went wrong.
+
+Do NOT output any other content after the PR URL or error - this helps parse your output.
+"####;
+
 /// Prompt for the corrector agent that fixes issues found by the reviewer.
 /// Placeholders: {project}, {feature_description}, {stories_context}, {iteration}, {max_iterations}
 pub const CORRECTOR_PROMPT: &str = r####"You are a corrector agent fixing issues identified during code review.
@@ -1093,5 +1147,100 @@ mod tests {
             PR_REVIEW_PROMPT.contains("location") || PR_REVIEW_PROMPT.contains("line"),
             "Should reference comment location"
         );
+    }
+
+    // ========================================================================
+    // PR Template Prompt tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn pr_template_prompt_contains_spec_data_placeholder() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("{spec_data}"),
+            "Must include spec_data placeholder"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_contains_template_content_placeholder() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("{template_content}"),
+            "Must include template_content placeholder"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_contains_gh_command_placeholder() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("{gh_command}"),
+            "Must include gh_command placeholder"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_instructs_fill_template() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("Fill") || PR_TEMPLATE_PROMPT.contains("fill"),
+            "Should instruct agent to fill the template"
+        );
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("template"),
+            "Should reference the template"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_instructs_execute_command() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("Execute") || PR_TEMPLATE_PROMPT.contains("execute"),
+            "Should instruct agent to execute the command"
+        );
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("gh") || PR_TEMPLATE_PROMPT.contains("command"),
+            "Should reference the gh command"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_mentions_spec_data() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("spec") || PR_TEMPLATE_PROMPT.contains("Spec"),
+            "Should reference spec data"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_mentions_pr_url_output() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("PR URL") || PR_TEMPLATE_PROMPT.contains("URL"),
+            "Should instruct agent to output PR URL"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_instructs_preserve_structure() {
+        assert!(
+            PR_TEMPLATE_PROMPT.contains("structure") || PR_TEMPLATE_PROMPT.contains("Preserve"),
+            "Should instruct agent to preserve template structure"
+        );
+    }
+
+    #[test]
+    fn pr_template_prompt_can_be_populated() {
+        let spec_data = "**Project:** Test\n**Description:** Test feature";
+        let template = "## Description\n\n<!-- Describe your changes -->";
+        let command = "gh pr create --title \"Test\" --body \"<filled>\"";
+
+        let populated = PR_TEMPLATE_PROMPT
+            .replace("{spec_data}", spec_data)
+            .replace("{template_content}", template)
+            .replace("{gh_command}", command);
+
+        assert!(populated.contains("**Project:** Test"));
+        assert!(populated.contains("## Description"));
+        assert!(populated.contains("gh pr create"));
+        assert!(!populated.contains("{spec_data}"));
+        assert!(!populated.contains("{template_content}"));
+        assert!(!populated.contains("{gh_command}"));
     }
 }
