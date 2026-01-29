@@ -29,6 +29,7 @@ pub mod display;
 pub mod error;
 pub mod gh;
 pub mod git;
+pub mod knowledge;
 pub mod monitor;
 pub mod output;
 pub mod progress;
@@ -38,6 +39,8 @@ pub mod runner;
 pub mod snapshot;
 pub mod spec;
 pub mod state;
+#[cfg(test)]
+pub mod test_utils;
 
 pub use display::{BannerColor, StoryResult};
 pub use error::{Autom8Error, Result};
