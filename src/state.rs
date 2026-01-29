@@ -1,5 +1,7 @@
 use crate::config::{self, Config};
 use crate::error::Result;
+use crate::git;
+use crate::knowledge::{FileChange, ProjectKnowledge, StoryChanges};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -78,6 +80,14 @@ pub struct RunState {
     /// This ensures resumed runs use the same config they started with.
     #[serde(default)]
     pub config: Option<Config>,
+    /// Cumulative project knowledge tracked across agent runs.
+    /// Contains file info, decisions, patterns, and story changes.
+    #[serde(default)]
+    pub knowledge: ProjectKnowledge,
+    /// Git commit hash captured before starting each story.
+    /// Used to calculate diffs for what changed during the story.
+    #[serde(default)]
+    pub pre_story_commit: Option<String>,
 }
 
 impl RunState {
@@ -96,6 +106,8 @@ impl RunState {
             finished_at: None,
             iterations: Vec::new(),
             config: None,
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
         }
     }
 
@@ -115,6 +127,8 @@ impl RunState {
             finished_at: None,
             iterations: Vec::new(),
             config: Some(config),
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
         }
     }
 
@@ -133,6 +147,8 @@ impl RunState {
             finished_at: None,
             iterations: Vec::new(),
             config: None,
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
         }
     }
 
@@ -156,6 +172,8 @@ impl RunState {
             finished_at: None,
             iterations: Vec::new(),
             config: Some(config),
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
         }
     }
 
@@ -219,6 +237,71 @@ impl RunState {
         } else {
             0
         }
+    }
+
+    /// Capture the current HEAD commit before starting a story.
+    ///
+    /// This stores the commit hash so we can later calculate what changed
+    /// during the story implementation. For non-git projects, this is a no-op.
+    pub fn capture_pre_story_state(&mut self) {
+        if git::is_git_repo() {
+            self.pre_story_commit = git::get_head_commit().ok();
+        }
+    }
+
+    /// Record changes made during a story and update project knowledge.
+    ///
+    /// This method:
+    /// 1. Captures the git diff since `pre_story_commit`
+    /// 2. Creates a `StoryChanges` record
+    /// 3. Adds it to the project knowledge
+    ///
+    /// For non-git projects or if `pre_story_commit` is not set, this creates
+    /// an empty `StoryChanges` record.
+    ///
+    /// # Arguments
+    /// * `story_id` - The ID of the story that was just implemented
+    /// * `commit_hash` - Optional commit hash if the changes were committed
+    pub fn record_story_changes(&mut self, story_id: &str, commit_hash: Option<String>) {
+        let mut files_created = Vec::new();
+        let mut files_modified = Vec::new();
+        let mut files_deleted = Vec::new();
+
+        // If we have a pre-story commit, calculate the diff
+        if let Some(ref base_commit) = self.pre_story_commit {
+            if git::is_git_repo() {
+                if let Ok(entries) = git::get_diff_since(base_commit) {
+                    for entry in entries {
+                        let file_change = FileChange {
+                            path: entry.path.clone(),
+                            additions: entry.additions,
+                            deletions: entry.deletions,
+                            purpose: None,
+                            key_symbols: Vec::new(),
+                        };
+
+                        match entry.status {
+                            git::DiffStatus::Added => files_created.push(file_change),
+                            git::DiffStatus::Modified => files_modified.push(file_change),
+                            git::DiffStatus::Deleted => files_deleted.push(entry.path),
+                        }
+                    }
+                }
+            }
+        }
+
+        let story_changes = StoryChanges {
+            story_id: story_id.to_string(),
+            files_created,
+            files_modified,
+            files_deleted,
+            commit_hash,
+        };
+
+        self.knowledge.story_changes.push(story_changes);
+
+        // Clear pre_story_commit after recording
+        self.pre_story_commit = None;
     }
 }
 
@@ -1117,5 +1200,258 @@ mod tests {
         let loaded = sm.load_current().unwrap().unwrap();
         assert!(loaded.config.is_some());
         assert_eq!(loaded.config.unwrap(), config);
+    }
+
+    // ======================================================================
+    // Tests for US-003: ProjectKnowledge integration with RunState
+    // ======================================================================
+
+    #[test]
+    fn test_run_state_has_knowledge_field() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        // Knowledge should be initialized as default (empty)
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.knowledge.decisions.is_empty());
+        assert!(state.knowledge.patterns.is_empty());
+        assert!(state.knowledge.story_changes.is_empty());
+        assert!(state.knowledge.baseline_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_has_pre_story_commit_field() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_new_with_config_has_knowledge() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        let state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+        );
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_from_spec_has_knowledge() {
+        let state = RunState::from_spec(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+        );
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_from_spec_with_config_has_knowledge() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        let state = RunState::from_spec_with_config(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+            config,
+        );
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_backwards_compatible_without_knowledge_field() {
+        // Simulate loading a legacy state.json that doesn't have knowledge or pre_story_commit fields
+        let legacy_json = r#"{
+            "run_id": "test-123",
+            "status": "running",
+            "machine_state": "initializing",
+            "spec_json_path": "test.json",
+            "branch": "test-branch",
+            "current_story": null,
+            "iteration": 0,
+            "review_iteration": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "iterations": []
+        }"#;
+
+        let state: RunState = serde_json::from_str(legacy_json).unwrap();
+
+        // Knowledge should default to empty
+        assert!(state.knowledge.files.is_empty());
+        assert!(state.knowledge.decisions.is_empty());
+        assert!(state.knowledge.patterns.is_empty());
+        assert!(state.knowledge.story_changes.is_empty());
+        assert!(state.knowledge.baseline_commit.is_none());
+
+        // pre_story_commit should default to None
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_run_state_knowledge_serialization_roundtrip() {
+        use crate::knowledge::{Decision, Pattern};
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Add some knowledge
+        state.knowledge.baseline_commit = Some("abc123".to_string());
+        state.knowledge.decisions.push(Decision {
+            story_id: "US-001".to_string(),
+            topic: "Architecture".to_string(),
+            choice: "Use modules".to_string(),
+            rationale: "Better organization".to_string(),
+        });
+        state.knowledge.patterns.push(Pattern {
+            story_id: "US-001".to_string(),
+            description: "Use Result for errors".to_string(),
+            example_file: Some(PathBuf::from("src/lib.rs")),
+        });
+        state.pre_story_commit = Some("def456".to_string());
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&state).unwrap();
+
+        // Deserialize back
+        let deserialized: RunState = serde_json::from_str(&json).unwrap();
+
+        // Verify knowledge is preserved
+        assert_eq!(
+            deserialized.knowledge.baseline_commit,
+            Some("abc123".to_string())
+        );
+        assert_eq!(deserialized.knowledge.decisions.len(), 1);
+        assert_eq!(deserialized.knowledge.decisions[0].story_id, "US-001");
+        assert_eq!(deserialized.knowledge.patterns.len(), 1);
+        assert_eq!(deserialized.pre_story_commit, Some("def456".to_string()));
+    }
+
+    #[test]
+    fn test_capture_pre_story_state_in_git_repo() {
+        // This test runs in a git repo, so capture_pre_story_state should set pre_story_commit
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.pre_story_commit.is_none());
+
+        state.capture_pre_story_state();
+
+        // In a git repo, this should capture the HEAD commit
+        assert!(state.pre_story_commit.is_some());
+        let commit = state.pre_story_commit.unwrap();
+        // Should be a 40-character hex hash
+        assert_eq!(commit.len(), 40);
+        assert!(commit.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_record_story_changes_creates_story_changes_entry() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Record changes without pre_story_commit (simulates non-git or no prior capture)
+        state.record_story_changes("US-001", None);
+
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        let changes = &state.knowledge.story_changes[0];
+        assert_eq!(changes.story_id, "US-001");
+        assert!(changes.files_created.is_empty());
+        assert!(changes.files_modified.is_empty());
+        assert!(changes.files_deleted.is_empty());
+        assert!(changes.commit_hash.is_none());
+    }
+
+    #[test]
+    fn test_record_story_changes_with_commit_hash() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.record_story_changes("US-001", Some("abc1234".to_string()));
+
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        let changes = &state.knowledge.story_changes[0];
+        assert_eq!(changes.commit_hash, Some("abc1234".to_string()));
+    }
+
+    #[test]
+    fn test_record_story_changes_clears_pre_story_commit() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.pre_story_commit = Some("abc123".to_string());
+
+        state.record_story_changes("US-001", None);
+
+        // pre_story_commit should be cleared after recording
+        assert!(state.pre_story_commit.is_none());
+    }
+
+    #[test]
+    fn test_record_story_changes_multiple_stories() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.record_story_changes("US-001", Some("commit1".to_string()));
+        state.record_story_changes("US-002", Some("commit2".to_string()));
+        state.record_story_changes("US-003", None);
+
+        assert_eq!(state.knowledge.story_changes.len(), 3);
+        assert_eq!(state.knowledge.story_changes[0].story_id, "US-001");
+        assert_eq!(state.knowledge.story_changes[1].story_id, "US-002");
+        assert_eq!(state.knowledge.story_changes[2].story_id, "US-003");
+    }
+
+    #[test]
+    fn test_state_manager_preserves_knowledge_on_save_and_load() {
+        use crate::knowledge::Decision;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.knowledge.baseline_commit = Some("baseline123".to_string());
+        state.knowledge.decisions.push(Decision {
+            story_id: "US-001".to_string(),
+            topic: "Test".to_string(),
+            choice: "Option A".to_string(),
+            rationale: "Because".to_string(),
+        });
+        state.pre_story_commit = Some("pre123".to_string());
+
+        sm.save(&state).unwrap();
+
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(
+            loaded.knowledge.baseline_commit,
+            Some("baseline123".to_string())
+        );
+        assert_eq!(loaded.knowledge.decisions.len(), 1);
+        assert_eq!(loaded.pre_story_commit, Some("pre123".to_string()));
+    }
+
+    #[test]
+    fn test_capture_and_record_workflow() {
+        // Test the typical workflow: capture -> implement -> record
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Step 1: Capture pre-story state
+        state.capture_pre_story_state();
+
+        // In a git repo, pre_story_commit should be set
+        let captured_commit = state.pre_story_commit.clone();
+        assert!(captured_commit.is_some());
+
+        // Step 2: (Implementation happens here - we simulate no changes for test)
+
+        // Step 3: Record story changes
+        state.record_story_changes("US-001", Some("new_commit_hash".to_string()));
+
+        // Verify: pre_story_commit cleared, story_changes recorded
+        assert!(state.pre_story_commit.is_none());
+        assert_eq!(state.knowledge.story_changes.len(), 1);
+        assert_eq!(
+            state.knowledge.story_changes[0].commit_hash,
+            Some("new_commit_hash".to_string())
+        );
     }
 }
