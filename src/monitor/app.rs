@@ -536,10 +536,16 @@ impl MonitorApp {
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: KeyCode) {
-        // Handle Escape to close detail view
+        // q/Q always quits immediately from any screen
+        if matches!(key, KeyCode::Char('q') | KeyCode::Char('Q')) {
+            self.should_quit = true;
+            return;
+        }
+
+        // Handle keys in detail view
         if self.show_run_detail {
             match key {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.show_run_detail = false;
                 }
                 _ => {}
@@ -548,9 +554,6 @@ impl MonitorApp {
         }
 
         match key {
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                self.should_quit = true;
-            }
             KeyCode::Tab => {
                 self.next_view();
                 // Clear run history filter when switching views with Tab
@@ -602,11 +605,24 @@ impl MonitorApp {
                 self.handle_enter();
             }
             KeyCode::Esc => {
-                // In Run History view, clear filter and go back to unfiltered view
-                if self.current_view == View::RunHistory && self.run_history_filter.is_some() {
-                    self.run_history_filter = None;
-                    self.selected_index = 0;
-                    self.history_scroll_offset = 0;
+                // Hierarchical escape behavior - go back one level
+                match self.current_view {
+                    View::RunHistory => {
+                        if self.run_history_filter.is_some() {
+                            // Clear filter first
+                            self.run_history_filter = None;
+                            self.selected_index = 0;
+                            self.history_scroll_offset = 0;
+                        } else {
+                            // Go back to ProjectList
+                            self.current_view = View::ProjectList;
+                            self.selected_index = 0;
+                        }
+                    }
+                    View::ProjectList | View::ActiveRuns => {
+                        // Root views - quit
+                        self.should_quit = true;
+                    }
                 }
             }
             // Pagination for Active Runs view (n/] = next, p/[ = previous)
@@ -2119,14 +2135,14 @@ mod tests {
     }
 
     #[test]
-    fn test_q_closes_detail_view_instead_of_quitting() {
+    fn test_q_quits_immediately_even_from_detail_view() {
         let mut app = MonitorApp::new(1, None);
         app.show_run_detail = true;
 
         app.handle_key(KeyCode::Char('q'));
 
-        assert!(!app.show_run_detail);
-        assert!(!app.should_quit()); // Should NOT quit when closing detail
+        // q always quits immediately, regardless of detail view state
+        assert!(app.should_quit());
     }
 
     #[test]
@@ -3700,5 +3716,201 @@ mod tests {
         // Should be clamped to (0,0)
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 0);
+    }
+
+    // ============================================================================
+    // US-004: Hierarchical Escape Behavior Tests
+    // ============================================================================
+
+    #[test]
+    fn test_esc_from_active_runs_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_project_list_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_run_history_unfiltered_goes_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = None;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_eq!(app.current_view, View::ProjectList);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_run_history_filtered_clears_filter_first() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+        app.selected_index = 5;
+        app.history_scroll_offset = 10;
+
+        app.handle_key(KeyCode::Esc);
+
+        // Should clear filter but stay in RunHistory
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.history_scroll_offset, 0);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_twice_from_filtered_run_history_goes_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+
+        // First Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Second Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.current_view, View::ProjectList);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_three_times_from_filtered_run_history_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+
+        // First Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        // Second Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        // Third Esc quits
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_q_quits_from_any_view() {
+        // Test q quits from ProjectList
+        let mut app1 = MonitorApp::new(1, None);
+        app1.current_view = View::ProjectList;
+        app1.handle_key(KeyCode::Char('q'));
+        assert!(app1.should_quit());
+
+        // Test q quits from ActiveRuns
+        let mut app2 = MonitorApp::new(1, None);
+        app2.current_view = View::ActiveRuns;
+        app2.handle_key(KeyCode::Char('q'));
+        assert!(app2.should_quit());
+
+        // Test q quits from RunHistory
+        let mut app3 = MonitorApp::new(1, None);
+        app3.current_view = View::RunHistory;
+        app3.handle_key(KeyCode::Char('q'));
+        assert!(app3.should_quit());
+
+        // Test Q (uppercase) quits from any view
+        let mut app4 = MonitorApp::new(1, None);
+        app4.current_view = View::ProjectList;
+        app4.handle_key(KeyCode::Char('Q'));
+        assert!(app4.should_quit());
+    }
+
+    #[test]
+    fn test_esc_resets_selected_index_when_going_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = None;
+        app.selected_index = 5;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_eq!(app.current_view, View::ProjectList);
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_hierarchical_navigation_flow() {
+        // Simulate full navigation flow:
+        // ProjectList -> (Enter with project) -> RunHistory (filtered) -> (Enter) -> Detail
+        // Then Esc back through the hierarchy
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+
+        // Setup a project
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "test-project".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 1,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        }];
+
+        // Add a run history entry
+        app.run_history = vec![RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run: RunState::new(
+                std::path::PathBuf::from("test.json"),
+                "test-branch".to_string(),
+            ),
+            completed_stories: 3,
+            total_stories: 3,
+        }];
+
+        // Start at ProjectList
+        app.current_view = View::ProjectList;
+        assert_eq!(app.current_view, View::ProjectList);
+
+        // Enter on project goes to filtered RunHistory
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.current_view, View::RunHistory);
+        assert_eq!(app.run_history_filter, Some("test-project".to_string()));
+
+        // Enter on run history shows detail
+        app.handle_key(KeyCode::Enter);
+        assert!(app.show_run_detail);
+
+        // Esc closes detail view
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.show_run_detail);
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.current_view, View::ProjectList);
+
+        // Esc from ProjectList quits
+        app.handle_key(KeyCode::Esc);
+        assert!(app.should_quit());
     }
 }
