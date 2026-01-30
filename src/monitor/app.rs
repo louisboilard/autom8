@@ -223,6 +223,8 @@ pub struct MonitorApp {
     history_scroll_offset: usize,
     /// Whether to show the detail view for a selected run
     show_run_detail: bool,
+    /// Current page in Active Runs view (0-indexed) for pagination when > 4 runs
+    quadrant_page: usize,
 }
 
 impl MonitorApp {
@@ -240,6 +242,7 @@ impl MonitorApp {
             run_history_filter: None,
             history_scroll_offset: 0,
             show_run_detail: false,
+            quadrant_page: 0,
         }
     }
 
@@ -328,7 +331,7 @@ impl MonitorApp {
         Ok(())
     }
 
-    /// Ensure selected_index stays within bounds when projects/history change.
+    /// Ensure selected_index and quadrant_page stay within bounds when projects/history change.
     fn clamp_selection_index(&mut self) {
         let max_index = match self.current_view {
             View::ProjectList => self.projects.len().saturating_sub(1),
@@ -346,6 +349,11 @@ impl MonitorApp {
         // Also clamp scroll offset
         if self.history_scroll_offset > self.selected_index {
             self.history_scroll_offset = self.selected_index;
+        }
+        // Clamp quadrant_page for Active Runs view
+        let max_page = self.total_quadrant_pages().saturating_sub(1);
+        if self.quadrant_page > max_page {
+            self.quadrant_page = max_page;
         }
     }
 
@@ -414,6 +422,36 @@ impl MonitorApp {
     pub fn next_view(&mut self) {
         self.current_view = self.current_view.next(!self.has_active_runs);
         self.selected_index = 0;
+        self.quadrant_page = 0; // Reset pagination when switching views
+    }
+
+    /// Get the total number of pages for Active Runs view.
+    fn total_quadrant_pages(&self) -> usize {
+        let active_count = self
+            .projects
+            .iter()
+            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
+            .count();
+        if active_count == 0 {
+            1
+        } else {
+            (active_count + 3) / 4 // Ceiling division
+        }
+    }
+
+    /// Move to the next page in Active Runs view.
+    fn next_quadrant_page(&mut self) {
+        let total_pages = self.total_quadrant_pages();
+        if total_pages > 1 && self.quadrant_page < total_pages - 1 {
+            self.quadrant_page += 1;
+        }
+    }
+
+    /// Move to the previous page in Active Runs view.
+    fn prev_quadrant_page(&mut self) {
+        if self.quadrant_page > 0 {
+            self.quadrant_page -= 1;
+        }
     }
 
     /// Handle keyboard input.
@@ -474,6 +512,17 @@ impl MonitorApp {
                     self.run_history_filter = None;
                     self.selected_index = 0;
                     self.history_scroll_offset = 0;
+                }
+            }
+            // Pagination for Active Runs view (n/] = next, p/[ = previous)
+            KeyCode::Char('n') | KeyCode::Char(']') => {
+                if self.current_view == View::ActiveRuns {
+                    self.next_quadrant_page();
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('[') => {
+                if self.current_view == View::ActiveRuns {
+                    self.prev_quadrant_page();
                 }
             }
             _ => {}
@@ -600,48 +649,64 @@ impl MonitorApp {
             .filter(|p| p.active_run.is_some() || p.load_error.is_some())
             .collect();
 
-        if active.is_empty() {
-            let message = Paragraph::new("No active runs")
-                .style(Style::default().fg(COLOR_DIM))
-                .block(
-                    Block::default()
+        // Calculate pagination info
+        let total_runs = active.len();
+        let total_pages = (total_runs + 3) / 4; // Ceiling division
+        let start_idx = self.quadrant_page * 4;
+
+        // Get the 4 runs (or fewer) for the current page
+        let page_runs: Vec<Option<&ProjectData>> = (0..4)
+            .map(|i| active.get(start_idx + i).copied())
+            .collect();
+
+        // Fixed 2x2 grid layout - always split into 2 rows, each with 2 columns
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        let top_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+
+        let bottom_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]);
+
+        // Map quadrant indices to areas: [0]=top-left, [1]=top-right, [2]=bottom-left, [3]=bottom-right
+        let quadrant_areas = [top_cols[0], top_cols[1], bottom_cols[0], bottom_cols[1]];
+
+        // Render each quadrant
+        for (i, opt_project) in page_runs.iter().enumerate() {
+            match opt_project {
+                Some(project) => {
+                    self.render_run_or_error(frame, quadrant_areas[i], project, false);
+                }
+                None => {
+                    // Empty bordered box for unused quadrants
+                    let empty_block = Block::default()
                         .borders(Borders::ALL)
-                        .title(" Active Runs "),
-                );
-            frame.render_widget(message, area);
-            return;
-        }
-
-        match active.len() {
-            1 => {
-                // Full screen for single run
-                self.render_run_or_error(frame, area, active[0], true);
-            }
-            2 => {
-                // Vertical split (side by side) for two runs
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(area);
-
-                self.render_run_or_error(frame, chunks[0], active[0], false);
-                self.render_run_or_error(frame, chunks[1], active[1], false);
-            }
-            _ => {
-                // 3+ runs: list on left, detail on right
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                    .split(area);
-
-                // Render list on left
-                self.render_active_runs_list(frame, chunks[0], &active);
-
-                // Render detail for selected run on right
-                if let Some(selected) = active.get(self.selected_index) {
-                    self.render_run_or_error(frame, chunks[1], selected, true);
+                        .border_style(Style::default().fg(COLOR_DIM));
+                    frame.render_widget(empty_block, quadrant_areas[i]);
                 }
             }
+        }
+
+        // Render page indicator if more than 4 runs (overlay at top-right of area)
+        if total_pages > 1 {
+            let indicator = format!(" Page {}/{} ", self.quadrant_page + 1, total_pages);
+            let indicator_width = indicator.len() as u16;
+            let indicator_area = Rect::new(
+                area.x + area.width.saturating_sub(indicator_width + 1),
+                area.y,
+                indicator_width,
+                1,
+            );
+            let indicator_widget = Paragraph::new(indicator)
+                .style(Style::default().fg(COLOR_PRIMARY).bg(Color::Black));
+            frame.render_widget(indicator_widget, indicator_area);
         }
     }
 
@@ -695,55 +760,6 @@ impl MonitorApp {
 
         let paragraph = Paragraph::new(error_lines).wrap(Wrap { trim: true });
         frame.render_widget(paragraph, inner);
-    }
-
-    /// Render the list view for 3+ active runs
-    fn render_active_runs_list(&self, frame: &mut Frame, area: Rect, active: &[&ProjectData]) {
-        let items: Vec<ListItem> = active
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let (state_str, state_clr) = if let Some(ref _error) = p.load_error {
-                    ("Error", COLOR_ERROR)
-                } else if let Some(ref run) = p.active_run {
-                    (
-                        format_state(run.machine_state),
-                        state_color(run.machine_state),
-                    )
-                } else {
-                    ("Unknown", COLOR_DIM)
-                };
-
-                let line = Line::from(vec![
-                    Span::styled(
-                        if i == self.selected_index {
-                            "▶ "
-                        } else {
-                            "  "
-                        },
-                        Style::default().fg(COLOR_PRIMARY),
-                    ),
-                    Span::styled(
-                        &p.info.name,
-                        if i == self.selected_index {
-                            Style::default()
-                                .fg(COLOR_WARNING)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::White)
-                        },
-                    ),
-                    Span::styled(format!(" ({})", state_str), Style::default().fg(state_clr)),
-                ]);
-
-                ListItem::new(line)
-            })
-            .collect();
-
-        let title = format!(" Runs ({}) ", active.len());
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-
-        frame.render_widget(list, area);
     }
 
     /// Render detailed view for a single run
@@ -1184,20 +1200,27 @@ impl MonitorApp {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let help_text = if self.show_run_detail {
-            " Enter/Esc: close detail view "
+            " Enter/Esc: close detail view ".to_string()
         } else {
             match self.current_view {
                 View::ProjectList => {
-                    " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit "
+                    " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit ".to_string()
                 }
                 View::RunHistory => {
                     if self.run_history_filter.is_some() {
-                        " Tab: switch view | ↑↓: navigate | Enter: details | Esc: clear filter | Q: quit "
+                        " Tab: switch view | ↑↓: navigate | Enter: details | Esc: clear filter | Q: quit ".to_string()
                     } else {
-                        " Tab: switch view | ↑↓: navigate | Enter: details | Q: quit "
+                        " Tab: switch view | ↑↓: navigate | Enter: details | Q: quit ".to_string()
                     }
                 }
-                View::ActiveRuns => " Tab: switch view | ↑↓: navigate | Q: quit ",
+                View::ActiveRuns => {
+                    // Show pagination keys only when there are more than 4 runs
+                    if self.total_quadrant_pages() > 1 {
+                        " Tab: switch view | n/]: next page | p/[: prev page | Q: quit ".to_string()
+                    } else {
+                        " Tab: switch view | Q: quit ".to_string()
+                    }
+                }
             }
         };
         let footer = Paragraph::new(help_text).style(Style::default().fg(COLOR_DIM));
@@ -2379,5 +2402,544 @@ mod tests {
         assert_eq!(state_str, "Error");
         // Just to use app to avoid warning
         assert!(!app.should_quit());
+    }
+
+    // ===========================================
+    // US-002: Fixed Quadrant Layout Tests
+    // ===========================================
+
+    #[test]
+    fn test_monitor_app_new_initializes_quadrant_page_to_zero() {
+        let app = MonitorApp::new(1, None);
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_zero_runs() {
+        let app = MonitorApp::new(1, None);
+        // With no projects, total_quadrant_pages returns 1 (minimum)
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_one_to_four_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "project-1".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: Some(RunState::new(
+                std::path::PathBuf::from("test.json"),
+                "branch".to_string(),
+            )),
+            progress: None,
+            load_error: None,
+        }];
+
+        // 1 run = 1 page
+        assert_eq!(app.total_quadrant_pages(), 1);
+
+        // Add 3 more projects (4 total) - still 1 page
+        for i in 2..=4 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_five_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 5 runs = 2 pages (4 on first, 1 on second)
+        assert_eq!(app.total_quadrant_pages(), 2);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_eight_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=8 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 8 runs = 2 pages (4 on each)
+        assert_eq!(app.total_quadrant_pages(), 2);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_nine_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=9 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 9 runs = 3 pages (4, 4, 1)
+        assert_eq!(app.total_quadrant_pages(), 3);
+    }
+
+    #[test]
+    fn test_next_quadrant_page_advances() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 5 projects to have 2 pages
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        // Should not go beyond last page
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_prev_quadrant_page_goes_back() {
+        let mut app = MonitorApp::new(1, None);
+        app.quadrant_page = 2;
+
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 0);
+
+        // Should not go below 0
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_next_quadrant_page_does_nothing_with_single_page() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Only 2 projects = 1 page
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.next_quadrant_page();
+        // Should stay at 0 since there's only 1 page
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_handle_n_key_advances_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_handle_right_bracket_advances_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.handle_key(KeyCode::Char(']'));
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_handle_p_key_goes_back_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 1;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.handle_key(KeyCode::Char('p'));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_handle_left_bracket_goes_back_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 1;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.handle_key(KeyCode::Char('['));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_pagination_keys_ignored_in_other_views() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.quadrant_page = 0;
+
+        // n/p keys should not affect quadrant_page in other views
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.quadrant_page, 0);
+
+        app.handle_key(KeyCode::Char('p'));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_tab_resets_quadrant_page() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 2;
+
+        app.handle_key(KeyCode::Tab);
+
+        // After switching view, quadrant_page should reset to 0
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_clamp_selection_index_also_clamps_quadrant_page() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.quadrant_page = 5; // Out of bounds
+        // Only 3 projects = 1 page (max page index = 0)
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.clamp_selection_index();
+
+        // Should be clamped to max valid page (0)
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_only_counts_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 3 active projects
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("active-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        // Add 2 idle projects (no active run)
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("idle-{}", i),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // Only 3 active = 1 page (not 5)
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_includes_error_projects() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 3 active projects
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("active-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        // Add 2 projects with errors (should count as active)
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("error-{}", i),
+                    has_active_run: true,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: Some("Corrupted".to_string()),
+            });
+        }
+
+        // 3 active + 2 error = 5 = 2 pages
+        assert_eq!(app.total_quadrant_pages(), 2);
     }
 }
