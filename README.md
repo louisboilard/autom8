@@ -2,19 +2,15 @@
 
 ![autom8 TUI](assets/monitor.png)
 
-**Ship features while you sleep.**
-
-autom8 is the missing orchestration layer for AI-powered development. You write a spec describing what you want—autom8 drives Claude through implementation, handles the iteration loop, and delivers working code with a pull request ready for review.
-
-No babysitting. No copy-pasting between chat windows. Just define your feature, kick off the run, and come back to a PR.
+A CLI tool for orchestrating Claude-powered development. Define your feature requirements as a spec, and autom8 drives Claude through iterative implementation—managing state, context, and quality gates—until you have working code and a pull request ready for review.
 
 ## Why autom8?
 
-- **Spec-to-PR in one command** — Write a feature spec, run `autom8`, get a pull request. The entire implementation loop is handled for you.
-- **Context that compounds** — Each iteration feeds the git diff from previous work back into the next prompt. Claude always knows what just changed.
-- **Interrupt anything, resume anywhere** — State persists automatically. `Ctrl+C` mid-run, grab coffee, `autom8 resume` when you're back.
-- **Deterministic orchestration** — LLMs handle the creative work; autom8 handles state, git, reviews, and PR creation with predictable logic.
-- **Built-in quality gates** — Automatic review loops catch issues before commit. Claude reviews its own work and fixes problems without your intervention.
+- **Spec-to-PR workflow** — Write a feature spec, run `autom8`, receive a pull request. The implementation loop runs autonomously.
+- **Cumulative context** — Each iteration receives the git diff from previous work. Claude operates with awareness of what changed, enabling coherent multi-story implementations.
+- **Persistent state** — Full run state saves after every transition. Interrupt at any point and resume with `autom8 resume`.
+- **Deterministic orchestration** — LLMs handle implementation; autom8 handles state transitions, git operations, reviews, and PR creation with predictable logic.
+- **Automated review** — Built-in review loops identify issues before commit. Claude examines its own work and applies corrections without manual intervention.
 
 ## Installation
 
@@ -49,50 +45,38 @@ autom8 spec.md      # Markdown spec
 autom8 spec.json    # JSON spec
 ```
 
-Or run `autom8` without arguments to select from existing specs interactively.
-
 ### 2. Watch it work
 
 ![Running autom8](assets/running.png)
 
 autom8 converts specs to JSON, picks the highest-priority incomplete story, runs Claude to implement it, reviews the work, fixes issues automatically, and commits when all stories pass.
 
-## Under the Hood
+## How It Works
 
-autom8 isn't just a wrapper around `claude`—it's an orchestration engine with some clever mechanics.
+### Cumulative Context
 
-### Context That Compounds
+Each Claude iteration receives the **git diff from the previous iteration** in its prompt. This provides Claude with precise awareness of recent changes, enabling coherent multi-story implementations and self-correction across iterations.
 
-Each Claude iteration doesn't start from scratch. Before every prompt, autom8 injects the **git diff from the previous iteration** directly into the context. This means Claude always knows exactly what just changed, can build on its own work intelligently, and catches its own mistakes in subsequent passes.
+### State Persistence
 
-The result: multi-story features maintain coherence across hours of autonomous work, and each iteration is informed by real code changes rather than just conversation history.
+Run state—current story, iteration count, review status—persists to `.autom8/state.json` after every transition. This includes story completion status, branch information, and original config settings. Runs can be interrupted and resumed with full fidelity.
 
-### Interrupt Anything, Resume Anywhere
+### Review Loops
 
-The entire run state—current story, iteration count, review status—persists to `.autom8/state.json` after every transition. Hit `Ctrl+C` mid-implementation, and `autom8 resume` picks up exactly where you left off.
+After all stories pass, autom8 runs a review phase where Claude examines the complete implementation for edge cases, code quality, and missed requirements. If issues are found, autom8 enters a correction cycle—Claude applies fixes and review runs again. Up to three review/correct iterations occur automatically before requiring intervention.
 
-This isn't just "save progress." autom8 snapshots the full context including which stories passed, what branch you're on, and your original config settings. Leave a run overnight; resume it tomorrow with full fidelity.
+### Orchestration Design
 
-### Self-Healing Review Loops
+autom8 constrains LLM usage to implementation tasks while handling orchestration deterministically:
 
-When all stories pass, autom8 doesn't just commit. It runs a dedicated review phase where Claude examines the complete implementation for edge cases, code quality, and missed requirements. If issues are found, autom8 automatically enters a correction cycle—Claude fixes the problems and review runs again.
-
-Up to three review/correct iterations happen automatically before requiring intervention. Most runs self-correct without you ever knowing there was an issue.
-
-### Deterministic Orchestration
-
-LLMs are powerful but unpredictable. autom8 keeps them focused on what they're good at—understanding requirements, writing code, reviewing changes—while handling everything else with boring, reliable logic:
-
-- **State machine**: Explicit states and transitions, no ambiguous "maybe it's done?" moments
+- **State machine**: Explicit states and transitions with well-defined completion criteria
 - **Git operations**: Predictable branch management, commit filtering, PR creation
-- **Completion detection**: Claude signals completion through structured output, not vibes
-- **Iteration limits**: Hard caps prevent runaway loops
-
-The philosophy: let Claude be creative; let autom8 be predictable.
+- **Completion detection**: Claude signals completion through structured output tags
+- **Iteration limits**: Hard caps prevent unbounded loops
 
 ## State Machine
 
-Under the hood, autom8 runs a deterministic state machine—no guessing whether things are "probably done." Every transition is explicit, every state is persisted, and you can interrupt at any point knowing exactly where you'll resume.
+autom8 uses a deterministic state machine for orchestration. Every transition is explicit, every state is persisted, and interruption at any point preserves the exact position for resumption.
 
 ```mermaid
 stateDiagram-v2
@@ -134,7 +118,7 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-The states you'll see most often: **running-claude** (implementation in progress), **reviewing** (quality check), **correcting** (fixing issues), and **completed** (ready for your review). Everything else is orchestration plumbing.
+Primary states: **running-claude** (implementation in progress), **reviewing** (quality check), **correcting** (applying fixes), and **completed** (ready for review).
 
 ## CLI Commands
 
@@ -173,6 +157,27 @@ Specs can be written in Markdown (`spec.md`) or JSON (`spec.json`). autom8 conve
 }
 ```
 
+## Configuration
+
+autom8 uses TOML configuration files to control behavior.
+
+**Global config:** `~/.config/autom8/config.toml`
+
+```toml
+# Enable/disable the review phase before committing
+review = true
+
+# Enable/disable automatic commits
+commit = true
+
+# Enable/disable automatic PR creation (requires commit = true)
+pull_request = true
+```
+
+**Per-project config:** `~/.config/autom8/<project>/config.toml`
+
+Project-specific configuration overrides global settings. When a project config doesn't exist, it inherits from the global config.
+
 ## Automatic PR Creation
 
 After committing, autom8 creates a pull request via GitHub CLI (`gh`). Requirements:
@@ -182,7 +187,7 @@ After committing, autom8 creates a pull request via GitHub CLI (`gh`). Requireme
 
 PR creation is gracefully skipped if requirements aren't met or a PR already exists—autom8 still completes successfully.
 
-<!-- TODO: Add result.png screenshot showing PR creation output -->
+**PR Templates:** If your repository contains a pull request template (`.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`, or `pull_request_template.md`), autom8 detects it and populates the template with implementation details from the spec.
 
 ## File Storage
 
@@ -196,6 +201,10 @@ In git repositories, autom8 automatically creates or checks out the branch speci
 | ![Default](assets/autom8.png) | ![Completion](assets/completion.png) | ![Describe](assets/describe_cmd.png) |
 |:-----------------------------:|:------------------------------------:|:------------------------------------:|
 | Default command               | Shell completion                     | Describe command                     |
+
+| ![Review and Commit](assets/result.png) | ![History Monitor](assets/history_monitor.png) |
+|:---------------------------------------:|:----------------------------------------------:|
+| Review and commit process               | Run history with iteration details             |
 
 ## License
 
