@@ -435,7 +435,7 @@ impl MonitorApp {
         if active_count == 0 {
             1
         } else {
-            (active_count + 3) / 4 // Ceiling division
+            active_count.div_ceil(4)
         }
     }
 
@@ -651,13 +651,12 @@ impl MonitorApp {
 
         // Calculate pagination info
         let total_runs = active.len();
-        let total_pages = (total_runs + 3) / 4; // Ceiling division
+        let total_pages = total_runs.div_ceil(4);
         let start_idx = self.quadrant_page * 4;
 
         // Get the 4 runs (or fewer) for the current page
-        let page_runs: Vec<Option<&ProjectData>> = (0..4)
-            .map(|i| active.get(start_idx + i).copied())
-            .collect();
+        let page_runs: Vec<Option<&ProjectData>> =
+            (0..4).map(|i| active.get(start_idx + i).copied()).collect();
 
         // Fixed 2x2 grid layout - always split into 2 rows, each with 2 columns
         let rows = Layout::default()
@@ -2817,7 +2816,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_page = 5; // Out of bounds
-        // Only 3 projects = 1 page (max page index = 0)
+                               // Only 3 projects = 1 page (max page index = 0)
         for i in 1..=3 {
             app.projects.push(ProjectData {
                 info: ProjectTreeInfo {
