@@ -2208,4 +2208,47 @@ src/lib.rs | Library module | [Config]
 
         env::set_current_dir(original_dir).unwrap();
     }
+
+    // ======================================================================
+    // Tests for US-001: Output snippet stored in finish_iteration
+    // ======================================================================
+
+    #[test]
+    fn test_finish_iteration_stores_output_snippet() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        let output = "Line 1\nLine 2\nLine 3\nClaude output here".to_string();
+        state.finish_iteration(IterationStatus::Success, output.clone());
+
+        assert_eq!(state.iterations[0].output_snippet, output);
+        assert_eq!(state.iterations[0].status, IterationStatus::Success);
+        assert!(state.iterations[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn test_finish_iteration_with_empty_output_snippet() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        state.finish_iteration(IterationStatus::Success, String::new());
+
+        assert_eq!(state.iterations[0].output_snippet, "");
+    }
+
+    #[test]
+    fn test_finish_iteration_output_snippet_serialization() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        let output = "Test output from Claude".to_string();
+        state.finish_iteration(IterationStatus::Success, output.clone());
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"output_snippet\":\"Test output from Claude\""));
+
+        // Verify roundtrip
+        let loaded: RunState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.iterations[0].output_snippet, output);
+    }
 }

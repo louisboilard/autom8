@@ -223,6 +223,14 @@ pub struct MonitorApp {
     history_scroll_offset: usize,
     /// Whether to show the detail view for a selected run
     show_run_detail: bool,
+    /// Current page in Active Runs view (0-indexed) for pagination when > 4 runs
+    quadrant_page: usize,
+    /// Selected quadrant row (0 or 1) for Active Runs 2D navigation
+    quadrant_row: usize,
+    /// Selected quadrant column (0 or 1) for Active Runs 2D navigation
+    quadrant_col: usize,
+    /// Scroll offset for detail view
+    detail_scroll_offset: usize,
 }
 
 impl MonitorApp {
@@ -240,6 +248,10 @@ impl MonitorApp {
             run_history_filter: None,
             history_scroll_offset: 0,
             show_run_detail: false,
+            quadrant_page: 0,
+            quadrant_row: 0,
+            quadrant_col: 0,
+            detail_scroll_offset: 0,
         }
     }
 
@@ -328,7 +340,7 @@ impl MonitorApp {
         Ok(())
     }
 
-    /// Ensure selected_index stays within bounds when projects/history change.
+    /// Ensure selected_index and quadrant_page stay within bounds when projects/history change.
     fn clamp_selection_index(&mut self) {
         let max_index = match self.current_view {
             View::ProjectList => self.projects.len().saturating_sub(1),
@@ -346,6 +358,25 @@ impl MonitorApp {
         // Also clamp scroll offset
         if self.history_scroll_offset > self.selected_index {
             self.history_scroll_offset = self.selected_index;
+        }
+        // Clamp quadrant_page for Active Runs view
+        let max_page = self.total_quadrant_pages().saturating_sub(1);
+        if self.quadrant_page > max_page {
+            self.quadrant_page = max_page;
+        }
+        // Clamp quadrant row/col to valid positions
+        let runs_on_page = self.runs_on_current_page();
+        if runs_on_page == 0 {
+            self.quadrant_row = 0;
+            self.quadrant_col = 0;
+        } else {
+            // Ensure current position is valid
+            if !self.is_quadrant_valid(self.quadrant_row, self.quadrant_col) {
+                // Move to the last valid quadrant
+                let last_idx = runs_on_page.saturating_sub(1);
+                self.quadrant_row = last_idx / 2;
+                self.quadrant_col = last_idx % 2;
+            }
         }
     }
 
@@ -414,15 +445,118 @@ impl MonitorApp {
     pub fn next_view(&mut self) {
         self.current_view = self.current_view.next(!self.has_active_runs);
         self.selected_index = 0;
+        self.quadrant_page = 0; // Reset pagination when switching views
+        self.quadrant_row = 0;
+        self.quadrant_col = 0;
+    }
+
+    /// Get the total number of pages for Active Runs view.
+    fn total_quadrant_pages(&self) -> usize {
+        let active_count = self
+            .projects
+            .iter()
+            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
+            .count();
+        if active_count == 0 {
+            1
+        } else {
+            active_count.div_ceil(4)
+        }
+    }
+
+    /// Move to the next page in Active Runs view.
+    fn next_quadrant_page(&mut self) {
+        let total_pages = self.total_quadrant_pages();
+        if total_pages > 1 && self.quadrant_page < total_pages - 1 {
+            self.quadrant_page += 1;
+        }
+    }
+
+    /// Move to the previous page in Active Runs view.
+    fn prev_quadrant_page(&mut self) {
+        if self.quadrant_page > 0 {
+            self.quadrant_page -= 1;
+        }
+    }
+
+    /// Get the number of active runs on the current page (0-4).
+    fn runs_on_current_page(&self) -> usize {
+        let active_count = self
+            .projects
+            .iter()
+            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
+            .count();
+        let start_idx = self.quadrant_page * 4;
+        let remaining = active_count.saturating_sub(start_idx);
+        remaining.min(4)
+    }
+
+    /// Check if a quadrant position is valid (has a run) on the current page.
+    fn is_quadrant_valid(&self, row: usize, col: usize) -> bool {
+        let quadrant_idx = row * 2 + col;
+        quadrant_idx < self.runs_on_current_page()
+    }
+
+    /// Navigate up in the quadrant grid (Active Runs view).
+    fn quadrant_move_up(&mut self) {
+        if self.quadrant_row > 0 {
+            let new_row = self.quadrant_row - 1;
+            if self.is_quadrant_valid(new_row, self.quadrant_col) {
+                self.quadrant_row = new_row;
+            }
+        }
+    }
+
+    /// Navigate down in the quadrant grid (Active Runs view).
+    fn quadrant_move_down(&mut self) {
+        if self.quadrant_row < 1 {
+            let new_row = self.quadrant_row + 1;
+            if self.is_quadrant_valid(new_row, self.quadrant_col) {
+                self.quadrant_row = new_row;
+            }
+        }
+    }
+
+    /// Navigate left in the quadrant grid (Active Runs view).
+    fn quadrant_move_left(&mut self) {
+        if self.quadrant_col > 0 {
+            let new_col = self.quadrant_col - 1;
+            if self.is_quadrant_valid(self.quadrant_row, new_col) {
+                self.quadrant_col = new_col;
+            }
+        }
+    }
+
+    /// Navigate right in the quadrant grid (Active Runs view).
+    fn quadrant_move_right(&mut self) {
+        if self.quadrant_col < 1 {
+            let new_col = self.quadrant_col + 1;
+            if self.is_quadrant_valid(self.quadrant_row, new_col) {
+                self.quadrant_col = new_col;
+            }
+        }
     }
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: KeyCode) {
-        // Handle Escape to close detail view
+        // q/Q always quits immediately from any screen
+        if matches!(key, KeyCode::Char('q') | KeyCode::Char('Q')) {
+            self.should_quit = true;
+            return;
+        }
+
+        // Handle keys in detail view
         if self.show_run_detail {
             match key {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.show_run_detail = false;
+                    self.detail_scroll_offset = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
                 }
                 _ => {}
             }
@@ -430,17 +564,17 @@ impl MonitorApp {
         }
 
         match key {
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                self.should_quit = true;
-            }
             KeyCode::Tab => {
                 self.next_view();
                 // Clear run history filter when switching views with Tab
                 self.run_history_filter = None;
                 self.history_scroll_offset = 0;
             }
-            KeyCode::Up => {
-                if self.selected_index > 0 {
+            // Up navigation (arrow key or k)
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.current_view == View::ActiveRuns {
+                    self.quadrant_move_up();
+                } else if self.selected_index > 0 {
                     self.selected_index -= 1;
                     // Adjust scroll offset if needed
                     if self.current_view == View::RunHistory
@@ -450,30 +584,66 @@ impl MonitorApp {
                     }
                 }
             }
-            KeyCode::Down => {
-                let max_index = match self.current_view {
-                    View::ProjectList => self.projects.len().saturating_sub(1),
-                    View::ActiveRuns => self
-                        .projects
-                        .iter()
-                        .filter(|p| p.active_run.is_some())
-                        .count()
-                        .saturating_sub(1),
-                    View::RunHistory => self.run_history.len().saturating_sub(1),
-                };
-                if self.selected_index < max_index {
-                    self.selected_index += 1;
+            // Down navigation (arrow key or j)
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.current_view == View::ActiveRuns {
+                    self.quadrant_move_down();
+                } else {
+                    let max_index = match self.current_view {
+                        View::ProjectList => self.projects.len().saturating_sub(1),
+                        View::ActiveRuns => 0, // Not used, handled above
+                        View::RunHistory => self.run_history.len().saturating_sub(1),
+                    };
+                    if self.selected_index < max_index {
+                        self.selected_index += 1;
+                    }
+                }
+            }
+            // Left navigation (h) - only meaningful in Active Runs quadrant view
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.current_view == View::ActiveRuns {
+                    self.quadrant_move_left();
+                }
+            }
+            // Right navigation (l) - only meaningful in Active Runs quadrant view
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.current_view == View::ActiveRuns {
+                    self.quadrant_move_right();
                 }
             }
             KeyCode::Enter => {
                 self.handle_enter();
             }
             KeyCode::Esc => {
-                // In Run History view, clear filter and go back to unfiltered view
-                if self.current_view == View::RunHistory && self.run_history_filter.is_some() {
-                    self.run_history_filter = None;
-                    self.selected_index = 0;
-                    self.history_scroll_offset = 0;
+                // Hierarchical escape behavior - go back one level
+                match self.current_view {
+                    View::RunHistory => {
+                        if self.run_history_filter.is_some() {
+                            // Clear filter first
+                            self.run_history_filter = None;
+                            self.selected_index = 0;
+                            self.history_scroll_offset = 0;
+                        } else {
+                            // Go back to ProjectList
+                            self.current_view = View::ProjectList;
+                            self.selected_index = 0;
+                        }
+                    }
+                    View::ProjectList | View::ActiveRuns => {
+                        // Root views - quit
+                        self.should_quit = true;
+                    }
+                }
+            }
+            // Pagination for Active Runs view (n/] = next, p/[ = previous)
+            KeyCode::Char('n') | KeyCode::Char(']') => {
+                if self.current_view == View::ActiveRuns {
+                    self.next_quadrant_page();
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('[') => {
+                if self.current_view == View::ActiveRuns {
+                    self.prev_quadrant_page();
                 }
             }
             _ => {}
@@ -496,6 +666,7 @@ impl MonitorApp {
                 // Show detail view for selected run
                 if self.selected_index < self.run_history.len() {
                     self.show_run_detail = true;
+                    self.detail_scroll_offset = 0;
                 }
             }
             View::ActiveRuns => {
@@ -600,48 +771,67 @@ impl MonitorApp {
             .filter(|p| p.active_run.is_some() || p.load_error.is_some())
             .collect();
 
-        if active.is_empty() {
-            let message = Paragraph::new("No active runs")
-                .style(Style::default().fg(COLOR_DIM))
-                .block(
-                    Block::default()
+        // Calculate pagination info
+        let total_runs = active.len();
+        let total_pages = total_runs.div_ceil(4);
+        let start_idx = self.quadrant_page * 4;
+
+        // Get the 4 runs (or fewer) for the current page
+        let page_runs: Vec<Option<&ProjectData>> =
+            (0..4).map(|i| active.get(start_idx + i).copied()).collect();
+
+        // Fixed 2x2 grid layout - always split into 2 rows, each with 2 columns
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        let top_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+
+        let bottom_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]);
+
+        // Map quadrant indices to areas: [0]=top-left, [1]=top-right, [2]=bottom-left, [3]=bottom-right
+        let quadrant_areas = [top_cols[0], top_cols[1], bottom_cols[0], bottom_cols[1]];
+
+        // Render each quadrant
+        for (i, opt_project) in page_runs.iter().enumerate() {
+            let row = i / 2;
+            let col = i % 2;
+            let is_selected = row == self.quadrant_row && col == self.quadrant_col;
+
+            match opt_project {
+                Some(project) => {
+                    self.render_run_or_error(frame, quadrant_areas[i], project, false, is_selected);
+                }
+                None => {
+                    // Empty bordered box for unused quadrants
+                    let empty_block = Block::default()
                         .borders(Borders::ALL)
-                        .title(" Active Runs "),
-                );
-            frame.render_widget(message, area);
-            return;
-        }
-
-        match active.len() {
-            1 => {
-                // Full screen for single run
-                self.render_run_or_error(frame, area, active[0], true);
-            }
-            2 => {
-                // Vertical split (side by side) for two runs
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(area);
-
-                self.render_run_or_error(frame, chunks[0], active[0], false);
-                self.render_run_or_error(frame, chunks[1], active[1], false);
-            }
-            _ => {
-                // 3+ runs: list on left, detail on right
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                    .split(area);
-
-                // Render list on left
-                self.render_active_runs_list(frame, chunks[0], &active);
-
-                // Render detail for selected run on right
-                if let Some(selected) = active.get(self.selected_index) {
-                    self.render_run_or_error(frame, chunks[1], selected, true);
+                        .border_style(Style::default().fg(COLOR_DIM));
+                    frame.render_widget(empty_block, quadrant_areas[i]);
                 }
             }
+        }
+
+        // Render page indicator if more than 4 runs (overlay at top-right of area)
+        if total_pages > 1 {
+            let indicator = format!(" Page {}/{} ", self.quadrant_page + 1, total_pages);
+            let indicator_width = indicator.len() as u16;
+            let indicator_area = Rect::new(
+                area.x + area.width.saturating_sub(indicator_width + 1),
+                area.y,
+                indicator_width,
+                1,
+            );
+            let indicator_widget = Paragraph::new(indicator)
+                .style(Style::default().fg(COLOR_PRIMARY).bg(Color::Black));
+            frame.render_widget(indicator_widget, indicator_area);
         }
     }
 
@@ -652,20 +842,33 @@ impl MonitorApp {
         area: Rect,
         project: &ProjectData,
         full: bool,
+        is_selected: bool,
     ) {
         if let Some(ref error) = project.load_error {
-            self.render_error_panel(frame, area, &project.info.name, error);
+            self.render_error_panel(frame, area, &project.info.name, error, is_selected);
         } else {
-            self.render_run_detail(frame, area, project, full);
+            self.render_run_detail(frame, area, project, full, is_selected);
         }
     }
 
     /// Render an error panel for a project with a corrupted state file
-    fn render_error_panel(&self, frame: &mut Frame, area: Rect, project_name: &str, error: &str) {
+    fn render_error_panel(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        project_name: &str,
+        error: &str,
+        is_selected: bool,
+    ) {
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_ERROR
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", project_name))
-            .border_style(Style::default().fg(COLOR_ERROR));
+            .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -697,66 +900,29 @@ impl MonitorApp {
         frame.render_widget(paragraph, inner);
     }
 
-    /// Render the list view for 3+ active runs
-    fn render_active_runs_list(&self, frame: &mut Frame, area: Rect, active: &[&ProjectData]) {
-        let items: Vec<ListItem> = active
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let (state_str, state_clr) = if let Some(ref _error) = p.load_error {
-                    ("Error", COLOR_ERROR)
-                } else if let Some(ref run) = p.active_run {
-                    (
-                        format_state(run.machine_state),
-                        state_color(run.machine_state),
-                    )
-                } else {
-                    ("Unknown", COLOR_DIM)
-                };
-
-                let line = Line::from(vec![
-                    Span::styled(
-                        if i == self.selected_index {
-                            "▶ "
-                        } else {
-                            "  "
-                        },
-                        Style::default().fg(COLOR_PRIMARY),
-                    ),
-                    Span::styled(
-                        &p.info.name,
-                        if i == self.selected_index {
-                            Style::default()
-                                .fg(COLOR_WARNING)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::White)
-                        },
-                    ),
-                    Span::styled(format!(" ({})", state_str), Style::default().fg(state_clr)),
-                ]);
-
-                ListItem::new(line)
-            })
-            .collect();
-
-        let title = format!(" Runs ({}) ", active.len());
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-
-        frame.render_widget(list, area);
-    }
-
     /// Render detailed view for a single run
-    fn render_run_detail(&self, frame: &mut Frame, area: Rect, project: &ProjectData, full: bool) {
+    fn render_run_detail(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        project: &ProjectData,
+        full: bool,
+        is_selected: bool,
+    ) {
         let run = match project.active_run.as_ref() {
             Some(r) => r,
             None => return, // No run to render
         };
 
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_PRIMARY
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", project.info.name))
-            .border_style(Style::default().fg(COLOR_PRIMARY));
+            .border_style(Style::default().fg(border_color));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1174,30 +1340,41 @@ impl MonitorApp {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Press Enter or Esc to close",
+            "j/k or ↑↓: scroll | Enter/Esc: close",
             Style::default().fg(COLOR_DIM),
         )));
 
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+        let paragraph = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((self.detail_scroll_offset as u16, 0));
         frame.render_widget(paragraph, inner);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let help_text = if self.show_run_detail {
-            " Enter/Esc: close detail view "
+            " jk/↑↓: scroll | Enter/Esc: close detail view ".to_string()
         } else {
             match self.current_view {
                 View::ProjectList => {
-                    " Tab: switch view | ↑↓: navigate | Enter: view history | Q: quit "
+                    " Tab: switch view | jk/↑↓: navigate | Enter: view history | Q: quit "
+                        .to_string()
                 }
                 View::RunHistory => {
                     if self.run_history_filter.is_some() {
-                        " Tab: switch view | ↑↓: navigate | Enter: details | Esc: clear filter | Q: quit "
+                        " Tab: switch view | jk/↑↓: navigate | Enter: details | Esc: clear filter | Q: quit ".to_string()
                     } else {
-                        " Tab: switch view | ↑↓: navigate | Enter: details | Q: quit "
+                        " Tab: switch view | jk/↑↓: navigate | Enter: details | Q: quit "
+                            .to_string()
                     }
                 }
-                View::ActiveRuns => " Tab: switch view | ↑↓: navigate | Q: quit ",
+                View::ActiveRuns => {
+                    // Show pagination keys only when there are more than 4 runs
+                    if self.total_quadrant_pages() > 1 {
+                        " Tab: switch view | hjkl/arrows: navigate | n/]: next page | p/[: prev page | Q: quit ".to_string()
+                    } else {
+                        " Tab: switch view | hjkl/arrows: navigate | Q: quit ".to_string()
+                    }
+                }
             }
         };
         let footer = Paragraph::new(help_text).style(Style::default().fg(COLOR_DIM));
@@ -1971,14 +2148,14 @@ mod tests {
     }
 
     #[test]
-    fn test_q_closes_detail_view_instead_of_quitting() {
+    fn test_q_quits_immediately_even_from_detail_view() {
         let mut app = MonitorApp::new(1, None);
         app.show_run_detail = true;
 
         app.handle_key(KeyCode::Char('q'));
 
-        assert!(!app.show_run_detail);
-        assert!(!app.should_quit()); // Should NOT quit when closing detail
+        // q always quits immediately, regardless of detail view state
+        assert!(app.should_quit());
     }
 
     #[test]
@@ -2379,5 +2556,1374 @@ mod tests {
         assert_eq!(state_str, "Error");
         // Just to use app to avoid warning
         assert!(!app.should_quit());
+    }
+
+    // ===========================================
+    // US-002: Fixed Quadrant Layout Tests
+    // ===========================================
+
+    #[test]
+    fn test_monitor_app_new_initializes_quadrant_page_to_zero() {
+        let app = MonitorApp::new(1, None);
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_zero_runs() {
+        let app = MonitorApp::new(1, None);
+        // With no projects, total_quadrant_pages returns 1 (minimum)
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_one_to_four_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "project-1".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: Some(RunState::new(
+                std::path::PathBuf::from("test.json"),
+                "branch".to_string(),
+            )),
+            progress: None,
+            load_error: None,
+        }];
+
+        // 1 run = 1 page
+        assert_eq!(app.total_quadrant_pages(), 1);
+
+        // Add 3 more projects (4 total) - still 1 page
+        for i in 2..=4 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_five_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 5 runs = 2 pages (4 on first, 1 on second)
+        assert_eq!(app.total_quadrant_pages(), 2);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_eight_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=8 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 8 runs = 2 pages (4 on each)
+        assert_eq!(app.total_quadrant_pages(), 2);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_with_nine_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        for i in 1..=9 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // 9 runs = 3 pages (4, 4, 1)
+        assert_eq!(app.total_quadrant_pages(), 3);
+    }
+
+    #[test]
+    fn test_next_quadrant_page_advances() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 5 projects to have 2 pages
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        // Should not go beyond last page
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_prev_quadrant_page_goes_back() {
+        let mut app = MonitorApp::new(1, None);
+        app.quadrant_page = 2;
+
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 0);
+
+        // Should not go below 0
+        app.prev_quadrant_page();
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_next_quadrant_page_does_nothing_with_single_page() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Only 2 projects = 1 page
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.next_quadrant_page();
+        // Should stay at 0 since there's only 1 page
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_handle_n_key_advances_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_handle_right_bracket_advances_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        assert_eq!(app.quadrant_page, 0);
+        app.handle_key(KeyCode::Char(']'));
+        assert_eq!(app.quadrant_page, 1);
+    }
+
+    #[test]
+    fn test_handle_p_key_goes_back_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 1;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.handle_key(KeyCode::Char('p'));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_handle_left_bracket_goes_back_page_in_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 1;
+        // Add 5 projects
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.handle_key(KeyCode::Char('['));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_pagination_keys_ignored_in_other_views() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.quadrant_page = 0;
+
+        // n/p keys should not affect quadrant_page in other views
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.quadrant_page, 0);
+
+        app.handle_key(KeyCode::Char('p'));
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_tab_resets_quadrant_page() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.quadrant_page = 2;
+
+        app.handle_key(KeyCode::Tab);
+
+        // After switching view, quadrant_page should reset to 0
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_clamp_selection_index_also_clamps_quadrant_page() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.quadrant_page = 5; // Out of bounds
+                               // Only 3 projects = 1 page (max page index = 0)
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.clamp_selection_index();
+
+        // Should be clamped to max valid page (0)
+        assert_eq!(app.quadrant_page, 0);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_only_counts_active_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 3 active projects
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("active-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        // Add 2 idle projects (no active run)
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("idle-{}", i),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        // Only 3 active = 1 page (not 5)
+        assert_eq!(app.total_quadrant_pages(), 1);
+    }
+
+    #[test]
+    fn test_total_quadrant_pages_includes_error_projects() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Add 3 active projects
+        for i in 1..=3 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("active-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+        // Add 2 projects with errors (should count as active)
+        for i in 1..=2 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("error-{}", i),
+                    has_active_run: true,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: Some("Corrupted".to_string()),
+            });
+        }
+
+        // 3 active + 2 error = 5 = 2 pages
+        assert_eq!(app.total_quadrant_pages(), 2);
+    }
+
+    // ===========================================
+    // US-003: Vim-Style Navigation (hjkl) Tests
+    // ===========================================
+
+    #[test]
+    fn test_monitor_app_new_initializes_quadrant_row_col_to_zero() {
+        let app = MonitorApp::new(1, None);
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_next_view_resets_quadrant_position() {
+        let mut app = MonitorApp::new(1, None);
+        app.quadrant_row = 1;
+        app.quadrant_col = 1;
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        app.next_view();
+
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_j_key_navigates_down_in_project_list() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-a".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-b".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+        ];
+
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn test_k_key_navigates_up_in_project_list() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.selected_index = 1;
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-a".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-b".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+        ];
+
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_j_key_navigates_down_in_run_history() {
+        use std::path::PathBuf;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history = vec![
+            RunHistoryEntry {
+                project_name: "project-a".to_string(),
+                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                completed_stories: 1,
+                total_stories: 2,
+            },
+            RunHistoryEntry {
+                project_name: "project-b".to_string(),
+                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                completed_stories: 2,
+                total_stories: 3,
+            },
+        ];
+
+        assert_eq!(app.selected_index, 0);
+
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn test_k_key_navigates_up_in_run_history() {
+        use std::path::PathBuf;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.selected_index = 1;
+        app.run_history = vec![
+            RunHistoryEntry {
+                project_name: "project-a".to_string(),
+                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                completed_stories: 1,
+                total_stories: 2,
+            },
+            RunHistoryEntry {
+                project_name: "project-b".to_string(),
+                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                completed_stories: 2,
+                total_stories: 3,
+            },
+        ];
+
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.selected_index, 0);
+    }
+
+    fn create_four_active_projects() -> Vec<ProjectData> {
+        use crate::config::ProjectTreeInfo;
+
+        (1..=4)
+            .map(|i| ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_hjkl_quadrant_navigation_in_active_runs() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.projects = create_four_active_projects();
+
+        // Start at top-left (0,0)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Move right with 'l'
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Move down with 'j'
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Move left with 'h'
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Move up with 'k'
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_arrow_keys_quadrant_navigation_in_active_runs() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.projects = create_four_active_projects();
+
+        // Start at top-left (0,0)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Move right with Right arrow
+        app.handle_key(KeyCode::Right);
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Move down with Down arrow
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Move left with Left arrow
+        app.handle_key(KeyCode::Left);
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Move up with Up arrow
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_quadrant_navigation_stays_in_bounds() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        app.projects = create_four_active_projects();
+
+        // Try to go left from (0,0) - should stay
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Try to go up from (0,0) - should stay
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Move to bottom-right (1,1)
+        app.handle_key(KeyCode::Char('l'));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Try to go right from (1,1) - should stay
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Try to go down from (1,1) - should stay
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 1);
+    }
+
+    #[test]
+    fn test_quadrant_navigation_with_fewer_than_four_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // Only 2 projects (positions 0,0 and 0,1)
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-1".to_string(),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-2".to_string(),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            },
+        ];
+
+        // Start at (0,0)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Can move right to (0,1)
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Cannot move down (no runs in row 1)
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+    }
+
+    #[test]
+    fn test_quadrant_navigation_with_three_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+        // 3 projects (positions 0,0, 0,1, and 1,0)
+        app.projects = (1..=3)
+            .map(|i| ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            })
+            .collect();
+
+        // Start at (0,0), move right to (0,1)
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Try to move down from (0,1) - position (1,1) is invalid
+        app.handle_key(KeyCode::Char('j'));
+        // Should stay at (0,1) since (1,1) has no run
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+
+        // Move left back to (0,0)
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Can move down from (0,0) to (1,0)
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 0);
+
+        // Cannot move right from (1,0) to (1,1) - no run there
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.quadrant_row, 1);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_h_and_l_ignored_in_project_list() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+        app.selected_index = 1;
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-a".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-b".to_string(),
+                    has_active_run: false,
+                    run_status: None,
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: None,
+                progress: None,
+                load_error: None,
+            },
+        ];
+
+        // 'h' should not change selected_index in list views
+        app.handle_key(KeyCode::Char('h'));
+        assert_eq!(app.selected_index, 1);
+
+        // 'l' should not change selected_index in list views
+        app.handle_key(KeyCode::Char('l'));
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn test_runs_on_current_page_with_full_page() {
+        let mut app = MonitorApp::new(1, None);
+        app.projects = create_four_active_projects();
+        app.quadrant_page = 0;
+
+        assert_eq!(app.runs_on_current_page(), 4);
+    }
+
+    #[test]
+    fn test_runs_on_current_page_with_partial_page() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // 5 projects = 4 on page 0, 1 on page 1
+        for i in 1..=5 {
+            app.projects.push(ProjectData {
+                info: ProjectTreeInfo {
+                    name: format!("project-{}", i),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            });
+        }
+
+        app.quadrant_page = 0;
+        assert_eq!(app.runs_on_current_page(), 4);
+
+        app.quadrant_page = 1;
+        assert_eq!(app.runs_on_current_page(), 1);
+    }
+
+    #[test]
+    fn test_is_quadrant_valid() {
+        let mut app = MonitorApp::new(1, None);
+        app.projects = create_four_active_projects();
+        app.quadrant_page = 0;
+
+        // All 4 positions valid with 4 runs
+        assert!(app.is_quadrant_valid(0, 0));
+        assert!(app.is_quadrant_valid(0, 1));
+        assert!(app.is_quadrant_valid(1, 0));
+        assert!(app.is_quadrant_valid(1, 1));
+    }
+
+    #[test]
+    fn test_is_quadrant_valid_with_two_runs() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        // Only 2 projects
+        app.projects = vec![
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-1".to_string(),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            },
+            ProjectData {
+                info: ProjectTreeInfo {
+                    name: "project-2".to_string(),
+                    has_active_run: true,
+                    run_status: Some(crate::state::RunStatus::Running),
+                    spec_count: 0,
+                    incomplete_spec_count: 0,
+                    spec_md_count: 0,
+                    runs_count: 0,
+                    last_run_date: None,
+                },
+                active_run: Some(RunState::new(
+                    std::path::PathBuf::from("test.json"),
+                    "branch".to_string(),
+                )),
+                progress: None,
+                load_error: None,
+            },
+        ];
+        app.quadrant_page = 0;
+
+        // Only positions 0,0 and 0,1 valid
+        assert!(app.is_quadrant_valid(0, 0));
+        assert!(app.is_quadrant_valid(0, 1));
+        assert!(!app.is_quadrant_valid(1, 0));
+        assert!(!app.is_quadrant_valid(1, 1));
+    }
+
+    #[test]
+    fn test_clamp_selection_index_clamps_quadrant_position() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        // Start at position (1,1) with 4 runs
+        app.quadrant_row = 1;
+        app.quadrant_col = 1;
+        app.projects = create_four_active_projects();
+
+        // Now reduce to only 2 runs
+        app.projects.truncate(2);
+
+        app.clamp_selection_index();
+
+        // Should be clamped to last valid position (0,1)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 1);
+    }
+
+    #[test]
+    fn test_clamp_selection_index_with_one_run() {
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.quadrant_row = 1;
+        app.quadrant_col = 1;
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "project-1".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: Some(RunState::new(
+                std::path::PathBuf::from("test.json"),
+                "branch".to_string(),
+            )),
+            progress: None,
+            load_error: None,
+        }];
+
+        app.clamp_selection_index();
+
+        // Should be clamped to (0,0)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    #[test]
+    fn test_clamp_selection_index_with_zero_runs() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.quadrant_row = 1;
+        app.quadrant_col = 1;
+        app.projects = vec![];
+
+        app.clamp_selection_index();
+
+        // Should be clamped to (0,0)
+        assert_eq!(app.quadrant_row, 0);
+        assert_eq!(app.quadrant_col, 0);
+    }
+
+    // ============================================================================
+    // US-004: Hierarchical Escape Behavior Tests
+    // ============================================================================
+
+    #[test]
+    fn test_esc_from_active_runs_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_project_list_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ProjectList;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_run_history_unfiltered_goes_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = None;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_eq!(app.current_view, View::ProjectList);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_from_run_history_filtered_clears_filter_first() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+        app.selected_index = 5;
+        app.history_scroll_offset = 10;
+
+        app.handle_key(KeyCode::Esc);
+
+        // Should clear filter but stay in RunHistory
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.history_scroll_offset, 0);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_twice_from_filtered_run_history_goes_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+
+        // First Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Second Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.current_view, View::ProjectList);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn test_esc_three_times_from_filtered_run_history_quits() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = Some("my-project".to_string());
+
+        // First Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        // Second Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        // Third Esc quits
+        app.handle_key(KeyCode::Esc);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn test_q_quits_from_any_view() {
+        // Test q quits from ProjectList
+        let mut app1 = MonitorApp::new(1, None);
+        app1.current_view = View::ProjectList;
+        app1.handle_key(KeyCode::Char('q'));
+        assert!(app1.should_quit());
+
+        // Test q quits from ActiveRuns
+        let mut app2 = MonitorApp::new(1, None);
+        app2.current_view = View::ActiveRuns;
+        app2.handle_key(KeyCode::Char('q'));
+        assert!(app2.should_quit());
+
+        // Test q quits from RunHistory
+        let mut app3 = MonitorApp::new(1, None);
+        app3.current_view = View::RunHistory;
+        app3.handle_key(KeyCode::Char('q'));
+        assert!(app3.should_quit());
+
+        // Test Q (uppercase) quits from any view
+        let mut app4 = MonitorApp::new(1, None);
+        app4.current_view = View::ProjectList;
+        app4.handle_key(KeyCode::Char('Q'));
+        assert!(app4.should_quit());
+    }
+
+    #[test]
+    fn test_esc_resets_selected_index_when_going_to_project_list() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::RunHistory;
+        app.run_history_filter = None;
+        app.selected_index = 5;
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_eq!(app.current_view, View::ProjectList);
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_hierarchical_navigation_flow() {
+        // Simulate full navigation flow:
+        // ProjectList -> (Enter with project) -> RunHistory (filtered) -> (Enter) -> Detail
+        // Then Esc back through the hierarchy
+        use crate::config::ProjectTreeInfo;
+
+        let mut app = MonitorApp::new(1, None);
+
+        // Setup a project
+        app.projects = vec![ProjectData {
+            info: ProjectTreeInfo {
+                name: "test-project".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 1,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        }];
+
+        // Add a run history entry
+        app.run_history = vec![RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run: RunState::new(
+                std::path::PathBuf::from("test.json"),
+                "test-branch".to_string(),
+            ),
+            completed_stories: 3,
+            total_stories: 3,
+        }];
+
+        // Start at ProjectList
+        app.current_view = View::ProjectList;
+        assert_eq!(app.current_view, View::ProjectList);
+
+        // Enter on project goes to filtered RunHistory
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.current_view, View::RunHistory);
+        assert_eq!(app.run_history_filter, Some("test-project".to_string()));
+
+        // Enter on run history shows detail
+        app.handle_key(KeyCode::Enter);
+        assert!(app.show_run_detail);
+
+        // Esc closes detail view
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.show_run_detail);
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Esc clears filter
+        app.handle_key(KeyCode::Esc);
+        assert!(app.run_history_filter.is_none());
+        assert_eq!(app.current_view, View::RunHistory);
+
+        // Esc goes to ProjectList
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.current_view, View::ProjectList);
+
+        // Esc from ProjectList quits
+        app.handle_key(KeyCode::Esc);
+        assert!(app.should_quit());
     }
 }

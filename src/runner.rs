@@ -646,7 +646,7 @@ impl Runner {
         full_output: &str,
         print_summary_fn: &impl Fn(u32, &[StoryResult]) -> Result<()>,
     ) -> Result<LoopAction> {
-        state.finish_iteration(IterationStatus::Success, String::new());
+        state.finish_iteration(IterationStatus::Success, full_output.to_string());
         state.set_work_summary(work_summary.clone());
 
         // Capture story knowledge from git diff and agent output (US-006)
@@ -723,7 +723,7 @@ impl Runner {
         work_summary: Option<String>,
         full_output: &str,
     ) -> Result<LoopAction> {
-        state.finish_iteration(IterationStatus::Success, String::new());
+        state.finish_iteration(IterationStatus::Success, full_output.to_string());
         state.set_work_summary(work_summary.clone());
 
         // Capture story knowledge from git diff and agent output (US-006)
