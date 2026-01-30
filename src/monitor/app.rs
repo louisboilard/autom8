@@ -229,6 +229,8 @@ pub struct MonitorApp {
     quadrant_row: usize,
     /// Selected quadrant column (0 or 1) for Active Runs 2D navigation
     quadrant_col: usize,
+    /// Scroll offset for detail view
+    detail_scroll_offset: usize,
 }
 
 impl MonitorApp {
@@ -249,6 +251,7 @@ impl MonitorApp {
             quadrant_page: 0,
             quadrant_row: 0,
             quadrant_col: 0,
+            detail_scroll_offset: 0,
         }
     }
 
@@ -547,6 +550,13 @@ impl MonitorApp {
             match key {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.show_run_detail = false;
+                    self.detail_scroll_offset = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
                 }
                 _ => {}
             }
@@ -656,6 +666,7 @@ impl MonitorApp {
                 // Show detail view for selected run
                 if self.selected_index < self.run_history.len() {
                     self.show_run_detail = true;
+                    self.detail_scroll_offset = 0;
                 }
             }
             View::ActiveRuns => {
@@ -1329,17 +1340,19 @@ impl MonitorApp {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Press Enter or Esc to close",
+            "j/k or ↑↓: scroll | Enter/Esc: close",
             Style::default().fg(COLOR_DIM),
         )));
 
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+        let paragraph = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((self.detail_scroll_offset as u16, 0));
         frame.render_widget(paragraph, inner);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let help_text = if self.show_run_detail {
-            " Enter/Esc: close detail view ".to_string()
+            " jk/↑↓: scroll | Enter/Esc: close detail view ".to_string()
         } else {
             match self.current_view {
                 View::ProjectList => {
