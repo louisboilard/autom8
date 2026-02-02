@@ -1490,6 +1490,9 @@ mod tests {
 
     #[test]
     fn test_state_manager_new_uses_config_directory() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // This test verifies that StateManager::new() uses the config directory
         let sm = StateManager::new().unwrap();
         let spec_dir = sm.spec_dir();
@@ -1520,6 +1523,9 @@ mod tests {
     /// This is used by the resume command to find active runs.
     #[test]
     fn test_state_manager_state_file_in_config_directory() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         let sm = StateManager::new().unwrap();
 
         // save and load operations use state_file() which should be in config dir
@@ -1545,6 +1551,9 @@ mod tests {
     /// This verifies the path: ~/.config/autom8/<project-name>/spec/
     #[test]
     fn test_state_manager_list_specs_uses_config_directory() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         let sm = StateManager::new().unwrap();
         let spec_dir = sm.spec_dir();
 
@@ -1658,6 +1667,9 @@ mod tests {
     /// Spec files should ONLY be found in the config directory.
     #[test]
     fn test_clean_uses_config_directory_not_legacy_location() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         let sm = StateManager::new().unwrap();
         let spec_dir = sm.spec_dir();
 
