@@ -173,6 +173,81 @@ impl SessionData {
     }
 }
 
+/// Data for a single entry in the run history panel.
+///
+/// Represents an archived run for a project, displayed in the right panel
+/// when a project is selected.
+#[derive(Debug, Clone)]
+pub struct RunHistoryEntry {
+    /// The run ID.
+    pub run_id: String,
+    /// When the run started.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// When the run finished (if completed).
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The run status (completed/failed).
+    pub status: crate::state::RunStatus,
+    /// Number of completed stories.
+    pub completed_stories: usize,
+    /// Total number of stories in the spec.
+    pub total_stories: usize,
+    /// Branch name for this run.
+    pub branch: String,
+}
+
+impl RunHistoryEntry {
+    /// Create a RunHistoryEntry from a RunState.
+    pub fn from_run_state(run: &RunState) -> Self {
+        // Count completed stories by looking at iterations with status Completed
+        let completed_stories = run
+            .iterations
+            .iter()
+            .filter(|i| i.status == crate::state::IterationStatus::Success)
+            .map(|i| &i.story_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+
+        // Total stories is harder to determine from archived state
+        // Use the iteration count as a proxy (each story should have at least one iteration)
+        let story_ids: std::collections::HashSet<_> =
+            run.iterations.iter().map(|i| &i.story_id).collect();
+        let total_stories = story_ids.len().max(1);
+
+        Self {
+            run_id: run.run_id.clone(),
+            started_at: run.started_at,
+            finished_at: run.finished_at,
+            status: run.status,
+            completed_stories,
+            total_stories,
+            branch: run.branch.clone(),
+        }
+    }
+
+    /// Format the story count as "X/Y stories".
+    pub fn story_count_text(&self) -> String {
+        format!("{}/{} stories", self.completed_stories, self.total_stories)
+    }
+
+    /// Format the run status as a display string.
+    pub fn status_text(&self) -> &'static str {
+        match self.status {
+            crate::state::RunStatus::Completed => "Completed",
+            crate::state::RunStatus::Failed => "Failed",
+            crate::state::RunStatus::Running => "Running",
+        }
+    }
+
+    /// Get the status color for display.
+    pub fn status_color(&self) -> Color32 {
+        match self.status {
+            crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
+            crate::state::RunStatus::Failed => colors::STATUS_ERROR,
+            crate::state::RunStatus::Running => colors::STATUS_RUNNING,
+        }
+    }
+}
+
 // Time formatting utilities (format_duration, format_relative_time) and
 // text utilities (truncate_with_ellipsis, format_state) are now in the
 // components module and re-exported for use here.
@@ -235,6 +310,13 @@ pub struct Autom8App {
     selected_project: Option<String>,
 
     // ========================================================================
+    // Run History Cache
+    // ========================================================================
+    /// Cached run history for the selected project.
+    /// Loaded when a project is selected, cleared when deselected.
+    run_history: Vec<RunHistoryEntry>,
+
+    // ========================================================================
     // Loading State
     // ========================================================================
     /// Whether the initial data load has completed.
@@ -280,6 +362,7 @@ impl Autom8App {
             sessions: Vec::new(),
             has_active_runs: false,
             selected_project: None,
+            run_history: Vec::new(),
             initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
@@ -333,12 +416,46 @@ impl Autom8App {
     /// Toggles the selection of a project.
     /// If the project is already selected, it becomes deselected.
     /// If a different project is selected, it becomes the new selection.
+    /// Also loads/clears run history for the selected project.
     pub fn toggle_project_selection(&mut self, project_name: &str) {
         if self.selected_project.as_deref() == Some(project_name) {
+            // Deselect: clear selection and history
             self.selected_project = None;
+            self.run_history.clear();
         } else {
+            // Select new project: update selection and load history
             self.selected_project = Some(project_name.to_string());
+            self.load_run_history(project_name);
         }
+    }
+
+    /// Load run history for a specific project.
+    /// Populates self.run_history with archived runs, sorted newest first.
+    fn load_run_history(&mut self, project_name: &str) {
+        self.run_history.clear();
+
+        // Get the StateManager for this project
+        let sm = match StateManager::for_project(project_name) {
+            Ok(sm) => sm,
+            Err(_) => return, // Can't load history
+        };
+
+        // Load archived runs
+        let archived = match sm.list_archived() {
+            Ok(runs) => runs,
+            Err(_) => return, // Can't load history
+        };
+
+        // Convert to RunHistoryEntry and store (already sorted newest first by list_archived)
+        self.run_history = archived
+            .iter()
+            .map(RunHistoryEntry::from_run_state)
+            .collect();
+    }
+
+    /// Returns the run history for the selected project.
+    pub fn run_history(&self) -> &[RunHistoryEntry] {
+        &self.run_history
     }
 
     /// Returns whether a project is currently selected.
@@ -1148,23 +1265,48 @@ impl Autom8App {
     }
 
     /// Render the right panel of the Projects view.
-    /// Shows hint text when no project is selected, or detail view when selected.
+    /// Shows hint text when no project is selected, or run history when selected.
     fn render_projects_right_panel(&self, ui: &mut egui::Ui) {
         if let Some(ref selected_name) = self.selected_project {
-            // Show selected project info (placeholder for US-003 run history)
+            // Header: Project name
             ui.label(
-                egui::RichText::new(format!("Selected: {}", selected_name))
-                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                egui::RichText::new(format!("Run History: {}", selected_name))
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
                     .color(colors::TEXT_PRIMARY),
             );
 
-            ui.add_space(spacing::SM);
+            ui.add_space(spacing::MD);
 
-            ui.label(
-                egui::RichText::new("Run history will appear here")
-                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                    .color(colors::TEXT_MUTED),
-            );
+            if self.run_history.is_empty() {
+                // Empty state for no run history
+                ui.add_space(spacing::LG);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("No run history")
+                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                            .color(colors::TEXT_MUTED),
+                    );
+
+                    ui.add_space(spacing::XS);
+
+                    ui.label(
+                        egui::RichText::new("Completed runs will appear here")
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                });
+            } else {
+                // Scrollable run history list
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                    .show(ui, |ui| {
+                        for entry in &self.run_history {
+                            self.render_run_history_entry(ui, entry);
+                            ui.add_space(spacing::SM);
+                        }
+                    });
+            }
         } else {
             // Empty state when no project is selected
             ui.add_space(spacing::XXL);
@@ -1184,6 +1326,90 @@ impl Autom8App {
                 );
             });
         }
+    }
+
+    /// Render a single run history entry as a card.
+    fn render_run_history_entry(&self, ui: &mut egui::Ui, entry: &RunHistoryEntry) {
+        // Card background
+        let available_width = ui.available_width();
+        let card_height = 72.0; // Fixed height for history cards
+
+        let (rect, _response) =
+            ui.allocate_exact_size(Vec2::new(available_width, card_height), Sense::hover());
+
+        // Draw card background
+        ui.painter().rect_filled(
+            rect,
+            Rounding::same(rounding::CARD),
+            colors::SURFACE_HOVER,
+        );
+
+        // Card content
+        let inner_rect = rect.shrink(spacing::MD);
+        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect).layout(egui::Layout::top_down(egui::Align::LEFT)));
+
+        // Top row: Date/time and status
+        child_ui.horizontal(|ui| {
+            // Date/time (left)
+            let datetime_text = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
+            ui.label(
+                egui::RichText::new(datetime_text)
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Status badge (right)
+                let status_color = entry.status_color();
+                let status_text = entry.status_text();
+
+                // Draw status badge background
+                let badge_galley = ui.fonts(|f| {
+                    f.layout_no_wrap(
+                        status_text.to_string(),
+                        typography::font(FontSize::Small, FontWeight::Medium),
+                        colors::TEXT_PRIMARY,
+                    )
+                });
+                let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
+                let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+                let (badge_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
+
+                ui.painter().rect_filled(
+                    badge_rect,
+                    Rounding::same(rounding::SMALL),
+                    status_color.gamma_multiply(0.2),
+                );
+
+                // Center the text in the badge
+                let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+                ui.painter().galley(text_pos, badge_galley, status_color);
+            });
+        });
+
+        child_ui.add_space(spacing::XS);
+
+        // Bottom row: Story count and branch
+        child_ui.horizontal(|ui| {
+            // Story count
+            ui.label(
+                egui::RichText::new(entry.story_count_text())
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+
+            ui.add_space(spacing::MD);
+
+            // Branch name (truncated)
+            let branch_display = truncate_with_ellipsis(&entry.branch, MAX_BRANCH_LENGTH);
+            ui.label(
+                egui::RichText::new(format!("⎇ {}", branch_display))
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
     }
 
     /// Render the empty state for Projects view.
