@@ -5,7 +5,7 @@
 use autom8::commands::{
     all_sessions_status_command, clean_command, default_command, describe_command,
     global_status_command, init_command, list_command, monitor_command, pr_review_command,
-    projects_command, resume_command, run_command, run_with_file, status_command,
+    projects_command, resume_command, run_command, run_with_file, status_command, CleanOptions,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -74,8 +74,28 @@ enum Commands {
         list: bool,
     },
 
-    /// Clean up spec files from config directory
-    Clean,
+    /// Clean up sessions and worktrees from the project
+    Clean {
+        /// Also remove associated worktrees
+        #[arg(short, long)]
+        worktrees: bool,
+
+        /// Remove all sessions (with confirmation)
+        #[arg(short, long)]
+        all: bool,
+
+        /// Remove a specific session by ID
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Only remove orphaned sessions (worktree deleted but state remains)
+        #[arg(short, long)]
+        orphaned: bool,
+
+        /// Force removal even if worktrees have uncommitted changes
+        #[arg(short, long)]
+        force: bool,
+    },
 
     /// Initialize autom8 config directory structure for current project
     Init,
@@ -155,7 +175,22 @@ fn main() {
             resume_command(session.as_deref(), *list)
         }
 
-        (None, Some(Commands::Clean)) => clean_command(),
+        (
+            None,
+            Some(Commands::Clean {
+                worktrees,
+                all,
+                session,
+                orphaned,
+                force,
+            }),
+        ) => clean_command(CleanOptions {
+            worktrees: *worktrees,
+            all: *all,
+            session: session.clone(),
+            orphaned: *orphaned,
+            force: *force,
+        }),
 
         (None, Some(Commands::Init)) => init_command(),
 
@@ -249,7 +284,7 @@ mod tests {
         assert!(matches!(cli_projects.command, Some(Commands::Projects)));
 
         let cli_clean = Cli::try_parse_from(["autom8", "clean"]).unwrap();
-        assert!(matches!(cli_clean.command, Some(Commands::Clean)));
+        assert!(matches!(cli_clean.command, Some(Commands::Clean { .. })));
 
         let cli_init = Cli::try_parse_from(["autom8", "init"]).unwrap();
         assert!(matches!(cli_init.command, Some(Commands::Init)));
