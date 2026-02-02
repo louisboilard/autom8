@@ -1624,7 +1624,10 @@ mod tests {
         );
 
         assert!(msg.contains("permissions"));
-        assert!(msg.contains("Suggestions:"));
+        assert!(
+            msg.contains("To resolve"),
+            "Error should include resolution steps"
+        );
     }
 
     #[test]
@@ -1632,6 +1635,9 @@ mod tests {
         let msg = format_worktree_error("some unknown error", "feature", Path::new("/some/path"));
 
         assert!(msg.contains("some unknown error"));
-        assert!(msg.contains("Suggestions:"));
+        assert!(
+            msg.contains("To resolve"),
+            "Error should include resolution steps"
+        );
     }
 }
