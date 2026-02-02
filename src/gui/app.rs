@@ -1257,9 +1257,12 @@ impl Autom8App {
 
             // Run ID (smaller, muted)
             ui.label(
-                egui::RichText::new(format!("Run ID: {}", &run_state.run_id[..8.min(run_state.run_id.len())]))
-                    .font(typography::font(FontSize::Small, FontWeight::Regular))
-                    .color(colors::TEXT_MUTED),
+                egui::RichText::new(format!(
+                    "Run ID: {}",
+                    &run_state.run_id[..8.min(run_state.run_id.len())]
+                ))
+                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
             );
         });
 
@@ -1277,9 +1280,11 @@ impl Autom8App {
                         .color(colors::TEXT_SECONDARY),
                 );
                 ui.label(
-                    egui::RichText::new(run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_PRIMARY),
+                    egui::RichText::new(
+                        run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    )
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_PRIMARY),
                 );
                 ui.end_row();
 
@@ -1359,9 +1364,12 @@ impl Autom8App {
                             .color(colors::TEXT_SECONDARY),
                     );
                     ui.label(
-                        egui::RichText::new(format!("{}/{} completed", completed_count, total_stories))
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_PRIMARY),
+                        egui::RichText::new(format!(
+                            "{}/{} completed",
+                            completed_count, total_stories
+                        ))
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_PRIMARY),
                     );
                     ui.end_row();
                 }
@@ -3941,10 +3949,7 @@ mod tests {
         assert_eq!(app.tab_count(), 3); // ActiveRuns, Projects, RunDetail
 
         // Should be the active tab
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail(entry.run_id.clone())
-        );
+        assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
     }
 
     #[test]
@@ -4060,10 +4065,7 @@ mod tests {
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
         // Now on run detail tab
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail(entry.run_id.clone())
-        );
+        assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
 
         // Close it
         app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
