@@ -41,3 +41,11 @@ pub fn print_worktree_reused(path: &std::path::Path, branch: &str) {
 pub fn print_worktree_context(path: &std::path::Path) {
     println!("{CYAN}Working in worktree:{RESET} {}", path.display());
 }
+
+/// Print interruption message when the user presses Ctrl+C.
+pub fn print_interrupted() {
+    println!();
+    println!(
+        "{YELLOW}Interrupted.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue."
+    );
+}

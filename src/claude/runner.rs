@@ -154,9 +154,9 @@ impl ClaudeRunner {
 
         // Write prompt to stdin - take and drop stdin handle to close it
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+            stdin.write_all(prompt.as_bytes()).map_err(|e| {
+                Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e))
+            })?;
             // stdin is dropped here, closing the handle
         }
 
@@ -252,7 +252,14 @@ where
     F: FnMut(&str),
 {
     let runner = ClaudeRunner::new();
-    runner.run(spec, story, spec_path, previous_iterations, knowledge, on_output)
+    runner.run(
+        spec,
+        story,
+        spec_path,
+        previous_iterations,
+        knowledge,
+        on_output,
+    )
 }
 
 fn build_prompt(
@@ -804,9 +811,7 @@ mod tests {
         // (sending signal 0 to check if process exists)
         #[cfg(unix)]
         {
-            let status = Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status();
+            let status = Command::new("kill").args(["-0", &pid.to_string()]).status();
             // Should fail because process no longer exists
             assert!(status.is_ok());
             assert!(!status.unwrap().success());

@@ -46,8 +46,8 @@ pub use header::{
     print_spec_generated, print_spec_loaded, print_state_transition,
 };
 pub use messages::{
-    print_error, print_info, print_warning, print_worktree_context, print_worktree_created,
-    print_worktree_reused,
+    print_error, print_info, print_interrupted, print_warning, print_worktree_context,
+    print_worktree_created, print_worktree_reused,
 };
 pub use pr::{
     format_pr_for_selection, print_branch_switched, print_no_open_prs, print_pr_already_exists,

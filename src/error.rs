@@ -72,6 +72,9 @@ pub enum Autom8Error {
 
     #[error("Signal handler error: {0}")]
     SignalHandler(String),
+
+    #[error("Interrupted by user")]
+    Interrupted,
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;
