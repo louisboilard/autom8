@@ -6,7 +6,7 @@ use super::views::View;
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
 use crate::spec::Spec;
-use crate::state::{MachineState, RunState, SessionMetadata, StateManager};
+use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
 use crate::worktree::MAIN_SESSION_ID;
 use chrono::{DateTime, Utc};
 use crossterm::{
@@ -137,6 +137,8 @@ pub struct SessionData {
     pub is_main_session: bool,
     /// Whether this session is stale (worktree was deleted)
     pub is_stale: bool,
+    /// Live output state for streaming Claude output (from live.json)
+    pub live_output: Option<LiveState>,
 }
 
 impl SessionData {
@@ -443,19 +445,24 @@ impl MonitorApp {
                         load_error: Some("Worktree has been deleted".to_string()),
                         is_main_session,
                         is_stale: true,
+                        live_output: None,
                     });
                     continue;
                 }
 
-                // Load the run state for this session
-                let (run, load_error) =
+                // Load the run state and live output for this session
+                let (run, load_error, live_output) =
                     if let Some(session_sm) = sm.get_session(&metadata.session_id) {
                         match session_sm.load_current() {
-                            Ok(run) => (run, None),
-                            Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+                            Ok(run) => {
+                                // Load live output (gracefully returns None if missing/corrupted)
+                                let live = session_sm.load_live();
+                                (run, None, live)
+                            }
+                            Err(e) => (None, Some(format!("Corrupted state: {}", e)), None),
                         }
                     } else {
-                        (None, Some("Session not found".to_string()))
+                        (None, Some("Session not found".to_string()), None)
                     };
 
                 // Load spec to get progress information
@@ -474,6 +481,7 @@ impl MonitorApp {
                     load_error,
                     is_main_session,
                     is_stale: false,
+                    live_output,
                 });
             }
         }
@@ -1255,8 +1263,8 @@ impl MonitorApp {
         let info = Paragraph::new(info_lines);
         frame.render_widget(info, chunks[0]);
 
-        // Output snippet section
-        let output_snippet = self.get_output_snippet(run);
+        // Output snippet section (prefer live output when available)
+        let output_snippet = self.get_output_snippet(run, session.live_output.as_ref());
         let output = Paragraph::new(output_snippet)
             .style(Style::default().fg(COLOR_DIM))
             .wrap(Wrap { trim: true })
@@ -1348,8 +1356,8 @@ impl MonitorApp {
         let info = Paragraph::new(info_lines);
         frame.render_widget(info, chunks[0]);
 
-        // Output snippet section
-        let output_snippet = self.get_output_snippet(run);
+        // Output snippet section (legacy, no live output available)
+        let output_snippet = self.get_output_snippet(run, None);
         let output = Paragraph::new(output_snippet)
             .style(Style::default().fg(COLOR_DIM))
             .wrap(Wrap { trim: true })
@@ -1361,8 +1369,30 @@ impl MonitorApp {
         frame.render_widget(output, chunks[1]);
     }
 
-    /// Get the latest output snippet from a run
-    fn get_output_snippet(&self, run: &RunState) -> String {
+    /// Staleness threshold for live output (5 seconds)
+    const LIVE_OUTPUT_STALE_SECONDS: i64 = 5;
+
+    /// Get the latest output snippet from a run, preferring live output when available and fresh.
+    ///
+    /// Priority:
+    /// 1. If state is RunningClaude and live_output exists and is fresh (<5 seconds old), use live output
+    /// 2. Otherwise, if iteration has output_snippet, use that (last 5 lines)
+    /// 3. Fallback to status message based on machine state
+    fn get_output_snippet(&self, run: &RunState, live_output: Option<&LiveState>) -> String {
+        // Check for fresh live output when Claude is running
+        if run.machine_state == MachineState::RunningClaude {
+            if let Some(live) = live_output {
+                // Check if live output is fresh (within 5 seconds)
+                let age = Utc::now().signed_duration_since(live.updated_at);
+                if age.num_seconds() < Self::LIVE_OUTPUT_STALE_SECONDS && !live.output_lines.is_empty() {
+                    // Take last 5-10 lines from live output (consistent with iteration output)
+                    let take_count = 5.min(live.output_lines.len());
+                    let start = live.output_lines.len().saturating_sub(take_count);
+                    return live.output_lines[start..].join("\n");
+                }
+            }
+        }
+
         // Get output from the current or last iteration
         if let Some(iter) = run.iterations.last() {
             if !iter.output_snippet.is_empty() {
@@ -1912,6 +1942,7 @@ mod tests {
             load_error: None,
             is_main_session: is_main,
             is_stale: false,
+            live_output: None,
         }
     }
 
@@ -2156,7 +2187,7 @@ mod tests {
         let app = MonitorApp::new(None);
         let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
-        let snippet = app.get_output_snippet(&run);
+        let snippet = app.get_output_snippet(&run, None);
         assert_eq!(snippet, "Initializing run...");
     }
 
@@ -2170,7 +2201,7 @@ mod tests {
         run.iterations.last_mut().unwrap().output_snippet =
             "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7".to_string();
 
-        let snippet = app.get_output_snippet(&run);
+        let snippet = app.get_output_snippet(&run, None);
         // Should return last 5 lines
         assert_eq!(snippet, "Line 3\nLine 4\nLine 5\nLine 6\nLine 7");
     }
@@ -2184,8 +2215,98 @@ mod tests {
         run.machine_state = MachineState::Reviewing;
         run.review_iteration = 2;
 
-        let snippet = app.get_output_snippet(&run);
+        let snippet = app.get_output_snippet(&run, None);
         assert_eq!(snippet, "Reviewing changes (cycle 2)...");
+    }
+
+    #[test]
+    fn test_get_output_snippet_prefers_fresh_live_output_when_running_claude() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::RunningClaude;
+
+        // Create fresh live output
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.append_line("Live line 1".to_string());
+        live.append_line("Live line 2".to_string());
+        live.append_line("Live line 3".to_string());
+
+        let snippet = app.get_output_snippet(&run, Some(&live));
+        assert_eq!(snippet, "Live line 1\nLive line 2\nLive line 3");
+    }
+
+    #[test]
+    fn test_get_output_snippet_falls_back_to_iteration_when_live_output_stale() {
+        use chrono::{Duration, Utc};
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::RunningClaude;
+        run.start_iteration("US-001");
+        run.iterations.last_mut().unwrap().output_snippet = "Iteration output".to_string();
+
+        // Create stale live output (older than 5 seconds)
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.append_line("Stale live line".to_string());
+        live.updated_at = Utc::now() - Duration::seconds(10);
+
+        let snippet = app.get_output_snippet(&run, Some(&live));
+        assert_eq!(snippet, "Iteration output");
+    }
+
+    #[test]
+    fn test_get_output_snippet_falls_back_to_status_when_live_output_empty() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::RunningClaude;
+
+        // Create fresh but empty live output
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        let snippet = app.get_output_snippet(&run, Some(&live));
+        assert_eq!(snippet, "Claude is working...");
+    }
+
+    #[test]
+    fn test_get_output_snippet_ignores_live_output_for_non_running_claude_states() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::Reviewing;
+        run.review_iteration = 1;
+
+        // Create fresh live output (should be ignored since state is not RunningClaude)
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.append_line("Should be ignored".to_string());
+
+        let snippet = app.get_output_snippet(&run, Some(&live));
+        // Should return status message, not live output
+        assert_eq!(snippet, "Reviewing changes (cycle 1)...");
+    }
+
+    #[test]
+    fn test_get_output_snippet_live_output_takes_last_5_lines() {
+        use std::path::PathBuf;
+
+        let app = MonitorApp::new(None);
+        let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        run.machine_state = MachineState::RunningClaude;
+
+        // Create live output with more than 5 lines
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        for i in 1..=10 {
+            live.append_line(format!("Line {}", i));
+        }
+
+        let snippet = app.get_output_snippet(&run, Some(&live));
+        // Should return last 5 lines
+        assert_eq!(snippet, "Line 6\nLine 7\nLine 8\nLine 9\nLine 10");
     }
 
     #[test]
@@ -4440,6 +4561,7 @@ mod tests {
             load_error: Some(error.to_string()),
             is_main_session: is_main,
             is_stale,
+            live_output: None,
         }
     }
 
