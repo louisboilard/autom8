@@ -3824,4 +3824,141 @@ mod tests {
         app.handle_key(KeyCode::Esc);
         assert!(app.should_quit());
     }
+
+    // ============================================================================
+    // US-002: Session Display Title Tests
+    // ============================================================================
+
+    #[test]
+    fn test_session_display_title_main_session() {
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "feature-branch");
+        assert_eq!(session.display_title(), "my-project (main)");
+    }
+
+    #[test]
+    fn test_session_display_title_worktree_session() {
+        let session = create_test_session("my-project", "abc12345", "feature-branch");
+        assert_eq!(session.display_title(), "my-project (abc12345)");
+    }
+
+    #[test]
+    fn test_session_display_title_8char_hex_id() {
+        // Verify that session IDs are displayed in their 8-char hex format
+        let session = create_test_session("autom8", "deadbeef", "worktree-branch");
+        assert_eq!(session.display_title(), "autom8 (deadbeef)");
+    }
+
+    #[test]
+    fn test_multiple_sessions_same_project_in_grid() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add three sessions for the same project
+        app.sessions.push(create_test_session(
+            "my-project",
+            MAIN_SESSION_ID,
+            "main-branch",
+        ));
+        app.sessions.push(create_test_session(
+            "my-project",
+            "abc12345",
+            "feature-1",
+        ));
+        app.sessions.push(create_test_session(
+            "my-project",
+            "def67890",
+            "feature-2",
+        ));
+
+        // All three should be in the sessions list
+        assert_eq!(app.sessions.len(), 3);
+
+        // Verify each has the correct project name
+        assert_eq!(app.sessions[0].project_name, "my-project");
+        assert_eq!(app.sessions[1].project_name, "my-project");
+        assert_eq!(app.sessions[2].project_name, "my-project");
+
+        // Verify distinct session IDs
+        assert_eq!(app.sessions[0].metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(app.sessions[1].metadata.session_id, "abc12345");
+        assert_eq!(app.sessions[2].metadata.session_id, "def67890");
+
+        // Verify distinct display titles
+        assert_eq!(app.sessions[0].display_title(), "my-project (main)");
+        assert_eq!(app.sessions[1].display_title(), "my-project (abc12345)");
+        assert_eq!(app.sessions[2].display_title(), "my-project (def67890)");
+    }
+
+    #[test]
+    fn test_pagination_with_multiple_sessions_same_project() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add 5 sessions for the same project (to span 2 pages)
+        for i in 1..=5 {
+            app.sessions.push(create_test_session(
+                "my-project",
+                &format!("{:08x}", i),
+                &format!("feature-{}", i),
+            ));
+        }
+
+        // Should have 2 pages (4 on first, 1 on second)
+        assert_eq!(app.total_quadrant_pages(), 2);
+
+        // First page should have 4 sessions
+        assert_eq!(app.quadrant_page, 0);
+
+        // Navigate to second page
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        // Verify all sessions have distinct display titles
+        let titles: Vec<_> = app.sessions.iter().map(|s| s.display_title()).collect();
+        assert_eq!(titles.len(), 5);
+        // Check uniqueness
+        let unique_titles: std::collections::HashSet<_> = titles.iter().collect();
+        assert_eq!(unique_titles.len(), 5);
+    }
+
+    #[test]
+    fn test_sessions_from_different_projects_in_grid() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add sessions from different projects
+        app.sessions.push(create_test_session(
+            "project-alpha",
+            MAIN_SESSION_ID,
+            "main-branch",
+        ));
+        app.sessions.push(create_test_session(
+            "project-beta",
+            "12345678",
+            "feature-x",
+        ));
+        app.sessions.push(create_test_session(
+            "project-gamma",
+            MAIN_SESSION_ID,
+            "develop",
+        ));
+
+        // All three should be in the grid
+        assert_eq!(app.sessions.len(), 3);
+
+        // Verify display titles
+        assert_eq!(app.sessions[0].display_title(), "project-alpha (main)");
+        assert_eq!(app.sessions[1].display_title(), "project-beta (12345678)");
+        assert_eq!(app.sessions[2].display_title(), "project-gamma (main)");
+    }
+
+    #[test]
+    fn test_is_main_session_flag_correct() {
+        // Main session should have is_main_session = true
+        let main_session = create_test_session("test", MAIN_SESSION_ID, "branch");
+        assert!(main_session.is_main_session);
+
+        // Worktree session should have is_main_session = false
+        let worktree_session = create_test_session("test", "abcd1234", "branch");
+        assert!(!worktree_session.is_main_session);
+    }
 }
