@@ -462,8 +462,18 @@ pub fn ensure_config_dir() -> Result<(PathBuf, bool)> {
     Ok((dir, created))
 }
 
-/// Get the current project name (basename of the current working directory).
+/// Get the current project name.
+///
+/// Uses the git repository name (basename of the main repo root) when in a git
+/// repository, ensuring consistent project identification across all worktrees.
+/// Falls back to the current working directory basename if not in a git repo.
 pub fn current_project_name() -> Result<String> {
+    // Try to get the git repository name first
+    if let Ok(Some(repo_name)) = crate::worktree::get_git_repo_name() {
+        return Ok(repo_name);
+    }
+
+    // Fallback: use CWD basename for non-git directories
     let cwd = env::current_dir().map_err(|e| {
         Autom8Error::Config(format!("Could not determine current directory: {}", e))
     })?;
@@ -1162,14 +1172,39 @@ mod tests {
     }
 
     #[test]
-    fn test_current_project_name_returns_directory_basename() {
-        // This test verifies the function returns a non-empty project name
+    fn test_current_project_name_returns_git_repo_name() {
+        // This test verifies the function returns the git repo name when in a git repo
+        // (which enables consistent project identification across worktrees)
         let result = current_project_name();
         assert!(result.is_ok());
         let name = result.unwrap();
         assert!(!name.is_empty());
-        // Running from autom8 project directory
+        // Running from autom8 project directory, should use git repo name
         assert_eq!(name, "autom8");
+    }
+
+    #[test]
+    fn test_current_project_name_uses_git_repo_not_cwd() {
+        // Verify that current_project_name uses git repo name, not CWD basename.
+        // The git repo name should match what get_git_repo_name() returns.
+        let project_name = current_project_name().unwrap();
+        let git_repo_name = crate::worktree::get_git_repo_name().unwrap();
+
+        // When in a git repo, both should return the same value
+        assert!(git_repo_name.is_some(), "Should be in a git repo");
+        assert_eq!(
+            project_name,
+            git_repo_name.unwrap(),
+            "current_project_name should match git repo name"
+        );
+    }
+
+    #[test]
+    fn test_current_project_name_is_consistent_across_calls() {
+        // Project name should be stable - important for worktree support
+        let name1 = current_project_name().unwrap();
+        let name2 = current_project_name().unwrap();
+        assert_eq!(name1, name2, "Project name should be stable across calls");
     }
 
     #[test]

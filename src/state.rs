@@ -2944,10 +2944,8 @@ src/lib.rs | Library module | [Config]
         let temp_dir = TempDir::new().unwrap();
 
         // Create older session first
-        let sm1 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "older".to_string(),
-        );
+        let sm1 =
+            StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "older".to_string());
         let state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
         sm1.save(&state1).unwrap();
 
@@ -2955,10 +2953,8 @@ src/lib.rs | Library module | [Config]
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Create newer session
-        let sm2 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "newer".to_string(),
-        );
+        let sm2 =
+            StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "newer".to_string());
         let state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
         sm2.save(&state2).unwrap();
 
@@ -3082,11 +3078,8 @@ src/lib.rs | Library module | [Config]
         // Create a legacy state with lots of data
         let mut legacy_state = RunState::new(PathBuf::from("test.json"), "feature-x".to_string());
         legacy_state.start_iteration("US-001");
-        legacy_state
-            .iterations
-            .last_mut()
-            .unwrap()
-            .work_summary = Some("Did some work".to_string());
+        legacy_state.iterations.last_mut().unwrap().work_summary =
+            Some("Did some work".to_string());
         legacy_state.review_iteration = 2;
         legacy_state.knowledge.baseline_commit = Some("abc123".to_string());
 
@@ -3112,10 +3105,7 @@ src/lib.rs | Library module | [Config]
             loaded.iterations[0].work_summary,
             Some("Did some work".to_string())
         );
-        assert_eq!(
-            loaded.knowledge.baseline_commit,
-            Some("abc123".to_string())
-        );
+        assert_eq!(loaded.knowledge.baseline_commit, Some("abc123".to_string()));
     }
 
     #[test]
@@ -3123,10 +3113,7 @@ src/lib.rs | Library module | [Config]
         let temp_dir = TempDir::new().unwrap();
 
         // Create session structure first
-        let session_dir = temp_dir
-            .path()
-            .join(SESSIONS_DIR)
-            .join(MAIN_SESSION_ID);
+        let session_dir = temp_dir.path().join(SESSIONS_DIR).join(MAIN_SESSION_ID);
         fs::create_dir_all(&session_dir).unwrap();
 
         let state = RunState::new(PathBuf::from("new.json"), "new-branch".to_string());
@@ -3166,10 +3153,7 @@ src/lib.rs | Library module | [Config]
         sm.save(&state).unwrap();
 
         // Both files should exist
-        let session_dir = temp_dir
-            .path()
-            .join(SESSIONS_DIR)
-            .join(MAIN_SESSION_ID);
+        let session_dir = temp_dir.path().join(SESSIONS_DIR).join(MAIN_SESSION_ID);
         assert!(session_dir.join(STATE_FILE).exists());
         assert!(session_dir.join(METADATA_FILE).exists());
 

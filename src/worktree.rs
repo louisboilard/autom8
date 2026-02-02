@@ -348,6 +348,59 @@ pub fn is_in_worktree() -> Result<bool> {
     Ok(get_worktree_root()?.is_some())
 }
 
+/// Get the git repository name (basename of the main repo root).
+///
+/// This function returns the name of the git repository, which is the
+/// basename of the main repository root directory. This ensures consistent
+/// project identification regardless of whether you're in the main repo
+/// or a linked worktree.
+///
+/// # Returns
+/// * `Ok(Some(name))` - The repository name if in a git repository
+/// * `Ok(None)` - If not in a git repository
+/// * `Err` - If there's an error determining the repo name
+///
+/// # Example
+/// ```no_run
+/// use autom8::worktree::get_git_repo_name;
+///
+/// if let Some(name) = get_git_repo_name().expect("git error") {
+///     println!("Repository: {}", name);
+/// }
+/// ```
+pub fn get_git_repo_name() -> Result<Option<String>> {
+    // First check if we're in a git repo
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .output()?;
+
+    if !output.status.success() {
+        // Not in a git repository - this is not an error, just means no git
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(Autom8Error::WorktreeError(format!(
+            "Failed to check git repository: {}",
+            stderr.trim()
+        )));
+    }
+
+    // Get the main repo root (works from both main repo and worktrees)
+    let main_root = get_main_repo_root()?;
+
+    // Extract the basename
+    main_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| Some(s.to_string()))
+        .ok_or_else(|| {
+            Autom8Error::WorktreeError(
+                "Could not determine repository name from path".to_string(),
+            )
+        })
+}
+
 // ============================================================================
 // Session Identity System (US-002)
 // ============================================================================
@@ -994,5 +1047,79 @@ mod tests {
             "All session IDs should be unique. IDs: {:?}",
             ids
         );
+    }
+
+    // ========================================================================
+    // Git Repo Name tests (US-004)
+    // ========================================================================
+
+    #[test]
+    fn test_get_git_repo_name_returns_repo_name() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // When running in a git repo, should return Some(repo_name)
+        let result = get_git_repo_name();
+        assert!(result.is_ok());
+
+        let name = result.unwrap();
+        assert!(name.is_some(), "Should return repo name when in git repo");
+
+        let repo_name = name.unwrap();
+        assert!(!repo_name.is_empty(), "Repo name should not be empty");
+        // The name should be a valid directory name (no path separators)
+        assert!(
+            !repo_name.contains('/') && !repo_name.contains('\\'),
+            "Repo name should not contain path separators: {}",
+            repo_name
+        );
+    }
+
+    #[test]
+    fn test_get_git_repo_name_is_consistent_with_main_repo_root() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // The repo name should match the basename of get_main_repo_root()
+        let main_root = get_main_repo_root().unwrap();
+        let expected_name = main_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+
+        let repo_name = get_git_repo_name().unwrap().unwrap();
+
+        assert_eq!(
+            repo_name, expected_name,
+            "Repo name should match main repo root basename"
+        );
+    }
+
+    #[test]
+    fn test_get_git_repo_name_is_stable() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // Calling multiple times should return the same value
+        let name1 = get_git_repo_name().unwrap();
+        let name2 = get_git_repo_name().unwrap();
+        assert_eq!(name1, name2, "Repo name should be stable across calls");
+    }
+
+    #[test]
+    fn test_get_git_repo_name_is_filesystem_safe() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let repo_name = get_git_repo_name().unwrap();
+        if let Some(name) = repo_name {
+            // Name should be filesystem-safe (no special characters that would break paths)
+            assert!(
+                !name.contains('/'),
+                "Repo name should not contain forward slashes"
+            );
+            assert!(
+                !name.contains('\\'),
+                "Repo name should not contain backslashes"
+            );
+            assert!(!name.contains('\0'), "Repo name should not contain NUL");
+        }
     }
 }
