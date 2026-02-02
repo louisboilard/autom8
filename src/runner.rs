@@ -1288,7 +1288,7 @@ impl Runner {
 
         // Setup worktree context if enabled (US-007)
         // This creates/reuses a worktree and changes the current working directory
-        let (worktree_context, mut worktree_setup_ctx) =
+        let (worktree_context, worktree_setup_ctx) =
             self.setup_worktree_context(&config, &spec.branch_name)?;
 
         // Create the appropriate StateManager for this context
