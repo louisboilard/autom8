@@ -64,7 +64,15 @@ enum Commands {
     },
 
     /// Resume a failed or interrupted run
-    Resume,
+    Resume {
+        /// Resume a specific session by ID
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// List all resumable sessions (incomplete runs)
+        #[arg(short, long)]
+        list: bool,
+    },
 
     /// Clean up spec files from config directory
     Clean,
@@ -143,7 +151,9 @@ fn main() {
             }
         }
 
-        (None, Some(Commands::Resume)) => resume_command(&runner),
+        (None, Some(Commands::Resume { session, list })) => {
+            resume_command(session.as_deref(), *list)
+        }
 
         (None, Some(Commands::Clean)) => clean_command(),
 
@@ -230,7 +240,7 @@ mod tests {
     fn test_us006_other_commands_still_work() {
         // Verify that other commands are still routed correctly
         let cli_resume = Cli::try_parse_from(["autom8", "resume"]).unwrap();
-        assert!(matches!(cli_resume.command, Some(Commands::Resume)));
+        assert!(matches!(cli_resume.command, Some(Commands::Resume { .. })));
 
         let cli_status = Cli::try_parse_from(["autom8", "status"]).unwrap();
         assert!(matches!(cli_status.command, Some(Commands::Status { .. })));
