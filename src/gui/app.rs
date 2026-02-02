@@ -4,6 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
+use crate::gui::theme::{self, colors, Status};
 use crate::gui::typography::{self, FontSize, FontWeight};
 use eframe::egui;
 
@@ -39,10 +40,11 @@ impl Autom8App {
 impl eframe::App for Autom8App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Title using custom typography
+            // Title using custom typography with primary text color
             ui.label(
                 egui::RichText::new("autom8")
-                    .font(typography::font(FontSize::Title, FontWeight::SemiBold)),
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
             );
 
             ui.add_space(20.0);
@@ -50,22 +52,67 @@ impl eframe::App for Autom8App {
             if let Some(ref filter) = self.project_filter {
                 ui.label(
                     egui::RichText::new(format!("Filtering: {}", filter))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_SECONDARY),
                 );
             } else {
                 ui.label(
                     egui::RichText::new("Monitoring all projects")
-                        .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_SECONDARY),
                 );
             }
 
             ui.add_space(10.0);
             ui.separator();
-            ui.add_space(10.0);
+            ui.add_space(16.0);
+
+            // Status indicators demonstration
+            ui.label(
+                egui::RichText::new("Status Colors")
+                    .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                Self::status_indicator(ui, Status::Running, "Running");
+                ui.add_space(16.0);
+                Self::status_indicator(ui, Status::Success, "Success");
+                ui.add_space(16.0);
+                Self::status_indicator(ui, Status::Warning, "Warning");
+                ui.add_space(16.0);
+                Self::status_indicator(ui, Status::Error, "Error");
+                ui.add_space(16.0);
+                Self::status_indicator(ui, Status::Idle, "Idle");
+            });
+
+            ui.add_space(16.0);
 
             ui.label(
-                egui::RichText::new("GUI initialized successfully. Ready for implementation.")
-                    .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                egui::RichText::new("Theme initialized. Ready for implementation.")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+}
+
+impl Autom8App {
+    /// Render a status indicator with a colored dot and label.
+    fn status_indicator(ui: &mut egui::Ui, status: Status, label: &str) {
+        ui.horizontal(|ui| {
+            // Draw colored dot
+            let (rect, _response) =
+                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(rect.center(), 4.0, status.color());
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(label)
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_PRIMARY),
             );
         });
     }
@@ -98,6 +145,8 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
         Box::new(|cc| {
             // Initialize custom typography (fonts and text styles)
             typography::init(&cc.egui_ctx);
+            // Initialize theme (colors, visuals, and style)
+            theme::init(&cc.egui_ctx);
             Ok(Box::new(Autom8App::new(project_filter)))
         }),
     )
