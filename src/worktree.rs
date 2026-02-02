@@ -395,9 +395,7 @@ pub fn get_git_repo_name() -> Result<Option<String>> {
         .and_then(|n| n.to_str())
         .map(|s| Some(s.to_string()))
         .ok_or_else(|| {
-            Autom8Error::WorktreeError(
-                "Could not determine repository name from path".to_string(),
-            )
+            Autom8Error::WorktreeError("Could not determine repository name from path".to_string())
         })
 }
 

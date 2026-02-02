@@ -96,6 +96,9 @@ pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
     skip_review: bool,
+    /// Override for the worktree config setting.
+    /// None = use config value, Some(true/false) = override config.
+    worktree_override: Option<bool>,
 }
 
 impl Runner {
@@ -104,6 +107,7 @@ impl Runner {
             state_manager: StateManager::new()?,
             verbose: false,
             skip_review: false,
+            worktree_override: None,
         })
     }
 
@@ -115,6 +119,28 @@ impl Runner {
     pub fn with_skip_review(mut self, skip_review: bool) -> Self {
         self.skip_review = skip_review;
         self
+    }
+
+    /// Set the worktree mode override.
+    ///
+    /// When set, this overrides the `worktree` setting from the config file.
+    /// Use `true` to enable worktree mode (--worktree flag).
+    /// Use `false` to disable worktree mode (--no-worktree flag).
+    pub fn with_worktree(mut self, worktree: bool) -> Self {
+        self.worktree_override = Some(worktree);
+        self
+    }
+
+    /// Get the effective worktree mode, considering CLI override and config.
+    ///
+    /// Priority: CLI flag > config file > default (false).
+    #[allow(dead_code)]
+    pub fn effective_worktree(&self) -> Result<bool> {
+        if let Some(override_value) = self.worktree_override {
+            return Ok(override_value);
+        }
+        let config = get_effective_config()?;
+        Ok(config.worktree)
     }
 
     /// Load the effective config.
@@ -1130,6 +1156,67 @@ mod tests {
         assert!(runner.verbose);
     }
 
+    // ========================================================================
+    // US-005: Worktree Configuration Override tests
+    // ========================================================================
+
+    #[test]
+    fn test_runner_worktree_override_defaults_to_none() {
+        let runner = Runner::new().unwrap();
+        assert!(
+            runner.worktree_override.is_none(),
+            "worktree_override should be None by default"
+        );
+    }
+
+    #[test]
+    fn test_runner_with_worktree_true() {
+        let runner = Runner::new().unwrap().with_worktree(true);
+        assert_eq!(
+            runner.worktree_override,
+            Some(true),
+            "worktree_override should be Some(true) after with_worktree(true)"
+        );
+    }
+
+    #[test]
+    fn test_runner_with_worktree_false() {
+        let runner = Runner::new().unwrap().with_worktree(false);
+        assert_eq!(
+            runner.worktree_override,
+            Some(false),
+            "worktree_override should be Some(false) after with_worktree(false)"
+        );
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_preserves_worktree() {
+        let runner = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_skip_review(true)
+            .with_worktree(true);
+        assert!(runner.verbose);
+        assert!(runner.skip_review);
+        assert_eq!(runner.worktree_override, Some(true));
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_worktree_order_independent() {
+        let runner1 = Runner::new()
+            .unwrap()
+            .with_worktree(true)
+            .with_verbose(true);
+
+        let runner2 = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_worktree(true);
+
+        assert_eq!(runner1.worktree_override, runner2.worktree_override);
+        assert_eq!(runner1.verbose, runner2.verbose);
+    }
+
     /// Tests that story_index calculation produces 1-indexed values.
     /// The formula: position().map(|i| i as u32 + 1).unwrap_or(state.iteration)
     /// must produce 1-indexed display values like [US-001 1/8], not [US-001 0/8].
@@ -1828,6 +1915,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1843,6 +1931,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("spec.json"),
@@ -1863,6 +1952,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -1884,6 +1974,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1905,6 +1996,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false, // Must be false when commit is false (validated by US-004)
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1926,6 +2018,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1947,6 +2040,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1980,6 +2074,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2012,6 +2107,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2043,6 +2139,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),

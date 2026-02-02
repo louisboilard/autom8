@@ -42,6 +42,14 @@ enum Commands {
         /// Skip the review loop and go directly to committing
         #[arg(long)]
         skip_review: bool,
+
+        /// Enable worktree mode: create a dedicated worktree for this run
+        #[arg(long, conflicts_with = "no_worktree")]
+        worktree: bool,
+
+        /// Disable worktree mode: run on the current branch (overrides config)
+        #[arg(long, conflicts_with = "worktree")]
+        no_worktree: bool,
     },
 
     /// Check the current run status
@@ -114,8 +122,8 @@ fn main() {
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (None, Some(Commands::Run { spec, skip_review })) => {
-            run_command(cli.verbose, spec, *skip_review)
+        (None, Some(Commands::Run { spec, skip_review, worktree, no_worktree })) => {
+            run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree)
         }
 
         (None, Some(Commands::Status { all, global })) => {
@@ -1272,5 +1280,88 @@ mod tests {
         assert!(SUPPORTED_SHELLS.contains(&"bash"));
         assert!(SUPPORTED_SHELLS.contains(&"zsh"));
         assert!(SUPPORTED_SHELLS.contains(&"fish"));
+    }
+
+    // ======================================================================
+    // Tests for US-005: Worktree CLI flags
+    // ======================================================================
+
+    #[test]
+    fn test_us005_run_command_has_worktree_flag() {
+        // Test that --worktree flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "run", "--worktree"]).unwrap();
+        if let Some(Commands::Run { worktree, no_worktree, .. }) = cli.command {
+            assert!(worktree, "--worktree should set worktree to true");
+            assert!(!no_worktree, "no_worktree should be false when --worktree is set");
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_run_command_has_no_worktree_flag() {
+        // Test that --no-worktree flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "run", "--no-worktree"]).unwrap();
+        if let Some(Commands::Run { worktree, no_worktree, .. }) = cli.command {
+            assert!(!worktree, "worktree should be false when --no-worktree is set");
+            assert!(no_worktree, "--no-worktree should set no_worktree to true");
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_run_command_worktree_defaults() {
+        // Test that both flags default to false
+        let cli = Cli::try_parse_from(["autom8", "run"]).unwrap();
+        if let Some(Commands::Run { worktree, no_worktree, .. }) = cli.command {
+            assert!(!worktree, "worktree should default to false");
+            assert!(!no_worktree, "no_worktree should default to false");
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_worktree_flags_are_mutually_exclusive() {
+        // Test that --worktree and --no-worktree cannot be used together
+        let result = Cli::try_parse_from(["autom8", "run", "--worktree", "--no-worktree"]);
+        assert!(
+            result.is_err(),
+            "--worktree and --no-worktree should be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn test_us005_worktree_flag_with_spec() {
+        // Test that --worktree works with --spec
+        let cli = Cli::try_parse_from(["autom8", "run", "--spec", "my-spec.json", "--worktree"]).unwrap();
+        if let Some(Commands::Run { spec, worktree, no_worktree, .. }) = cli.command {
+            assert_eq!(spec.to_string_lossy(), "my-spec.json");
+            assert!(worktree);
+            assert!(!no_worktree);
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_no_worktree_flag_with_skip_review() {
+        // Test that --no-worktree works with --skip-review
+        let cli = Cli::try_parse_from(["autom8", "run", "--skip-review", "--no-worktree"]).unwrap();
+        if let Some(Commands::Run { skip_review, worktree, no_worktree, .. }) = cli.command {
+            assert!(skip_review);
+            assert!(!worktree);
+            assert!(no_worktree);
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_worktree_config_available() {
+        // Verify the worktree field exists on Config struct
+        let config = autom8::config::Config::default();
+        let _worktree: bool = config.worktree;
     }
 }

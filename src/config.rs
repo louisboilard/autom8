@@ -60,11 +60,26 @@ pub struct Config {
     /// When `false`, no PR is created.
     #[serde(default = "default_true")]
     pub pull_request: bool,
+
+    /// Whether to automatically create worktrees for runs.
+    ///
+    /// When `true`, autom8 creates a dedicated worktree for each run,
+    /// enabling multiple parallel sessions for the same project.
+    /// When `false`, autom8 runs on the current branch (default behavior).
+    ///
+    /// Note: Requires a git repository. Has no effect outside of git repos.
+    #[serde(default = "default_false")]
+    pub worktree: bool,
 }
 
-/// Helper function for serde default values.
+/// Helper function for serde default values (true).
 fn default_true() -> bool {
     true
+}
+
+/// Helper function for serde default values (false).
+fn default_false() -> bool {
+    false
 }
 
 impl Default for Config {
@@ -73,6 +88,7 @@ impl Default for Config {
             review: true,
             commit: true,
             pull_request: true,
+            worktree: false,
         }
     }
 }
@@ -187,6 +203,12 @@ commit = true
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = true
+
+# Worktree mode: Automatic worktree creation for parallel runs
+# - true: Create a dedicated worktree for each run (enables parallel sessions)
+# - false: Run on the current branch (default, single session per project)
+# Note: Requires a git repository. Has no effect outside of git repos.
+worktree = false
 "#;
 
 /// Get the path to the global config file.
@@ -290,8 +312,14 @@ commit = {}
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = {}
+
+# Worktree mode: Automatic worktree creation for parallel runs
+# - true: Create a dedicated worktree for each run (enables parallel sessions)
+# - false: Run on the current branch (default, single session per project)
+# Note: Requires a git repository. Has no effect outside of git repos.
+worktree = {}
 "#,
-        config.review, config.commit, config.pull_request
+        config.review, config.commit, config.pull_request, config.worktree
     )
 }
 
@@ -2035,6 +2063,7 @@ mod tests {
         assert!(config.review, "review should default to true");
         assert!(config.commit, "commit should default to true");
         assert!(config.pull_request, "pull_request should default to true");
+        assert!(!config.worktree, "worktree should default to false");
     }
 
     #[test]
@@ -2045,6 +2074,7 @@ mod tests {
         assert!(toml_str.contains("review = true"));
         assert!(toml_str.contains("commit = true"));
         assert!(toml_str.contains("pull_request = true"));
+        assert!(toml_str.contains("worktree = false"));
     }
 
     #[test]
@@ -2053,6 +2083,7 @@ mod tests {
             review = false
             commit = true
             pull_request = false
+            worktree = true
         "#;
 
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -2060,6 +2091,7 @@ mod tests {
         assert!(!config.review);
         assert!(config.commit);
         assert!(!config.pull_request);
+        assert!(config.worktree);
     }
 
     #[test]
@@ -2077,6 +2109,7 @@ mod tests {
             config.pull_request,
             "missing pull_request should default to true"
         );
+        assert!(!config.worktree, "missing worktree should default to false");
     }
 
     #[test]
@@ -2088,6 +2121,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
+        assert!(!config.worktree);
     }
 
     #[test]
@@ -2096,6 +2130,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            worktree: true,
         };
 
         let toml_str = toml::to_string(&original).unwrap();
@@ -2123,6 +2158,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            worktree: true,
         };
 
         let cloned = original.clone();
@@ -2138,6 +2174,7 @@ mod tests {
         assert!(debug_str.contains("review"));
         assert!(debug_str.contains("commit"));
         assert!(debug_str.contains("pull_request"));
+        assert!(debug_str.contains("worktree"));
     }
 
     // ========================================================================
@@ -2160,6 +2197,7 @@ mod tests {
         assert!(content.contains("review = true"));
         assert!(content.contains("commit = true"));
         assert!(content.contains("pull_request = true"));
+        assert!(content.contains("worktree = false"));
     }
 
     #[test]
@@ -2171,6 +2209,7 @@ mod tests {
         assert!(content.contains("# Review state"));
         assert!(content.contains("# Commit state"));
         assert!(content.contains("# Pull request state"));
+        assert!(content.contains("# Worktree mode"));
 
         // Check that true/false meanings are explained
         assert!(content.contains("- true:"));
@@ -2183,12 +2222,14 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            worktree: true,
         };
         let content = generate_config_with_comments(&config);
 
         assert!(content.contains("review = false"));
         assert!(content.contains("commit = true"));
         assert!(content.contains("pull_request = false"));
+        assert!(content.contains("worktree = true"));
     }
 
     #[test]
@@ -2199,6 +2240,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
+        assert!(!config.worktree);
     }
 
     #[test]
@@ -2235,6 +2277,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
 
         // Write it
@@ -2374,6 +2417,7 @@ commit = true
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let global_path = config_dir.join("config.toml");
         let global_content = generate_config_with_comments(&global_config);
@@ -2460,6 +2504,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
 
         // Simulate save_project_config
@@ -2517,6 +2562,7 @@ commit = true
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let project_dir = config_dir.join("test-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2553,6 +2599,7 @@ commit = true
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let global_path = config_dir.join("config.toml");
         let content = generate_config_with_comments(&global_config);
@@ -2589,6 +2636,7 @@ commit = true
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let global_path = config_dir.join("config.toml");
         fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
@@ -2598,6 +2646,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2678,6 +2727,7 @@ commit = true
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
 
         // Save
@@ -2733,6 +2783,7 @@ review = false
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let global_content = generate_config_with_comments(&global_config);
         let global_path = config_dir.join("config.toml");
@@ -2777,6 +2828,7 @@ review = false
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let global_path = config_dir.join("config.toml");
         fs::write(&global_path, generate_config_with_comments(&global_config)).unwrap();
@@ -2786,6 +2838,7 @@ review = false
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let project_dir = config_dir.join("my-project");
         fs::create_dir_all(&project_dir).unwrap();
@@ -2829,6 +2882,7 @@ review = false
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2839,6 +2893,7 @@ review = false
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2849,6 +2904,7 @@ review = false
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2859,6 +2915,7 @@ review = false
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2869,6 +2926,7 @@ review = false
             review: true,
             commit: false,
             pull_request: true,
+            ..Default::default()
         };
         let result = validate_config(&config);
         assert!(result.is_err());
@@ -2916,6 +2974,7 @@ review = false
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -2939,6 +2998,7 @@ review = false
                 review,
                 commit,
                 pull_request,
+                ..Default::default()
             };
             let result = validate_config(&config);
             assert_eq!(
@@ -2965,6 +3025,7 @@ review = false
             review: true,
             commit: false,
             pull_request: true,
+            ..Default::default()
         };
         let validation_result = validate_config(&invalid_config);
         assert!(validation_result.is_err());
@@ -3005,5 +3066,81 @@ review = false
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
+    }
+
+    // ========================================================================
+    // US-005: Worktree Configuration Option tests
+    // ========================================================================
+
+    #[test]
+    fn test_worktree_config_defaults_to_false() {
+        let config = Config::default();
+        assert!(
+            !config.worktree,
+            "worktree should default to false for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_worktree_config_can_be_enabled() {
+        let toml_str = r#"
+            worktree = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.worktree, "worktree should be true when set in config");
+    }
+
+    #[test]
+    fn test_worktree_config_missing_defaults_to_false() {
+        // Old config files without worktree field should still work
+        let toml_str = r#"
+            review = true
+            commit = true
+            pull_request = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.worktree,
+            "missing worktree field should default to false"
+        );
+    }
+
+    #[test]
+    fn test_worktree_config_explicit_false() {
+        let toml_str = r#"
+            worktree = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.worktree,
+            "explicit worktree = false should be respected"
+        );
+    }
+
+    #[test]
+    fn test_worktree_config_with_all_other_fields() {
+        let toml_str = r#"
+            review = false
+            commit = true
+            pull_request = false
+            worktree = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.review);
+        assert!(config.commit);
+        assert!(!config.pull_request);
+        assert!(config.worktree);
+    }
+
+    #[test]
+    fn test_worktree_config_documentation_note_in_generated_comments() {
+        let config = Config::default();
+        let content = generate_config_with_comments(&config);
+
+        // Verify the git repository requirement note is documented
+        assert!(
+            content.contains("Requires a git repository"),
+            "config comments should document git repo requirement"
+        );
     }
 }

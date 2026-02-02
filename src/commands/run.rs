@@ -20,17 +20,26 @@ use super::{detect_input_type, ensure_project_dir, InputType};
 /// * `verbose` - If true, show full Claude output
 /// * `spec` - Path to the spec file (JSON or Markdown)
 /// * `skip_review` - If true, skip the review loop
+/// * `worktree` - If true, enable worktree mode (overrides config)
+/// * `no_worktree` - If true, disable worktree mode (overrides config)
 ///
 /// # Returns
 ///
 /// * `Ok(())` on successful completion
 /// * `Err(Autom8Error)` if implementation fails
-pub fn run_command(verbose: bool, spec: &Path, skip_review: bool) -> Result<()> {
+pub fn run_command(verbose: bool, spec: &Path, skip_review: bool, worktree: bool, no_worktree: bool) -> Result<()> {
     ensure_project_dir()?;
 
-    let runner = Runner::new()?
+    let mut runner = Runner::new()?
         .with_verbose(verbose)
         .with_skip_review(skip_review);
+
+    // Apply worktree CLI flag override (CLI flags take precedence over config)
+    if worktree {
+        runner = runner.with_worktree(true);
+    } else if no_worktree {
+        runner = runner.with_worktree(false);
+    }
 
     print_header();
 

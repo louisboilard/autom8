@@ -1562,6 +1562,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1587,6 +1588,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -1603,6 +1605,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1628,6 +1631,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1681,6 +1685,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1699,6 +1704,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1717,6 +1723,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1738,6 +1745,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1779,6 +1787,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1805,6 +1814,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -2650,6 +2660,7 @@ src/lib.rs | Library module | [Config]
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config_and_session(
             PathBuf::from("test.json"),
@@ -2676,6 +2687,7 @@ src/lib.rs | Library module | [Config]
             review: true,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::from_spec_with_config_and_session(
             PathBuf::from("spec-feature.md"),
