@@ -4,6 +4,7 @@
 //! parallel execution of autom8 sessions on the same project.
 
 use crate::error::{Autom8Error, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -347,6 +348,123 @@ pub fn is_in_worktree() -> Result<bool> {
     Ok(get_worktree_root()?.is_some())
 }
 
+// ============================================================================
+// Session Identity System (US-002)
+// ============================================================================
+
+/// Well-known session ID for the main repository.
+pub const MAIN_SESSION_ID: &str = "main";
+
+/// Generate a deterministic session ID from a worktree path.
+///
+/// The session ID is derived from the SHA-256 hash of the absolute path,
+/// taking the first 8 characters. This ensures:
+/// - Determinism: same path always produces the same ID
+/// - Uniqueness: different paths produce different IDs (with high probability)
+/// - Filesystem safety: only alphanumeric characters (hex digits)
+/// - Readability: 8 characters is short but sufficient
+///
+/// # Arguments
+/// * `worktree_path` - The absolute path to the worktree directory
+///
+/// # Returns
+/// An 8-character hexadecimal string that uniquely identifies the worktree.
+///
+/// # Example
+/// ```
+/// use autom8::worktree::generate_session_id;
+/// use std::path::Path;
+///
+/// let id = generate_session_id(Path::new("/home/user/project-feature"));
+/// assert_eq!(id.len(), 8);
+/// assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+/// ```
+pub fn generate_session_id(worktree_path: &Path) -> String {
+    let path_str = worktree_path.to_string_lossy();
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    let result = hasher.finalize();
+    // Take first 8 characters of hex representation (4 bytes = 8 hex chars)
+    hex::encode(&result[..4])
+}
+
+/// Get the session ID for the current working directory.
+///
+/// This function determines the appropriate session ID based on the current
+/// location:
+/// - If in the main repository: returns the well-known "main" session ID
+/// - If in a linked worktree: returns a hash-based ID from the worktree path
+///
+/// # Returns
+/// * `Ok(String)` - The session ID for the current directory
+/// * `Err` - If not in a git repository
+///
+/// # Example
+/// ```no_run
+/// use autom8::worktree::get_current_session_id;
+///
+/// let session_id = get_current_session_id().expect("Not in a git repo");
+/// println!("Session ID: {}", session_id);
+/// ```
+pub fn get_current_session_id() -> Result<String> {
+    // Check if we're in a linked worktree
+    if let Some(worktree_root) = get_worktree_root()? {
+        // In a linked worktree - generate ID from path
+        Ok(generate_session_id(&worktree_root))
+    } else {
+        // In main repository - use well-known ID
+        Ok(MAIN_SESSION_ID.to_string())
+    }
+}
+
+/// Get the session ID for the main repository.
+///
+/// This function returns the session ID that would be used when running
+/// from the main repository (not a linked worktree). This is useful for
+/// operations that need to reference the main session regardless of
+/// the current working directory.
+///
+/// # Returns
+/// The well-known "main" session ID.
+pub fn get_main_session_id() -> String {
+    MAIN_SESSION_ID.to_string()
+}
+
+/// Get the session ID for a specific worktree path.
+///
+/// This is a convenience function that combines path resolution with
+/// session ID generation. For the main repository path, it returns "main".
+/// For linked worktree paths, it generates a hash-based ID.
+///
+/// # Arguments
+/// * `path` - The path to resolve a session ID for
+///
+/// # Returns
+/// * `Ok(String)` - The session ID for the given path
+/// * `Err` - If the path is not in a git repository or cannot be resolved
+pub fn get_session_id_for_path(path: &Path) -> Result<String> {
+    // Get the absolute path
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    // Get the main repo root to compare
+    let main_root = get_main_repo_root()?;
+
+    // Canonicalize both paths for reliable comparison
+    let abs_canonical = abs_path.canonicalize().unwrap_or(abs_path);
+    let main_canonical = main_root.canonicalize().unwrap_or(main_root);
+
+    // Check if this is the main repo
+    if abs_canonical == main_canonical {
+        Ok(MAIN_SESSION_ID.to_string())
+    } else {
+        Ok(generate_session_id(&abs_canonical))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +785,210 @@ mod tests {
         let result = get_worktree_root();
         assert!(result.is_ok());
         // Result could be Some(path) or None depending on where we're running
+    }
+
+    // ========================================================================
+    // Session ID tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_generate_session_id_returns_8_chars() {
+        let path = Path::new("/home/user/project-feature");
+        let id = generate_session_id(path);
+        assert_eq!(id.len(), 8);
+    }
+
+    #[test]
+    fn test_generate_session_id_is_hex_only() {
+        let path = Path::new("/home/user/project-feature");
+        let id = generate_session_id(path);
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "Session ID should be filesystem-safe (hex only): {}",
+            id
+        );
+    }
+
+    #[test]
+    fn test_generate_session_id_is_deterministic() {
+        let path = Path::new("/home/user/project-feature");
+        let id1 = generate_session_id(path);
+        let id2 = generate_session_id(path);
+        assert_eq!(id1, id2, "Same path should produce same session ID");
+    }
+
+    #[test]
+    fn test_generate_session_id_different_paths_different_ids() {
+        let path1 = Path::new("/home/user/project-feature-a");
+        let path2 = Path::new("/home/user/project-feature-b");
+        let id1 = generate_session_id(path1);
+        let id2 = generate_session_id(path2);
+        assert_ne!(
+            id1, id2,
+            "Different paths should produce different session IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_session_id_similar_paths() {
+        // Test that even similar paths produce different IDs
+        let path1 = Path::new("/home/user/project");
+        let path2 = Path::new("/home/user/project2");
+        let id1 = generate_session_id(path1);
+        let id2 = generate_session_id(path2);
+        assert_ne!(
+            id1, id2,
+            "Similar paths should produce different session IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_session_id_handles_path_with_spaces() {
+        let path = Path::new("/home/user/my project/feature branch");
+        let id = generate_session_id(path);
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_generate_session_id_handles_unicode_path() {
+        let path = Path::new("/home/user/проект/фича");
+        let id = generate_session_id(path);
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_main_session_id_constant() {
+        assert_eq!(MAIN_SESSION_ID, "main");
+        assert!(MAIN_SESSION_ID.len() <= 12);
+        assert!(MAIN_SESSION_ID
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn test_get_main_session_id() {
+        let id = get_main_session_id();
+        assert_eq!(id, "main");
+    }
+
+    #[test]
+    fn test_get_current_session_id_in_main_repo() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // When running in main repo (not a linked worktree)
+        if !is_in_worktree().unwrap_or(true) {
+            let id = get_current_session_id().unwrap();
+            assert_eq!(id, MAIN_SESSION_ID, "Main repo should return 'main' ID");
+        }
+    }
+
+    #[test]
+    fn test_get_current_session_id_returns_valid_id() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let result = get_current_session_id();
+        assert!(result.is_ok());
+
+        let id = result.unwrap();
+        // ID should be either "main" or an 8-char hex string
+        assert!(
+            id == MAIN_SESSION_ID || (id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit())),
+            "Session ID should be 'main' or 8 hex chars: {}",
+            id
+        );
+    }
+
+    #[test]
+    fn test_get_current_session_id_is_stable() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // Calling multiple times should return same ID
+        let id1 = get_current_session_id().unwrap();
+        let id2 = get_current_session_id().unwrap();
+        assert_eq!(id1, id2, "Session ID should be stable across calls");
+    }
+
+    #[test]
+    fn test_session_id_length_is_within_bounds() {
+        // Test that all possible session IDs are 8-12 chars (per acceptance criteria)
+        let main_id = get_main_session_id();
+        assert!(
+            main_id.len() >= 4 && main_id.len() <= 12,
+            "main ID should be 4-12 chars: {} ({})",
+            main_id,
+            main_id.len()
+        );
+
+        let hash_id = generate_session_id(Path::new("/some/path"));
+        assert!(
+            hash_id.len() >= 8 && hash_id.len() <= 12,
+            "hash ID should be 8-12 chars: {} ({})",
+            hash_id,
+            hash_id.len()
+        );
+    }
+
+    #[test]
+    fn test_session_id_is_filesystem_safe() {
+        // All generated IDs should be safe for use in filenames
+        let paths = [
+            "/home/user/project",
+            "/tmp/worktree-123",
+            "C:\\Users\\test\\project",
+            "/path/with spaces/and-dashes_underscores",
+        ];
+
+        for path in paths {
+            let id = generate_session_id(Path::new(path));
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "ID '{}' from path '{}' should be filesystem-safe",
+                id,
+                path
+            );
+        }
+
+        // Main ID should also be safe
+        assert!(MAIN_SESSION_ID
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    }
+
+    #[test]
+    fn test_get_session_id_for_path_returns_main_for_main_repo() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        let main_root = get_main_repo_root().unwrap();
+        let id = get_session_id_for_path(&main_root).unwrap();
+        assert_eq!(id, MAIN_SESSION_ID, "Main repo path should return 'main' ID");
+    }
+
+    #[test]
+    fn test_generate_session_id_uniqueness_sample() {
+        // Test a sample of paths to verify uniqueness
+        let paths = [
+            "/home/user/project1",
+            "/home/user/project2",
+            "/home/user/project3",
+            "/tmp/worktree-a",
+            "/tmp/worktree-b",
+            "/var/lib/myproject",
+            "/opt/work/feature-x",
+            "/opt/work/feature-y",
+        ];
+
+        let ids: Vec<String> = paths.iter().map(|p| generate_session_id(Path::new(p))).collect();
+
+        // Check all IDs are unique
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(
+            ids.len(),
+            unique_ids.len(),
+            "All session IDs should be unique. IDs: {:?}",
+            ids
+        );
     }
 }

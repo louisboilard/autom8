@@ -89,6 +89,10 @@ pub struct RunState {
     /// Used to calculate diffs for what changed during the story.
     #[serde(default)]
     pub pre_story_commit: Option<String>,
+    /// Session identifier for worktree-based parallel execution.
+    /// Deterministic ID derived from worktree path (or "main" for main repo).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl RunState {
@@ -109,6 +113,7 @@ impl RunState {
             config: None,
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
+            session_id: None,
         }
     }
 
@@ -130,6 +135,56 @@ impl RunState {
             config: Some(config),
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
+            session_id: None,
+        }
+    }
+
+    /// Create a new RunState with a session ID.
+    pub fn new_with_session(spec_json_path: PathBuf, branch: String, session_id: String) -> Self {
+        Self {
+            run_id: Uuid::new_v4().to_string(),
+            status: RunStatus::Running,
+            machine_state: MachineState::Initializing,
+            spec_json_path,
+            spec_md_path: None,
+            branch,
+            current_story: None,
+            iteration: 0,
+            review_iteration: 0,
+            started_at: Utc::now(),
+            finished_at: None,
+            iterations: Vec::new(),
+            config: None,
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
+            session_id: Some(session_id),
+        }
+    }
+
+    /// Create a new RunState with config and session ID.
+    pub fn new_with_config_and_session(
+        spec_json_path: PathBuf,
+        branch: String,
+        config: Config,
+        session_id: String,
+    ) -> Self {
+        Self {
+            run_id: Uuid::new_v4().to_string(),
+            status: RunStatus::Running,
+            machine_state: MachineState::Initializing,
+            spec_json_path,
+            spec_md_path: None,
+            branch,
+            current_story: None,
+            iteration: 0,
+            review_iteration: 0,
+            started_at: Utc::now(),
+            finished_at: None,
+            iterations: Vec::new(),
+            config: Some(config),
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
+            session_id: Some(session_id),
         }
     }
 
@@ -150,6 +205,7 @@ impl RunState {
             config: None,
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
+            session_id: None,
         }
     }
 
@@ -175,6 +231,34 @@ impl RunState {
             config: Some(config),
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
+            session_id: None,
+        }
+    }
+
+    /// Create a RunState from spec with config and session ID.
+    pub fn from_spec_with_config_and_session(
+        spec_md_path: PathBuf,
+        spec_json_path: PathBuf,
+        config: Config,
+        session_id: String,
+    ) -> Self {
+        Self {
+            run_id: Uuid::new_v4().to_string(),
+            status: RunStatus::Running,
+            machine_state: MachineState::LoadingSpec,
+            spec_json_path,
+            spec_md_path: Some(spec_md_path),
+            branch: String::new(), // Will be set after spec generation
+            current_story: None,
+            iteration: 0,
+            review_iteration: 0,
+            started_at: Utc::now(),
+            finished_at: None,
+            iterations: Vec::new(),
+            config: Some(config),
+            knowledge: ProjectKnowledge::default(),
+            pre_story_commit: None,
+            session_id: Some(session_id),
         }
     }
 
@@ -2250,5 +2334,154 @@ src/lib.rs | Library module | [Config]
         // Verify roundtrip
         let loaded: RunState = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.iterations[0].output_snippet, output);
+    }
+
+    // ======================================================================
+    // Tests for US-002: Session Identity System
+    // ======================================================================
+
+    #[test]
+    fn test_run_state_new_has_no_session_id_by_default() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.session_id.is_none());
+    }
+
+    #[test]
+    fn test_run_state_new_with_session() {
+        let state = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            "abc12345".to_string(),
+        );
+        assert_eq!(state.session_id, Some("abc12345".to_string()));
+    }
+
+    #[test]
+    fn test_run_state_new_with_config_and_session() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: false,
+        };
+        let state = RunState::new_with_config_and_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+            "session123".to_string(),
+        );
+        assert_eq!(state.session_id, Some("session123".to_string()));
+        assert_eq!(state.config, Some(config));
+    }
+
+    #[test]
+    fn test_run_state_from_spec_has_no_session_id_by_default() {
+        let state = RunState::from_spec(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+        );
+        assert!(state.session_id.is_none());
+    }
+
+    #[test]
+    fn test_run_state_from_spec_with_config_and_session() {
+        let config = Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+        };
+        let state = RunState::from_spec_with_config_and_session(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+            config.clone(),
+            "worktree1".to_string(),
+        );
+        assert_eq!(state.session_id, Some("worktree1".to_string()));
+        assert_eq!(state.config, Some(config));
+    }
+
+    #[test]
+    fn test_run_state_session_id_serialization_roundtrip() {
+        let state = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            "abc12345".to_string(),
+        );
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"session_id\":\"abc12345\""));
+
+        // Deserialize back
+        let deserialized: RunState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.session_id, Some("abc12345".to_string()));
+    }
+
+    #[test]
+    fn test_run_state_backwards_compatible_without_session_id_field() {
+        // Simulate loading a legacy state.json that doesn't have the session_id field
+        let legacy_json = r#"{
+            "run_id": "test-123",
+            "status": "running",
+            "machine_state": "initializing",
+            "spec_json_path": "test.json",
+            "branch": "test-branch",
+            "current_story": null,
+            "iteration": 0,
+            "review_iteration": 0,
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "iterations": []
+        }"#;
+
+        let state: RunState = serde_json::from_str(legacy_json).unwrap();
+        assert!(
+            state.session_id.is_none(),
+            "Legacy state without session_id should deserialize with None"
+        );
+    }
+
+    #[test]
+    fn test_state_manager_preserves_session_id_on_save_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            "mysession".to_string(),
+        );
+
+        sm.save(&state).unwrap();
+
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.session_id, Some("mysession".to_string()));
+    }
+
+    #[test]
+    fn test_run_state_session_id_with_main_constant() {
+        use crate::worktree::MAIN_SESSION_ID;
+
+        let state = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            MAIN_SESSION_ID.to_string(),
+        );
+        assert_eq!(state.session_id, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_run_state_session_id_with_hash_format() {
+        // Test with a typical hash-based session ID (8 hex chars)
+        let state = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            "a1b2c3d4".to_string(),
+        );
+        assert_eq!(state.session_id, Some("a1b2c3d4".to_string()));
+
+        // Verify it's valid hex
+        let session_id = state.session_id.unwrap();
+        assert_eq!(session_id.len(), 8);
+        assert!(session_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
