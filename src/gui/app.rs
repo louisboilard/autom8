@@ -883,7 +883,10 @@ impl Autom8App {
             colors::TEXT_PRIMARY,
         );
         painter.galley(
-            egui::pos2(content_rect.min.x + dot_radius * 2.0 + spacing::SM, cursor_y),
+            egui::pos2(
+                content_rect.min.x + dot_radius * 2.0 + spacing::SM,
+                cursor_y,
+            ),
             state_galley.clone(),
             Color32::TRANSPARENT,
         );
