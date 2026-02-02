@@ -162,6 +162,7 @@ impl Error for ConfigError {}
 ///     review: true,
 ///     commit: false,
 ///     pull_request: true, // Invalid: PR without commit
+///     ..Default::default()
 /// };
 /// assert!(validate_config(&invalid_config).is_err());
 /// ```
