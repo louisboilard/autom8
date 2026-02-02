@@ -12,9 +12,14 @@ use uuid::Uuid;
 
 const STATE_FILE: &str = "state.json";
 const METADATA_FILE: &str = "metadata.json";
+const LIVE_FILE: &str = "live.json";
 const SESSIONS_DIR: &str = "sessions";
 const RUNS_DIR: &str = "runs";
 const SPEC_DIR: &str = "spec";
+
+/// Maximum number of output lines to keep in LiveState.
+/// Prevents unbounded memory growth during long Claude runs.
+const LIVE_STATE_MAX_LINES: usize = 50;
 
 /// Metadata about a session, stored separately from the full state.
 ///
@@ -54,6 +59,45 @@ pub struct SessionStatus {
     pub is_current: bool,
     /// Whether the worktree path still exists
     pub is_stale: bool,
+}
+
+/// Live streaming state for a session, written frequently during Claude runs.
+///
+/// This struct holds the most recent output lines and current state, enabling
+/// the monitor command to display real-time output without reading the full state.
+/// Written atomically to prevent partial reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveState {
+    /// Recent output lines from Claude (max 50 lines, newest last)
+    pub output_lines: Vec<String>,
+    /// When this live state was last updated
+    pub updated_at: DateTime<Utc>,
+    /// Current machine state
+    pub machine_state: MachineState,
+}
+
+impl LiveState {
+    /// Create a new LiveState with the given machine state.
+    pub fn new(machine_state: MachineState) -> Self {
+        Self {
+            output_lines: Vec::new(),
+            updated_at: Utc::now(),
+            machine_state,
+        }
+    }
+
+    /// Append a line to the output, keeping at most 50 lines.
+    /// Updates the `updated_at` timestamp.
+    pub fn append_line(&mut self, line: String) {
+        self.output_lines.push(line);
+        // Keep only the last 50 lines
+        if self.output_lines.len() > LIVE_STATE_MAX_LINES {
+            let excess = self.output_lines.len() - LIVE_STATE_MAX_LINES;
+            self.output_lines.drain(0..excess);
+        }
+        self.updated_at = Utc::now();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -716,6 +760,11 @@ impl StateManager {
         self.session_dir().join(METADATA_FILE)
     }
 
+    /// Path to the live state file for this session
+    fn live_file(&self) -> PathBuf {
+        self.session_dir().join(LIVE_FILE)
+    }
+
     /// Path to the legacy state file (for migration)
     fn legacy_state_file(&self) -> PathBuf {
         self.base_dir.join(STATE_FILE)
@@ -903,9 +952,53 @@ impl StateManager {
         if metadata_path.exists() {
             fs::remove_file(metadata_path)?;
         }
+        // Also clear live state
+        self.clear_live()?;
         // Try to remove the session directory if empty
         let session_dir = self.session_dir();
         let _ = fs::remove_dir(&session_dir); // Ignore error if not empty
+        Ok(())
+    }
+
+    /// Save live state atomically (write to temp file, then rename).
+    ///
+    /// Atomic writes prevent the monitor from reading a partial/corrupted file.
+    pub fn save_live(&self, live_state: &LiveState) -> Result<()> {
+        self.ensure_dirs()?;
+
+        let live_path = self.live_file();
+        let temp_path = live_path.with_extension("json.tmp");
+
+        // Write to temp file
+        let content = serde_json::to_string(live_state)?;
+        fs::write(&temp_path, content)?;
+
+        // Atomic rename
+        fs::rename(&temp_path, &live_path)?;
+
+        Ok(())
+    }
+
+    /// Load live state, returning None if file doesn't exist or is corrupted.
+    ///
+    /// Gracefully handles missing or malformed files so the monitor can
+    /// recover without crashing.
+    pub fn load_live(&self) -> Option<LiveState> {
+        let path = self.live_file();
+        if !path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Remove the live state file.
+    pub fn clear_live(&self) -> Result<()> {
+        let path = self.live_file();
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
         Ok(())
     }
 
@@ -3878,5 +3971,272 @@ src/lib.rs | Library module | [Config]
         assert_eq!(status.current_story, Some("US-001".to_string()));
         assert!(status.is_current);
         assert!(!status.is_stale);
+    }
+
+    // ======================================================================
+    // Tests for US-002: LiveState struct and file management
+    // ======================================================================
+
+    #[test]
+    fn test_live_state_new() {
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        assert!(live.output_lines.is_empty());
+        assert_eq!(live.machine_state, MachineState::RunningClaude);
+        // updated_at should be recent (within last second)
+        let elapsed = Utc::now() - live.updated_at;
+        assert!(elapsed.num_seconds() < 1);
+    }
+
+    #[test]
+    fn test_live_state_append_line() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        live.append_line("Line 1".to_string());
+        live.append_line("Line 2".to_string());
+
+        assert_eq!(live.output_lines.len(), 2);
+        assert_eq!(live.output_lines[0], "Line 1");
+        assert_eq!(live.output_lines[1], "Line 2");
+    }
+
+    #[test]
+    fn test_live_state_append_line_updates_timestamp() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        let initial_time = live.updated_at;
+
+        // Small delay to ensure timestamp changes
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        live.append_line("New line".to_string());
+
+        assert!(
+            live.updated_at > initial_time,
+            "updated_at should be updated on append_line"
+        );
+    }
+
+    #[test]
+    fn test_live_state_max_50_lines() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Add 60 lines
+        for i in 0..60 {
+            live.append_line(format!("Line {}", i));
+        }
+
+        // Should only keep last 50 lines
+        assert_eq!(live.output_lines.len(), 50);
+        // First line should be "Line 10" (lines 0-9 were dropped)
+        assert_eq!(live.output_lines[0], "Line 10");
+        // Last line should be "Line 59"
+        assert_eq!(live.output_lines[49], "Line 59");
+    }
+
+    #[test]
+    fn test_live_state_exactly_50_lines() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Add exactly 50 lines
+        for i in 0..50 {
+            live.append_line(format!("Line {}", i));
+        }
+
+        assert_eq!(live.output_lines.len(), 50);
+        assert_eq!(live.output_lines[0], "Line 0");
+        assert_eq!(live.output_lines[49], "Line 49");
+    }
+
+    #[test]
+    fn test_live_state_serialization_roundtrip() {
+        let mut live = LiveState::new(MachineState::Reviewing);
+        live.append_line("Test output".to_string());
+
+        let json = serde_json::to_string(&live).unwrap();
+        let parsed: LiveState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.output_lines, live.output_lines);
+        assert_eq!(parsed.machine_state, MachineState::Reviewing);
+    }
+
+    #[test]
+    fn test_live_state_camel_case_serialization() {
+        let live = LiveState::new(MachineState::RunningClaude);
+        let json = serde_json::to_string(&live).unwrap();
+
+        // Verify camelCase serialization
+        assert!(json.contains("outputLines"));
+        assert!(json.contains("updatedAt"));
+        assert!(json.contains("machineState"));
+
+        // Verify snake_case is NOT used
+        assert!(!json.contains("output_lines"));
+        assert!(!json.contains("updated_at"));
+        assert!(!json.contains("machine_state"));
+    }
+
+    #[test]
+    fn test_state_manager_save_and_load_live() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Ensure session directory exists
+        sm.ensure_dirs().unwrap();
+
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.append_line("Hello from Claude".to_string());
+
+        sm.save_live(&live).unwrap();
+
+        let loaded = sm.load_live();
+        assert!(loaded.is_some(), "Should load saved live state");
+
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.output_lines, vec!["Hello from Claude"]);
+        assert_eq!(loaded.machine_state, MachineState::RunningClaude);
+    }
+
+    #[test]
+    fn test_state_manager_load_live_returns_none_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let loaded = sm.load_live();
+        assert!(loaded.is_none(), "Should return None when live.json doesn't exist");
+    }
+
+    #[test]
+    fn test_state_manager_load_live_handles_corrupted_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create session directory and write corrupted content
+        sm.ensure_dirs().unwrap();
+        let live_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(LIVE_FILE);
+        fs::write(&live_path, "not valid json {{{").unwrap();
+
+        // Should gracefully return None instead of panicking
+        let loaded = sm.load_live();
+        assert!(loaded.is_none(), "Should return None for corrupted file");
+    }
+
+    #[test]
+    fn test_state_manager_clear_live() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        sm.ensure_dirs().unwrap();
+
+        // Save live state
+        let live = LiveState::new(MachineState::RunningClaude);
+        sm.save_live(&live).unwrap();
+        assert!(sm.load_live().is_some());
+
+        // Clear live state
+        sm.clear_live().unwrap();
+        assert!(sm.load_live().is_none(), "Live state should be cleared");
+    }
+
+    #[test]
+    fn test_state_manager_clear_live_no_error_when_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Should not error when file doesn't exist
+        let result = sm.clear_live();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_state_manager_clear_current_also_clears_live() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save both state and live state
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let live = LiveState::new(MachineState::RunningClaude);
+        sm.save_live(&live).unwrap();
+
+        // Clear current - should also clear live
+        sm.clear_current().unwrap();
+
+        assert!(sm.load_current().unwrap().is_none());
+        assert!(sm.load_live().is_none(), "clear_current should also clear live state");
+    }
+
+    #[test]
+    fn test_state_manager_save_live_atomic_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let live = LiveState::new(MachineState::RunningClaude);
+        sm.save_live(&live).unwrap();
+
+        // Verify no temp file remains
+        let temp_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join("live.json.tmp");
+        assert!(!temp_path.exists(), "Temp file should be renamed, not remain");
+
+        // Verify actual file exists
+        let live_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(LIVE_FILE);
+        assert!(live_path.exists(), "live.json should exist after save");
+    }
+
+    #[test]
+    fn test_state_manager_live_file_location() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "test-session".to_string(),
+        );
+
+        sm.ensure_dirs().unwrap();
+
+        let live = LiveState::new(MachineState::RunningClaude);
+        sm.save_live(&live).unwrap();
+
+        // Verify file is in the correct session directory
+        let expected_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join("test-session")
+            .join(LIVE_FILE);
+        assert!(
+            expected_path.exists(),
+            "live.json should be in session directory"
+        );
+    }
+
+    #[test]
+    fn test_live_state_different_machine_states() {
+        // Test that all relevant machine states serialize correctly
+        let states = vec![
+            MachineState::Idle,
+            MachineState::RunningClaude,
+            MachineState::Reviewing,
+            MachineState::Correcting,
+            MachineState::Committing,
+        ];
+
+        for state in states {
+            let live = LiveState::new(state);
+            let json = serde_json::to_string(&live).unwrap();
+            let parsed: LiveState = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.machine_state, state);
+        }
     }
 }
