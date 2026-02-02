@@ -54,10 +54,7 @@ fn list_resumable_sessions(state_manager: &StateManager) -> Result<()> {
     let sessions = state_manager.list_sessions_with_status()?;
 
     // Filter to resumable sessions (incomplete runs - either running or failed states)
-    let resumable: Vec<SessionStatus> = sessions
-        .into_iter()
-        .filter(|s| is_resumable_session(s))
-        .collect();
+    let resumable: Vec<SessionStatus> = sessions.into_iter().filter(is_resumable_session).collect();
 
     if resumable.is_empty() {
         println!("{GRAY}No resumable sessions found.{RESET}");
@@ -71,7 +68,9 @@ fn list_resumable_sessions(state_manager: &StateManager) -> Result<()> {
     print_sessions_status(&resumable);
 
     println!();
-    println!("{GRAY}Use {CYAN}autom8 resume --session <id>{GRAY} to resume a specific session.{RESET}");
+    println!(
+        "{GRAY}Use {CYAN}autom8 resume --session <id>{GRAY} to resume a specific session.{RESET}"
+    );
 
     Ok(())
 }
@@ -144,11 +143,16 @@ fn resume_auto_detect(state_manager: &StateManager) -> Result<()> {
     let in_worktree = is_in_worktree().unwrap_or(false);
 
     // Filter to resumable sessions
-    let resumable: Vec<&SessionStatus> = sessions.iter().filter(|s| is_resumable_session(s)).collect();
+    let resumable: Vec<&SessionStatus> = sessions
+        .iter()
+        .filter(|&s| is_resumable_session(s))
+        .collect();
 
     if resumable.is_empty() {
         // No resumable sessions - fall back to smart resume (scanning for incomplete specs)
-        println!("{YELLOW}[resume]{RESET} No active sessions found, scanning for incomplete specs...");
+        println!(
+            "{YELLOW}[resume]{RESET} No active sessions found, scanning for incomplete specs..."
+        );
         println!();
         let runner = Runner::new()?;
         return runner.resume();
@@ -169,7 +173,10 @@ fn resume_auto_detect(state_manager: &StateManager) -> Result<()> {
     }
 
     // Check if current session is resumable
-    if let Some(current) = resumable.iter().find(|s| s.metadata.session_id == current_session_id) {
+    if let Some(current) = resumable
+        .iter()
+        .find(|s| s.metadata.session_id == current_session_id)
+    {
         if current.is_current {
             println!(
                 "{GREEN}[resume]{RESET} Resuming current session: {}",
@@ -202,7 +209,11 @@ fn resume_auto_detect(state_manager: &StateManager) -> Result<()> {
                 .unwrap_or_default();
             format!(
                 "{}{}{} [{}]{}",
-                s.metadata.session_id, current_marker, stale_marker, s.metadata.branch_name, state_str
+                s.metadata.session_id,
+                current_marker,
+                stale_marker,
+                s.metadata.branch_name,
+                state_str
             )
         })
         .chain(std::iter::once("Exit".to_string()))

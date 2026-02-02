@@ -1525,4 +1525,76 @@ mod tests {
         let sessions = sm.list_sessions_with_status().unwrap();
         assert!(sessions.is_empty());
     }
+
+    // ======================================================================
+    // Tests for US-010: Multi-Session Resume Command
+    // ======================================================================
+
+    #[test]
+    fn test_us010_resume_command_no_args() {
+        // Test that resume command works without arguments
+        let cli = Cli::try_parse_from(["autom8", "resume"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none(), "session should be None by default");
+            assert!(!list, "list should be false by default");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_session_flag() {
+        // Test that --session flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "resume", "--session", "abc123"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert_eq!(session, Some("abc123".to_string()));
+            assert!(!list);
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_session_short_flag() {
+        // Test that -s short flag works for --session
+        let cli = Cli::try_parse_from(["autom8", "resume", "-s", "xyz789"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert_eq!(session, Some("xyz789".to_string()));
+            assert!(!list);
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_list_flag() {
+        // Test that --list flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "resume", "--list"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none());
+            assert!(list, "--list should set list to true");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_list_short_flag() {
+        // Test that -l short flag works for --list
+        let cli = Cli::try_parse_from(["autom8", "resume", "-l"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none());
+            assert!(list, "-l should set list to true");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_function_signature_changed() {
+        // Verify the resume_command function accepts the new parameters
+        use autom8::commands::resume_command;
+        // Type check: resume_command takes Option<&str> and bool
+        let _: fn(Option<&str>, bool) -> autom8::error::Result<()> = resume_command;
+    }
 }
