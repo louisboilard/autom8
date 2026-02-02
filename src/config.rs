@@ -2143,7 +2143,7 @@ mod tests {
         assert!(config.review, "review should default to true");
         assert!(config.commit, "commit should default to true");
         assert!(config.pull_request, "pull_request should default to true");
-        assert!(!config.worktree, "worktree should default to false");
+        assert!(config.worktree, "worktree should default to true");
     }
 
     #[test]
@@ -2189,7 +2189,7 @@ mod tests {
             config.pull_request,
             "missing pull_request should default to true"
         );
-        assert!(!config.worktree, "missing worktree should default to false");
+        assert!(config.worktree, "missing worktree should default to true");
     }
 
     #[test]
@@ -2201,7 +2201,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
-        assert!(!config.worktree);
+        assert!(config.worktree);
     }
 
     #[test]
@@ -2323,7 +2323,7 @@ mod tests {
         assert!(config.review);
         assert!(config.commit);
         assert!(config.pull_request);
-        assert!(!config.worktree);
+        assert!(config.worktree);
     }
 
     #[test]
@@ -3156,11 +3156,11 @@ review = false
     // ========================================================================
 
     #[test]
-    fn test_worktree_config_defaults_to_false() {
+    fn test_worktree_config_defaults_to_true() {
         let config = Config::default();
         assert!(
-            !config.worktree,
-            "worktree should default to false for backward compatibility"
+            config.worktree,
+            "worktree should default to true"
         );
     }
 
