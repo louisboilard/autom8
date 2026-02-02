@@ -27,7 +27,7 @@ mod utils;
 pub use commit::{run_for_commit, CommitResult};
 pub use pr_review::{run_pr_review, PRReviewResult, PRReviewSummary};
 pub use review::{run_corrector, run_reviewer, CorrectorResult, ReviewResult};
-pub use runner::run_claude;
+pub use runner::{run_claude, ClaudeRunner};
 pub use spec::run_for_spec_generation;
 pub use stream::extract_text_from_stream_line;
 pub use types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeResult, ClaudeStoryResult};
