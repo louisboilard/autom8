@@ -1299,7 +1299,9 @@ impl Autom8App {
                 // Scrollable run history list
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
                     .show(ui, |ui| {
                         for entry in &self.run_history {
                             self.render_run_history_entry(ui, entry);
@@ -1338,15 +1340,16 @@ impl Autom8App {
             ui.allocate_exact_size(Vec2::new(available_width, card_height), Sense::hover());
 
         // Draw card background
-        ui.painter().rect_filled(
-            rect,
-            Rounding::same(rounding::CARD),
-            colors::SURFACE_HOVER,
-        );
+        ui.painter()
+            .rect_filled(rect, Rounding::same(rounding::CARD), colors::SURFACE_HOVER);
 
         // Card content
         let inner_rect = rect.shrink(spacing::MD);
-        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect).layout(egui::Layout::top_down(egui::Align::LEFT)));
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
 
         // Top row: Date/time and status
         child_ui.horizontal(|ui| {
