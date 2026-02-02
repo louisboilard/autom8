@@ -135,6 +135,8 @@ pub struct SessionData {
     pub load_error: Option<String>,
     /// Whether this is the main repo session (vs. a worktree)
     pub is_main_session: bool,
+    /// Whether this session is stale (worktree was deleted)
+    pub is_stale: bool,
 }
 
 impl SessionData {
@@ -428,13 +430,25 @@ impl MonitorApp {
                     continue;
                 }
 
-                // Skip stale sessions (worktree deleted but metadata remains)
-                if !metadata.worktree_path.exists() {
-                    continue;
-                }
+                // Check if worktree was deleted (stale session)
+                let is_stale = !metadata.worktree_path.exists();
 
                 // Determine if this is the main session
                 let is_main_session = metadata.session_id == MAIN_SESSION_ID;
+
+                // For stale sessions, set error and skip state loading
+                if is_stale {
+                    sessions.push(SessionData {
+                        project_name: project_name.clone(),
+                        metadata,
+                        run: None,
+                        progress: None,
+                        load_error: Some("Worktree has been deleted".to_string()),
+                        is_main_session,
+                        is_stale: true,
+                    });
+                    continue;
+                }
 
                 // Load the run state for this session
                 let (run, load_error) =
@@ -462,6 +476,7 @@ impl MonitorApp {
                     progress,
                     load_error,
                     is_main_session,
+                    is_stale: false,
                 });
             }
         }
@@ -1039,7 +1054,7 @@ impl MonitorApp {
         frame.render_widget(paragraph, inner);
     }
 
-    /// Render an error panel for a session with a corrupted state file
+    /// Render an error panel for a session with a corrupted state file or stale worktree
     fn render_session_error_panel(
         &self,
         frame: &mut Frame,
@@ -1062,31 +1077,68 @@ impl MonitorApp {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let error_lines = vec![
-            Line::from(vec![
-                Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
-                Span::styled(
-                    "State File Error",
-                    Style::default()
-                        .fg(COLOR_ERROR)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
-                Span::styled(
-                    &session.metadata.session_id,
-                    Style::default().fg(COLOR_PRIMARY),
-                ),
-            ]),
-            Line::from(Span::styled(
-                "The state file may be corrupted or unreadable.",
-                Style::default().fg(COLOR_DIM),
-            )),
-        ];
+        // Build error lines based on whether this is a stale session or corrupted state
+        let error_lines = if session.is_stale {
+            vec![
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
+                    Span::styled(
+                        "Stale Session",
+                        Style::default()
+                            .fg(COLOR_ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Session ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        &session.metadata.session_id,
+                        Style::default().fg(COLOR_PRIMARY),
+                    ),
+                    Span::styled(" failed to load.", Style::default().fg(COLOR_DIM)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "The worktree directory no longer exists.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+                Line::from(Span::styled(
+                    "Run `autom8 clean --orphaned` to remove stale sessions.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
+                    Span::styled(
+                        "State File Error",
+                        Style::default()
+                            .fg(COLOR_ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Session ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        &session.metadata.session_id,
+                        Style::default().fg(COLOR_PRIMARY),
+                    ),
+                    Span::styled(" failed to load.", Style::default().fg(COLOR_DIM)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "The state file may be corrupted or unreadable.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+            ]
+        };
 
         let paragraph = Paragraph::new(error_lines).wrap(Wrap { trim: true });
         frame.render_widget(paragraph, inner);
@@ -1851,6 +1903,7 @@ mod tests {
             progress: None,
             load_error: None,
             is_main_session: is_main,
+            is_stale: false,
         }
     }
 
@@ -4141,9 +4194,12 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
 
         // Add sessions with distinct session IDs
-        app.sessions.push(create_test_session("myproject", MAIN_SESSION_ID, "main"));
-        app.sessions.push(create_test_session("myproject", "deadbeef", "feature-a"));
-        app.sessions.push(create_test_session("myproject", "cafebabe", "feature-b"));
+        app.sessions
+            .push(create_test_session("myproject", MAIN_SESSION_ID, "main"));
+        app.sessions
+            .push(create_test_session("myproject", "deadbeef", "feature-a"));
+        app.sessions
+            .push(create_test_session("myproject", "cafebabe", "feature-b"));
 
         // Each should have correct title format
         assert_eq!(app.sessions[0].display_title(), "myproject (main)");
@@ -4248,16 +4304,10 @@ mod tests {
         app.has_active_runs = true;
 
         // Add 2 sessions for same project (main + worktree)
-        app.sessions.push(create_test_session(
-            "autom8",
-            MAIN_SESSION_ID,
-            "main",
-        ));
-        app.sessions.push(create_test_session(
-            "autom8",
-            "abc12345",
-            "feature-x",
-        ));
+        app.sessions
+            .push(create_test_session("autom8", MAIN_SESSION_ID, "main"));
+        app.sessions
+            .push(create_test_session("autom8", "abc12345", "feature-x"));
 
         // Both should be navigable
         assert!(app.is_quadrant_valid(0, 0));
@@ -4349,5 +4399,177 @@ mod tests {
             app.sessions[1].truncated_worktree_path(),
             ".../projects/autom8-wt-feature-x"
         );
+    }
+
+    // ==========================================================================
+    // US-004 Tests: Update error panel display for session context
+    // ==========================================================================
+    // These tests verify that error panels show session identity and appropriate
+    // error messages for corrupted states and stale sessions.
+
+    /// Helper function to create a test session with an error
+    fn create_error_session(
+        project_name: &str,
+        session_id: &str,
+        error: &str,
+        is_stale: bool,
+    ) -> SessionData {
+        let is_main = session_id == MAIN_SESSION_ID;
+        SessionData {
+            project_name: project_name.to_string(),
+            metadata: SessionMetadata {
+                session_id: session_id.to_string(),
+                worktree_path: PathBuf::from(if is_main {
+                    format!("/home/user/projects/{}", project_name)
+                } else {
+                    format!("/home/user/projects/{}-wt-deleted", project_name)
+                }),
+                branch_name: "feature/test".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: Some(error.to_string()),
+            is_main_session: is_main,
+            is_stale,
+        }
+    }
+
+    #[test]
+    fn test_us004_error_panel_title_shows_project_and_session_id() {
+        // Main session error panel
+        let main_error_session = create_error_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert_eq!(main_error_session.display_title(), "autom8 (main)");
+
+        // Worktree session error panel
+        let worktree_error_session = create_error_session(
+            "autom8",
+            "abc12345",
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert_eq!(worktree_error_session.display_title(), "autom8 (abc12345)");
+    }
+
+    #[test]
+    fn test_us004_error_session_has_load_error() {
+        let error_session = create_error_session(
+            "myproject",
+            "deadbeef",
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert!(error_session.load_error.is_some());
+        assert_eq!(
+            error_session.load_error.as_ref().unwrap(),
+            "Corrupted state: invalid JSON"
+        );
+    }
+
+    #[test]
+    fn test_us004_stale_session_has_is_stale_flag() {
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+        assert!(stale_session.is_stale);
+        assert!(stale_session.load_error.is_some());
+    }
+
+    #[test]
+    fn test_us004_non_stale_error_session_has_is_stale_false() {
+        let error_session = create_error_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert!(!error_session.is_stale);
+    }
+
+    #[test]
+    fn test_us004_stale_session_error_message_content() {
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+        // The stale session should have an error indicating worktree deletion
+        assert!(stale_session
+            .load_error
+            .as_ref()
+            .unwrap()
+            .contains("deleted"));
+    }
+
+    #[test]
+    fn test_us004_error_session_display_title_format() {
+        // Verify the display_title works correctly for error sessions
+        let main_error = create_error_session("proj", MAIN_SESSION_ID, "error", false);
+        let worktree_error = create_error_session("proj", "12345678", "error", true);
+
+        // Main should show "(main)"
+        assert!(main_error.display_title().ends_with("(main)"));
+        // Worktree should show the 8-char session ID
+        assert!(worktree_error.display_title().ends_with("(12345678)"));
+    }
+
+    #[test]
+    fn test_us004_error_and_stale_sessions_appear_in_app() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+
+        // Add a normal session
+        app.sessions
+            .push(create_test_session("proj1", MAIN_SESSION_ID, "main"));
+
+        // Add an error session (corrupted state)
+        app.sessions.push(create_error_session(
+            "proj2",
+            "aabbccdd",
+            "Corrupted state",
+            false,
+        ));
+
+        // Add a stale session
+        app.sessions.push(create_error_session(
+            "proj3",
+            "11223344",
+            "Worktree has been deleted",
+            true,
+        ));
+
+        // All three should be in the sessions list
+        assert_eq!(app.sessions.len(), 3);
+
+        // First is normal (no error)
+        assert!(app.sessions[0].load_error.is_none());
+        assert!(!app.sessions[0].is_stale);
+
+        // Second is error but not stale
+        assert!(app.sessions[1].load_error.is_some());
+        assert!(!app.sessions[1].is_stale);
+
+        // Third is stale
+        assert!(app.sessions[2].load_error.is_some());
+        assert!(app.sessions[2].is_stale);
+    }
+
+    #[test]
+    fn test_us004_stale_session_metadata_preserved() {
+        // Stale sessions should still have accessible metadata for display
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+
+        // Session ID should be accessible for error display
+        assert_eq!(stale_session.metadata.session_id, "abc12345");
+
+        // Project name should be accessible for title
+        assert_eq!(stale_session.project_name, "autom8");
+
+        // Branch should be accessible (shows what was being worked on)
+        assert_eq!(stale_session.metadata.branch_name, "feature/test");
     }
 }
