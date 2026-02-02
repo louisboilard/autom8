@@ -724,7 +724,8 @@ pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Pat
         message.push_str("Suggestions:\n");
         message.push_str("  1. Use a different branch name in your spec\n");
         message.push_str("  2. Run `git worktree list` to see existing worktrees\n");
-        message.push_str("  3. Remove the conflicting worktree with `git worktree remove <path>`\n");
+        message
+            .push_str("  3. Remove the conflicting worktree with `git worktree remove <path>`\n");
     } else if error.contains("already exists") {
         message.push_str("Reason: A directory or worktree already exists at this path.\n\n");
         message.push_str("Suggestions:\n");
@@ -1508,11 +1509,7 @@ mod tests {
 
     #[test]
     fn test_format_worktree_error_generic() {
-        let msg = format_worktree_error(
-            "some unknown error",
-            "feature",
-            Path::new("/some/path"),
-        );
+        let msg = format_worktree_error("some unknown error", "feature", Path::new("/some/path"));
 
         assert!(msg.contains("some unknown error"));
         assert!(msg.contains("Suggestions:"));

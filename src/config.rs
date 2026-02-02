@@ -81,6 +81,16 @@ pub struct Config {
     /// Example: For repo "myproject" and branch "feature/login", creates "myproject-wt-feature-login"
     #[serde(default = "default_worktree_path_pattern")]
     pub worktree_path_pattern: String,
+
+    /// Whether to remove worktrees after successful completion.
+    ///
+    /// When `true`, autom8 automatically removes the worktree directory after
+    /// a successful run (Completed state). Failed runs keep their worktrees.
+    /// When `false`, worktrees are preserved for manual inspection/cleanup.
+    ///
+    /// Note: Only applies when `worktree = true`. Has no effect otherwise.
+    #[serde(default = "default_false")]
+    pub worktree_cleanup: bool,
 }
 
 /// Default worktree path pattern.
@@ -106,6 +116,7 @@ impl Default for Config {
             pull_request: true,
             worktree: false,
             worktree_path_pattern: default_worktree_path_pattern(),
+            worktree_cleanup: false,
         }
     }
 }
@@ -232,6 +243,12 @@ worktree = false
 # Placeholders: {repo} = repository name, {branch} = branch name (slugified)
 # Default: {repo}-wt-{branch} (e.g., "myproject-wt-feature-login")
 worktree_path_pattern = "{repo}-wt-{branch}"
+
+# Worktree cleanup: Automatically remove worktrees after successful completion
+# - true: Remove worktree directory after run completes successfully
+# - false: Preserve worktrees for manual inspection/cleanup (default)
+# Note: Failed runs always keep their worktrees. Only applies when worktree = true.
+worktree_cleanup = false
 "#;
 
 /// Get the path to the global config file.
@@ -346,8 +363,19 @@ worktree = {}
 # Placeholders: {{repo}} = repository name, {{branch}} = branch name (slugified)
 # Default: {{repo}}-wt-{{branch}} (e.g., "myproject-wt-feature-login")
 worktree_path_pattern = "{}"
+
+# Worktree cleanup: Automatically remove worktrees after successful completion
+# - true: Remove worktree directory after run completes successfully
+# - false: Preserve worktrees for manual inspection/cleanup (default)
+# Note: Failed runs always keep their worktrees. Only applies when worktree = true.
+worktree_cleanup = {}
 "#,
-        config.review, config.commit, config.pull_request, config.worktree, config.worktree_path_pattern
+        config.review,
+        config.commit,
+        config.pull_request,
+        config.worktree,
+        config.worktree_path_pattern,
+        config.worktree_cleanup
     )
 }
 
@@ -3176,5 +3204,119 @@ review = false
             content.contains("Requires a git repository"),
             "config comments should document git repo requirement"
         );
+    }
+
+    // ========================================================================
+    // US-008: worktree_cleanup configuration tests
+    // ========================================================================
+
+    #[test]
+    fn test_worktree_cleanup_config_defaults_to_false() {
+        let config = Config::default();
+        assert!(
+            !config.worktree_cleanup,
+            "worktree_cleanup should default to false for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_can_be_enabled() {
+        let toml_str = r#"
+            worktree_cleanup = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            config.worktree_cleanup,
+            "worktree_cleanup should be true when set in config"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_missing_defaults_to_false() {
+        // Old config files without worktree_cleanup field should still work
+        let toml_str = r#"
+            review = true
+            commit = true
+            worktree = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.worktree_cleanup,
+            "missing worktree_cleanup field should default to false"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_explicit_false() {
+        let toml_str = r#"
+            worktree_cleanup = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.worktree_cleanup,
+            "explicit worktree_cleanup = false should be respected"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_with_all_worktree_fields() {
+        let toml_str = r#"
+            worktree = true
+            worktree_path_pattern = "{repo}-test-{branch}"
+            worktree_cleanup = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.worktree);
+        assert_eq!(config.worktree_path_pattern, "{repo}-test-{branch}");
+        assert!(config.worktree_cleanup);
+    }
+
+    #[test]
+    fn test_worktree_cleanup_in_generated_comments() {
+        let config = Config {
+            worktree_cleanup: true,
+            ..Default::default()
+        };
+        let content = generate_config_with_comments(&config);
+
+        // Verify worktree_cleanup is documented
+        assert!(
+            content.contains("worktree_cleanup = true"),
+            "generated config should include worktree_cleanup setting"
+        );
+        assert!(
+            content.contains("successful completion"),
+            "config comments should document cleanup behavior"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_in_default_config_with_comments() {
+        // Verify DEFAULT_CONFIG_WITH_COMMENTS includes worktree_cleanup
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("worktree_cleanup"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should include worktree_cleanup"
+        );
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("worktree_cleanup = false"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should have worktree_cleanup = false"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_serialization_roundtrip() {
+        let config = Config {
+            worktree: true,
+            worktree_cleanup: true,
+            ..Default::default()
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("worktree_cleanup = true"));
+
+        // Deserialize back
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.worktree_cleanup, config.worktree_cleanup);
     }
 }
