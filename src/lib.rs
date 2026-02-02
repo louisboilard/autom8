@@ -36,6 +36,7 @@ pub mod progress;
 pub mod prompt;
 pub mod prompts;
 pub mod runner;
+pub mod signal;
 pub mod snapshot;
 pub mod spec;
 pub mod state;

@@ -69,6 +69,9 @@ pub enum Autom8Error {
         session_id: String,
         worktree_path: std::path::PathBuf,
     },
+
+    #[error("Signal handler error: {0}")]
+    SignalHandler(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;
