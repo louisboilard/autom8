@@ -518,7 +518,10 @@ mod tests {
     fn test_animation_time_configured() {
         let style = configure_style();
         // Animation time should be configured for smooth transitions
-        assert!(style.animation_time > 0.0, "Animation time should be positive");
+        assert!(
+            style.animation_time > 0.0,
+            "Animation time should be positive"
+        );
         assert!(
             style.animation_time <= 0.2,
             "Animation time should not be too long (responsive feel)"

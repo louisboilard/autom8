@@ -2055,7 +2055,8 @@ impl Autom8App {
         // Calculate panel widths: 50/50 split with divider in the middle
         // Subtract the divider width and margins from the total width
         let divider_total_width = SPLIT_DIVIDER_WIDTH + SPLIT_DIVIDER_MARGIN * 2.0;
-        let panel_width = ((available_width - divider_total_width) / 2.0).max(SPLIT_PANEL_MIN_WIDTH);
+        let panel_width =
+            ((available_width - divider_total_width) / 2.0).max(SPLIT_PANEL_MIN_WIDTH);
 
         // We need to collect the clicked_run_id outside the closure
         let mut clicked_run_id: Option<String> = None;
@@ -2079,11 +2080,8 @@ impl Autom8App {
                 divider_rect.min,
                 Vec2::new(SPLIT_DIVIDER_WIDTH, available_height),
             );
-            ui.painter().rect_filled(
-                divider_line_rect,
-                Rounding::ZERO,
-                colors::SEPARATOR,
-            );
+            ui.painter()
+                .rect_filled(divider_line_rect, Rounding::ZERO, colors::SEPARATOR);
             ui.add_space(SPLIT_DIVIDER_WIDTH);
 
             ui.add_space(SPLIT_DIVIDER_MARGIN);
@@ -4545,7 +4543,13 @@ mod tests {
     fn test_split_view_constants_use_spacing_scale() {
         // Verify that split view margins align with the spacing scale
         // SPLIT_DIVIDER_MARGIN should be a standard spacing value
-        let valid_spacing_values = [spacing::XS, spacing::SM, spacing::MD, spacing::LG, spacing::XL];
+        let valid_spacing_values = [
+            spacing::XS,
+            spacing::SM,
+            spacing::MD,
+            spacing::LG,
+            spacing::XL,
+        ];
         assert!(
             valid_spacing_values.contains(&SPLIT_DIVIDER_MARGIN),
             "Split divider margin should use spacing scale"
@@ -4688,10 +4692,7 @@ mod tests {
         for (i, color1) in status_colors.iter().enumerate() {
             for (j, color2) in status_colors.iter().enumerate() {
                 if i != j {
-                    assert_ne!(
-                        color1, color2,
-                        "Status colors should all be distinct"
-                    );
+                    assert_ne!(color1, color2, "Status colors should all be distinct");
                 }
             }
         }
