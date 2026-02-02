@@ -3158,10 +3158,7 @@ review = false
     #[test]
     fn test_worktree_config_defaults_to_true() {
         let config = Config::default();
-        assert!(
-            config.worktree,
-            "worktree should default to true"
-        );
+        assert!(config.worktree, "worktree should default to true");
     }
 
     #[test]

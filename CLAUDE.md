@@ -148,7 +148,7 @@ commit = true       # Auto-commit changes
 pull_request = true # Auto-create PR
 
 # Worktree settings (for parallel sessions)
-worktree = false              # Enable automatic worktree creation
+worktree = true               # Enable automatic worktree creation (default)
 worktree_path_pattern = "{repo}-wt-{branch}"  # Worktree naming pattern
 worktree_cleanup = false      # Remove worktrees after completion
 ```
@@ -280,16 +280,16 @@ Session IDs are filesystem-safe and stable (same path always produces the same I
 
 ### Worktree Modes
 
-**When `worktree = false` (default):**
-- Runs on current branch in main repository
-- Single session per project (backward-compatible behavior)
-- State stored in `sessions/main/`
-
-**When `worktree = true`:**
+**When `worktree = true` (default):**
 - Creates dedicated worktree at `<repo-parent>/<repo>-wt-<branch>/`
 - Each worktree gets its own session with isolated state
 - Multiple specs can run in parallel
 - Worktrees can be auto-cleaned after successful completion (`worktree_cleanup = true`)
+
+**When `worktree = false`:**
+- Runs on current branch in main repository
+- Single session per project
+- State stored in `sessions/main/`
 
 ### Branch Conflict Detection
 
