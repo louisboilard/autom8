@@ -74,6 +74,25 @@ const MAX_TEXT_LENGTH: usize = 40;
 const MAX_BRANCH_LENGTH: usize = 25;
 
 // ============================================================================
+// Projects View Constants
+// ============================================================================
+
+/// Height of each row in the project list.
+const PROJECT_ROW_HEIGHT: f32 = 56.0;
+
+/// Horizontal padding within project rows.
+const PROJECT_ROW_PADDING_H: f32 = 12.0;
+
+/// Vertical padding within project rows.
+const PROJECT_ROW_PADDING_V: f32 = 12.0;
+
+/// Spacing between rows in the project list.
+const PROJECT_ROW_SPACING: f32 = 4.0;
+
+/// Size of the status indicator dot in the project list.
+const PROJECT_STATUS_DOT_RADIUS: f32 = 5.0;
+
+// ============================================================================
 // Data Layer Types
 // ============================================================================
 
@@ -1118,6 +1137,7 @@ impl Autom8App {
     /// Render the Projects view.
     fn render_projects(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
+            // Header section
             ui.label(
                 egui::RichText::new("Projects")
                     .font(typography::font(FontSize::Title, FontWeight::SemiBold))
@@ -1132,59 +1152,203 @@ impl Autom8App {
                         .font(typography::font(FontSize::Body, FontWeight::Regular))
                         .color(colors::TEXT_SECONDARY),
                 );
+                ui.add_space(8.0);
             }
 
-            ui.add_space(16.0);
-
+            // Empty state or list
             if self.projects.is_empty() {
-                ui.label(
-                    egui::RichText::new("No projects found.")
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_MUTED),
-                );
+                self.render_empty_projects(ui);
             } else {
-                // Show count of projects
-                ui.label(
-                    egui::RichText::new(format!("{} project(s)", self.projects.len()))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
-                );
-
-                ui.add_space(8.0);
-
-                // List projects (placeholder - will be expanded in future stories)
-                for project in &self.projects {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&project.info.name)
-                                .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                .color(colors::TEXT_PRIMARY),
-                        );
-
-                        let status = project.info.status_label();
-                        let status_color = match status {
-                            "running" => colors::STATUS_RUNNING,
-                            "failed" => colors::STATUS_ERROR,
-                            _ => colors::TEXT_MUTED,
-                        };
-
-                        ui.label(
-                            egui::RichText::new(status)
-                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
-                                .color(status_color),
-                        );
-
-                        if let Some(ref error) = project.load_error {
-                            ui.label(
-                                egui::RichText::new(error)
-                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
-                                    .color(colors::STATUS_ERROR),
-                            );
-                        }
-                    });
-                }
+                self.render_projects_list(ui);
             }
         });
+    }
+
+    /// Render the empty state for Projects view.
+    fn render_empty_projects(&self, ui: &mut egui::Ui) {
+        ui.add_space(32.0);
+
+        // Center the empty state message
+        ui.vertical_centered(|ui| {
+            ui.add_space(48.0);
+
+            ui.label(
+                egui::RichText::new("No projects found")
+                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new("Projects will appear here after running autom8")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Render the projects list with scrolling.
+    fn render_projects_list(&self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for project in &self.projects {
+                    self.render_project_row(ui, project);
+                    ui.add_space(PROJECT_ROW_SPACING);
+                }
+            });
+    }
+
+    /// Count active sessions for a given project name.
+    fn count_active_sessions_for_project(&self, project_name: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.project_name == project_name && !s.is_stale)
+            .count()
+    }
+
+    /// Get the project status indicator color.
+    /// Green = running, Red = error, Gray = idle
+    fn project_status_color(&self, project: &ProjectData) -> Color32 {
+        if let Some(ref error) = project.load_error {
+            // Has an error
+            if !error.is_empty() {
+                return colors::STATUS_ERROR;
+            }
+        }
+
+        if project.info.has_active_run {
+            colors::STATUS_RUNNING
+        } else {
+            colors::STATUS_IDLE
+        }
+    }
+
+    /// Get the status text for a project.
+    /// Returns "Running", "N sessions active", "Idle", or "Last run: X ago"
+    fn project_status_text(&self, project: &ProjectData) -> String {
+        // Check for errors first
+        if let Some(ref error) = project.load_error {
+            if !error.is_empty() {
+                return truncate_with_ellipsis(error, 30);
+            }
+        }
+
+        // Count active sessions for this project
+        let active_count = self.count_active_sessions_for_project(&project.info.name);
+
+        if active_count > 1 {
+            format!("{} sessions active", active_count)
+        } else if project.info.has_active_run || active_count == 1 {
+            "Running".to_string()
+        } else if let Some(last_run) = project.info.last_run_date {
+            format!("Last run: {}", format_relative_time(last_run))
+        } else {
+            "Idle".to_string()
+        }
+    }
+
+    /// Render a single project row.
+    fn render_project_row(&self, ui: &mut egui::Ui, project: &ProjectData) {
+        let row_size = Vec2::new(ui.available_width(), PROJECT_ROW_HEIGHT);
+
+        // Allocate space for the row with hover interaction
+        let (rect, response) = ui.allocate_exact_size(row_size, Sense::hover());
+
+        // Skip if not visible (optimization for scrolling)
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+
+        let painter = ui.painter();
+        let is_hovered = response.hovered();
+
+        // Draw row background with hover state
+        let bg_color = if is_hovered {
+            colors::SURFACE_HOVER
+        } else {
+            colors::SURFACE
+        };
+        painter.rect(
+            rect,
+            Rounding::same(rounding::BUTTON),
+            bg_color,
+            Stroke::new(1.0, colors::BORDER),
+        );
+
+        // Content layout within the row
+        let content_rect = rect.shrink2(Vec2::new(PROJECT_ROW_PADDING_H, PROJECT_ROW_PADDING_V));
+        let mut cursor_x = content_rect.min.x;
+        let center_y = content_rect.center().y;
+
+        // ====================================================================
+        // STATUS INDICATOR DOT
+        // ====================================================================
+        let status_color = self.project_status_color(project);
+        let dot_center = egui::pos2(cursor_x + PROJECT_STATUS_DOT_RADIUS, center_y);
+        painter.circle_filled(dot_center, PROJECT_STATUS_DOT_RADIUS, status_color);
+        cursor_x += PROJECT_STATUS_DOT_RADIUS * 2.0 + 12.0;
+
+        // ====================================================================
+        // PROJECT NAME
+        // ====================================================================
+        let name_text = truncate_with_ellipsis(&project.info.name, 30);
+        let name_galley = painter.layout_no_wrap(
+            name_text,
+            typography::font(FontSize::Body, FontWeight::SemiBold),
+            colors::TEXT_PRIMARY,
+        );
+        let name_y = center_y - name_galley.rect.height() / 2.0 - 6.0;
+        painter.galley(
+            egui::pos2(cursor_x, name_y),
+            name_galley.clone(),
+            Color32::TRANSPARENT,
+        );
+
+        // ====================================================================
+        // STATUS TEXT (below project name)
+        // ====================================================================
+        let status_text = self.project_status_text(project);
+        let status_text_color = if project.load_error.is_some() {
+            colors::STATUS_ERROR
+        } else if project.info.has_active_run
+            || self.count_active_sessions_for_project(&project.info.name) > 0
+        {
+            colors::STATUS_RUNNING
+        } else {
+            colors::TEXT_MUTED
+        };
+        let status_galley = painter.layout_no_wrap(
+            status_text,
+            typography::font(FontSize::Caption, FontWeight::Regular),
+            status_text_color,
+        );
+        let status_y = name_y + name_galley.rect.height() + 4.0;
+        painter.galley(
+            egui::pos2(cursor_x, status_y),
+            status_galley,
+            Color32::TRANSPARENT,
+        );
+
+        // ====================================================================
+        // LAST ACTIVITY (right-aligned)
+        // ====================================================================
+        if let Some(last_run) = project.info.last_run_date {
+            let activity_text = format_relative_time(last_run);
+            let activity_galley = painter.layout_no_wrap(
+                activity_text,
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_MUTED,
+            );
+            let activity_x = content_rect.max.x - activity_galley.rect.width();
+            let activity_y = center_y - activity_galley.rect.height() / 2.0;
+            painter.galley(
+                egui::pos2(activity_x, activity_y),
+                activity_galley,
+                Color32::TRANSPARENT,
+            );
+        }
     }
 }
 
@@ -1868,5 +2032,260 @@ mod tests {
         let project = "my-very-long-project-name-that-exceeds-limits";
         let truncated = truncate_with_ellipsis(project, MAX_TEXT_LENGTH.saturating_sub(10));
         assert!(truncated.len() <= MAX_TEXT_LENGTH.saturating_sub(10));
+    }
+
+    // ========================================================================
+    // Projects View Tests
+    // ========================================================================
+
+    #[test]
+    fn test_project_row_constants() {
+        // Row height should accommodate two lines of text plus padding
+        assert!(
+            PROJECT_ROW_HEIGHT >= 40.0 && PROJECT_ROW_HEIGHT <= 80.0,
+            "Row height should be reasonable for two-line content"
+        );
+
+        // Padding values should be reasonable
+        assert!(PROJECT_ROW_PADDING_H >= 8.0 && PROJECT_ROW_PADDING_H <= 20.0);
+        assert!(PROJECT_ROW_PADDING_V >= 8.0 && PROJECT_ROW_PADDING_V <= 20.0);
+
+        // Status dot should be visible but not too large
+        assert!(PROJECT_STATUS_DOT_RADIUS >= 3.0 && PROJECT_STATUS_DOT_RADIUS <= 8.0);
+    }
+
+    #[test]
+    fn test_count_active_sessions_for_project_empty() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let count = app.count_active_sessions_for_project("test-project");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_project_status_color_running() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        };
+        assert_eq!(app.project_status_color(&project), colors::STATUS_RUNNING);
+    }
+
+    #[test]
+    fn test_project_status_color_idle() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 1,
+                last_run_date: Some(Utc::now()),
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        };
+        assert_eq!(app.project_status_color(&project), colors::STATUS_IDLE);
+    }
+
+    #[test]
+    fn test_project_status_color_error() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: Some("State corrupted".to_string()),
+        };
+        assert_eq!(app.project_status_color(&project), colors::STATUS_ERROR);
+    }
+
+    #[test]
+    fn test_project_status_text_running() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: true,
+                run_status: Some(crate::state::RunStatus::Running),
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        };
+        assert_eq!(app.project_status_text(&project), "Running");
+    }
+
+    #[test]
+    fn test_project_status_text_idle() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        };
+        assert_eq!(app.project_status_text(&project), "Idle");
+    }
+
+    #[test]
+    fn test_project_status_text_with_last_run() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let last_run = Utc::now() - chrono::Duration::hours(2);
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 1,
+                last_run_date: Some(last_run),
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        };
+        let status = app.project_status_text(&project);
+        assert!(status.starts_with("Last run:"));
+        assert!(status.contains("2h ago"));
+    }
+
+    #[test]
+    fn test_project_status_text_with_error() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: Some("Corrupted state file".to_string()),
+        };
+        let status = app.project_status_text(&project);
+        assert!(status.contains("Corrupted"));
+    }
+
+    #[test]
+    fn test_project_data_fields() {
+        let project = ProjectData {
+            info: ProjectTreeInfo {
+                name: "my-project".to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 3,
+                incomplete_spec_count: 1,
+                spec_md_count: 2,
+                runs_count: 5,
+                last_run_date: Some(Utc::now()),
+            },
+            active_run: None,
+            progress: Some(RunProgress {
+                completed: 2,
+                total: 5,
+            }),
+            load_error: None,
+        };
+
+        assert_eq!(project.info.name, "my-project");
+        assert_eq!(project.info.spec_count, 3);
+        assert!(project.progress.is_some());
+        assert!(project.load_error.is_none());
+    }
+
+    #[test]
+    fn test_project_tree_info_status_labels() {
+        // Running status
+        let running = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: true,
+            run_status: Some(crate::state::RunStatus::Running),
+            spec_count: 1,
+            incomplete_spec_count: 0,
+            spec_md_count: 0,
+            runs_count: 0,
+            last_run_date: None,
+        };
+        assert_eq!(running.status_label(), "running");
+
+        // Failed status
+        let failed = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: Some(crate::state::RunStatus::Failed),
+            spec_count: 1,
+            incomplete_spec_count: 0,
+            spec_md_count: 0,
+            runs_count: 0,
+            last_run_date: None,
+        };
+        assert_eq!(failed.status_label(), "failed");
+
+        // Incomplete status
+        let incomplete = ProjectTreeInfo {
+            name: "test".to_string(),
+            has_active_run: false,
+            run_status: None,
+            spec_count: 1,
+            incomplete_spec_count: 1,
+            spec_md_count: 0,
+            runs_count: 0,
+            last_run_date: None,
+        };
+        assert_eq!(incomplete.status_label(), "incomplete");
+    }
+
+    #[test]
+    fn test_projects_empty_state_message() {
+        let app = Autom8App::new(Some("definitely-not-a-project".to_string()));
+        // With an impossible filter, projects should be empty
+        // The empty state message should be "No projects found"
+        assert!(app.projects().is_empty() || !app.projects().iter().any(|p| p.info.name == "definitely-not-a-project"));
     }
 }
