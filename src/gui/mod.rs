@@ -4,5 +4,6 @@
 //! sessions using eframe/egui.
 
 pub mod app;
+pub mod components;
 pub mod theme;
 pub mod typography;

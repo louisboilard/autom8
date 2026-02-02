@@ -5,6 +5,10 @@
 
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::{Autom8Error, Result};
+use crate::gui::components::{
+    self, format_duration, format_relative_time, format_state, state_to_color,
+    truncate_with_ellipsis, Progress, StatusDot, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
+};
 use crate::gui::theme::{self, colors, rounding};
 use crate::gui::typography::{self, FontSize, FontWeight};
 use crate::spec::Spec;
@@ -67,11 +71,7 @@ const CARD_MIN_HEIGHT: f32 = 240.0;
 /// Number of output lines to display in session cards.
 const OUTPUT_LINES_TO_SHOW: usize = 5;
 
-/// Maximum characters for text truncation before adding ellipsis.
-const MAX_TEXT_LENGTH: usize = 40;
-
-/// Maximum characters for branch name truncation.
-const MAX_BRANCH_LENGTH: usize = 25;
+// MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
 // ============================================================================
 // Projects View Constants
@@ -183,78 +183,9 @@ impl SessionData {
     }
 }
 
-// ============================================================================
-// Time Formatting Utilities
-// ============================================================================
-
-/// Format a duration from a start time as a human-readable string (e.g., "5m 32s", "1h 5m").
-pub fn format_duration(started_at: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(started_at);
-    let total_secs = duration.num_seconds().max(0) as u64;
-
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
-/// Format a timestamp as a relative time string (e.g., "2h ago", "3d ago").
-pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(timestamp);
-    let total_secs = duration.num_seconds().max(0) as u64;
-
-    let minutes = total_secs / 60;
-    let hours = total_secs / 3600;
-    let days = total_secs / 86400;
-
-    if days > 0 {
-        format!("{}d ago", days)
-    } else if hours > 0 {
-        format!("{}h ago", hours)
-    } else if minutes > 0 {
-        format!("{}m ago", minutes)
-    } else {
-        "just now".to_string()
-    }
-}
-
-/// Format a machine state as a human-readable string.
-pub fn format_state(state: MachineState) -> &'static str {
-    match state {
-        MachineState::Idle => "Idle",
-        MachineState::LoadingSpec => "Loading Spec",
-        MachineState::GeneratingSpec => "Generating Spec",
-        MachineState::Initializing => "Initializing",
-        MachineState::PickingStory => "Picking Story",
-        MachineState::RunningClaude => "Running Claude",
-        MachineState::Reviewing => "Reviewing",
-        MachineState::Correcting => "Correcting",
-        MachineState::Committing => "Committing",
-        MachineState::CreatingPR => "Creating PR",
-        MachineState::Completed => "Completed",
-        MachineState::Failed => "Failed",
-    }
-}
-
-/// Truncate a string with ellipsis if it exceeds the max length.
-pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        s[..max_len].to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}
+// Time formatting utilities (format_duration, format_relative_time) and
+// text utilities (truncate_with_ellipsis, format_state) are now in the
+// components module and re-exported for use here.
 
 // ============================================================================
 // Tab Types
@@ -926,7 +857,7 @@ impl Autom8App {
         // STATUS ROW: Colored indicator dot with state label
         // ====================================================================
         let (state, state_color) = if let Some(ref run) = session.run {
-            (run.machine_state, self.state_to_color(run.machine_state))
+            (run.machine_state, state_to_color(run.machine_state))
         } else {
             (MachineState::Idle, colors::STATUS_IDLE)
         };
@@ -1116,23 +1047,7 @@ impl Autom8App {
         }
     }
 
-    /// Map a machine state to its display color.
-    fn state_to_color(&self, state: MachineState) -> Color32 {
-        match state {
-            MachineState::RunningClaude
-            | MachineState::Reviewing
-            | MachineState::Correcting
-            | MachineState::Committing
-            | MachineState::CreatingPR
-            | MachineState::Initializing
-            | MachineState::PickingStory
-            | MachineState::LoadingSpec
-            | MachineState::GeneratingSpec => colors::STATUS_RUNNING,
-            MachineState::Completed => colors::STATUS_SUCCESS,
-            MachineState::Failed => colors::STATUS_ERROR,
-            MachineState::Idle => colors::STATUS_IDLE,
-        }
-    }
+    // state_to_color is now imported from the components module.
 
     /// Render the Projects view.
     fn render_projects(&self, ui: &mut egui::Ui) {
@@ -1801,57 +1716,57 @@ mod tests {
 
     #[test]
     fn test_state_to_color_running_states() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
+        // state_to_color is now a standalone function from components module
         assert_eq!(
-            app.state_to_color(MachineState::RunningClaude),
+            state_to_color(MachineState::RunningClaude),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::Reviewing),
+            state_to_color(MachineState::Reviewing),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::Correcting),
+            state_to_color(MachineState::Correcting),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::Committing),
+            state_to_color(MachineState::Committing),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::CreatingPR),
+            state_to_color(MachineState::CreatingPR),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::Initializing),
+            state_to_color(MachineState::Initializing),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::PickingStory),
+            state_to_color(MachineState::PickingStory),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::LoadingSpec),
+            state_to_color(MachineState::LoadingSpec),
             colors::STATUS_RUNNING
         );
         assert_eq!(
-            app.state_to_color(MachineState::GeneratingSpec),
+            state_to_color(MachineState::GeneratingSpec),
             colors::STATUS_RUNNING
         );
     }
 
     #[test]
     fn test_state_to_color_terminal_states() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
+        // state_to_color is now a standalone function from components module
         assert_eq!(
-            app.state_to_color(MachineState::Completed),
+            state_to_color(MachineState::Completed),
             colors::STATUS_SUCCESS
         );
         assert_eq!(
-            app.state_to_color(MachineState::Failed),
+            state_to_color(MachineState::Failed),
             colors::STATUS_ERROR
         );
-        assert_eq!(app.state_to_color(MachineState::Idle), colors::STATUS_IDLE);
+        assert_eq!(state_to_color(MachineState::Idle), colors::STATUS_IDLE);
     }
 
     // ========================================================================
@@ -2286,6 +2201,12 @@ mod tests {
         let app = Autom8App::new(Some("definitely-not-a-project".to_string()));
         // With an impossible filter, projects should be empty
         // The empty state message should be "No projects found"
-        assert!(app.projects().is_empty() || !app.projects().iter().any(|p| p.info.name == "definitely-not-a-project"));
+        assert!(
+            app.projects().is_empty()
+                || !app
+                    .projects()
+                    .iter()
+                    .any(|p| p.info.name == "definitely-not-a-project")
+        );
     }
 }
