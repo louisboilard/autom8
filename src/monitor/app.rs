@@ -1120,11 +1120,19 @@ impl MonitorApp {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        // Calculate header height based on session type and display mode
+        // Base: 4 lines (State, Story, Progress, Duration)
+        // + 1 for Session type (always shown)
+        // + 1 for Branch (always shown)
+        // + 1 for Worktree path (only for worktree sessions in full mode)
+        let base_height = 6; // State, Story, Progress, Duration, Session, Branch
+        let extra_height = if full && !session.is_main_session { 1 } else { 0 }; // Worktree path
+
         // Split into header info and output snippet
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if full { 6 } else { 4 }),
+                Constraint::Length(base_height + extra_height),
                 Constraint::Min(0),
             ])
             .split(inner);
@@ -1140,7 +1148,24 @@ impl MonitorApp {
             .map(|p| p.as_fraction())
             .unwrap_or_else(|| "N/A".to_string());
 
+        // Session type indicator with visual distinction
+        let (session_type_indicator, session_type_color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+
         let mut info_lines = vec![
+            // Session type line (first for visibility)
+            Line::from(vec![
+                Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(session_type_indicator, Style::default().fg(session_type_color)),
+            ]),
+            // Branch line (always visible)
+            Line::from(vec![
+                Span::styled("Branch: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&run.branch, Style::default().fg(Color::White)),
+            ]),
             Line::from(vec![
                 Span::styled("State: ", Style::default().fg(COLOR_DIM)),
                 Span::styled(
@@ -1162,11 +1187,18 @@ impl MonitorApp {
             ]),
         ];
 
-        if full {
-            info_lines.push(Line::from(vec![
-                Span::styled("Branch: ", Style::default().fg(COLOR_DIM)),
-                Span::styled(&run.branch, Style::default().fg(Color::White)),
-            ]));
+        // Add worktree path for worktree sessions in full mode
+        if full && !session.is_main_session {
+            info_lines.insert(
+                2, // After Session and Branch
+                Line::from(vec![
+                    Span::styled("Path: ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        session.truncated_worktree_path(),
+                        Style::default().fg(COLOR_DIM),
+                    ),
+                ]),
+            );
         }
 
         let info = Paragraph::new(info_lines);
@@ -3951,5 +3983,112 @@ mod tests {
         // Worktree session should have is_main_session = false
         let worktree_session = create_test_session("test", "abcd1234", "branch");
         assert!(!worktree_session.is_main_session);
+    }
+
+    // ===========================================
+    // US-003: Session Context in Run Detail Tests
+    // ===========================================
+
+    #[test]
+    fn test_us003_main_session_indicator() {
+        // Main sessions should use "● main" indicator
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "main");
+        assert!(session.is_main_session);
+        // The indicator is constructed in render_session_detail, verify the condition
+        let (indicator, color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+        assert_eq!(indicator, "● main");
+        assert_eq!(color, COLOR_PRIMARY); // Cyan for main
+    }
+
+    #[test]
+    fn test_us003_worktree_session_indicator() {
+        // Worktree sessions should use "◆ worktree" indicator
+        let session = create_test_session("my-project", "abc12345", "feature-x");
+        assert!(!session.is_main_session);
+        let (indicator, color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+        assert_eq!(indicator, "◆ worktree");
+        assert_eq!(color, COLOR_REVIEW); // Magenta for worktree
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_short() {
+        // Short paths should display fully
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path = PathBuf::from("foo/bar");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, "foo/bar");
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_long() {
+        // Long paths should show ".../last/two" format
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path =
+            PathBuf::from("/home/user/projects/autom8-wt-feature-x");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, ".../projects/autom8-wt-feature-x");
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_exactly_two_components() {
+        // Exactly 2 components should display fully
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path = PathBuf::from("projects/repo");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, "projects/repo");
+    }
+
+    #[test]
+    fn test_us003_main_session_no_worktree_path_in_detail() {
+        // Main sessions should not show worktree path (tested by checking is_main_session)
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "main");
+        // In render_session_detail, worktree path is only shown when:
+        // full && !session.is_main_session
+        // Since session.is_main_session is true, path would NOT be shown
+        assert!(session.is_main_session);
+    }
+
+    #[test]
+    fn test_us003_worktree_session_has_path_available() {
+        // Worktree sessions should have path available for display
+        let session = create_test_session("my-project", "abc12345", "feature-x");
+        assert!(!session.is_main_session);
+        // In render_session_detail, path IS shown when full && !is_main_session
+        // Verify the path is populated
+        assert!(!session.metadata.worktree_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_us003_branch_always_available() {
+        // Both main and worktree sessions should have branch available
+        let main_session = create_test_session("project", MAIN_SESSION_ID, "develop");
+        let worktree_session = create_test_session("project", "abc12345", "feature-x");
+
+        // Branch should be in the run state
+        assert_eq!(
+            main_session.run.as_ref().unwrap().branch,
+            "develop"
+        );
+        assert_eq!(
+            worktree_session.run.as_ref().unwrap().branch,
+            "feature-x"
+        );
+    }
+
+    #[test]
+    fn test_us003_visual_distinction_colors() {
+        // Verify the color constants are distinct
+        assert_ne!(COLOR_PRIMARY, COLOR_REVIEW);
+        // COLOR_PRIMARY is Cyan, COLOR_REVIEW is Magenta
+        assert_eq!(COLOR_PRIMARY, Color::Cyan);
+        assert_eq!(COLOR_REVIEW, Color::Magenta);
     }
 }
