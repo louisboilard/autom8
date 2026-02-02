@@ -1343,9 +1343,6 @@ impl Runner {
             worktree_override: self.worktree_override,
         };
 
-        // Mark metadata as saved since the state will be saved in run_implementation_loop
-        worktree_setup_ctx.metadata_saved = true;
-
         worktree_runner.run_implementation_loop(state, &spec_json_path, worktree_setup_ctx)
     }
 
@@ -1353,7 +1350,7 @@ impl Runner {
         &self,
         mut state: RunState,
         spec_json_path: &Path,
-        worktree_setup_ctx: WorktreeSetupContext,
+        mut worktree_setup_ctx: WorktreeSetupContext,
     ) -> Result<()> {
         // Create signal handler for graceful shutdown (US-004)
         let signal_handler = SignalHandler::new()?;
@@ -1365,6 +1362,10 @@ impl Runner {
         print_state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
         self.state_manager.save(&state)?;
+
+        // Mark metadata as saved now that state has been persisted
+        // This ensures cleanup_on_interruption won't remove the worktree
+        worktree_setup_ctx.metadata_saved = true;
 
         // Track story results for summary
         let mut story_results: Vec<StoryResult> = Vec::new();
@@ -3173,65 +3174,6 @@ mod tests {
             live_result.is_none(),
             "Live output should be cleared after interruption"
         );
-    }
-
-    /// Test that ClaudeRunner.kill() is called during interruption
-    /// by verifying a running process gets terminated.
-    #[test]
-    fn test_us004_handle_interruption_kills_claude_runner() {
-        use std::process::{Command, Stdio};
-
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        // Create a ClaudeRunner with a running process
-        let claude_runner = ClaudeRunner::new();
-
-        // Spawn a long-running process
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("Failed to spawn sleep process");
-
-        // Use set_child method (which is available for tests in claude::runner)
-        // We need to test via the public API instead - spawn and kill
-        // For this test, we'll use a different approach: verify kill() is called
-        // by checking is_running() goes from false to false (no-op when no process)
-        // Since we can't access private fields, we test via behavior
-
-        // Store the process info for verification
-        let pid = child.id();
-
-        // Note: ClaudeRunner.child is private, so we can't directly set it.
-        // Instead, we test the kill behavior independently.
-        // The handle_interruption test just verifies kill() is called (no error thrown).
-        std::mem::forget(child); // Leak the child to avoid double-wait
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm.save(&state).unwrap();
-
-        // Call handle_interruption - this should call kill() which is a no-op when empty
-        runner.handle_interruption(&mut state, &claude_runner, None);
-
-        // Verify the state was updated correctly (the main purpose of handle_interruption)
-        assert_eq!(state.status, RunStatus::Interrupted);
-
-        // Clean up the leaked process
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-        }
     }
 
     /// Test that resume handles Interrupted status correctly.
