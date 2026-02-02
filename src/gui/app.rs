@@ -877,7 +877,11 @@ impl Autom8App {
         } else {
             colors::SURFACE_HOVER
         };
-        painter.rect_filled(badge_bg_rect, Rounding::same(rounding::SMALL), badge_bg_color);
+        painter.rect_filled(
+            badge_bg_rect,
+            Rounding::same(rounding::SMALL),
+            badge_bg_color,
+        );
         painter.galley(
             egui::pos2(badge_x + badge_padding_h, cursor_y + badge_padding_v),
             badge_galley,
@@ -886,10 +890,7 @@ impl Autom8App {
         cursor_y += project_galley.rect.height() + 4.0;
 
         // Branch name row
-        let branch_text = format!(
-            "{}",
-            truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH)
-        );
+        let branch_text = truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH);
         let branch_galley = painter.layout_no_wrap(
             branch_text,
             typography::font(FontSize::Caption, FontWeight::Regular),
@@ -1823,7 +1824,10 @@ mod tests {
 
         assert!(session.run.is_some());
         assert!(!session.is_main_session);
-        assert_eq!(session.progress.as_ref().unwrap().as_fraction(), "Story 2/3");
+        assert_eq!(
+            session.progress.as_ref().unwrap().as_fraction(),
+            "Story 2/3"
+        );
     }
 
     #[test]
@@ -1848,10 +1852,7 @@ mod tests {
 
         assert!(session.load_error.is_some());
         assert!(session.is_stale);
-        assert_eq!(
-            session.load_error.as_ref().unwrap(),
-            "Corrupted state file"
-        );
+        assert_eq!(session.load_error.as_ref().unwrap(), "Corrupted state file");
     }
 
     #[test]
