@@ -3473,7 +3473,11 @@ src/lib.rs | Library module | [Config]
         let mut metadata: SessionMetadata =
             serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
         metadata.worktree_path = worktree_dir.path().to_path_buf();
-        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
 
         // Now delete the worktree directory to make it stale
         drop(worktree_dir);
@@ -3500,7 +3504,10 @@ src/lib.rs | Library module | [Config]
             temp_dir.path().to_path_buf(),
             "session-abc".to_string(),
         );
-        let state1 = RunState::new(PathBuf::from("test1.json"), "feature/my-feature".to_string());
+        let state1 = RunState::new(
+            PathBuf::from("test1.json"),
+            "feature/my-feature".to_string(),
+        );
         sm1.save(&state1).unwrap();
 
         // Check conflict from another session
@@ -3528,7 +3535,10 @@ src/lib.rs | Library module | [Config]
         sm.save(&state).unwrap();
 
         let metadata = sm.load_metadata().unwrap().unwrap();
-        assert!(metadata.is_running, "New RunState should be marked as running");
+        assert!(
+            metadata.is_running,
+            "New RunState should be marked as running"
+        );
 
         // Mark as completed and save again
         let mut state = sm.load_current().unwrap().unwrap();

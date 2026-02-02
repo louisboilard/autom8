@@ -18,3 +18,26 @@ pub fn print_warning(msg: &str) {
 pub fn print_info(msg: &str) {
     println!("{CYAN}Info:{RESET} {}", msg);
 }
+
+/// Print worktree creation information.
+pub fn print_worktree_created(path: &std::path::Path, branch: &str) {
+    println!(
+        "{GREEN}Worktree created:{RESET} {} (branch: {})",
+        path.display(),
+        branch
+    );
+}
+
+/// Print worktree reuse information.
+pub fn print_worktree_reused(path: &std::path::Path, branch: &str) {
+    println!(
+        "{CYAN}Worktree reused:{RESET} {} (branch: {})",
+        path.display(),
+        branch
+    );
+}
+
+/// Print worktree context information.
+pub fn print_worktree_context(path: &std::path::Path) {
+    println!("{CYAN}Working in worktree:{RESET} {}", path.display());
+}

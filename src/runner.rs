@@ -15,7 +15,12 @@ use crate::output::{
     print_pr_success, print_pr_updated, print_proceeding_to_implementation, print_project_info,
     print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_generated, print_spec_loaded, print_state_transition, print_story_complete,
-    print_tasks_progress, BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_tasks_progress, print_worktree_context, print_worktree_created, print_worktree_reused,
+    BOLD, CYAN, GRAY, RESET, YELLOW,
+};
+use crate::worktree::{
+    ensure_worktree, format_worktree_error, generate_session_id, generate_worktree_path,
+    WorktreeResult,
 };
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
@@ -146,6 +151,82 @@ impl Runner {
     /// Load the effective config.
     fn load_config_with_override(&self) -> Result<crate::config::Config> {
         get_effective_config()
+    }
+
+    /// Check if worktree mode is effective (considering CLI override and config).
+    fn is_worktree_mode(&self, config: &crate::config::Config) -> bool {
+        if let Some(override_value) = self.worktree_override {
+            return override_value;
+        }
+        config.worktree
+    }
+
+    /// Setup worktree context for a run.
+    ///
+    /// When worktree mode is enabled, this will:
+    /// 1. Create or reuse a worktree for the specified branch
+    /// 2. Change the current working directory to the worktree
+    /// 3. Generate a new session ID for the worktree
+    ///
+    /// Returns the session ID and worktree path if a worktree was created/reused,
+    /// or None if running in non-worktree mode.
+    fn setup_worktree_context(
+        &self,
+        config: &crate::config::Config,
+        branch_name: &str,
+    ) -> Result<Option<(String, PathBuf)>> {
+        // Check if worktree mode is enabled
+        if !self.is_worktree_mode(config) {
+            return Ok(None);
+        }
+
+        // Check if we're in a git repo
+        if !git::is_git_repo() {
+            print_info("Worktree mode enabled but not in a git repository. Running in current directory.");
+            return Ok(None);
+        }
+
+        // Create or reuse worktree
+        let pattern = &config.worktree_path_pattern;
+        let result = ensure_worktree(pattern, branch_name).map_err(|e| {
+            // Provide enhanced error message for worktree failures
+            if let Autom8Error::WorktreeError(msg) = &e {
+                let worktree_path = generate_worktree_path(pattern, branch_name)
+                    .unwrap_or_else(|_| PathBuf::from("<unknown>"));
+                let formatted = format_worktree_error(msg, branch_name, &worktree_path);
+                Autom8Error::WorktreeError(formatted)
+            } else {
+                e
+            }
+        })?;
+
+        // Get the worktree path and inform the user
+        let worktree_path = result.path().to_path_buf();
+        match result {
+            WorktreeResult::Created(_) => {
+                print_worktree_created(&worktree_path, branch_name);
+            }
+            WorktreeResult::Reused(_) => {
+                print_worktree_reused(&worktree_path, branch_name);
+            }
+        }
+
+        // Change to the worktree directory
+        std::env::set_current_dir(&worktree_path).map_err(|e| {
+            Autom8Error::WorktreeError(format!(
+                "Failed to change to worktree directory '{}': {}",
+                worktree_path.display(),
+                e
+            ))
+        })?;
+
+        // Print context info
+        print_worktree_context(&worktree_path);
+
+        // Generate session ID for the worktree
+        let session_id = generate_session_id(&worktree_path);
+
+        Ok(Some((session_id, worktree_path)))
     }
 
     /// Handle a fatal error by transitioning to Failed state, saving, displaying error, and optionally printing summary.
@@ -821,8 +902,9 @@ impl Runner {
         let spec_json_path = spec_dir.join(format!("{}.json", stem));
 
         // Initialize state with config snapshot for resume support
+        // Clone config since we need it later for worktree setup
         let mut state =
-            RunState::from_spec_with_config(spec_path.clone(), spec_json_path.clone(), config);
+            RunState::from_spec_with_config(spec_path.clone(), spec_json_path.clone(), config.clone());
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -867,7 +949,10 @@ impl Runner {
 
         // Check for branch conflicts with other active sessions (US-006)
         // This must happen before any git operations to prevent race conditions
-        if let Some(conflict) = self.state_manager.check_branch_conflict(&spec.branch_name)? {
+        if let Some(conflict) = self
+            .state_manager
+            .check_branch_conflict(&spec.branch_name)?
+        {
             return Err(Autom8Error::BranchConflict {
                 branch: spec.branch_name.clone(),
                 session_id: conflict.session_id,
@@ -875,16 +960,39 @@ impl Runner {
             });
         }
 
-        // Update state with branch from generated spec
+        // Setup worktree context if enabled (US-007)
+        // This creates/reuses a worktree and changes the current working directory
+        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+
+        // Create the appropriate StateManager for this context
+        let effective_state_manager = if let Some((ref session_id, _)) = worktree_context {
+            // In worktree mode, use the worktree's session ID
+            StateManager::with_session(session_id.clone())?
+        } else {
+            // Not in worktree mode, use auto-detected session
+            StateManager::new()?
+        };
+
+        // Update state with branch from generated spec and session ID
         state.branch = spec.branch_name.clone();
+        if let Some((session_id, _)) = &worktree_context {
+            state.session_id = Some(session_id.clone());
+        }
         state.transition_to(MachineState::Initializing);
-        self.state_manager.save(&state)?;
+        effective_state_manager.save(&state)?;
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
 
-        // Continue with normal implementation flow
-        self.run_implementation_loop(state, &spec_json_path)
+        // Create a new Runner with the effective state manager and continue
+        let effective_runner = Runner {
+            state_manager: effective_state_manager,
+            verbose: self.verbose,
+            skip_review: self.skip_review,
+            worktree_override: self.worktree_override,
+        };
+
+        effective_runner.run_implementation_loop(state, &spec_json_path)
     }
 
     pub fn run(&self, spec_json_path: &Path) -> Result<()> {
@@ -908,7 +1016,10 @@ impl Runner {
 
         // Check for branch conflicts with other active sessions (US-006)
         // This must happen before any git operations to prevent race conditions
-        if let Some(conflict) = self.state_manager.check_branch_conflict(&spec.branch_name)? {
+        if let Some(conflict) = self
+            .state_manager
+            .check_branch_conflict(&spec.branch_name)?
+        {
             return Err(Autom8Error::BranchConflict {
                 branch: spec.branch_name.clone(),
                 session_id: conflict.session_id,
@@ -916,8 +1027,21 @@ impl Runner {
             });
         }
 
-        // If in a git repo, ensure we're on the correct branch
-        if git::is_git_repo() {
+        // Setup worktree context if enabled (US-007)
+        // This creates/reuses a worktree and changes the current working directory
+        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+
+        // Create the appropriate StateManager for this context
+        let state_manager = if let Some((ref session_id, _)) = worktree_context {
+            // In worktree mode, use the worktree's session ID
+            StateManager::with_session(session_id.clone())?
+        } else {
+            // Not in worktree mode, use auto-detected session
+            StateManager::new()?
+        };
+
+        // If NOT in worktree mode and in a git repo, ensure we're on the correct branch
+        if worktree_context.is_none() && git::is_git_repo() {
             let current_branch = git::current_branch()?;
             if current_branch != spec.branch_name {
                 print_info(&format!(
@@ -929,16 +1053,34 @@ impl Runner {
         }
 
         // Initialize state with config snapshot for resume support
-        let state = RunState::new_with_config(
-            spec_json_path.to_path_buf(),
-            spec.branch_name.clone(),
-            config,
-        );
+        let state = if let Some((session_id, _)) = worktree_context {
+            RunState::new_with_config_and_session(
+                spec_json_path.to_path_buf(),
+                spec.branch_name.clone(),
+                config,
+                session_id,
+            )
+        } else {
+            RunState::new_with_config(
+                spec_json_path.to_path_buf(),
+                spec.branch_name.clone(),
+                config,
+            )
+        };
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
         print_project_info(&spec);
 
-        self.run_implementation_loop(state, &spec_json_path)
+        // Create a new Runner with the worktree-specific state manager
+        // and delegate to it for the implementation loop
+        let worktree_runner = Runner {
+            state_manager,
+            verbose: self.verbose,
+            skip_review: self.skip_review,
+            worktree_override: self.worktree_override,
+        };
+
+        worktree_runner.run_implementation_loop(state, &spec_json_path)
     }
 
     fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {

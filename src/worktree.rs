@@ -516,6 +516,240 @@ pub fn get_session_id_for_path(path: &Path) -> Result<String> {
     }
 }
 
+// ============================================================================
+// Worktree Path Generation (US-007)
+// ============================================================================
+
+/// Convert a branch name to a filesystem-safe slug.
+///
+/// Replaces slashes with dashes, removes unsafe characters, and normalizes
+/// to produce a valid directory name component.
+///
+/// # Arguments
+/// * `branch_name` - The git branch name to slugify
+///
+/// # Returns
+/// A filesystem-safe version of the branch name.
+///
+/// # Example
+/// ```
+/// use autom8::worktree::slugify_branch_name;
+///
+/// assert_eq!(slugify_branch_name("feature/login"), "feature-login");
+/// assert_eq!(slugify_branch_name("feat/add-user-auth"), "feat-add-user-auth");
+/// ```
+pub fn slugify_branch_name(branch_name: &str) -> String {
+    branch_name
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' {
+                '-'
+            } else if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        // Collapse multiple dashes into one
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Generate the worktree path from a pattern and parameters.
+///
+/// Replaces placeholders in the pattern:
+/// - `{repo}` - The repository name
+/// - `{branch}` - The branch name (slugified)
+///
+/// The worktree is created as a sibling directory of the main repository.
+///
+/// # Arguments
+/// * `pattern` - The path pattern (e.g., "{repo}-wt-{branch}")
+/// * `repo_name` - The repository name
+/// * `branch_name` - The branch name (will be slugified)
+///
+/// # Returns
+/// The generated worktree directory name.
+///
+/// # Example
+/// ```
+/// use autom8::worktree::generate_worktree_name;
+///
+/// let name = generate_worktree_name("{repo}-wt-{branch}", "myproject", "feature/login");
+/// assert_eq!(name, "myproject-wt-feature-login");
+/// ```
+pub fn generate_worktree_name(pattern: &str, repo_name: &str, branch_name: &str) -> String {
+    let slugified_branch = slugify_branch_name(branch_name);
+    pattern
+        .replace("{repo}", repo_name)
+        .replace("{branch}", &slugified_branch)
+}
+
+/// Generate the full path for a worktree.
+///
+/// Creates the worktree as a sibling directory of the main repository.
+///
+/// # Arguments
+/// * `pattern` - The path pattern (e.g., "{repo}-wt-{branch}")
+/// * `branch_name` - The branch name (will be slugified)
+///
+/// # Returns
+/// * `Ok(PathBuf)` - The full path where the worktree should be created
+/// * `Err` - If not in a git repository
+///
+/// # Example
+/// ```no_run
+/// use autom8::worktree::generate_worktree_path;
+///
+/// // If main repo is at /home/user/myproject, returns:
+/// // /home/user/myproject-wt-feature-login
+/// let path = generate_worktree_path("{repo}-wt-{branch}", "feature/login").unwrap();
+/// ```
+pub fn generate_worktree_path(pattern: &str, branch_name: &str) -> Result<PathBuf> {
+    let main_repo = get_main_repo_root()?;
+    let repo_name = main_repo
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            Autom8Error::WorktreeError("Could not determine repository name".to_string())
+        })?;
+
+    let worktree_name = generate_worktree_name(pattern, repo_name, branch_name);
+
+    // Place worktree as sibling of main repo
+    let parent = main_repo.parent().ok_or_else(|| {
+        Autom8Error::WorktreeError("Could not determine repository parent directory".to_string())
+    })?;
+
+    Ok(parent.join(worktree_name))
+}
+
+/// Result of ensuring a worktree exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeResult {
+    /// A new worktree was created at this path
+    Created(PathBuf),
+    /// An existing worktree was found and reused at this path
+    Reused(PathBuf),
+}
+
+impl WorktreeResult {
+    /// Get the path regardless of whether it was created or reused.
+    pub fn path(&self) -> &Path {
+        match self {
+            WorktreeResult::Created(p) | WorktreeResult::Reused(p) => p,
+        }
+    }
+
+    /// Returns true if the worktree was newly created.
+    pub fn was_created(&self) -> bool {
+        matches!(self, WorktreeResult::Created(_))
+    }
+}
+
+/// Ensure a worktree exists for the specified branch.
+///
+/// If a worktree already exists for this branch, it is reused.
+/// Otherwise, a new worktree is created.
+///
+/// # Arguments
+/// * `pattern` - The path pattern for the worktree name
+/// * `branch_name` - The branch to use for the worktree
+///
+/// # Returns
+/// * `Ok(WorktreeResult::Created(path))` - A new worktree was created
+/// * `Ok(WorktreeResult::Reused(path))` - An existing worktree was found
+/// * `Err` - If worktree creation fails
+pub fn ensure_worktree(pattern: &str, branch_name: &str) -> Result<WorktreeResult> {
+    let target_path = generate_worktree_path(pattern, branch_name)?;
+
+    // Check if a worktree already exists at this path or for this branch
+    let worktrees = list_worktrees()?;
+    for wt in &worktrees {
+        // Check if there's a worktree at our target path
+        if wt.path == target_path {
+            // Verify it has the right branch
+            if let Some(ref wt_branch) = wt.branch {
+                if wt_branch == branch_name {
+                    return Ok(WorktreeResult::Reused(target_path));
+                }
+            }
+            // Path exists but with wrong branch - this is a conflict
+            return Err(Autom8Error::WorktreeError(format!(
+                "Worktree at '{}' exists but uses branch '{}', not '{}'",
+                target_path.display(),
+                wt.branch.as_deref().unwrap_or("(detached)"),
+                branch_name
+            )));
+        }
+
+        // Check if there's already a worktree for this branch at a different path
+        if let Some(ref wt_branch) = wt.branch {
+            if wt_branch == branch_name && !wt.is_main {
+                // Branch is already checked out in a worktree - reuse it
+                return Ok(WorktreeResult::Reused(wt.path.clone()));
+            }
+        }
+    }
+
+    // No existing worktree found - create a new one
+    create_worktree(&target_path, branch_name)?;
+    Ok(WorktreeResult::Created(target_path))
+}
+
+/// Get detailed information about worktree creation failure.
+///
+/// Provides suggestions for how to resolve common worktree creation issues.
+///
+/// # Arguments
+/// * `error` - The error message from the failed git command
+/// * `branch_name` - The branch that was being created
+/// * `worktree_path` - The path where the worktree was being created
+///
+/// # Returns
+/// A user-friendly error message with suggestions.
+pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Path) -> String {
+    let mut message = format!(
+        "Failed to create worktree for branch '{}' at '{}'.\n\n",
+        branch_name,
+        worktree_path.display()
+    );
+
+    // Analyze the error and provide specific suggestions
+    if error.contains("already checked out") {
+        message.push_str("Reason: Branch is already checked out in another worktree.\n\n");
+        message.push_str("Suggestions:\n");
+        message.push_str("  1. Use a different branch name in your spec\n");
+        message.push_str("  2. Run `git worktree list` to see existing worktrees\n");
+        message.push_str("  3. Remove the conflicting worktree with `git worktree remove <path>`\n");
+    } else if error.contains("already exists") {
+        message.push_str("Reason: A directory or worktree already exists at this path.\n\n");
+        message.push_str("Suggestions:\n");
+        message.push_str(&format!(
+            "  1. Remove the existing directory: rm -rf '{}'\n",
+            worktree_path.display()
+        ));
+        message.push_str("  2. Use a different branch name in your spec\n");
+        message.push_str("  3. Configure a different worktree_path_pattern in config\n");
+    } else if error.contains("permission denied") || error.contains("Permission denied") {
+        message.push_str("Reason: Insufficient permissions to create the worktree directory.\n\n");
+        message.push_str("Suggestions:\n");
+        message.push_str("  1. Check write permissions on the parent directory\n");
+        message.push_str("  2. Run with appropriate permissions\n");
+    } else {
+        message.push_str(&format!("Error: {}\n\n", error));
+        message.push_str("Suggestions:\n");
+        message.push_str("  1. Ensure you're in a git repository\n");
+        message.push_str("  2. Run `git worktree list` to check current worktrees\n");
+        message.push_str("  3. Check git configuration and permissions\n");
+    }
+
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,5 +1353,168 @@ mod tests {
             );
             assert!(!name.contains('\0'), "Repo name should not contain NUL");
         }
+    }
+
+    // ========================================================================
+    // Worktree Path Generation tests (US-007)
+    // ========================================================================
+
+    #[test]
+    fn test_slugify_branch_name_replaces_slashes() {
+        assert_eq!(slugify_branch_name("feature/login"), "feature-login");
+        assert_eq!(
+            slugify_branch_name("feature/user/auth"),
+            "feature-user-auth"
+        );
+    }
+
+    #[test]
+    fn test_slugify_branch_name_preserves_valid_chars() {
+        assert_eq!(slugify_branch_name("main"), "main");
+        assert_eq!(slugify_branch_name("feature-branch"), "feature-branch");
+        assert_eq!(slugify_branch_name("v1.0.0"), "v1.0.0");
+        assert_eq!(slugify_branch_name("release_v2"), "release_v2");
+    }
+
+    #[test]
+    fn test_slugify_branch_name_collapses_multiple_dashes() {
+        assert_eq!(slugify_branch_name("feature//login"), "feature-login");
+        assert_eq!(slugify_branch_name("a--b---c"), "a-b-c");
+    }
+
+    #[test]
+    fn test_slugify_branch_name_removes_special_chars() {
+        assert_eq!(slugify_branch_name("feature@login"), "feature-login");
+        assert_eq!(slugify_branch_name("branch#1"), "branch-1");
+        assert_eq!(slugify_branch_name("test:name"), "test-name");
+    }
+
+    #[test]
+    fn test_generate_worktree_name_default_pattern() {
+        let name = generate_worktree_name("{repo}-wt-{branch}", "myproject", "feature/login");
+        assert_eq!(name, "myproject-wt-feature-login");
+    }
+
+    #[test]
+    fn test_generate_worktree_name_custom_pattern() {
+        let name = generate_worktree_name("{repo}_worktree_{branch}", "myproject", "main");
+        assert_eq!(name, "myproject_worktree_main");
+    }
+
+    #[test]
+    fn test_generate_worktree_name_only_repo() {
+        let name = generate_worktree_name("{repo}-dev", "myproject", "feature/test");
+        assert_eq!(name, "myproject-dev");
+    }
+
+    #[test]
+    fn test_generate_worktree_name_only_branch() {
+        let name = generate_worktree_name("wt-{branch}", "myproject", "feature/test");
+        assert_eq!(name, "wt-feature-test");
+    }
+
+    #[test]
+    fn test_generate_worktree_name_complex_branch() {
+        let name = generate_worktree_name(
+            "{repo}-wt-{branch}",
+            "autom8",
+            "feature/git-worktrees/us-007",
+        );
+        assert_eq!(name, "autom8-wt-feature-git-worktrees-us-007");
+    }
+
+    #[test]
+    fn test_generate_worktree_path_returns_sibling_of_main_repo() {
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // This test runs in a git repo
+        let result = generate_worktree_path("{repo}-wt-{branch}", "feature/test");
+        assert!(result.is_ok());
+
+        let path = result.unwrap();
+        // Path should end with the generated worktree name
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("-wt-feature-test"),
+            "Path should contain worktree name: {}",
+            path_str
+        );
+
+        // Path should be a sibling of the main repo (same parent directory)
+        let main_repo = get_main_repo_root().unwrap();
+        assert_eq!(
+            path.parent(),
+            main_repo.parent(),
+            "Worktree should be a sibling of main repo"
+        );
+    }
+
+    #[test]
+    fn test_worktree_result_path_method() {
+        let path = PathBuf::from("/test/path");
+        let created = WorktreeResult::Created(path.clone());
+        let reused = WorktreeResult::Reused(path.clone());
+
+        assert_eq!(created.path(), &path);
+        assert_eq!(reused.path(), &path);
+    }
+
+    #[test]
+    fn test_worktree_result_was_created() {
+        let path = PathBuf::from("/test/path");
+        let created = WorktreeResult::Created(path.clone());
+        let reused = WorktreeResult::Reused(path.clone());
+
+        assert!(created.was_created());
+        assert!(!reused.was_created());
+    }
+
+    #[test]
+    fn test_format_worktree_error_already_checked_out() {
+        let msg = format_worktree_error(
+            "fatal: branch 'main' is already checked out at '/other/path'",
+            "main",
+            Path::new("/new/worktree"),
+        );
+
+        assert!(msg.contains("main"));
+        assert!(msg.contains("already checked out"));
+        assert!(msg.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn test_format_worktree_error_already_exists() {
+        let msg = format_worktree_error(
+            "fatal: '/new/worktree' already exists",
+            "feature",
+            Path::new("/new/worktree"),
+        );
+
+        assert!(msg.contains("already exists"));
+        assert!(msg.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn test_format_worktree_error_permission_denied() {
+        let msg = format_worktree_error(
+            "error: permission denied",
+            "feature",
+            Path::new("/restricted/path"),
+        );
+
+        assert!(msg.contains("permissions"));
+        assert!(msg.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn test_format_worktree_error_generic() {
+        let msg = format_worktree_error(
+            "some unknown error",
+            "feature",
+            Path::new("/some/path"),
+        );
+
+        assert!(msg.contains("some unknown error"));
+        assert!(msg.contains("Suggestions:"));
     }
 }

@@ -45,7 +45,10 @@ pub use header::{
     print_iteration_start, print_proceeding_to_implementation, print_project_info,
     print_spec_generated, print_spec_loaded, print_state_transition,
 };
-pub use messages::{print_error, print_info, print_warning};
+pub use messages::{
+    print_error, print_info, print_warning, print_worktree_context, print_worktree_created,
+    print_worktree_reused,
+};
 pub use pr::{
     format_pr_for_selection, print_branch_switched, print_no_open_prs, print_pr_already_exists,
     print_pr_detected, print_pr_skipped, print_pr_success, print_pr_updated,

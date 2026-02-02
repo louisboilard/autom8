@@ -70,6 +70,22 @@ pub struct Config {
     /// Note: Requires a git repository. Has no effect outside of git repos.
     #[serde(default = "default_false")]
     pub worktree: bool,
+
+    /// Pattern for worktree directory names.
+    ///
+    /// Placeholders:
+    /// - `{repo}` - The repository name
+    /// - `{branch}` - The branch name (slugified: slashes replaced with dashes)
+    ///
+    /// Default: `{repo}-wt-{branch}`
+    /// Example: For repo "myproject" and branch "feature/login", creates "myproject-wt-feature-login"
+    #[serde(default = "default_worktree_path_pattern")]
+    pub worktree_path_pattern: String,
+}
+
+/// Default worktree path pattern.
+fn default_worktree_path_pattern() -> String {
+    "{repo}-wt-{branch}".to_string()
 }
 
 /// Helper function for serde default values (true).
@@ -89,6 +105,7 @@ impl Default for Config {
             commit: true,
             pull_request: true,
             worktree: false,
+            worktree_path_pattern: default_worktree_path_pattern(),
         }
     }
 }
@@ -210,6 +227,11 @@ pull_request = true
 # - false: Run on the current branch (default, single session per project)
 # Note: Requires a git repository. Has no effect outside of git repos.
 worktree = false
+
+# Worktree path pattern: Pattern for naming worktree directories
+# Placeholders: {repo} = repository name, {branch} = branch name (slugified)
+# Default: {repo}-wt-{branch} (e.g., "myproject-wt-feature-login")
+worktree_path_pattern = "{repo}-wt-{branch}"
 "#;
 
 /// Get the path to the global config file.
@@ -319,8 +341,13 @@ pull_request = {}
 # - false: Run on the current branch (default, single session per project)
 # Note: Requires a git repository. Has no effect outside of git repos.
 worktree = {}
+
+# Worktree path pattern: Pattern for naming worktree directories
+# Placeholders: {{repo}} = repository name, {{branch}} = branch name (slugified)
+# Default: {{repo}}-wt-{{branch}} (e.g., "myproject-wt-feature-login")
+worktree_path_pattern = "{}"
 "#,
-        config.review, config.commit, config.pull_request, config.worktree
+        config.review, config.commit, config.pull_request, config.worktree, config.worktree_path_pattern
     )
 }
 
@@ -2132,6 +2159,7 @@ mod tests {
             commit: true,
             pull_request: false,
             worktree: true,
+            ..Default::default()
         };
 
         let toml_str = toml::to_string(&original).unwrap();
@@ -2160,6 +2188,7 @@ mod tests {
             commit: true,
             pull_request: false,
             worktree: true,
+            ..Default::default()
         };
 
         let cloned = original.clone();
@@ -2224,6 +2253,7 @@ mod tests {
             commit: true,
             pull_request: false,
             worktree: true,
+            ..Default::default()
         };
         let content = generate_config_with_comments(&config);
 
