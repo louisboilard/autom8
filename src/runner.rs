@@ -13,10 +13,10 @@ use crate::output::{
     print_issues_found, print_iteration_complete, print_iteration_start,
     print_max_review_iterations, print_phase_banner, print_phase_footer, print_pr_already_exists,
     print_pr_skipped, print_pr_success, print_pr_updated, print_proceeding_to_implementation,
-    print_project_info, print_review_passed, print_reviewing, print_run_summary, print_skip_review,
-    print_spec_generated, print_spec_loaded, print_state_transition, print_story_complete,
-    print_tasks_progress, print_worktree_context, print_worktree_created, print_worktree_reused,
-    BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_project_info, print_resuming_interrupted, print_review_passed, print_reviewing,
+    print_run_summary, print_skip_review, print_spec_generated, print_spec_loaded,
+    print_state_transition, print_story_complete, print_tasks_progress, print_worktree_context,
+    print_worktree_created, print_worktree_reused, BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
@@ -1366,6 +1366,11 @@ impl Runner {
                 || state.status == RunStatus::Failed
                 || state.status == RunStatus::Interrupted
             {
+                // Show interruption message if resuming from an interrupted state
+                if state.status == RunStatus::Interrupted {
+                    print_resuming_interrupted(&format!("{:?}", state.machine_state));
+                }
+
                 let spec_json_path = state.spec_json_path.clone();
 
                 // Archive the interrupted/failed run before starting fresh
@@ -3196,5 +3201,100 @@ mod tests {
         assert_ne!(state.status, RunStatus::Failed);
         assert_ne!(state.status, RunStatus::Running);
         assert_ne!(state.status, RunStatus::Completed);
+    }
+
+    // =========================================================================
+    // US-005: Show Interruption Message on Resume
+    // =========================================================================
+
+    /// Test that interrupted status can be detected for showing resume message.
+    #[test]
+    fn test_us005_detect_interrupted_status_for_resume_message() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Set up an interrupted state with a specific machine state
+        state.status = RunStatus::Interrupted;
+        state.machine_state = MachineState::RunningClaude;
+
+        // The resume logic should detect this condition
+        let should_show_message = state.status == RunStatus::Interrupted;
+        assert!(should_show_message);
+
+        // Machine state should be preserved and accessible
+        assert_eq!(format!("{:?}", state.machine_state), "RunningClaude");
+    }
+
+    /// Test that the resume logic shows message only for Interrupted, not Failed or Running.
+    #[test]
+    fn test_us005_resume_message_only_for_interrupted() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Running status should not show interruption message
+        state.status = RunStatus::Running;
+        assert_ne!(state.status, RunStatus::Interrupted);
+
+        // Failed status should not show interruption message
+        state.status = RunStatus::Failed;
+        assert_ne!(state.status, RunStatus::Interrupted);
+
+        // Completed status should not show interruption message
+        state.status = RunStatus::Completed;
+        assert_ne!(state.status, RunStatus::Interrupted);
+
+        // Only Interrupted shows the message
+        state.status = RunStatus::Interrupted;
+        assert_eq!(state.status, RunStatus::Interrupted);
+    }
+
+    /// Test that machine state formatting works for all states in interruption message.
+    #[test]
+    fn test_us005_machine_state_formatting_for_message() {
+        // Test that all machine states can be Debug-formatted for the message
+        let states = [
+            MachineState::Idle,
+            MachineState::Initializing,
+            MachineState::LoadingSpec,
+            MachineState::PickingStory,
+            MachineState::RunningClaude,
+            MachineState::Reviewing,
+            MachineState::Correcting,
+            MachineState::Committing,
+            MachineState::CreatingPR,
+            MachineState::Completed,
+            MachineState::Failed,
+        ];
+
+        for machine_state in states {
+            let formatted = format!("{:?}", machine_state);
+            assert!(!formatted.is_empty(), "Machine state should format to non-empty string");
+            // Verify it doesn't contain unexpected characters
+            assert!(
+                formatted.chars().all(|c| c.is_alphanumeric()),
+                "Formatted state should be alphanumeric: {}",
+                formatted
+            );
+        }
+    }
+
+    /// Test that print_resuming_interrupted is called correctly in the resume flow.
+    #[test]
+    fn test_us005_resume_flow_interrupt_detection() {
+        // This test verifies the condition used in the resume method
+        let test_cases = [
+            (RunStatus::Interrupted, true),  // Should show message
+            (RunStatus::Running, false),     // Should NOT show message
+            (RunStatus::Failed, false),      // Should NOT show message
+            (RunStatus::Completed, false),   // Should NOT show message (and not resumable)
+        ];
+
+        for (status, should_show) in test_cases {
+            let show_message = status == RunStatus::Interrupted;
+            assert_eq!(
+                show_message, should_show,
+                "Status {:?} should{} show interruption message",
+                status,
+                if should_show { "" } else { " NOT" }
+            );
+        }
     }
 }

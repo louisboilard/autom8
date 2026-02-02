@@ -47,3 +47,40 @@ pub fn print_interrupted() {
     println!();
     println!("{YELLOW}Interrupted.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue.");
 }
+
+/// Print message when resuming from an interrupted run.
+pub fn print_resuming_interrupted(machine_state: &str) {
+    println!(
+        "{YELLOW}Previous run was interrupted at {BOLD}{}{RESET}{YELLOW}. Resuming...{RESET}",
+        machine_state
+    );
+    println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// US-005: Verify print_resuming_interrupted doesn't panic and accepts various machine states.
+    #[test]
+    fn test_us005_print_resuming_interrupted_smoke() {
+        // Test with various machine state strings
+        print_resuming_interrupted("RunningClaude");
+        print_resuming_interrupted("Reviewing");
+        print_resuming_interrupted("Committing");
+        print_resuming_interrupted("CreatingPR");
+        // Should not panic with any input
+    }
+
+    /// US-005: Verify print_resuming_interrupted works with Debug-formatted machine states.
+    #[test]
+    fn test_us005_print_resuming_interrupted_debug_format() {
+        // The function is called with format!("{:?}", state.machine_state)
+        // which produces debug-formatted strings
+        print_resuming_interrupted("Idle");
+        print_resuming_interrupted("Initializing");
+        print_resuming_interrupted("PickingStory");
+        print_resuming_interrupted("Failed");
+        // All should succeed without panic
+    }
+}
