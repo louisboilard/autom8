@@ -1384,7 +1384,9 @@ impl MonitorApp {
             if let Some(live) = live_output {
                 // Check if live output is fresh (within 5 seconds)
                 let age = Utc::now().signed_duration_since(live.updated_at);
-                if age.num_seconds() < Self::LIVE_OUTPUT_STALE_SECONDS && !live.output_lines.is_empty() {
+                if age.num_seconds() < Self::LIVE_OUTPUT_STALE_SECONDS
+                    && !live.output_lines.is_empty()
+                {
                     // Take last 5-10 lines from live output (consistent with iteration output)
                     let take_count = 5.min(live.output_lines.len());
                     let start = live.output_lines.len().saturating_sub(take_count);
