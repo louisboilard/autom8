@@ -19,16 +19,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
-const DEFAULT_WIDTH: f32 = 1200.0;
+const DEFAULT_WIDTH: f32 = 700.0;
 
 /// Default window height in pixels.
-const DEFAULT_HEIGHT: f32 = 800.0;
+const DEFAULT_HEIGHT: f32 = 500.0;
 
 /// Minimum window width in pixels.
-const MIN_WIDTH: f32 = 800.0;
+const MIN_WIDTH: f32 = 400.0;
 
 /// Minimum window height in pixels.
-const MIN_HEIGHT: f32 = 600.0;
+const MIN_HEIGHT: f32 = 300.0;
 
 /// Height of the header/tab bar area (48px = 3 * LG spacing).
 const HEADER_HEIGHT: f32 = 48.0;
