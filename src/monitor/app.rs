@@ -1781,6 +1781,48 @@ pub fn run_monitor(poll_interval: u64, project_filter: Option<String>) -> Result
 mod tests {
     use super::*;
 
+    /// Helper function to create a test SessionData for use in tests
+    fn create_test_session(
+        project_name: &str,
+        session_id: &str,
+        branch: &str,
+    ) -> SessionData {
+        let is_main = session_id == MAIN_SESSION_ID;
+        SessionData {
+            project_name: project_name.to_string(),
+            metadata: SessionMetadata {
+                session_id: session_id.to_string(),
+                worktree_path: PathBuf::from(if is_main {
+                    format!("/home/user/projects/{}", project_name)
+                } else {
+                    format!("/home/user/projects/{}-wt-{}", project_name, branch)
+                }),
+                branch_name: branch.to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            run: Some(RunState::new(
+                PathBuf::from("test.json"),
+                branch.to_string(),
+            )),
+            progress: None,
+            load_error: None,
+            is_main_session: is_main,
+        }
+    }
+
+    /// Helper function to add N test sessions to the app
+    fn add_test_sessions(app: &mut MonitorApp, count: usize) {
+        for i in 1..=count {
+            app.sessions.push(create_test_session(
+                &format!("project-{}", i),
+                &format!("{:08x}", i), // session IDs like "00000001", "00000002"
+                &format!("branch-{}", i),
+            ));
+        }
+    }
+
     #[test]
     fn test_monitor_app_new() {
         let app = MonitorApp::new(1, None);
@@ -2907,120 +2949,36 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_with_five_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 5);
 
-        // 5 runs = 2 pages (4 on first, 1 on second)
+        // 5 sessions = 2 pages (4 on first, 1 on second)
         assert_eq!(app.total_quadrant_pages(), 2);
     }
 
     #[test]
     fn test_total_quadrant_pages_with_eight_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=8 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 8);
 
-        // 8 runs = 2 pages (4 on each)
+        // 8 sessions = 2 pages (4 on each)
         assert_eq!(app.total_quadrant_pages(), 2);
     }
 
     #[test]
     fn test_total_quadrant_pages_with_nine_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=9 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 9);
 
-        // 9 runs = 3 pages (4, 4, 1)
+        // 9 sessions = 3 pages (4, 4, 1)
         assert_eq!(app.total_quadrant_pages(), 3);
     }
 
     #[test]
     fn test_next_quadrant_page_advances() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Add 5 projects to have 2 pages
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions to have 2 pages
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.next_quadrant_page();
@@ -3049,30 +3007,9 @@ mod tests {
 
     #[test]
     fn test_next_quadrant_page_does_nothing_with_single_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Only 2 projects = 1 page
-        for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Only 2 sessions = 1 page
+        add_test_sessions(&mut app, 2);
 
         assert_eq!(app.quadrant_page, 0);
         app.next_quadrant_page();
@@ -3082,32 +3019,11 @@ mod tests {
 
     #[test]
     fn test_handle_n_key_advances_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.handle_key(KeyCode::Char('n'));
@@ -3116,32 +3032,11 @@ mod tests {
 
     #[test]
     fn test_handle_right_bracket_advances_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.handle_key(KeyCode::Char(']'));
@@ -3150,33 +3045,12 @@ mod tests {
 
     #[test]
     fn test_handle_p_key_goes_back_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         app.handle_key(KeyCode::Char('p'));
         assert_eq!(app.quadrant_page, 0);
@@ -3184,33 +3058,12 @@ mod tests {
 
     #[test]
     fn test_handle_left_bracket_goes_back_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         app.handle_key(KeyCode::Char('['));
         assert_eq!(app.quadrant_page, 0);
@@ -3245,32 +3098,11 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_also_clamps_quadrant_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_page = 5; // Out of bounds
-                               // Only 3 projects = 1 page (max page index = 0)
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Only 3 sessions = 1 page (max page index = 0)
+        add_test_sessions(&mut app, 3);
 
         app.clamp_selection_index();
 
@@ -3279,97 +3111,32 @@ mod tests {
     }
 
     #[test]
-    fn test_total_quadrant_pages_only_counts_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
+    fn test_total_quadrant_pages_only_counts_sessions() {
+        // Sessions are always "active" by definition (we only store running sessions)
         let mut app = MonitorApp::new(1, None);
-        // Add 3 active projects
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("active-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
-        // Add 2 idle projects (no active run)
-        for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("idle-{}", i),
-                    has_active_run: false,
-                    run_status: None,
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: None,
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 3 active sessions
+        add_test_sessions(&mut app, 3);
 
-        // Only 3 active = 1 page (not 5)
+        // 3 sessions = 1 page
         assert_eq!(app.total_quadrant_pages(), 1);
     }
 
     #[test]
-    fn test_total_quadrant_pages_includes_error_projects() {
-        use crate::config::ProjectTreeInfo;
-
+    fn test_total_quadrant_pages_includes_error_sessions() {
         let mut app = MonitorApp::new(1, None);
-        // Add 3 active projects
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("active-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
-        // Add 2 projects with errors (should count as active)
+        // Add 3 active sessions
+        add_test_sessions(&mut app, 3);
+
+        // Add 2 sessions with errors (should still count)
         for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("error-{}", i),
-                    has_active_run: true,
-                    run_status: None,
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: None,
-                progress: None,
-                load_error: Some("Corrupted".to_string()),
-            });
+            let mut session = create_test_session(
+                &format!("error-project-{}", i),
+                &format!("err{:05x}", i),
+                &format!("error-branch-{}", i),
+            );
+            session.run = None;
+            session.load_error = Some("Corrupted".to_string());
+            app.sessions.push(session);
         }
 
         // 3 active + 2 error = 5 = 2 pages
@@ -3543,28 +3310,13 @@ mod tests {
         assert_eq!(app.selected_index, 0);
     }
 
-    fn create_four_active_projects() -> Vec<ProjectData> {
-        use crate::config::ProjectTreeInfo;
-
+    fn create_four_active_sessions() -> Vec<SessionData> {
         (1..=4)
-            .map(|i| ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            })
+            .map(|i| create_test_session(
+                &format!("project-{}", i),
+                &format!("{:08x}", i),
+                &format!("branch-{}", i),
+            ))
             .collect()
     }
 
@@ -3573,7 +3325,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Start at top-left (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3605,7 +3357,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Start at top-left (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3637,7 +3389,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Try to go left from (0,0) - should stay
         app.handle_key(KeyCode::Char('h'));
@@ -3668,50 +3420,11 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_fewer_than_four_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Only 2 projects (positions 0,0 and 0,1)
-        app.projects = vec![
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-1".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-2".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-        ];
+        // Only 2 sessions (positions 0,0 and 0,1)
+        add_test_sessions(&mut app, 2);
 
         // Start at (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3722,7 +3435,7 @@ mod tests {
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
 
-        // Cannot move down (no runs in row 1)
+        // Cannot move down (no sessions in row 1)
         app.handle_key(KeyCode::Char('j'));
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
@@ -3730,32 +3443,11 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_three_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // 3 projects (positions 0,0, 0,1, and 1,0)
-        app.projects = (1..=3)
-            .map(|i| ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            })
-            .collect();
+        // 3 sessions (positions 0,0, 0,1, and 1,0)
+        add_test_sessions(&mut app, 3);
 
         // Start at (0,0), move right to (0,1)
         app.handle_key(KeyCode::Char('l'));
@@ -3764,7 +3456,7 @@ mod tests {
 
         // Try to move down from (0,1) - position (1,1) is invalid
         app.handle_key(KeyCode::Char('j'));
-        // Should stay at (0,1) since (1,1) has no run
+        // Should stay at (0,1) since (1,1) has no session
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
 
@@ -3778,7 +3470,7 @@ mod tests {
         assert_eq!(app.quadrant_row, 1);
         assert_eq!(app.quadrant_col, 0);
 
-        // Cannot move right from (1,0) to (1,1) - no run there
+        // Cannot move right from (1,0) to (1,1) - no session there
         app.handle_key(KeyCode::Char('l'));
         assert_eq!(app.quadrant_row, 1);
         assert_eq!(app.quadrant_col, 0);
@@ -3836,7 +3528,7 @@ mod tests {
     #[test]
     fn test_runs_on_current_page_with_full_page() {
         let mut app = MonitorApp::new(1, None);
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
         assert_eq!(app.runs_on_current_page(), 4);
@@ -3844,30 +3536,9 @@ mod tests {
 
     #[test]
     fn test_runs_on_current_page_with_partial_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // 5 projects = 4 on page 0, 1 on page 1
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // 5 sessions = 4 on page 0, 1 on page 1
+        add_test_sessions(&mut app, 5);
 
         app.quadrant_page = 0;
         assert_eq!(app.runs_on_current_page(), 4);
@@ -3879,7 +3550,7 @@ mod tests {
     #[test]
     fn test_is_quadrant_valid() {
         let mut app = MonitorApp::new(1, None);
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
         // All 4 positions valid with 4 runs
@@ -3891,48 +3562,9 @@ mod tests {
 
     #[test]
     fn test_is_quadrant_valid_with_two_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Only 2 projects
-        app.projects = vec![
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-1".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-2".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-        ];
+        // Only 2 sessions
+        add_test_sessions(&mut app, 2);
         app.quadrant_page = 0;
 
         // Only positions 0,0 and 0,1 valid
@@ -3946,13 +3578,13 @@ mod tests {
     fn test_clamp_selection_index_clamps_quadrant_position() {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
-        // Start at position (1,1) with 4 runs
+        // Start at position (1,1) with 4 sessions
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
-        // Now reduce to only 2 runs
-        app.projects.truncate(2);
+        // Now reduce to only 2 sessions
+        app.sessions.truncate(2);
 
         app.clamp_selection_index();
 
@@ -3963,30 +3595,12 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_with_one_run() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = vec![ProjectData {
-            info: ProjectTreeInfo {
-                name: "project-1".to_string(),
-                has_active_run: true,
-                run_status: Some(crate::state::RunStatus::Running),
-                spec_count: 0,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: Some(RunState::new(
-                std::path::PathBuf::from("test.json"),
-                "branch".to_string(),
-            )),
-            progress: None,
-            load_error: None,
-        }];
+        // Only 1 session
+        add_test_sessions(&mut app, 1);
 
         app.clamp_selection_index();
 
@@ -4001,7 +3615,7 @@ mod tests {
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = vec![];
+        // No sessions - sessions vector is already empty by default
 
         app.clamp_selection_index();
 
