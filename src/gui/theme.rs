@@ -193,44 +193,8 @@ pub mod colors {
     pub const STATUS_IDLE_BG: Color32 = Color32::from_rgb(240, 240, 242);
 }
 
-/// Status state enum for mapping to colors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    /// Running/active state.
-    Running,
-    /// Successful completion.
-    Success,
-    /// Warning/attention needed.
-    Warning,
-    /// Error/failure state.
-    Error,
-    /// Idle/inactive state.
-    Idle,
-}
-
-impl Status {
-    /// Returns the primary color for this status.
-    pub fn color(self) -> Color32 {
-        match self {
-            Status::Running => colors::STATUS_RUNNING,
-            Status::Success => colors::STATUS_SUCCESS,
-            Status::Warning => colors::STATUS_WARNING,
-            Status::Error => colors::STATUS_ERROR,
-            Status::Idle => colors::STATUS_IDLE,
-        }
-    }
-
-    /// Returns the background color for this status.
-    pub fn background_color(self) -> Color32 {
-        match self {
-            Status::Running => colors::STATUS_RUNNING_BG,
-            Status::Success => colors::STATUS_SUCCESS_BG,
-            Status::Warning => colors::STATUS_WARNING_BG,
-            Status::Error => colors::STATUS_ERROR_BG,
-            Status::Idle => colors::STATUS_IDLE_BG,
-        }
-    }
-}
+// Note: The Status enum is defined in the components module to avoid duplication.
+// Use `crate::gui::components::Status` for status state to color mapping.
 
 /// Configure egui Visuals for the light theme.
 ///
@@ -360,6 +324,7 @@ pub fn init(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::components::Status;
 
     #[test]
     fn test_spacing_scale() {
@@ -392,6 +357,7 @@ mod tests {
 
     #[test]
     fn test_status_colors() {
+        // Status enum is defined in components module
         assert_eq!(Status::Running.color(), colors::STATUS_RUNNING);
         assert_eq!(Status::Success.color(), colors::STATUS_SUCCESS);
         assert_eq!(Status::Warning.color(), colors::STATUS_WARNING);
@@ -401,6 +367,7 @@ mod tests {
 
     #[test]
     fn test_status_background_colors() {
+        // Status enum is defined in components module
         assert_eq!(
             Status::Running.background_color(),
             colors::STATUS_RUNNING_BG
@@ -525,12 +492,14 @@ mod tests {
 
     #[test]
     fn test_status_enum_equality() {
+        // Status enum is defined in components module
         assert_eq!(Status::Running, Status::Running);
         assert_ne!(Status::Running, Status::Idle);
     }
 
     #[test]
     fn test_status_enum_copy() {
+        // Status enum is defined in components module
         let status = Status::Success;
         let copied = status;
         assert_eq!(status, copied);

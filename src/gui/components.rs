@@ -382,19 +382,23 @@ pub fn format_relative_time_secs(total_secs: u64) -> String {
 
 /// Truncate a string with ellipsis if it exceeds the max length.
 ///
-/// If the string fits within `max_len`, it is returned unchanged.
+/// If the string fits within `max_len` characters, it is returned unchanged.
 /// Otherwise, it is truncated to `max_len - 3` characters plus "...".
 ///
 /// Special cases:
 /// - If `max_len <= 3`, the string is simply truncated without ellipsis
 /// - Empty strings are returned unchanged
+///
+/// This function is Unicode-safe and operates on characters, not bytes.
 pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else if max_len <= 3 {
-        s[..max_len].to_string()
+        s.chars().take(max_len).collect()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let truncated: String = s.chars().take(max_len - 3).collect();
+        format!("{}...", truncated)
     }
 }
 
