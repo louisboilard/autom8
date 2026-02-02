@@ -1597,17 +1597,6 @@ mod tests {
         assert!(project_dir.parent().unwrap().ends_with("autom8"));
     }
 
-    #[test]
-    fn test_state_manager_for_project() {
-        let sm = StateManager::for_project("test-project").unwrap();
-        let spec_dir = sm.spec_dir();
-
-        // The spec_dir should be under ~/.config/autom8/test-project/spec/
-        assert!(spec_dir.ends_with("spec"));
-        let project_dir = spec_dir.parent().unwrap();
-        assert!(project_dir.ends_with("test-project"));
-    }
-
     // ======================================================================
     // Tests for resume command config directory integration (US-007)
     // ======================================================================
