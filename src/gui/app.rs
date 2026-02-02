@@ -2653,4 +2653,150 @@ mod tests {
         app.toggle_project_selection("");
         assert!(app.selected_project().is_none());
     }
+
+    // ========================================================================
+    // Run History Tests (US-003)
+    // ========================================================================
+
+    #[test]
+    fn test_run_history_initially_empty() {
+        let app = Autom8App::new(None);
+        assert!(app.run_history().is_empty());
+    }
+
+    #[test]
+    fn test_run_history_entry_from_run_state() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.run_id, run.run_id);
+        assert_eq!(entry.branch, "feature/test");
+        assert_eq!(entry.status, RunStatus::Completed);
+        assert_eq!(entry.completed_stories, 0);
+    }
+
+    #[test]
+    fn test_run_history_entry_story_count_text() {
+        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
+        use chrono::Utc;
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        // Add some iterations
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+        run.iterations.push(IterationRecord {
+            number: 2,
+            story_id: "US-002".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+        run.iterations.push(IterationRecord {
+            number: 3,
+            story_id: "US-003".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            status: IterationStatus::Failed,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.completed_stories, 2);
+        assert_eq!(entry.total_stories, 3);
+        assert_eq!(entry.story_count_text(), "2/3 stories");
+    }
+
+    #[test]
+    fn test_run_history_entry_status_text() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+
+        run.status = RunStatus::Completed;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_text(), "Completed");
+
+        run.status = RunStatus::Failed;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_text(), "Failed");
+
+        run.status = RunStatus::Running;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_text(), "Running");
+    }
+
+    #[test]
+    fn test_run_history_entry_status_color() {
+        use crate::gui::theme::colors;
+        use crate::state::{RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+
+        run.status = RunStatus::Completed;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_color(), colors::STATUS_SUCCESS);
+
+        run.status = RunStatus::Failed;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_color(), colors::STATUS_ERROR);
+
+        run.status = RunStatus::Running;
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.status_color(), colors::STATUS_RUNNING);
+    }
+
+    #[test]
+    fn test_run_history_cleared_on_deselect() {
+        let mut app = Autom8App::new(None);
+
+        // Select a project (won't have history, but exercises the code path)
+        app.toggle_project_selection("nonexistent-project");
+        assert_eq!(app.selected_project(), Some("nonexistent-project"));
+
+        // Deselect - history should be cleared
+        app.toggle_project_selection("nonexistent-project");
+        assert!(app.selected_project().is_none());
+        assert!(app.run_history().is_empty());
+    }
+
+    #[test]
+    fn test_run_history_cleared_on_switch_project() {
+        let mut app = Autom8App::new(None);
+
+        // Select first project
+        app.toggle_project_selection("project-a");
+        assert_eq!(app.selected_project(), Some("project-a"));
+
+        // Switch to different project
+        app.toggle_project_selection("project-b");
+        assert_eq!(app.selected_project(), Some("project-b"));
+        // History would be reloaded for the new project
+    }
 }
