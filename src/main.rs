@@ -2215,4 +2215,66 @@ mod tests {
             panic!("Expected Config command");
         }
     }
+
+    // ======================================================================
+    // Tests for US-001 (egui-gui): GUI Command and Window Bootstrap
+    // ======================================================================
+
+    #[test]
+    fn test_gui_us001_gui_command_is_recognized() {
+        // Test that the gui command is recognized
+        let cli = Cli::try_parse_from(["autom8", "gui"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Gui { .. })));
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_parses_correctly() {
+        // Test that `autom8 gui` parses to the Gui variant with defaults
+        let cli = Cli::try_parse_from(["autom8", "gui"]).unwrap();
+        assert!(cli.file.is_none(), "No file should be set");
+        if let Some(Commands::Gui { project }) = cli.command {
+            assert!(
+                project.is_none(),
+                "Project filter should be None by default"
+            );
+        } else {
+            panic!("Expected Gui command");
+        }
+    }
+
+    #[test]
+    fn test_gui_us001_gui_project_flag() {
+        // Test that --project flag works
+        let cli = Cli::try_parse_from(["autom8", "gui", "--project", "myapp"]).unwrap();
+        if let Some(Commands::Gui { project }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+        } else {
+            panic!("Expected Gui command");
+        }
+    }
+
+    #[test]
+    fn test_gui_us001_gui_project_short_flag() {
+        // Test that -p short flag works for --project
+        let cli = Cli::try_parse_from(["autom8", "gui", "-p", "myapp"]).unwrap();
+        if let Some(Commands::Gui { project }) = cli.command {
+            assert_eq!(project, Some("myapp".to_string()));
+        } else {
+            panic!("Expected Gui command");
+        }
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_function_available() {
+        // Verify the gui_command function is exported
+        use autom8::commands::gui_command;
+        let _: fn(Option<&str>) -> autom8::error::Result<()> = gui_command;
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_appears_in_enum() {
+        // Verify that Gui command appears in the Commands enum
+        // (if this compiles, the variant exists)
+        let _cmd = Commands::Gui { project: None };
+    }
 }
