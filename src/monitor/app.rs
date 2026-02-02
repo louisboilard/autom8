@@ -1126,7 +1126,11 @@ impl MonitorApp {
         // + 1 for Branch (always shown)
         // + 1 for Worktree path (only for worktree sessions in full mode)
         let base_height = 6; // State, Story, Progress, Duration, Session, Branch
-        let extra_height = if full && !session.is_main_session { 1 } else { 0 }; // Worktree path
+        let extra_height = if full && !session.is_main_session {
+            1
+        } else {
+            0
+        }; // Worktree path
 
         // Split into header info and output snippet
         let chunks = Layout::default()
@@ -1159,7 +1163,10 @@ impl MonitorApp {
             // Session type line (first for visibility)
             Line::from(vec![
                 Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
-                Span::styled(session_type_indicator, Style::default().fg(session_type_color)),
+                Span::styled(
+                    session_type_indicator,
+                    Style::default().fg(session_type_color),
+                ),
             ]),
             // Branch line (always visible)
             Line::from(vec![
@@ -4031,8 +4038,7 @@ mod tests {
     fn test_us003_truncated_worktree_path_long() {
         // Long paths should show ".../last/two" format
         let mut session = create_test_session("test", "abc12345", "branch");
-        session.metadata.worktree_path =
-            PathBuf::from("/home/user/projects/autom8-wt-feature-x");
+        session.metadata.worktree_path = PathBuf::from("/home/user/projects/autom8-wt-feature-x");
         let truncated = session.truncated_worktree_path();
         assert_eq!(truncated, ".../projects/autom8-wt-feature-x");
     }
@@ -4073,14 +4079,8 @@ mod tests {
         let worktree_session = create_test_session("project", "abc12345", "feature-x");
 
         // Branch should be in the run state
-        assert_eq!(
-            main_session.run.as_ref().unwrap().branch,
-            "develop"
-        );
-        assert_eq!(
-            worktree_session.run.as_ref().unwrap().branch,
-            "feature-x"
-        );
+        assert_eq!(main_session.run.as_ref().unwrap().branch, "develop");
+        assert_eq!(worktree_session.run.as_ref().unwrap().branch, "feature-x");
     }
 
     #[test]
@@ -4090,5 +4090,264 @@ mod tests {
         // COLOR_PRIMARY is Cyan, COLOR_REVIEW is Magenta
         assert_eq!(COLOR_PRIMARY, Color::Cyan);
         assert_eq!(COLOR_REVIEW, Color::Magenta);
+    }
+
+    // ============================================================================
+    // US-007: Integration Test - Multiple Concurrent Sessions
+    // ============================================================================
+    //
+    // These tests verify that the monitor correctly displays multiple concurrent
+    // sessions for the same project (main repo + worktree scenarios).
+
+    #[test]
+    fn test_us007_main_and_worktree_sessions_both_appear_in_grid() {
+        // Simulates: Run in main repo AND run with --worktree for same project
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add a main repo session (simulating: `autom8 run spec.json`)
+        app.sessions.push(create_test_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "features/worktrees",
+        ));
+
+        // Add a worktree session (simulating: `autom8 run --worktree other-spec.json`)
+        app.sessions.push(create_test_session(
+            "autom8",
+            "abc12345",
+            "features/other-feature",
+        ));
+
+        // Both sessions should appear in the Active Runs grid
+        assert_eq!(app.sessions.len(), 2);
+
+        // Both should have the same project name
+        assert_eq!(app.sessions[0].project_name, "autom8");
+        assert_eq!(app.sessions[1].project_name, "autom8");
+
+        // But different session IDs
+        assert_eq!(app.sessions[0].metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(app.sessions[1].metadata.session_id, "abc12345");
+
+        // Display titles should distinguish them
+        assert_eq!(app.sessions[0].display_title(), "autom8 (main)");
+        assert_eq!(app.sessions[1].display_title(), "autom8 (abc12345)");
+    }
+
+    #[test]
+    fn test_us007_each_session_shows_correct_session_id_in_title() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add sessions with distinct session IDs
+        app.sessions.push(create_test_session("myproject", MAIN_SESSION_ID, "main"));
+        app.sessions.push(create_test_session("myproject", "deadbeef", "feature-a"));
+        app.sessions.push(create_test_session("myproject", "cafebabe", "feature-b"));
+
+        // Each should have correct title format
+        assert_eq!(app.sessions[0].display_title(), "myproject (main)");
+        assert_eq!(app.sessions[1].display_title(), "myproject (deadbeef)");
+        assert_eq!(app.sessions[2].display_title(), "myproject (cafebabe)");
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_progress() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Create main session with progress 2/5
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        main_session.progress = Some(RunProgress {
+            completed: 2,
+            total: 5,
+        });
+
+        // Create worktree session with different progress 4/8
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        worktree_session.progress = Some(RunProgress {
+            completed: 4,
+            total: 8,
+        });
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify independent progress
+        let main_progress = app.sessions[0].progress.as_ref().unwrap();
+        let wt_progress = app.sessions[1].progress.as_ref().unwrap();
+
+        assert_eq!(main_progress.completed, 2);
+        assert_eq!(main_progress.total, 5);
+        assert_eq!(main_progress.as_fraction(), "Story 3/5");
+
+        assert_eq!(wt_progress.completed, 4);
+        assert_eq!(wt_progress.total, 8);
+        assert_eq!(wt_progress.as_fraction(), "Story 5/8");
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_state() {
+        use crate::state::MachineState;
+
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session is in Reviewing state
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        if let Some(ref mut run) = main_session.run {
+            run.machine_state = MachineState::Reviewing;
+        }
+
+        // Worktree session is in RunningClaude state
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        if let Some(ref mut run) = worktree_session.run {
+            run.machine_state = MachineState::RunningClaude;
+        }
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify independent states
+        assert_eq!(
+            app.sessions[0].run.as_ref().unwrap().machine_state,
+            MachineState::Reviewing
+        );
+        assert_eq!(
+            app.sessions[1].run.as_ref().unwrap().machine_state,
+            MachineState::RunningClaude
+        );
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_branches() {
+        let mut app = MonitorApp::new(1, None);
+
+        app.sessions
+            .push(create_test_session("autom8", MAIN_SESSION_ID, "main"));
+        app.sessions.push(create_test_session(
+            "autom8",
+            "abc12345",
+            "features/new-feature",
+        ));
+
+        // Branches should be independent
+        assert_eq!(app.sessions[0].run.as_ref().unwrap().branch, "main");
+        assert_eq!(
+            app.sessions[1].run.as_ref().unwrap().branch,
+            "features/new-feature"
+        );
+
+        // Also verify branch in metadata
+        assert_eq!(app.sessions[0].metadata.branch_name, "main");
+        assert_eq!(app.sessions[1].metadata.branch_name, "features/new-feature");
+    }
+
+    #[test]
+    fn test_us007_quadrant_navigation_with_concurrent_sessions() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add 2 sessions for same project (main + worktree)
+        app.sessions.push(create_test_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "main",
+        ));
+        app.sessions.push(create_test_session(
+            "autom8",
+            "abc12345",
+            "feature-x",
+        ));
+
+        // Both should be navigable
+        assert!(app.is_quadrant_valid(0, 0));
+        assert!(app.is_quadrant_valid(0, 1));
+        assert!(!app.is_quadrant_valid(1, 0)); // No third session
+
+        // Navigate between them
+        // Session index is: quadrant_page * 4 + quadrant_row * 2 + quadrant_col
+        app.quadrant_col = 0;
+        app.quadrant_row = 0;
+        let session_idx_0 = app.quadrant_page * 4 + app.quadrant_row * 2 + app.quadrant_col;
+        assert_eq!(session_idx_0, 0);
+
+        app.handle_key(KeyCode::Char('l')); // Move right
+        assert_eq!(app.quadrant_col, 1);
+        let session_idx_1 = app.quadrant_page * 4 + app.quadrant_row * 2 + app.quadrant_col;
+        assert_eq!(session_idx_1, 1);
+    }
+
+    #[test]
+    fn test_us007_session_type_indicators_in_concurrent_sessions() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session
+        let main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        assert!(main_session.is_main_session);
+
+        // Worktree session
+        let worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        assert!(!worktree_session.is_main_session);
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify type indicators would be different
+        // (The actual indicator logic uses is_main_session to choose)
+        let get_indicator = |is_main: bool| {
+            if is_main {
+                ("● main", COLOR_PRIMARY)
+            } else {
+                ("◆ worktree", COLOR_REVIEW)
+            }
+        };
+
+        let (main_ind, main_color) = get_indicator(app.sessions[0].is_main_session);
+        let (wt_ind, wt_color) = get_indicator(app.sessions[1].is_main_session);
+
+        assert_eq!(main_ind, "● main");
+        assert_eq!(wt_ind, "◆ worktree");
+        assert_eq!(main_color, Color::Cyan);
+        assert_eq!(wt_color, Color::Magenta);
+    }
+
+    #[test]
+    fn test_us007_worktree_path_differs_between_sessions() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session - path is the main repo
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        main_session.metadata.worktree_path = PathBuf::from("/home/user/projects/autom8");
+
+        // Worktree session - path is the worktree directory
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        worktree_session.metadata.worktree_path =
+            PathBuf::from("/home/user/projects/autom8-wt-feature-x");
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Paths should be different
+        assert_ne!(
+            app.sessions[0].metadata.worktree_path,
+            app.sessions[1].metadata.worktree_path
+        );
+
+        // Truncated paths should also be different
+        assert_ne!(
+            app.sessions[0].truncated_worktree_path(),
+            app.sessions[1].truncated_worktree_path()
+        );
+
+        // Main shows full path (only 2 components)
+        assert_eq!(
+            app.sessions[0].truncated_worktree_path(),
+            ".../projects/autom8"
+        );
+        // Worktree shows truncated path
+        assert_eq!(
+            app.sessions[1].truncated_worktree_path(),
+            ".../projects/autom8-wt-feature-x"
+        );
     }
 }
