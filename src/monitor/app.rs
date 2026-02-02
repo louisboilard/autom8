@@ -6,7 +6,9 @@ use super::views::View;
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
 use crate::spec::Spec;
-use crate::state::{MachineState, RunState, StateManager};
+use crate::state::{MachineState, RunState, SessionMetadata, StateManager};
+use crate::worktree::MAIN_SESSION_ID;
+use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -114,6 +116,53 @@ pub struct ProjectData {
     pub load_error: Option<String>,
 }
 
+/// Data for a single session in the Active Runs view.
+///
+/// This struct represents one running session, which can be from
+/// the main repo or a worktree. Multiple sessions can belong to
+/// the same project (when using worktree mode).
+#[derive(Debug, Clone)]
+pub struct SessionData {
+    /// Project name (e.g., "autom8")
+    pub project_name: String,
+    /// Session metadata (includes session_id, worktree_path, branch)
+    pub metadata: SessionMetadata,
+    /// The active run state for this session
+    pub run: Option<RunState>,
+    /// Progress through the spec (loaded from spec file)
+    pub progress: Option<RunProgress>,
+    /// Error message if state file is corrupted or unreadable
+    pub load_error: Option<String>,
+    /// Whether this is the main repo session (vs. a worktree)
+    pub is_main_session: bool,
+}
+
+impl SessionData {
+    /// Format the display title for this session.
+    /// Returns "project-name (main)" or "project-name (abc12345)"
+    pub fn display_title(&self) -> String {
+        if self.is_main_session {
+            format!("{} (main)", self.project_name)
+        } else {
+            format!("{} ({})", self.project_name, &self.metadata.session_id)
+        }
+    }
+
+    /// Get a truncated worktree path for display (last 2 components)
+    pub fn truncated_worktree_path(&self) -> String {
+        let path = &self.metadata.worktree_path;
+        let components: Vec<_> = path.components().collect();
+        if components.len() <= 2 {
+            path.display().to_string()
+        } else {
+            let last_two: PathBuf = components[components.len() - 2..]
+                .iter()
+                .collect();
+            format!(".../{}", last_two.display())
+        }
+    }
+}
+
 /// A single entry in the run history view.
 #[derive(Debug, Clone)]
 pub struct RunHistoryEntry {
@@ -207,8 +256,11 @@ pub struct MonitorApp {
     poll_interval: u64,
     /// Optional project filter
     project_filter: Option<String>,
-    /// Cached project data
+    /// Cached project data (used for Project List view)
     projects: Vec<ProjectData>,
+    /// Cached session data for Active Runs view.
+    /// Contains only running sessions (is_running=true and not stale).
+    sessions: Vec<SessionData>,
     /// Cached run history entries (sorted by date, most recent first)
     run_history: Vec<RunHistoryEntry>,
     /// Whether there are any active runs
@@ -241,6 +293,7 @@ impl MonitorApp {
             poll_interval,
             project_filter,
             projects: Vec::new(),
+            sessions: Vec::new(),
             run_history: Vec::new(),
             has_active_runs: false,
             should_quit: false,
@@ -281,10 +334,10 @@ impl MonitorApp {
             tree_infos
         };
 
-        // Collect project data including active runs and progress
+        // Collect project data including active runs and progress (for Project List view)
         // Handle corrupted state files gracefully
         self.projects = filtered
-            .into_iter()
+            .iter()
             .map(|info| {
                 let (active_run, load_error) = if info.has_active_run {
                     match StateManager::for_project(&info.name) {
@@ -315,7 +368,7 @@ impl MonitorApp {
                 });
 
                 ProjectData {
-                    info,
+                    info: info.clone(),
                     active_run,
                     progress,
                     load_error,
@@ -323,8 +376,11 @@ impl MonitorApp {
             })
             .collect();
 
-        // Update active runs status (count both actual runs and errors as "active" for display)
-        self.has_active_runs = self.projects.iter().any(|p| p.active_run.is_some());
+        // Refresh sessions for Active Runs view
+        self.refresh_sessions(&filtered);
+
+        // Update active runs status based on sessions (not projects)
+        self.has_active_runs = !self.sessions.is_empty();
 
         // If current view is ActiveRuns but no active runs, switch to ProjectList
         if self.current_view == View::ActiveRuns && !self.has_active_runs {
@@ -340,16 +396,90 @@ impl MonitorApp {
         Ok(())
     }
 
+    /// Refresh sessions for the Active Runs view.
+    ///
+    /// Collects all running sessions across all projects, filtering out
+    /// stale sessions (where the worktree no longer exists).
+    fn refresh_sessions(&mut self, project_infos: &[ProjectTreeInfo]) {
+        let mut sessions: Vec<SessionData> = Vec::new();
+
+        // Get all project names to check
+        let project_names: Vec<_> = if let Some(ref filter) = self.project_filter {
+            vec![filter.clone()]
+        } else {
+            project_infos.iter().map(|p| p.name.clone()).collect()
+        };
+
+        for project_name in project_names {
+            // Get the StateManager for this project
+            let sm = match StateManager::for_project(&project_name) {
+                Ok(sm) => sm,
+                Err(_) => continue, // Skip projects we can't access
+            };
+
+            // List all sessions for this project
+            let project_sessions = match sm.list_sessions() {
+                Ok(s) => s,
+                Err(_) => continue, // Skip if we can't list sessions
+            };
+
+            // Process each session
+            for metadata in project_sessions {
+                // Skip non-running sessions
+                if !metadata.is_running {
+                    continue;
+                }
+
+                // Skip stale sessions (worktree deleted but metadata remains)
+                if !metadata.worktree_path.exists() {
+                    continue;
+                }
+
+                // Determine if this is the main session
+                let is_main_session = metadata.session_id == MAIN_SESSION_ID;
+
+                // Load the run state for this session
+                let (run, load_error) = if let Some(session_sm) = sm.get_session(&metadata.session_id)
+                {
+                    match session_sm.load_current() {
+                        Ok(run) => (run, None),
+                        Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+                    }
+                } else {
+                    (None, Some("Session not found".to_string()))
+                };
+
+                // Load spec to get progress information
+                let progress = run.as_ref().and_then(|r| {
+                    Spec::load(&r.spec_json_path).ok().map(|spec| RunProgress {
+                        completed: spec.completed_count(),
+                        total: spec.total_count(),
+                    })
+                });
+
+                sessions.push(SessionData {
+                    project_name: project_name.clone(),
+                    metadata,
+                    run,
+                    progress,
+                    load_error,
+                    is_main_session,
+                });
+            }
+        }
+
+        // Sort sessions by last_active_at descending
+        sessions.sort_by(|a, b| b.metadata.last_active_at.cmp(&a.metadata.last_active_at));
+
+        self.sessions = sessions;
+    }
+
     /// Ensure selected_index and quadrant_page stay within bounds when projects/history change.
     fn clamp_selection_index(&mut self) {
         let max_index = match self.current_view {
             View::ProjectList => self.projects.len().saturating_sub(1),
-            View::ActiveRuns => self
-                .projects
-                .iter()
-                .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-                .count()
-                .saturating_sub(1),
+            // Active Runs now uses sessions, not projects
+            View::ActiveRuns => self.sessions.len().saturating_sub(1),
             View::RunHistory => self.run_history.len().saturating_sub(1),
         };
         if self.selected_index > max_index {
@@ -452,11 +582,8 @@ impl MonitorApp {
 
     /// Get the total number of pages for Active Runs view.
     fn total_quadrant_pages(&self) -> usize {
-        let active_count = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .count();
+        // Active Runs view now uses sessions (not projects)
+        let active_count = self.sessions.len();
         if active_count == 0 {
             1
         } else {
@@ -481,11 +608,8 @@ impl MonitorApp {
 
     /// Get the number of active runs on the current page (0-4).
     fn runs_on_current_page(&self) -> usize {
-        let active_count = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .count();
+        // Active Runs view now uses sessions (not projects)
+        let active_count = self.sessions.len();
         let start_idx = self.quadrant_page * 4;
         let remaining = active_count.saturating_sub(start_idx);
         remaining.min(4)
@@ -764,21 +888,14 @@ impl MonitorApp {
     }
 
     fn render_active_runs(&self, frame: &mut Frame, area: Rect) {
-        // Include projects with errors in the active view
-        let active: Vec<_> = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .collect();
-
-        // Calculate pagination info
-        let total_runs = active.len();
-        let total_pages = total_runs.div_ceil(4);
+        // Calculate pagination info - now using sessions instead of projects
+        let total_runs = self.sessions.len();
+        let total_pages = total_runs.div_ceil(4).max(1);
         let start_idx = self.quadrant_page * 4;
 
-        // Get the 4 runs (or fewer) for the current page
-        let page_runs: Vec<Option<&ProjectData>> =
-            (0..4).map(|i| active.get(start_idx + i).copied()).collect();
+        // Get the 4 sessions (or fewer) for the current page
+        let page_sessions: Vec<Option<&SessionData>> =
+            (0..4).map(|i| self.sessions.get(start_idx + i)).collect();
 
         // Fixed 2x2 grid layout - always split into 2 rows, each with 2 columns
         let rows = Layout::default()
@@ -800,14 +917,14 @@ impl MonitorApp {
         let quadrant_areas = [top_cols[0], top_cols[1], bottom_cols[0], bottom_cols[1]];
 
         // Render each quadrant
-        for (i, opt_project) in page_runs.iter().enumerate() {
+        for (i, opt_session) in page_sessions.iter().enumerate() {
             let row = i / 2;
             let col = i % 2;
             let is_selected = row == self.quadrant_row && col == self.quadrant_col;
 
-            match opt_project {
-                Some(project) => {
-                    self.render_run_or_error(frame, quadrant_areas[i], project, false, is_selected);
+            match opt_session {
+                Some(session) => {
+                    self.render_session_or_error(frame, quadrant_areas[i], session, false, is_selected);
                 }
                 None => {
                     // Empty bordered box for unused quadrants
@@ -835,7 +952,24 @@ impl MonitorApp {
         }
     }
 
-    /// Render either a run detail or an error panel for a project
+    /// Render either a run detail or an error panel for a session
+    fn render_session_or_error(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        full: bool,
+        is_selected: bool,
+    ) {
+        if let Some(ref error) = session.load_error {
+            self.render_session_error_panel(frame, area, session, error, is_selected);
+        } else {
+            self.render_session_detail(frame, area, session, full, is_selected);
+        }
+    }
+
+    // Legacy render_run_or_error for ProjectData (kept for potential future use)
+    #[allow(dead_code)]
     fn render_run_or_error(
         &self,
         frame: &mut Frame,
@@ -852,6 +986,7 @@ impl MonitorApp {
     }
 
     /// Render an error panel for a project with a corrupted state file
+    #[allow(dead_code)]
     fn render_error_panel(
         &self,
         frame: &mut Frame,
@@ -900,7 +1035,151 @@ impl MonitorApp {
         frame.render_widget(paragraph, inner);
     }
 
-    /// Render detailed view for a single run
+    /// Render an error panel for a session with a corrupted state file
+    fn render_session_error_panel(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        error: &str,
+        is_selected: bool,
+    ) {
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_ERROR
+        };
+        // Use display_title() to show "project (session-id)"
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", session.display_title()))
+            .border_style(Style::default().fg(border_color));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let error_lines = vec![
+            Line::from(vec![
+                Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
+                Span::styled(
+                    "State File Error",
+                    Style::default()
+                        .fg(COLOR_ERROR)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&session.metadata.session_id, Style::default().fg(COLOR_PRIMARY)),
+            ]),
+            Line::from(Span::styled(
+                "The state file may be corrupted or unreadable.",
+                Style::default().fg(COLOR_DIM),
+            )),
+        ];
+
+        let paragraph = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner);
+    }
+
+    /// Render detailed view for a single session
+    fn render_session_detail(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        full: bool,
+        is_selected: bool,
+    ) {
+        let run = match session.run.as_ref() {
+            Some(r) => r,
+            None => return, // No run to render
+        };
+
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_PRIMARY
+        };
+        // Use display_title() to show "project (session-id)"
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", session.display_title()))
+            .border_style(Style::default().fg(border_color));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Split into header info and output snippet
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(if full { 6 } else { 4 }),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        // Header info
+        let state_str = format_state(run.machine_state);
+        let duration = format_duration(run.started_at);
+        let story = run.current_story.as_deref().unwrap_or("N/A");
+
+        let progress_str = session
+            .progress
+            .as_ref()
+            .map(|p| p.as_fraction())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let mut info_lines = vec![
+            Line::from(vec![
+                Span::styled("State: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(
+                    state_str,
+                    Style::default().fg(state_color(run.machine_state)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Story: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(story, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Progress: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&progress_str, Style::default().fg(COLOR_PRIMARY)),
+            ]),
+            Line::from(vec![
+                Span::styled("Duration: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&duration, Style::default().fg(COLOR_WARNING)),
+            ]),
+        ];
+
+        if full {
+            info_lines.push(Line::from(vec![
+                Span::styled("Branch: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&run.branch, Style::default().fg(Color::White)),
+            ]));
+        }
+
+        let info = Paragraph::new(info_lines);
+        frame.render_widget(info, chunks[0]);
+
+        // Output snippet section
+        let output_snippet = self.get_output_snippet(run);
+        let output = Paragraph::new(output_snippet)
+            .style(Style::default().fg(COLOR_DIM))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(" Latest Output "),
+            );
+        frame.render_widget(output, chunks[1]);
+    }
+
+    /// Render detailed view for a single run (legacy, for ProjectData)
+    #[allow(dead_code)]
     fn render_run_detail(
         &self,
         frame: &mut Frame,
