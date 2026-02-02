@@ -289,28 +289,33 @@ fn configure_widget_visuals(visuals: &mut Visuals) {
 
 /// Configure the egui Style with additional settings.
 pub fn configure_style() -> Style {
-    let mut style = Style::default();
-
-    // Apply custom visuals
-    style.visuals = configure_visuals();
+    // Get default style and modify spacing
+    let default_style = Style::default();
+    let mut spacing = default_style.spacing.clone();
 
     // Spacing adjustments for a cleaner look
-    style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-    style.spacing.window_margin = egui::Margin::same(16.0);
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.menu_margin = egui::Margin::same(8.0);
-    style.spacing.indent = 16.0;
-    style.spacing.scroll = egui::style::ScrollStyle {
+    spacing.item_spacing = egui::vec2(8.0, 4.0);
+    spacing.window_margin = egui::Margin::same(16.0);
+    spacing.button_padding = egui::vec2(12.0, 6.0);
+    spacing.menu_margin = egui::Margin::same(8.0);
+    spacing.indent = 16.0;
+    spacing.scroll = egui::style::ScrollStyle {
         floating: true,
         bar_width: 8.0,
         ..Default::default()
     };
 
-    // Interaction settings
-    style.interaction.selectable_labels = true;
-    style.interaction.multi_widget_text_select = true;
+    // Modify interaction settings
+    let mut interaction = default_style.interaction.clone();
+    interaction.selectable_labels = true;
+    interaction.multi_widget_text_select = true;
 
-    style
+    Style {
+        visuals: configure_visuals(),
+        spacing,
+        interaction,
+        ..Default::default()
+    }
 }
 
 /// Initialize the theme for the application.
@@ -344,9 +349,18 @@ mod tests {
 
     #[test]
     fn test_status_background_colors() {
-        assert_eq!(Status::Running.background_color(), colors::STATUS_RUNNING_BG);
-        assert_eq!(Status::Success.background_color(), colors::STATUS_SUCCESS_BG);
-        assert_eq!(Status::Warning.background_color(), colors::STATUS_WARNING_BG);
+        assert_eq!(
+            Status::Running.background_color(),
+            colors::STATUS_RUNNING_BG
+        );
+        assert_eq!(
+            Status::Success.background_color(),
+            colors::STATUS_SUCCESS_BG
+        );
+        assert_eq!(
+            Status::Warning.background_color(),
+            colors::STATUS_WARNING_BG
+        );
         assert_eq!(Status::Error.background_color(), colors::STATUS_ERROR_BG);
         assert_eq!(Status::Idle.background_color(), colors::STATUS_IDLE_BG);
     }
@@ -382,8 +396,9 @@ mod tests {
         let text_luminance = colors::TEXT_PRIMARY.r() as u32
             + colors::TEXT_PRIMARY.g() as u32
             + colors::TEXT_PRIMARY.b() as u32;
-        let bg_luminance =
-            colors::BACKGROUND.r() as u32 + colors::BACKGROUND.g() as u32 + colors::BACKGROUND.b() as u32;
+        let bg_luminance = colors::BACKGROUND.r() as u32
+            + colors::BACKGROUND.g() as u32
+            + colors::BACKGROUND.b() as u32;
 
         // Text should be significantly darker than background
         assert!(text_luminance < bg_luminance);
