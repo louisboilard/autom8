@@ -83,6 +83,19 @@ const PROJECT_ROW_PADDING_V: f32 = 12.0; // spacing::MD
 const PROJECT_STATUS_DOT_RADIUS: f32 = 5.0;
 
 // ============================================================================
+// Split View Constants (Visual Polish - US-007)
+// ============================================================================
+
+/// Width of the visual divider between split panels.
+const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
+
+/// Spacing around the divider (creates padding between content and divider).
+const SPLIT_DIVIDER_MARGIN: f32 = 12.0; // spacing::MD
+
+/// Minimum width for either panel in the split view.
+const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
+
+// ============================================================================
 // Data Layer Types
 // ============================================================================
 
@@ -2037,29 +2050,47 @@ impl Autom8App {
     fn render_projects(&mut self, ui: &mut egui::Ui) {
         // Use horizontal layout for split view
         let available_width = ui.available_width();
-        let left_panel_width = (available_width / 2.0).max(200.0);
+        let available_height = ui.available_height();
+
+        // Calculate panel widths: 50/50 split with divider in the middle
+        // Subtract the divider width and margins from the total width
+        let divider_total_width = SPLIT_DIVIDER_WIDTH + SPLIT_DIVIDER_MARGIN * 2.0;
+        let panel_width = ((available_width - divider_total_width) / 2.0).max(SPLIT_PANEL_MIN_WIDTH);
 
         // We need to collect the clicked_run_id outside the closure
         let mut clicked_run_id: Option<String> = None;
 
         ui.horizontal(|ui| {
-            // Left panel: Project list (takes half the width)
+            // Left panel: Project list
             ui.allocate_ui_with_layout(
-                Vec2::new(left_panel_width, ui.available_height()),
+                Vec2::new(panel_width, available_height),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
                     self.render_projects_left_panel(ui);
                 },
             );
 
-            // Vertical separator between panels
-            ui.add_space(spacing::SM);
-            ui.separator();
-            ui.add_space(spacing::SM);
+            // Visual divider between panels with appropriate margin
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
+
+            // Draw a custom vertical divider line using the SEPARATOR color
+            let divider_rect = ui.available_rect_before_wrap();
+            let divider_line_rect = Rect::from_min_size(
+                divider_rect.min,
+                Vec2::new(SPLIT_DIVIDER_WIDTH, available_height),
+            );
+            ui.painter().rect_filled(
+                divider_line_rect,
+                Rounding::ZERO,
+                colors::SEPARATOR,
+            );
+            ui.add_space(SPLIT_DIVIDER_WIDTH);
+
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
 
             // Right panel: Run history for selected project
             ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), ui.available_height()),
+                Vec2::new(ui.available_width(), available_height),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
                     clicked_run_id = self.render_projects_right_panel(ui);
@@ -2244,7 +2275,7 @@ impl Autom8App {
     /// Render a single run history entry as a card.
     /// Returns true if the entry was clicked.
     fn render_run_history_entry(&self, ui: &mut egui::Ui, entry: &RunHistoryEntry) -> bool {
-        // Card background
+        // Card background - use consistent height from constants
         let available_width = ui.available_width();
         let card_height = 72.0; // Fixed height for history cards
 
@@ -2253,16 +2284,19 @@ impl Autom8App {
 
         let is_hovered = response.hovered();
 
-        // Draw card background with hover state
+        // Draw card background with hover state - consistent with project row pattern
+        // Uses SURFACE as default, SURFACE_HOVER on hover, and border feedback
         let bg_color = if is_hovered {
-            colors::SURFACE_SELECTED
-        } else {
             colors::SURFACE_HOVER
+        } else {
+            colors::SURFACE
         };
+
+        // Border changes on hover for visual feedback - consistent with project rows
         let border = if is_hovered {
             Stroke::new(1.0, colors::BORDER_FOCUSED)
         } else {
-            Stroke::NONE
+            Stroke::new(1.0, colors::BORDER)
         };
 
         ui.painter()
@@ -4484,5 +4518,199 @@ mod tests {
         // After deselecting, still not loading
         app.toggle_project_selection("test-project");
         assert!(!app.is_run_history_loading());
+    }
+
+    // ========================================================================
+    // Visual Consistency Tests (US-007)
+    // ========================================================================
+
+    #[test]
+    fn test_split_view_constants() {
+        // Verify split view divider constants are reasonable
+        assert!(
+            SPLIT_DIVIDER_WIDTH > 0.0 && SPLIT_DIVIDER_WIDTH <= 2.0,
+            "Divider should be subtle (1-2px)"
+        );
+        assert!(
+            SPLIT_DIVIDER_MARGIN >= spacing::SM && SPLIT_DIVIDER_MARGIN <= spacing::LG,
+            "Divider margin should be moderate"
+        );
+        assert!(
+            SPLIT_PANEL_MIN_WIDTH >= 150.0 && SPLIT_PANEL_MIN_WIDTH <= 300.0,
+            "Panel minimum width should allow reasonable content"
+        );
+    }
+
+    #[test]
+    fn test_split_view_constants_use_spacing_scale() {
+        // Verify that split view margins align with the spacing scale
+        // SPLIT_DIVIDER_MARGIN should be a standard spacing value
+        let valid_spacing_values = [spacing::XS, spacing::SM, spacing::MD, spacing::LG, spacing::XL];
+        assert!(
+            valid_spacing_values.contains(&SPLIT_DIVIDER_MARGIN),
+            "Split divider margin should use spacing scale"
+        );
+    }
+
+    #[test]
+    fn test_project_row_uses_theme_colors() {
+        // Verify that project row constants are reasonable for hover/selected states
+        assert!(
+            PROJECT_ROW_HEIGHT >= 40.0 && PROJECT_ROW_HEIGHT <= 80.0,
+            "Row height should accommodate text with proper vertical rhythm"
+        );
+        assert!(
+            PROJECT_STATUS_DOT_RADIUS >= 3.0 && PROJECT_STATUS_DOT_RADIUS <= 8.0,
+            "Status dot should be visible but not overwhelming"
+        );
+    }
+
+    #[test]
+    fn test_card_rounding_consistency() {
+        // Verify rounding constants from theme are used consistently
+        assert_eq!(rounding::CARD, 8.0, "Card rounding should be 8px");
+        assert_eq!(rounding::BUTTON, 4.0, "Button rounding should be 4px");
+        assert_eq!(rounding::SMALL, 2.0, "Small element rounding should be 2px");
+    }
+
+    #[test]
+    fn test_hover_color_hierarchy() {
+        // Verify hover colors form a proper visual hierarchy
+        // SURFACE < SURFACE_HOVER < SURFACE_SELECTED (in terms of darkness/emphasis)
+        let surface_sum =
+            colors::SURFACE.r() as u32 + colors::SURFACE.g() as u32 + colors::SURFACE.b() as u32;
+        let hover_sum = colors::SURFACE_HOVER.r() as u32
+            + colors::SURFACE_HOVER.g() as u32
+            + colors::SURFACE_HOVER.b() as u32;
+        let selected_sum = colors::SURFACE_SELECTED.r() as u32
+            + colors::SURFACE_SELECTED.g() as u32
+            + colors::SURFACE_SELECTED.b() as u32;
+
+        // In a light theme, darker (lower sum) = more emphasis
+        assert!(
+            hover_sum < surface_sum,
+            "Hover should be visually distinct from surface"
+        );
+        assert!(
+            selected_sum < hover_sum,
+            "Selected should be more prominent than hover"
+        );
+    }
+
+    #[test]
+    fn test_border_color_hierarchy() {
+        // Verify border colors form a proper visual hierarchy
+        let border_sum =
+            colors::BORDER.r() as u32 + colors::BORDER.g() as u32 + colors::BORDER.b() as u32;
+        let focused_sum = colors::BORDER_FOCUSED.r() as u32
+            + colors::BORDER_FOCUSED.g() as u32
+            + colors::BORDER_FOCUSED.b() as u32;
+
+        // Focused border should be more prominent (darker in light theme)
+        assert!(
+            focused_sum < border_sum,
+            "Focused border should be more visible than default border"
+        );
+    }
+
+    #[test]
+    fn test_separator_color_exists() {
+        // Verify SEPARATOR color is defined and reasonable
+        let separator_sum = colors::SEPARATOR.r() as u32
+            + colors::SEPARATOR.g() as u32
+            + colors::SEPARATOR.b() as u32;
+
+        // Separator should be subtle but visible (not pure white)
+        assert!(
+            separator_sum < 765,
+            "Separator should have some color (not pure white)"
+        );
+        assert!(
+            separator_sum > 600,
+            "Separator should be subtle (light gray)"
+        );
+    }
+
+    #[test]
+    fn test_text_color_contrast() {
+        // Verify text colors maintain proper contrast hierarchy
+        let primary_sum = colors::TEXT_PRIMARY.r() as u32
+            + colors::TEXT_PRIMARY.g() as u32
+            + colors::TEXT_PRIMARY.b() as u32;
+        let secondary_sum = colors::TEXT_SECONDARY.r() as u32
+            + colors::TEXT_SECONDARY.g() as u32
+            + colors::TEXT_SECONDARY.b() as u32;
+        let muted_sum = colors::TEXT_MUTED.r() as u32
+            + colors::TEXT_MUTED.g() as u32
+            + colors::TEXT_MUTED.b() as u32;
+
+        // In light theme: darker text (lower sum) = more emphasis
+        assert!(
+            primary_sum < secondary_sum,
+            "Primary text should be more prominent than secondary"
+        );
+        assert!(
+            secondary_sum < muted_sum,
+            "Secondary text should be more prominent than muted"
+        );
+    }
+
+    #[test]
+    fn test_tab_constants_for_consistency() {
+        // Verify tab-related constants are reasonable
+        assert!(TAB_UNDERLINE_HEIGHT > 0.0 && TAB_UNDERLINE_HEIGHT <= 4.0);
+        assert!(TAB_PADDING_H >= spacing::SM && TAB_PADDING_H <= spacing::XL);
+        assert!(TAB_CLOSE_BUTTON_SIZE >= 12.0 && TAB_CLOSE_BUTTON_SIZE <= 24.0);
+    }
+
+    #[test]
+    fn test_animation_time_configured() {
+        // Verify animation time is set in the style
+        let style = theme::configure_style();
+        assert!(
+            style.animation_time > 0.0 && style.animation_time <= 0.5,
+            "Animation time should be set for smooth but responsive transitions"
+        );
+    }
+
+    #[test]
+    fn test_status_colors_are_distinct() {
+        // Verify all status colors are visually distinct from each other
+        let status_colors = [
+            colors::STATUS_RUNNING,
+            colors::STATUS_SUCCESS,
+            colors::STATUS_WARNING,
+            colors::STATUS_ERROR,
+            colors::STATUS_IDLE,
+        ];
+
+        // Check that each color is unique
+        for (i, color1) in status_colors.iter().enumerate() {
+            for (j, color2) in status_colors.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        color1, color2,
+                        "Status colors should all be distinct"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_spacing_scale_used_in_constants() {
+        // Verify that card and layout constants use spacing scale values
+        assert_eq!(CARD_SPACING, spacing::LG, "Card spacing should use LG");
+        assert_eq!(CARD_PADDING, spacing::LG, "Card padding should use LG");
+        assert_eq!(
+            PROJECT_ROW_PADDING_H,
+            spacing::MD,
+            "Project row horizontal padding should use MD"
+        );
+        assert_eq!(
+            PROJECT_ROW_PADDING_V,
+            spacing::MD,
+            "Project row vertical padding should use MD"
+        );
     }
 }

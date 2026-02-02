@@ -308,7 +308,12 @@ pub fn configure_style() -> Style {
         visuals: configure_visuals(),
         spacing: style_spacing,
         interaction,
-        // animation_time uses default which provides smooth transitions
+        // Enable smooth animations for hover/click state transitions.
+        // This affects widget state changes (hover, press, etc.) with a
+        // ~100ms ease-in animation for polished visual feedback.
+        // Note: egui doesn't support panel appearance/disappearance animations,
+        // but scroll areas and widget state changes will be smoothly animated.
+        animation_time: 0.1,
         ..Default::default()
     }
 }
@@ -503,5 +508,87 @@ mod tests {
         let status = Status::Success;
         let copied = status;
         assert_eq!(status, copied);
+    }
+
+    // ========================================================================
+    // Visual Polish Tests (US-007)
+    // ========================================================================
+
+    #[test]
+    fn test_animation_time_configured() {
+        let style = configure_style();
+        // Animation time should be configured for smooth transitions
+        assert!(style.animation_time > 0.0, "Animation time should be positive");
+        assert!(
+            style.animation_time <= 0.2,
+            "Animation time should not be too long (responsive feel)"
+        );
+    }
+
+    #[test]
+    fn test_widget_hover_visuals_configured() {
+        let visuals = configure_visuals();
+        // Hovered widgets should have distinct styling
+        assert_eq!(
+            visuals.widgets.hovered.bg_fill,
+            colors::SURFACE_HOVER,
+            "Hovered widgets should use SURFACE_HOVER"
+        );
+        assert_eq!(
+            visuals.widgets.hovered.bg_stroke.color,
+            colors::BORDER_FOCUSED,
+            "Hovered widgets should have focused border"
+        );
+    }
+
+    #[test]
+    fn test_widget_active_visuals_configured() {
+        let visuals = configure_visuals();
+        // Active/pressed widgets should have distinct styling
+        assert_eq!(
+            visuals.widgets.active.bg_fill,
+            colors::SURFACE_SELECTED,
+            "Active widgets should use SURFACE_SELECTED"
+        );
+        assert_eq!(
+            visuals.widgets.active.bg_stroke.color,
+            colors::ACCENT,
+            "Active widgets should have accent border"
+        );
+    }
+
+    #[test]
+    fn test_spacing_scale_consistency() {
+        // Verify spacing values follow a consistent scale
+        // Each step should be roughly double or 1.5x the previous
+        assert!(spacing::SM >= spacing::XS * 1.5);
+        assert!(spacing::MD >= spacing::SM * 1.25);
+        assert!(spacing::LG >= spacing::MD * 1.25);
+        assert!(spacing::XL >= spacing::LG * 1.25);
+    }
+
+    #[test]
+    fn test_scroll_style_configured() {
+        let style = configure_style();
+        // Scroll bars should have floating style for modern look
+        assert!(
+            style.spacing.scroll.floating,
+            "Scroll bars should use floating style"
+        );
+        assert!(
+            style.spacing.scroll.bar_width >= 6.0 && style.spacing.scroll.bar_width <= 12.0,
+            "Scroll bar width should be moderate"
+        );
+    }
+
+    #[test]
+    fn test_selection_colors_configured() {
+        let visuals = configure_visuals();
+        // Selection should use accent colors
+        assert_eq!(
+            visuals.selection.bg_fill,
+            colors::ACCENT_SUBTLE,
+            "Selection background should use ACCENT_SUBTLE"
+        );
     }
 }
