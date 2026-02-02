@@ -29,7 +29,7 @@ mod resume;
 mod run;
 mod status;
 
-pub use clean::clean_command;
+pub use clean::{clean_command, CleanOptions, CleanupSummary, SkippedSession};
 pub use default::default_command;
 pub use describe::describe_command;
 pub use init::init_command;
@@ -39,7 +39,7 @@ pub use pr_review::pr_review_command;
 pub use projects::projects_command;
 pub use resume::resume_command;
 pub use run::{run_command, run_with_file};
-pub use status::{global_status_command, status_command};
+pub use status::{all_sessions_status_command, global_status_command, status_command};
 
 use std::path::Path;
 

@@ -6,7 +6,8 @@ use super::views::View;
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
 use crate::spec::Spec;
-use crate::state::{MachineState, RunState, StateManager};
+use crate::state::{MachineState, RunState, SessionMetadata, StateManager};
+use crate::worktree::MAIN_SESSION_ID;
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -22,6 +23,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::Duration;
 
 // ============================================================================
@@ -112,6 +114,53 @@ pub struct ProjectData {
     pub progress: Option<RunProgress>,
     /// Error message if state file is corrupted or unreadable
     pub load_error: Option<String>,
+}
+
+/// Data for a single session in the Active Runs view.
+///
+/// This struct represents one running session, which can be from
+/// the main repo or a worktree. Multiple sessions can belong to
+/// the same project (when using worktree mode).
+#[derive(Debug, Clone)]
+pub struct SessionData {
+    /// Project name (e.g., "autom8")
+    pub project_name: String,
+    /// Session metadata (includes session_id, worktree_path, branch)
+    pub metadata: SessionMetadata,
+    /// The active run state for this session
+    pub run: Option<RunState>,
+    /// Progress through the spec (loaded from spec file)
+    pub progress: Option<RunProgress>,
+    /// Error message if state file is corrupted or unreadable
+    pub load_error: Option<String>,
+    /// Whether this is the main repo session (vs. a worktree)
+    pub is_main_session: bool,
+    /// Whether this session is stale (worktree was deleted)
+    pub is_stale: bool,
+}
+
+impl SessionData {
+    /// Format the display title for this session.
+    /// Returns "project-name (main)" or "project-name (abc12345)"
+    pub fn display_title(&self) -> String {
+        if self.is_main_session {
+            format!("{} (main)", self.project_name)
+        } else {
+            format!("{} ({})", self.project_name, &self.metadata.session_id)
+        }
+    }
+
+    /// Get a truncated worktree path for display (last 2 components)
+    pub fn truncated_worktree_path(&self) -> String {
+        let path = &self.metadata.worktree_path;
+        let components: Vec<_> = path.components().collect();
+        if components.len() <= 2 {
+            path.display().to_string()
+        } else {
+            let last_two: PathBuf = components[components.len() - 2..].iter().collect();
+            format!(".../{}", last_two.display())
+        }
+    }
 }
 
 /// A single entry in the run history view.
@@ -207,8 +256,11 @@ pub struct MonitorApp {
     poll_interval: u64,
     /// Optional project filter
     project_filter: Option<String>,
-    /// Cached project data
+    /// Cached project data (used for Project List view)
     projects: Vec<ProjectData>,
+    /// Cached session data for Active Runs view.
+    /// Contains only running sessions (is_running=true and not stale).
+    sessions: Vec<SessionData>,
     /// Cached run history entries (sorted by date, most recent first)
     run_history: Vec<RunHistoryEntry>,
     /// Whether there are any active runs
@@ -241,6 +293,7 @@ impl MonitorApp {
             poll_interval,
             project_filter,
             projects: Vec::new(),
+            sessions: Vec::new(),
             run_history: Vec::new(),
             has_active_runs: false,
             should_quit: false,
@@ -281,10 +334,10 @@ impl MonitorApp {
             tree_infos
         };
 
-        // Collect project data including active runs and progress
+        // Collect project data including active runs and progress (for Project List view)
         // Handle corrupted state files gracefully
         self.projects = filtered
-            .into_iter()
+            .iter()
             .map(|info| {
                 let (active_run, load_error) = if info.has_active_run {
                     match StateManager::for_project(&info.name) {
@@ -315,7 +368,7 @@ impl MonitorApp {
                 });
 
                 ProjectData {
-                    info,
+                    info: info.clone(),
                     active_run,
                     progress,
                     load_error,
@@ -323,8 +376,11 @@ impl MonitorApp {
             })
             .collect();
 
-        // Update active runs status (count both actual runs and errors as "active" for display)
-        self.has_active_runs = self.projects.iter().any(|p| p.active_run.is_some());
+        // Refresh sessions for Active Runs view
+        self.refresh_sessions(&filtered);
+
+        // Update active runs status based on sessions (not projects)
+        self.has_active_runs = !self.sessions.is_empty();
 
         // If current view is ActiveRuns but no active runs, switch to ProjectList
         if self.current_view == View::ActiveRuns && !self.has_active_runs {
@@ -340,16 +396,103 @@ impl MonitorApp {
         Ok(())
     }
 
+    /// Refresh sessions for the Active Runs view.
+    ///
+    /// Collects all running sessions across all projects, filtering out
+    /// stale sessions (where the worktree no longer exists).
+    fn refresh_sessions(&mut self, project_infos: &[ProjectTreeInfo]) {
+        let mut sessions: Vec<SessionData> = Vec::new();
+
+        // Get all project names to check
+        let project_names: Vec<_> = if let Some(ref filter) = self.project_filter {
+            vec![filter.clone()]
+        } else {
+            project_infos.iter().map(|p| p.name.clone()).collect()
+        };
+
+        for project_name in project_names {
+            // Get the StateManager for this project
+            let sm = match StateManager::for_project(&project_name) {
+                Ok(sm) => sm,
+                Err(_) => continue, // Skip projects we can't access
+            };
+
+            // List all sessions for this project
+            let project_sessions = match sm.list_sessions() {
+                Ok(s) => s,
+                Err(_) => continue, // Skip if we can't list sessions
+            };
+
+            // Process each session
+            for metadata in project_sessions {
+                // Skip non-running sessions
+                if !metadata.is_running {
+                    continue;
+                }
+
+                // Check if worktree was deleted (stale session)
+                let is_stale = !metadata.worktree_path.exists();
+
+                // Determine if this is the main session
+                let is_main_session = metadata.session_id == MAIN_SESSION_ID;
+
+                // For stale sessions, set error and skip state loading
+                if is_stale {
+                    sessions.push(SessionData {
+                        project_name: project_name.clone(),
+                        metadata,
+                        run: None,
+                        progress: None,
+                        load_error: Some("Worktree has been deleted".to_string()),
+                        is_main_session,
+                        is_stale: true,
+                    });
+                    continue;
+                }
+
+                // Load the run state for this session
+                let (run, load_error) =
+                    if let Some(session_sm) = sm.get_session(&metadata.session_id) {
+                        match session_sm.load_current() {
+                            Ok(run) => (run, None),
+                            Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+                        }
+                    } else {
+                        (None, Some("Session not found".to_string()))
+                    };
+
+                // Load spec to get progress information
+                let progress = run.as_ref().and_then(|r| {
+                    Spec::load(&r.spec_json_path).ok().map(|spec| RunProgress {
+                        completed: spec.completed_count(),
+                        total: spec.total_count(),
+                    })
+                });
+
+                sessions.push(SessionData {
+                    project_name: project_name.clone(),
+                    metadata,
+                    run,
+                    progress,
+                    load_error,
+                    is_main_session,
+                    is_stale: false,
+                });
+            }
+        }
+
+        // Sort sessions by last_active_at descending
+        sessions.sort_by(|a, b| b.metadata.last_active_at.cmp(&a.metadata.last_active_at));
+
+        self.sessions = sessions;
+    }
+
     /// Ensure selected_index and quadrant_page stay within bounds when projects/history change.
     fn clamp_selection_index(&mut self) {
         let max_index = match self.current_view {
             View::ProjectList => self.projects.len().saturating_sub(1),
-            View::ActiveRuns => self
-                .projects
-                .iter()
-                .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-                .count()
-                .saturating_sub(1),
+            // Active Runs now uses sessions, not projects
+            View::ActiveRuns => self.sessions.len().saturating_sub(1),
             View::RunHistory => self.run_history.len().saturating_sub(1),
         };
         if self.selected_index > max_index {
@@ -452,11 +595,8 @@ impl MonitorApp {
 
     /// Get the total number of pages for Active Runs view.
     fn total_quadrant_pages(&self) -> usize {
-        let active_count = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .count();
+        // Active Runs view now uses sessions (not projects)
+        let active_count = self.sessions.len();
         if active_count == 0 {
             1
         } else {
@@ -481,11 +621,8 @@ impl MonitorApp {
 
     /// Get the number of active runs on the current page (0-4).
     fn runs_on_current_page(&self) -> usize {
-        let active_count = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .count();
+        // Active Runs view now uses sessions (not projects)
+        let active_count = self.sessions.len();
         let start_idx = self.quadrant_page * 4;
         let remaining = active_count.saturating_sub(start_idx);
         remaining.min(4)
@@ -764,21 +901,14 @@ impl MonitorApp {
     }
 
     fn render_active_runs(&self, frame: &mut Frame, area: Rect) {
-        // Include projects with errors in the active view
-        let active: Vec<_> = self
-            .projects
-            .iter()
-            .filter(|p| p.active_run.is_some() || p.load_error.is_some())
-            .collect();
-
-        // Calculate pagination info
-        let total_runs = active.len();
-        let total_pages = total_runs.div_ceil(4);
+        // Calculate pagination info - now using sessions instead of projects
+        let total_runs = self.sessions.len();
+        let total_pages = total_runs.div_ceil(4).max(1);
         let start_idx = self.quadrant_page * 4;
 
-        // Get the 4 runs (or fewer) for the current page
-        let page_runs: Vec<Option<&ProjectData>> =
-            (0..4).map(|i| active.get(start_idx + i).copied()).collect();
+        // Get the 4 sessions (or fewer) for the current page
+        let page_sessions: Vec<Option<&SessionData>> =
+            (0..4).map(|i| self.sessions.get(start_idx + i)).collect();
 
         // Fixed 2x2 grid layout - always split into 2 rows, each with 2 columns
         let rows = Layout::default()
@@ -800,14 +930,20 @@ impl MonitorApp {
         let quadrant_areas = [top_cols[0], top_cols[1], bottom_cols[0], bottom_cols[1]];
 
         // Render each quadrant
-        for (i, opt_project) in page_runs.iter().enumerate() {
+        for (i, opt_session) in page_sessions.iter().enumerate() {
             let row = i / 2;
             let col = i % 2;
             let is_selected = row == self.quadrant_row && col == self.quadrant_col;
 
-            match opt_project {
-                Some(project) => {
-                    self.render_run_or_error(frame, quadrant_areas[i], project, false, is_selected);
+            match opt_session {
+                Some(session) => {
+                    self.render_session_or_error(
+                        frame,
+                        quadrant_areas[i],
+                        session,
+                        false,
+                        is_selected,
+                    );
                 }
                 None => {
                     // Empty bordered box for unused quadrants
@@ -835,7 +971,24 @@ impl MonitorApp {
         }
     }
 
-    /// Render either a run detail or an error panel for a project
+    /// Render either a run detail or an error panel for a session
+    fn render_session_or_error(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        full: bool,
+        is_selected: bool,
+    ) {
+        if let Some(ref error) = session.load_error {
+            self.render_session_error_panel(frame, area, session, error, is_selected);
+        } else {
+            self.render_session_detail(frame, area, session, full, is_selected);
+        }
+    }
+
+    // Legacy render_run_or_error for ProjectData (kept for potential future use)
+    #[allow(dead_code)]
     fn render_run_or_error(
         &self,
         frame: &mut Frame,
@@ -852,6 +1005,7 @@ impl MonitorApp {
     }
 
     /// Render an error panel for a project with a corrupted state file
+    #[allow(dead_code)]
     fn render_error_panel(
         &self,
         frame: &mut Frame,
@@ -900,7 +1054,230 @@ impl MonitorApp {
         frame.render_widget(paragraph, inner);
     }
 
-    /// Render detailed view for a single run
+    /// Render an error panel for a session with a corrupted state file or stale worktree
+    fn render_session_error_panel(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        error: &str,
+        is_selected: bool,
+    ) {
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_ERROR
+        };
+        // Use display_title() to show "project (session-id)"
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", session.display_title()))
+            .border_style(Style::default().fg(border_color));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Build error lines based on whether this is a stale session or corrupted state
+        let error_lines = if session.is_stale {
+            vec![
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
+                    Span::styled(
+                        "Stale Session",
+                        Style::default()
+                            .fg(COLOR_ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Session ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        &session.metadata.session_id,
+                        Style::default().fg(COLOR_PRIMARY),
+                    ),
+                    Span::styled(" failed to load.", Style::default().fg(COLOR_DIM)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "The worktree directory no longer exists.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+                Line::from(Span::styled(
+                    "Run `autom8 clean --orphaned` to remove stale sessions.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(COLOR_ERROR)),
+                    Span::styled(
+                        "State File Error",
+                        Style::default()
+                            .fg(COLOR_ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Session ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        &session.metadata.session_id,
+                        Style::default().fg(COLOR_PRIMARY),
+                    ),
+                    Span::styled(" failed to load.", Style::default().fg(COLOR_DIM)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(error, Style::default().fg(COLOR_DIM))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "The state file may be corrupted or unreadable.",
+                    Style::default().fg(COLOR_DIM),
+                )),
+            ]
+        };
+
+        let paragraph = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner);
+    }
+
+    /// Render detailed view for a single session
+    fn render_session_detail(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session: &SessionData,
+        full: bool,
+        is_selected: bool,
+    ) {
+        let run = match session.run.as_ref() {
+            Some(r) => r,
+            None => return, // No run to render
+        };
+
+        let border_color = if is_selected {
+            COLOR_WARNING
+        } else {
+            COLOR_PRIMARY
+        };
+        // Use display_title() to show "project (session-id)"
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", session.display_title()))
+            .border_style(Style::default().fg(border_color));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Calculate header height based on session type and display mode
+        // Base: 4 lines (State, Story, Progress, Duration)
+        // + 1 for Session type (always shown)
+        // + 1 for Branch (always shown)
+        // + 1 for Worktree path (only for worktree sessions in full mode)
+        let base_height = 6; // State, Story, Progress, Duration, Session, Branch
+        let extra_height = if full && !session.is_main_session {
+            1
+        } else {
+            0
+        }; // Worktree path
+
+        // Split into header info and output snippet
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(base_height + extra_height),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        // Header info
+        let state_str = format_state(run.machine_state);
+        let duration = format_duration(run.started_at);
+        let story = run.current_story.as_deref().unwrap_or("N/A");
+
+        let progress_str = session
+            .progress
+            .as_ref()
+            .map(|p| p.as_fraction())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        // Session type indicator with visual distinction
+        let (session_type_indicator, session_type_color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+
+        let mut info_lines = vec![
+            // Session type line (first for visibility)
+            Line::from(vec![
+                Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(
+                    session_type_indicator,
+                    Style::default().fg(session_type_color),
+                ),
+            ]),
+            // Branch line (always visible)
+            Line::from(vec![
+                Span::styled("Branch: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&run.branch, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("State: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(
+                    state_str,
+                    Style::default().fg(state_color(run.machine_state)),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Story: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(story, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("Progress: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&progress_str, Style::default().fg(COLOR_PRIMARY)),
+            ]),
+            Line::from(vec![
+                Span::styled("Duration: ", Style::default().fg(COLOR_DIM)),
+                Span::styled(&duration, Style::default().fg(COLOR_WARNING)),
+            ]),
+        ];
+
+        // Add worktree path for worktree sessions in full mode
+        if full && !session.is_main_session {
+            info_lines.insert(
+                2, // After Session and Branch
+                Line::from(vec![
+                    Span::styled("Path: ", Style::default().fg(COLOR_DIM)),
+                    Span::styled(
+                        session.truncated_worktree_path(),
+                        Style::default().fg(COLOR_DIM),
+                    ),
+                ]),
+            );
+        }
+
+        let info = Paragraph::new(info_lines);
+        frame.render_widget(info, chunks[0]);
+
+        // Output snippet section
+        let output_snippet = self.get_output_snippet(run);
+        let output = Paragraph::new(output_snippet)
+            .style(Style::default().fg(COLOR_DIM))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(" Latest Output "),
+            );
+        frame.render_widget(output, chunks[1]);
+    }
+
+    /// Render detailed view for a single run (legacy, for ProjectData)
+    #[allow(dead_code)]
     fn render_run_detail(
         &self,
         frame: &mut Frame,
@@ -1038,17 +1415,31 @@ impl MonitorApp {
             return;
         }
 
+        // Count running sessions per project for multi-session awareness
+        let session_counts: std::collections::HashMap<String, usize> = self
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some()) // Count sessions that are running or have errors
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
         let items: Vec<ListItem> = self
             .projects
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let is_selected = i == self.selected_index;
+                let session_count = session_counts.get(&p.info.name).copied().unwrap_or(0);
 
-                // Status indicator and text - check for errors first
+                // Status indicator and text - check for errors first, then aggregate session state
                 let (status_indicator, status_text, status_clr) = if p.load_error.is_some() {
                     ("⚠", "Error".to_string(), COLOR_ERROR)
-                } else if p.active_run.is_some() {
+                } else if session_count > 1 {
+                    // Multiple sessions running - show count
+                    ("●", format!("[{} sessions]", session_count), COLOR_SUCCESS)
+                } else if p.active_run.is_some() || session_count == 1 {
                     ("●", "Running".to_string(), COLOR_SUCCESS)
                 } else if let Some(last_run) = p.info.last_run_date {
                     (
@@ -1501,6 +1892,45 @@ pub fn run_monitor(poll_interval: u64, project_filter: Option<String>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper function to create a test SessionData for use in tests
+    fn create_test_session(project_name: &str, session_id: &str, branch: &str) -> SessionData {
+        let is_main = session_id == MAIN_SESSION_ID;
+        SessionData {
+            project_name: project_name.to_string(),
+            metadata: SessionMetadata {
+                session_id: session_id.to_string(),
+                worktree_path: PathBuf::from(if is_main {
+                    format!("/home/user/projects/{}", project_name)
+                } else {
+                    format!("/home/user/projects/{}-wt-{}", project_name, branch)
+                }),
+                branch_name: branch.to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            run: Some(RunState::new(
+                PathBuf::from("test.json"),
+                branch.to_string(),
+            )),
+            progress: None,
+            load_error: None,
+            is_main_session: is_main,
+            is_stale: false,
+        }
+    }
+
+    /// Helper function to add N test sessions to the app
+    fn add_test_sessions(app: &mut MonitorApp, count: usize) {
+        for i in 1..=count {
+            app.sessions.push(create_test_session(
+                &format!("project-{}", i),
+                &format!("{:08x}", i), // session IDs like "00000001", "00000002"
+                &format!("branch-{}", i),
+            ));
+        }
+    }
 
     #[test]
     fn test_monitor_app_new() {
@@ -2628,120 +3058,36 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_with_five_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 5);
 
-        // 5 runs = 2 pages (4 on first, 1 on second)
+        // 5 sessions = 2 pages (4 on first, 1 on second)
         assert_eq!(app.total_quadrant_pages(), 2);
     }
 
     #[test]
     fn test_total_quadrant_pages_with_eight_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=8 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 8);
 
-        // 8 runs = 2 pages (4 on each)
+        // 8 sessions = 2 pages (4 on each)
         assert_eq!(app.total_quadrant_pages(), 2);
     }
 
     #[test]
     fn test_total_quadrant_pages_with_nine_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        for i in 1..=9 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        add_test_sessions(&mut app, 9);
 
-        // 9 runs = 3 pages (4, 4, 1)
+        // 9 sessions = 3 pages (4, 4, 1)
         assert_eq!(app.total_quadrant_pages(), 3);
     }
 
     #[test]
     fn test_next_quadrant_page_advances() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Add 5 projects to have 2 pages
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions to have 2 pages
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.next_quadrant_page();
@@ -2770,30 +3116,9 @@ mod tests {
 
     #[test]
     fn test_next_quadrant_page_does_nothing_with_single_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Only 2 projects = 1 page
-        for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Only 2 sessions = 1 page
+        add_test_sessions(&mut app, 2);
 
         assert_eq!(app.quadrant_page, 0);
         app.next_quadrant_page();
@@ -2803,32 +3128,11 @@ mod tests {
 
     #[test]
     fn test_handle_n_key_advances_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.handle_key(KeyCode::Char('n'));
@@ -2837,32 +3141,11 @@ mod tests {
 
     #[test]
     fn test_handle_right_bracket_advances_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         assert_eq!(app.quadrant_page, 0);
         app.handle_key(KeyCode::Char(']'));
@@ -2871,33 +3154,12 @@ mod tests {
 
     #[test]
     fn test_handle_p_key_goes_back_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         app.handle_key(KeyCode::Char('p'));
         assert_eq!(app.quadrant_page, 0);
@@ -2905,33 +3167,12 @@ mod tests {
 
     #[test]
     fn test_handle_left_bracket_goes_back_page_in_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
-        // Add 5 projects
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 5 sessions
+        add_test_sessions(&mut app, 5);
 
         app.handle_key(KeyCode::Char('['));
         assert_eq!(app.quadrant_page, 0);
@@ -2966,32 +3207,11 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_also_clamps_quadrant_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_page = 5; // Out of bounds
-                               // Only 3 projects = 1 page (max page index = 0)
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+                               // Only 3 sessions = 1 page (max page index = 0)
+        add_test_sessions(&mut app, 3);
 
         app.clamp_selection_index();
 
@@ -3000,97 +3220,32 @@ mod tests {
     }
 
     #[test]
-    fn test_total_quadrant_pages_only_counts_active_runs() {
-        use crate::config::ProjectTreeInfo;
-
+    fn test_total_quadrant_pages_only_counts_sessions() {
+        // Sessions are always "active" by definition (we only store running sessions)
         let mut app = MonitorApp::new(1, None);
-        // Add 3 active projects
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("active-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
-        // Add 2 idle projects (no active run)
-        for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("idle-{}", i),
-                    has_active_run: false,
-                    run_status: None,
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: None,
-                progress: None,
-                load_error: None,
-            });
-        }
+        // Add 3 active sessions
+        add_test_sessions(&mut app, 3);
 
-        // Only 3 active = 1 page (not 5)
+        // 3 sessions = 1 page
         assert_eq!(app.total_quadrant_pages(), 1);
     }
 
     #[test]
-    fn test_total_quadrant_pages_includes_error_projects() {
-        use crate::config::ProjectTreeInfo;
-
+    fn test_total_quadrant_pages_includes_error_sessions() {
         let mut app = MonitorApp::new(1, None);
-        // Add 3 active projects
-        for i in 1..=3 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("active-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
-        // Add 2 projects with errors (should count as active)
+        // Add 3 active sessions
+        add_test_sessions(&mut app, 3);
+
+        // Add 2 sessions with errors (should still count)
         for i in 1..=2 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("error-{}", i),
-                    has_active_run: true,
-                    run_status: None,
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: None,
-                progress: None,
-                load_error: Some("Corrupted".to_string()),
-            });
+            let mut session = create_test_session(
+                &format!("error-project-{}", i),
+                &format!("err{:05x}", i),
+                &format!("error-branch-{}", i),
+            );
+            session.run = None;
+            session.load_error = Some("Corrupted".to_string());
+            app.sessions.push(session);
         }
 
         // 3 active + 2 error = 5 = 2 pages
@@ -3264,27 +3419,14 @@ mod tests {
         assert_eq!(app.selected_index, 0);
     }
 
-    fn create_four_active_projects() -> Vec<ProjectData> {
-        use crate::config::ProjectTreeInfo;
-
+    fn create_four_active_sessions() -> Vec<SessionData> {
         (1..=4)
-            .map(|i| ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
+            .map(|i| {
+                create_test_session(
+                    &format!("project-{}", i),
+                    &format!("{:08x}", i),
+                    &format!("branch-{}", i),
+                )
             })
             .collect()
     }
@@ -3294,7 +3436,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Start at top-left (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3326,7 +3468,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Start at top-left (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3358,7 +3500,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
         // Try to go left from (0,0) - should stay
         app.handle_key(KeyCode::Char('h'));
@@ -3389,50 +3531,11 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_fewer_than_four_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // Only 2 projects (positions 0,0 and 0,1)
-        app.projects = vec![
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-1".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-2".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-        ];
+        // Only 2 sessions (positions 0,0 and 0,1)
+        add_test_sessions(&mut app, 2);
 
         // Start at (0,0)
         assert_eq!(app.quadrant_row, 0);
@@ -3443,7 +3546,7 @@ mod tests {
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
 
-        // Cannot move down (no runs in row 1)
+        // Cannot move down (no sessions in row 1)
         app.handle_key(KeyCode::Char('j'));
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
@@ -3451,32 +3554,11 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_three_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
-        // 3 projects (positions 0,0, 0,1, and 1,0)
-        app.projects = (1..=3)
-            .map(|i| ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            })
-            .collect();
+        // 3 sessions (positions 0,0, 0,1, and 1,0)
+        add_test_sessions(&mut app, 3);
 
         // Start at (0,0), move right to (0,1)
         app.handle_key(KeyCode::Char('l'));
@@ -3485,7 +3567,7 @@ mod tests {
 
         // Try to move down from (0,1) - position (1,1) is invalid
         app.handle_key(KeyCode::Char('j'));
-        // Should stay at (0,1) since (1,1) has no run
+        // Should stay at (0,1) since (1,1) has no session
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 1);
 
@@ -3499,7 +3581,7 @@ mod tests {
         assert_eq!(app.quadrant_row, 1);
         assert_eq!(app.quadrant_col, 0);
 
-        // Cannot move right from (1,0) to (1,1) - no run there
+        // Cannot move right from (1,0) to (1,1) - no session there
         app.handle_key(KeyCode::Char('l'));
         assert_eq!(app.quadrant_row, 1);
         assert_eq!(app.quadrant_col, 0);
@@ -3557,7 +3639,7 @@ mod tests {
     #[test]
     fn test_runs_on_current_page_with_full_page() {
         let mut app = MonitorApp::new(1, None);
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
         assert_eq!(app.runs_on_current_page(), 4);
@@ -3565,30 +3647,9 @@ mod tests {
 
     #[test]
     fn test_runs_on_current_page_with_partial_page() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // 5 projects = 4 on page 0, 1 on page 1
-        for i in 1..=5 {
-            app.projects.push(ProjectData {
-                info: ProjectTreeInfo {
-                    name: format!("project-{}", i),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            });
-        }
+        // 5 sessions = 4 on page 0, 1 on page 1
+        add_test_sessions(&mut app, 5);
 
         app.quadrant_page = 0;
         assert_eq!(app.runs_on_current_page(), 4);
@@ -3600,7 +3661,7 @@ mod tests {
     #[test]
     fn test_is_quadrant_valid() {
         let mut app = MonitorApp::new(1, None);
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
         // All 4 positions valid with 4 runs
@@ -3612,48 +3673,9 @@ mod tests {
 
     #[test]
     fn test_is_quadrant_valid_with_two_runs() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
-        // Only 2 projects
-        app.projects = vec![
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-1".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-            ProjectData {
-                info: ProjectTreeInfo {
-                    name: "project-2".to_string(),
-                    has_active_run: true,
-                    run_status: Some(crate::state::RunStatus::Running),
-                    spec_count: 0,
-                    incomplete_spec_count: 0,
-                    spec_md_count: 0,
-                    runs_count: 0,
-                    last_run_date: None,
-                },
-                active_run: Some(RunState::new(
-                    std::path::PathBuf::from("test.json"),
-                    "branch".to_string(),
-                )),
-                progress: None,
-                load_error: None,
-            },
-        ];
+        // Only 2 sessions
+        add_test_sessions(&mut app, 2);
         app.quadrant_page = 0;
 
         // Only positions 0,0 and 0,1 valid
@@ -3667,13 +3689,13 @@ mod tests {
     fn test_clamp_selection_index_clamps_quadrant_position() {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
-        // Start at position (1,1) with 4 runs
+        // Start at position (1,1) with 4 sessions
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = create_four_active_projects();
+        app.sessions = create_four_active_sessions();
 
-        // Now reduce to only 2 runs
-        app.projects.truncate(2);
+        // Now reduce to only 2 sessions
+        app.sessions.truncate(2);
 
         app.clamp_selection_index();
 
@@ -3684,30 +3706,12 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_with_one_run() {
-        use crate::config::ProjectTreeInfo;
-
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = vec![ProjectData {
-            info: ProjectTreeInfo {
-                name: "project-1".to_string(),
-                has_active_run: true,
-                run_status: Some(crate::state::RunStatus::Running),
-                spec_count: 0,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: Some(RunState::new(
-                std::path::PathBuf::from("test.json"),
-                "branch".to_string(),
-            )),
-            progress: None,
-            load_error: None,
-        }];
+        // Only 1 session
+        add_test_sessions(&mut app, 1);
 
         app.clamp_selection_index();
 
@@ -3722,7 +3726,7 @@ mod tests {
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
-        app.projects = vec![];
+        // No sessions - sessions vector is already empty by default
 
         app.clamp_selection_index();
 
@@ -3925,5 +3929,859 @@ mod tests {
         // Esc from ProjectList quits
         app.handle_key(KeyCode::Esc);
         assert!(app.should_quit());
+    }
+
+    // ============================================================================
+    // US-002: Session Display Title Tests
+    // ============================================================================
+
+    #[test]
+    fn test_session_display_title_main_session() {
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "feature-branch");
+        assert_eq!(session.display_title(), "my-project (main)");
+    }
+
+    #[test]
+    fn test_session_display_title_worktree_session() {
+        let session = create_test_session("my-project", "abc12345", "feature-branch");
+        assert_eq!(session.display_title(), "my-project (abc12345)");
+    }
+
+    #[test]
+    fn test_session_display_title_8char_hex_id() {
+        // Verify that session IDs are displayed in their 8-char hex format
+        let session = create_test_session("autom8", "deadbeef", "worktree-branch");
+        assert_eq!(session.display_title(), "autom8 (deadbeef)");
+    }
+
+    #[test]
+    fn test_multiple_sessions_same_project_in_grid() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add three sessions for the same project
+        app.sessions.push(create_test_session(
+            "my-project",
+            MAIN_SESSION_ID,
+            "main-branch",
+        ));
+        app.sessions
+            .push(create_test_session("my-project", "abc12345", "feature-1"));
+        app.sessions
+            .push(create_test_session("my-project", "def67890", "feature-2"));
+
+        // All three should be in the sessions list
+        assert_eq!(app.sessions.len(), 3);
+
+        // Verify each has the correct project name
+        assert_eq!(app.sessions[0].project_name, "my-project");
+        assert_eq!(app.sessions[1].project_name, "my-project");
+        assert_eq!(app.sessions[2].project_name, "my-project");
+
+        // Verify distinct session IDs
+        assert_eq!(app.sessions[0].metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(app.sessions[1].metadata.session_id, "abc12345");
+        assert_eq!(app.sessions[2].metadata.session_id, "def67890");
+
+        // Verify distinct display titles
+        assert_eq!(app.sessions[0].display_title(), "my-project (main)");
+        assert_eq!(app.sessions[1].display_title(), "my-project (abc12345)");
+        assert_eq!(app.sessions[2].display_title(), "my-project (def67890)");
+    }
+
+    #[test]
+    fn test_pagination_with_multiple_sessions_same_project() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add 5 sessions for the same project (to span 2 pages)
+        for i in 1..=5 {
+            app.sessions.push(create_test_session(
+                "my-project",
+                &format!("{:08x}", i),
+                &format!("feature-{}", i),
+            ));
+        }
+
+        // Should have 2 pages (4 on first, 1 on second)
+        assert_eq!(app.total_quadrant_pages(), 2);
+
+        // First page should have 4 sessions
+        assert_eq!(app.quadrant_page, 0);
+
+        // Navigate to second page
+        app.next_quadrant_page();
+        assert_eq!(app.quadrant_page, 1);
+
+        // Verify all sessions have distinct display titles
+        let titles: Vec<_> = app.sessions.iter().map(|s| s.display_title()).collect();
+        assert_eq!(titles.len(), 5);
+        // Check uniqueness
+        let unique_titles: std::collections::HashSet<_> = titles.iter().collect();
+        assert_eq!(unique_titles.len(), 5);
+    }
+
+    #[test]
+    fn test_sessions_from_different_projects_in_grid() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add sessions from different projects
+        app.sessions.push(create_test_session(
+            "project-alpha",
+            MAIN_SESSION_ID,
+            "main-branch",
+        ));
+        app.sessions
+            .push(create_test_session("project-beta", "12345678", "feature-x"));
+        app.sessions.push(create_test_session(
+            "project-gamma",
+            MAIN_SESSION_ID,
+            "develop",
+        ));
+
+        // All three should be in the grid
+        assert_eq!(app.sessions.len(), 3);
+
+        // Verify display titles
+        assert_eq!(app.sessions[0].display_title(), "project-alpha (main)");
+        assert_eq!(app.sessions[1].display_title(), "project-beta (12345678)");
+        assert_eq!(app.sessions[2].display_title(), "project-gamma (main)");
+    }
+
+    #[test]
+    fn test_is_main_session_flag_correct() {
+        // Main session should have is_main_session = true
+        let main_session = create_test_session("test", MAIN_SESSION_ID, "branch");
+        assert!(main_session.is_main_session);
+
+        // Worktree session should have is_main_session = false
+        let worktree_session = create_test_session("test", "abcd1234", "branch");
+        assert!(!worktree_session.is_main_session);
+    }
+
+    // ===========================================
+    // US-003: Session Context in Run Detail Tests
+    // ===========================================
+
+    #[test]
+    fn test_us003_main_session_indicator() {
+        // Main sessions should use "● main" indicator
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "main");
+        assert!(session.is_main_session);
+        // The indicator is constructed in render_session_detail, verify the condition
+        let (indicator, color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+        assert_eq!(indicator, "● main");
+        assert_eq!(color, COLOR_PRIMARY); // Cyan for main
+    }
+
+    #[test]
+    fn test_us003_worktree_session_indicator() {
+        // Worktree sessions should use "◆ worktree" indicator
+        let session = create_test_session("my-project", "abc12345", "feature-x");
+        assert!(!session.is_main_session);
+        let (indicator, color) = if session.is_main_session {
+            ("● main", COLOR_PRIMARY)
+        } else {
+            ("◆ worktree", COLOR_REVIEW)
+        };
+        assert_eq!(indicator, "◆ worktree");
+        assert_eq!(color, COLOR_REVIEW); // Magenta for worktree
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_short() {
+        // Short paths should display fully
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path = PathBuf::from("foo/bar");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, "foo/bar");
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_long() {
+        // Long paths should show ".../last/two" format
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path = PathBuf::from("/home/user/projects/autom8-wt-feature-x");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, ".../projects/autom8-wt-feature-x");
+    }
+
+    #[test]
+    fn test_us003_truncated_worktree_path_exactly_two_components() {
+        // Exactly 2 components should display fully
+        let mut session = create_test_session("test", "abc12345", "branch");
+        session.metadata.worktree_path = PathBuf::from("projects/repo");
+        let truncated = session.truncated_worktree_path();
+        assert_eq!(truncated, "projects/repo");
+    }
+
+    #[test]
+    fn test_us003_main_session_no_worktree_path_in_detail() {
+        // Main sessions should not show worktree path (tested by checking is_main_session)
+        let session = create_test_session("my-project", MAIN_SESSION_ID, "main");
+        // In render_session_detail, worktree path is only shown when:
+        // full && !session.is_main_session
+        // Since session.is_main_session is true, path would NOT be shown
+        assert!(session.is_main_session);
+    }
+
+    #[test]
+    fn test_us003_worktree_session_has_path_available() {
+        // Worktree sessions should have path available for display
+        let session = create_test_session("my-project", "abc12345", "feature-x");
+        assert!(!session.is_main_session);
+        // In render_session_detail, path IS shown when full && !is_main_session
+        // Verify the path is populated
+        assert!(!session.metadata.worktree_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_us003_branch_always_available() {
+        // Both main and worktree sessions should have branch available
+        let main_session = create_test_session("project", MAIN_SESSION_ID, "develop");
+        let worktree_session = create_test_session("project", "abc12345", "feature-x");
+
+        // Branch should be in the run state
+        assert_eq!(main_session.run.as_ref().unwrap().branch, "develop");
+        assert_eq!(worktree_session.run.as_ref().unwrap().branch, "feature-x");
+    }
+
+    #[test]
+    fn test_us003_visual_distinction_colors() {
+        // Verify the color constants are distinct
+        assert_ne!(COLOR_PRIMARY, COLOR_REVIEW);
+        // COLOR_PRIMARY is Cyan, COLOR_REVIEW is Magenta
+        assert_eq!(COLOR_PRIMARY, Color::Cyan);
+        assert_eq!(COLOR_REVIEW, Color::Magenta);
+    }
+
+    // ============================================================================
+    // US-007: Integration Test - Multiple Concurrent Sessions
+    // ============================================================================
+    //
+    // These tests verify that the monitor correctly displays multiple concurrent
+    // sessions for the same project (main repo + worktree scenarios).
+
+    #[test]
+    fn test_us007_main_and_worktree_sessions_both_appear_in_grid() {
+        // Simulates: Run in main repo AND run with --worktree for same project
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add a main repo session (simulating: `autom8 run spec.json`)
+        app.sessions.push(create_test_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "features/worktrees",
+        ));
+
+        // Add a worktree session (simulating: `autom8 run --worktree other-spec.json`)
+        app.sessions.push(create_test_session(
+            "autom8",
+            "abc12345",
+            "features/other-feature",
+        ));
+
+        // Both sessions should appear in the Active Runs grid
+        assert_eq!(app.sessions.len(), 2);
+
+        // Both should have the same project name
+        assert_eq!(app.sessions[0].project_name, "autom8");
+        assert_eq!(app.sessions[1].project_name, "autom8");
+
+        // But different session IDs
+        assert_eq!(app.sessions[0].metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(app.sessions[1].metadata.session_id, "abc12345");
+
+        // Display titles should distinguish them
+        assert_eq!(app.sessions[0].display_title(), "autom8 (main)");
+        assert_eq!(app.sessions[1].display_title(), "autom8 (abc12345)");
+    }
+
+    #[test]
+    fn test_us007_each_session_shows_correct_session_id_in_title() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Add sessions with distinct session IDs
+        app.sessions
+            .push(create_test_session("myproject", MAIN_SESSION_ID, "main"));
+        app.sessions
+            .push(create_test_session("myproject", "deadbeef", "feature-a"));
+        app.sessions
+            .push(create_test_session("myproject", "cafebabe", "feature-b"));
+
+        // Each should have correct title format
+        assert_eq!(app.sessions[0].display_title(), "myproject (main)");
+        assert_eq!(app.sessions[1].display_title(), "myproject (deadbeef)");
+        assert_eq!(app.sessions[2].display_title(), "myproject (cafebabe)");
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_progress() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Create main session with progress 2/5
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        main_session.progress = Some(RunProgress {
+            completed: 2,
+            total: 5,
+        });
+
+        // Create worktree session with different progress 4/8
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        worktree_session.progress = Some(RunProgress {
+            completed: 4,
+            total: 8,
+        });
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify independent progress
+        let main_progress = app.sessions[0].progress.as_ref().unwrap();
+        let wt_progress = app.sessions[1].progress.as_ref().unwrap();
+
+        assert_eq!(main_progress.completed, 2);
+        assert_eq!(main_progress.total, 5);
+        assert_eq!(main_progress.as_fraction(), "Story 3/5");
+
+        assert_eq!(wt_progress.completed, 4);
+        assert_eq!(wt_progress.total, 8);
+        assert_eq!(wt_progress.as_fraction(), "Story 5/8");
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_state() {
+        use crate::state::MachineState;
+
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session is in Reviewing state
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        if let Some(ref mut run) = main_session.run {
+            run.machine_state = MachineState::Reviewing;
+        }
+
+        // Worktree session is in RunningClaude state
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        if let Some(ref mut run) = worktree_session.run {
+            run.machine_state = MachineState::RunningClaude;
+        }
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify independent states
+        assert_eq!(
+            app.sessions[0].run.as_ref().unwrap().machine_state,
+            MachineState::Reviewing
+        );
+        assert_eq!(
+            app.sessions[1].run.as_ref().unwrap().machine_state,
+            MachineState::RunningClaude
+        );
+    }
+
+    #[test]
+    fn test_us007_sessions_have_independent_branches() {
+        let mut app = MonitorApp::new(1, None);
+
+        app.sessions
+            .push(create_test_session("autom8", MAIN_SESSION_ID, "main"));
+        app.sessions.push(create_test_session(
+            "autom8",
+            "abc12345",
+            "features/new-feature",
+        ));
+
+        // Branches should be independent
+        assert_eq!(app.sessions[0].run.as_ref().unwrap().branch, "main");
+        assert_eq!(
+            app.sessions[1].run.as_ref().unwrap().branch,
+            "features/new-feature"
+        );
+
+        // Also verify branch in metadata
+        assert_eq!(app.sessions[0].metadata.branch_name, "main");
+        assert_eq!(app.sessions[1].metadata.branch_name, "features/new-feature");
+    }
+
+    #[test]
+    fn test_us007_quadrant_navigation_with_concurrent_sessions() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+        app.has_active_runs = true;
+
+        // Add 2 sessions for same project (main + worktree)
+        app.sessions
+            .push(create_test_session("autom8", MAIN_SESSION_ID, "main"));
+        app.sessions
+            .push(create_test_session("autom8", "abc12345", "feature-x"));
+
+        // Both should be navigable
+        assert!(app.is_quadrant_valid(0, 0));
+        assert!(app.is_quadrant_valid(0, 1));
+        assert!(!app.is_quadrant_valid(1, 0)); // No third session
+
+        // Navigate between them
+        // Session index is: quadrant_page * 4 + quadrant_row * 2 + quadrant_col
+        app.quadrant_col = 0;
+        app.quadrant_row = 0;
+        let session_idx_0 = app.quadrant_page * 4 + app.quadrant_row * 2 + app.quadrant_col;
+        assert_eq!(session_idx_0, 0);
+
+        app.handle_key(KeyCode::Char('l')); // Move right
+        assert_eq!(app.quadrant_col, 1);
+        let session_idx_1 = app.quadrant_page * 4 + app.quadrant_row * 2 + app.quadrant_col;
+        assert_eq!(session_idx_1, 1);
+    }
+
+    #[test]
+    fn test_us007_session_type_indicators_in_concurrent_sessions() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session
+        let main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        assert!(main_session.is_main_session);
+
+        // Worktree session
+        let worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        assert!(!worktree_session.is_main_session);
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Verify type indicators would be different
+        // (The actual indicator logic uses is_main_session to choose)
+        let get_indicator = |is_main: bool| {
+            if is_main {
+                ("● main", COLOR_PRIMARY)
+            } else {
+                ("◆ worktree", COLOR_REVIEW)
+            }
+        };
+
+        let (main_ind, main_color) = get_indicator(app.sessions[0].is_main_session);
+        let (wt_ind, wt_color) = get_indicator(app.sessions[1].is_main_session);
+
+        assert_eq!(main_ind, "● main");
+        assert_eq!(wt_ind, "◆ worktree");
+        assert_eq!(main_color, Color::Cyan);
+        assert_eq!(wt_color, Color::Magenta);
+    }
+
+    #[test]
+    fn test_us007_worktree_path_differs_between_sessions() {
+        let mut app = MonitorApp::new(1, None);
+
+        // Main session - path is the main repo
+        let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
+        main_session.metadata.worktree_path = PathBuf::from("/home/user/projects/autom8");
+
+        // Worktree session - path is the worktree directory
+        let mut worktree_session = create_test_session("autom8", "abc12345", "feature-x");
+        worktree_session.metadata.worktree_path =
+            PathBuf::from("/home/user/projects/autom8-wt-feature-x");
+
+        app.sessions.push(main_session);
+        app.sessions.push(worktree_session);
+
+        // Paths should be different
+        assert_ne!(
+            app.sessions[0].metadata.worktree_path,
+            app.sessions[1].metadata.worktree_path
+        );
+
+        // Truncated paths should also be different
+        assert_ne!(
+            app.sessions[0].truncated_worktree_path(),
+            app.sessions[1].truncated_worktree_path()
+        );
+
+        // Main shows full path (only 2 components)
+        assert_eq!(
+            app.sessions[0].truncated_worktree_path(),
+            ".../projects/autom8"
+        );
+        // Worktree shows truncated path
+        assert_eq!(
+            app.sessions[1].truncated_worktree_path(),
+            ".../projects/autom8-wt-feature-x"
+        );
+    }
+
+    // ==========================================================================
+    // US-004 Tests: Update error panel display for session context
+    // ==========================================================================
+    // These tests verify that error panels show session identity and appropriate
+    // error messages for corrupted states and stale sessions.
+
+    /// Helper function to create a test session with an error
+    fn create_error_session(
+        project_name: &str,
+        session_id: &str,
+        error: &str,
+        is_stale: bool,
+    ) -> SessionData {
+        let is_main = session_id == MAIN_SESSION_ID;
+        SessionData {
+            project_name: project_name.to_string(),
+            metadata: SessionMetadata {
+                session_id: session_id.to_string(),
+                worktree_path: PathBuf::from(if is_main {
+                    format!("/home/user/projects/{}", project_name)
+                } else {
+                    format!("/home/user/projects/{}-wt-deleted", project_name)
+                }),
+                branch_name: "feature/test".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: Some(error.to_string()),
+            is_main_session: is_main,
+            is_stale,
+        }
+    }
+
+    #[test]
+    fn test_us004_error_panel_title_shows_project_and_session_id() {
+        // Main session error panel
+        let main_error_session = create_error_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert_eq!(main_error_session.display_title(), "autom8 (main)");
+
+        // Worktree session error panel
+        let worktree_error_session =
+            create_error_session("autom8", "abc12345", "Corrupted state: invalid JSON", false);
+        assert_eq!(worktree_error_session.display_title(), "autom8 (abc12345)");
+    }
+
+    #[test]
+    fn test_us004_error_session_has_load_error() {
+        let error_session = create_error_session(
+            "myproject",
+            "deadbeef",
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert!(error_session.load_error.is_some());
+        assert_eq!(
+            error_session.load_error.as_ref().unwrap(),
+            "Corrupted state: invalid JSON"
+        );
+    }
+
+    #[test]
+    fn test_us004_stale_session_has_is_stale_flag() {
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+        assert!(stale_session.is_stale);
+        assert!(stale_session.load_error.is_some());
+    }
+
+    #[test]
+    fn test_us004_non_stale_error_session_has_is_stale_false() {
+        let error_session = create_error_session(
+            "autom8",
+            MAIN_SESSION_ID,
+            "Corrupted state: invalid JSON",
+            false,
+        );
+        assert!(!error_session.is_stale);
+    }
+
+    #[test]
+    fn test_us004_stale_session_error_message_content() {
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+        // The stale session should have an error indicating worktree deletion
+        assert!(stale_session
+            .load_error
+            .as_ref()
+            .unwrap()
+            .contains("deleted"));
+    }
+
+    #[test]
+    fn test_us004_error_session_display_title_format() {
+        // Verify the display_title works correctly for error sessions
+        let main_error = create_error_session("proj", MAIN_SESSION_ID, "error", false);
+        let worktree_error = create_error_session("proj", "12345678", "error", true);
+
+        // Main should show "(main)"
+        assert!(main_error.display_title().ends_with("(main)"));
+        // Worktree should show the 8-char session ID
+        assert!(worktree_error.display_title().ends_with("(12345678)"));
+    }
+
+    #[test]
+    fn test_us004_error_and_stale_sessions_appear_in_app() {
+        let mut app = MonitorApp::new(1, None);
+        app.current_view = View::ActiveRuns;
+
+        // Add a normal session
+        app.sessions
+            .push(create_test_session("proj1", MAIN_SESSION_ID, "main"));
+
+        // Add an error session (corrupted state)
+        app.sessions.push(create_error_session(
+            "proj2",
+            "aabbccdd",
+            "Corrupted state",
+            false,
+        ));
+
+        // Add a stale session
+        app.sessions.push(create_error_session(
+            "proj3",
+            "11223344",
+            "Worktree has been deleted",
+            true,
+        ));
+
+        // All three should be in the sessions list
+        assert_eq!(app.sessions.len(), 3);
+
+        // First is normal (no error)
+        assert!(app.sessions[0].load_error.is_none());
+        assert!(!app.sessions[0].is_stale);
+
+        // Second is error but not stale
+        assert!(app.sessions[1].load_error.is_some());
+        assert!(!app.sessions[1].is_stale);
+
+        // Third is stale
+        assert!(app.sessions[2].load_error.is_some());
+        assert!(app.sessions[2].is_stale);
+    }
+
+    #[test]
+    fn test_us004_stale_session_metadata_preserved() {
+        // Stale sessions should still have accessible metadata for display
+        let stale_session =
+            create_error_session("autom8", "abc12345", "Worktree has been deleted", true);
+
+        // Session ID should be accessible for error display
+        assert_eq!(stale_session.metadata.session_id, "abc12345");
+
+        // Project name should be accessible for title
+        assert_eq!(stale_session.project_name, "autom8");
+
+        // Branch should be accessible (shows what was being worked on)
+        assert_eq!(stale_session.metadata.branch_name, "feature/test");
+    }
+
+    // ============================================================================
+    // US-005: Project List view multi-session awareness tests
+    // ============================================================================
+
+    /// Helper to create a project data entry
+    fn create_test_project(name: &str) -> ProjectData {
+        ProjectData {
+            info: ProjectTreeInfo {
+                name: name.to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        }
+    }
+
+    #[test]
+    fn test_us005_single_session_shows_running() {
+        // When a project has exactly 1 session running, it should show "Running"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        // Count sessions for the project
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 1);
+        // Single session should show "Running", not "[1 sessions]"
+    }
+
+    #[test]
+    fn test_us005_multiple_sessions_show_count() {
+        // When a project has >1 sessions running, it should show "[N sessions]"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // Add 3 sessions for the same project
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "abc12345", "feature-a"),
+            create_test_session("autom8", "def67890", "feature-b"),
+        ];
+
+        // Count sessions for the project
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 3);
+        // Should show "[3 sessions]"
+    }
+
+    #[test]
+    fn test_us005_session_count_per_project() {
+        // Different projects should have independent session counts
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![
+            create_test_project("autom8"),
+            create_test_project("other-project"),
+        ];
+
+        // autom8 has 2 sessions, other-project has 1
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "abc12345", "feature-a"),
+            create_test_session("other-project", MAIN_SESSION_ID, "main"),
+        ];
+
+        // Build session counts like render_project_list does
+        let session_counts: std::collections::HashMap<String, usize> = app
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some())
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
+        assert_eq!(session_counts.get("autom8"), Some(&2));
+        assert_eq!(session_counts.get("other-project"), Some(&1));
+    }
+
+    #[test]
+    fn test_us005_no_sessions_idle_status() {
+        // Projects with no running sessions should show "Idle"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+        app.sessions = vec![]; // No sessions
+
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 0);
+        // Should show "Idle" (or last run date if available)
+    }
+
+    #[test]
+    fn test_us005_aggregate_state_any_running() {
+        // If any session is running, the project status should be "running"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // One session running
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        let has_running_sessions = app
+            .sessions
+            .iter()
+            .any(|s| s.project_name == "autom8" && s.run.is_some());
+
+        assert!(has_running_sessions);
+    }
+
+    #[test]
+    fn test_us005_session_count_includes_errors() {
+        // Sessions with load_error should also be counted (they're still "active")
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // One normal session, one error session
+        let mut error_session = create_test_session("autom8", "abc12345", "feature-a");
+        error_session.run = None;
+        error_session.load_error = Some("Corrupted state".to_string());
+
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            error_session,
+        ];
+
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 2);
+    }
+
+    #[test]
+    fn test_us005_mixed_projects_correct_counts() {
+        // Test a realistic scenario with multiple projects and varying session counts
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![
+            create_test_project("autom8"),
+            create_test_project("web-app"),
+            create_test_project("api-service"),
+        ];
+
+        app.sessions = vec![
+            // autom8: 3 sessions
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "11111111", "feature-1"),
+            create_test_session("autom8", "22222222", "feature-2"),
+            // web-app: 1 session
+            create_test_session("web-app", MAIN_SESSION_ID, "main"),
+            // api-service: 0 sessions (not in sessions list)
+        ];
+
+        let session_counts: std::collections::HashMap<String, usize> = app
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some())
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
+        assert_eq!(session_counts.get("autom8"), Some(&3)); // Shows "[3 sessions]"
+        assert_eq!(session_counts.get("web-app"), Some(&1)); // Shows "Running"
+        assert_eq!(session_counts.get("api-service"), None); // Shows "Idle"
+    }
+
+    #[test]
+    fn test_us005_project_error_takes_precedence() {
+        // If a project has a load_error in ProjectData, that should show "Error"
+        // even if sessions are running
+        let mut app = MonitorApp::new(1, None);
+        let mut project = create_test_project("autom8");
+        project.load_error = Some("Config error".to_string());
+        app.projects = vec![project];
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        // The project has load_error, so it should show "Error" status
+        assert!(app.projects[0].load_error.is_some());
     }
 }

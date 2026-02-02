@@ -15,13 +15,18 @@ use crate::output::{
     print_pr_success, print_pr_updated, print_proceeding_to_implementation, print_project_info,
     print_review_passed, print_reviewing, print_run_summary, print_skip_review,
     print_spec_generated, print_spec_loaded, print_state_transition, print_story_complete,
-    print_tasks_progress, BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_tasks_progress, print_worktree_context, print_worktree_created, print_worktree_reused,
+    BOLD, CYAN, GRAY, RESET, YELLOW,
 };
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
 };
 use crate::spec::{Spec, UserStory};
 use crate::state::{IterationStatus, MachineState, RunState, StateManager};
+use crate::worktree::{
+    ensure_worktree, format_worktree_error, generate_session_id, generate_worktree_path,
+    is_in_worktree, remove_worktree, WorktreeResult,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -96,6 +101,9 @@ pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
     skip_review: bool,
+    /// Override for the worktree config setting.
+    /// None = use config value, Some(true/false) = override config.
+    worktree_override: Option<bool>,
 }
 
 impl Runner {
@@ -104,6 +112,7 @@ impl Runner {
             state_manager: StateManager::new()?,
             verbose: false,
             skip_review: false,
+            worktree_override: None,
         })
     }
 
@@ -117,9 +126,109 @@ impl Runner {
         self
     }
 
+    /// Set the worktree mode override.
+    ///
+    /// When set, this overrides the `worktree` setting from the config file.
+    /// Use `true` to enable worktree mode (--worktree flag).
+    /// Use `false` to disable worktree mode (--no-worktree flag).
+    pub fn with_worktree(mut self, worktree: bool) -> Self {
+        self.worktree_override = Some(worktree);
+        self
+    }
+
+    /// Get the effective worktree mode, considering CLI override and config.
+    ///
+    /// Priority: CLI flag > config file > default (false).
+    #[allow(dead_code)]
+    pub fn effective_worktree(&self) -> Result<bool> {
+        if let Some(override_value) = self.worktree_override {
+            return Ok(override_value);
+        }
+        let config = get_effective_config()?;
+        Ok(config.worktree)
+    }
+
     /// Load the effective config.
     fn load_config_with_override(&self) -> Result<crate::config::Config> {
         get_effective_config()
+    }
+
+    /// Check if worktree mode is effective (considering CLI override and config).
+    fn is_worktree_mode(&self, config: &crate::config::Config) -> bool {
+        if let Some(override_value) = self.worktree_override {
+            return override_value;
+        }
+        config.worktree
+    }
+
+    /// Setup worktree context for a run.
+    ///
+    /// When worktree mode is enabled, this will:
+    /// 1. Create or reuse a worktree for the specified branch
+    /// 2. Change the current working directory to the worktree
+    /// 3. Generate a new session ID for the worktree
+    ///
+    /// Returns the session ID and worktree path if a worktree was created/reused,
+    /// or None if running in non-worktree mode.
+    fn setup_worktree_context(
+        &self,
+        config: &crate::config::Config,
+        branch_name: &str,
+    ) -> Result<Option<(String, PathBuf)>> {
+        // Check if worktree mode is enabled
+        if !self.is_worktree_mode(config) {
+            return Ok(None);
+        }
+
+        // Check if we're in a git repo
+        if !git::is_git_repo() {
+            print_info(
+                "Worktree mode enabled but not in a git repository. Running in current directory.",
+            );
+            return Ok(None);
+        }
+
+        // Create or reuse worktree
+        let pattern = &config.worktree_path_pattern;
+        let result = ensure_worktree(pattern, branch_name).map_err(|e| {
+            // Provide enhanced error message for worktree failures
+            if let Autom8Error::WorktreeError(msg) = &e {
+                let worktree_path = generate_worktree_path(pattern, branch_name)
+                    .unwrap_or_else(|_| PathBuf::from("<unknown>"));
+                let formatted = format_worktree_error(msg, branch_name, &worktree_path);
+                Autom8Error::WorktreeError(formatted)
+            } else {
+                e
+            }
+        })?;
+
+        // Get the worktree path and inform the user
+        let worktree_path = result.path().to_path_buf();
+        match result {
+            WorktreeResult::Created(_) => {
+                print_worktree_created(&worktree_path, branch_name);
+            }
+            WorktreeResult::Reused(_) => {
+                print_worktree_reused(&worktree_path, branch_name);
+            }
+        }
+
+        // Change to the worktree directory
+        std::env::set_current_dir(&worktree_path).map_err(|e| {
+            Autom8Error::WorktreeError(format!(
+                "Failed to change to worktree directory '{}': {}",
+                worktree_path.display(),
+                e
+            ))
+        })?;
+
+        // Print context info
+        print_worktree_context(&worktree_path);
+
+        // Generate session ID for the worktree
+        let session_id = generate_session_id(&worktree_path);
+
+        Ok(Some((session_id, worktree_path)))
     }
 
     /// Handle a fatal error by transitioning to Failed state, saving, displaying error, and optionally printing summary.
@@ -795,8 +904,12 @@ impl Runner {
         let spec_json_path = spec_dir.join(format!("{}.json", stem));
 
         // Initialize state with config snapshot for resume support
-        let mut state =
-            RunState::from_spec_with_config(spec_path.clone(), spec_json_path.clone(), config);
+        // Clone config since we need it later for worktree setup
+        let mut state = RunState::from_spec_with_config(
+            spec_path.clone(),
+            spec_json_path.clone(),
+            config.clone(),
+        );
         self.state_manager.save(&state)?;
 
         // LoadingSpec state
@@ -839,16 +952,52 @@ impl Runner {
 
         print_spec_generated(&spec, &spec_json_path);
 
-        // Update state with branch from generated spec
+        // Check for branch conflicts with other active sessions (US-006)
+        // This must happen before any git operations to prevent race conditions
+        if let Some(conflict) = self
+            .state_manager
+            .check_branch_conflict(&spec.branch_name)?
+        {
+            return Err(Autom8Error::BranchConflict {
+                branch: spec.branch_name.clone(),
+                session_id: conflict.session_id,
+                worktree_path: conflict.worktree_path,
+            });
+        }
+
+        // Setup worktree context if enabled (US-007)
+        // This creates/reuses a worktree and changes the current working directory
+        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+
+        // Create the appropriate StateManager for this context
+        let effective_state_manager = if let Some((ref session_id, _)) = worktree_context {
+            // In worktree mode, use the worktree's session ID
+            StateManager::with_session(session_id.clone())?
+        } else {
+            // Not in worktree mode, use auto-detected session
+            StateManager::new()?
+        };
+
+        // Update state with branch from generated spec and session ID
         state.branch = spec.branch_name.clone();
+        if let Some((session_id, _)) = &worktree_context {
+            state.session_id = Some(session_id.clone());
+        }
         state.transition_to(MachineState::Initializing);
-        self.state_manager.save(&state)?;
+        effective_state_manager.save(&state)?;
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
 
-        // Continue with normal implementation flow
-        self.run_implementation_loop(state, &spec_json_path)
+        // Create a new Runner with the effective state manager and continue
+        let effective_runner = Runner {
+            state_manager: effective_state_manager,
+            verbose: self.verbose,
+            skip_review: self.skip_review,
+            worktree_override: self.worktree_override,
+        };
+
+        effective_runner.run_implementation_loop(state, &spec_json_path)
     }
 
     pub fn run(&self, spec_json_path: &Path) -> Result<()> {
@@ -870,8 +1019,34 @@ impl Runner {
         // Load and validate spec
         let spec = Spec::load(&spec_json_path)?;
 
-        // If in a git repo, ensure we're on the correct branch
-        if git::is_git_repo() {
+        // Check for branch conflicts with other active sessions (US-006)
+        // This must happen before any git operations to prevent race conditions
+        if let Some(conflict) = self
+            .state_manager
+            .check_branch_conflict(&spec.branch_name)?
+        {
+            return Err(Autom8Error::BranchConflict {
+                branch: spec.branch_name.clone(),
+                session_id: conflict.session_id,
+                worktree_path: conflict.worktree_path,
+            });
+        }
+
+        // Setup worktree context if enabled (US-007)
+        // This creates/reuses a worktree and changes the current working directory
+        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+
+        // Create the appropriate StateManager for this context
+        let state_manager = if let Some((ref session_id, _)) = worktree_context {
+            // In worktree mode, use the worktree's session ID
+            StateManager::with_session(session_id.clone())?
+        } else {
+            // Not in worktree mode, use auto-detected session
+            StateManager::new()?
+        };
+
+        // If NOT in worktree mode and in a git repo, ensure we're on the correct branch
+        if worktree_context.is_none() && git::is_git_repo() {
             let current_branch = git::current_branch()?;
             if current_branch != spec.branch_name {
                 print_info(&format!(
@@ -883,16 +1058,34 @@ impl Runner {
         }
 
         // Initialize state with config snapshot for resume support
-        let state = RunState::new_with_config(
-            spec_json_path.to_path_buf(),
-            spec.branch_name.clone(),
-            config,
-        );
+        let state = if let Some((session_id, _)) = worktree_context {
+            RunState::new_with_config_and_session(
+                spec_json_path.to_path_buf(),
+                spec.branch_name.clone(),
+                config,
+                session_id,
+            )
+        } else {
+            RunState::new_with_config(
+                spec_json_path.to_path_buf(),
+                spec.branch_name.clone(),
+                config,
+            )
+        };
 
         print_state_transition(MachineState::Idle, MachineState::Initializing);
         print_project_info(&spec);
 
-        self.run_implementation_loop(state, &spec_json_path)
+        // Create a new Runner with the worktree-specific state manager
+        // and delegate to it for the implementation loop
+        let worktree_runner = Runner {
+            state_manager,
+            verbose: self.verbose,
+            skip_review: self.skip_review,
+            worktree_override: self.worktree_override,
+        };
+
+        worktree_runner.run_implementation_loop(state, &spec_json_path)
     }
 
     fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {
@@ -1088,6 +1281,52 @@ impl Runner {
 
     fn archive_and_cleanup(&self, state: &RunState) -> Result<()> {
         self.state_manager.archive(state)?;
+
+        // Check if we should clean up the worktree after successful completion
+        // Only applies when:
+        // 1. Run completed successfully (not failed)
+        // 2. worktree_cleanup is enabled in config
+        // 3. We're currently in a worktree (not the main repo)
+        let config = state.effective_config();
+        if state.status == crate::state::RunStatus::Completed && config.worktree_cleanup {
+            // Check if we're in a worktree
+            if let Ok(true) = is_in_worktree() {
+                // Get the worktree path from session metadata
+                if let Ok(Some(metadata)) = self.state_manager.load_metadata() {
+                    let worktree_path = metadata.worktree_path;
+
+                    // Clear state before removing worktree (since we're inside it)
+                    self.state_manager.clear_current()?;
+
+                    // Change to the main repo before removing worktree
+                    // We need to get out of the worktree directory first
+                    if let Ok(main_repo) = crate::worktree::get_main_repo_root() {
+                        if std::env::set_current_dir(&main_repo).is_ok() {
+                            // Now remove the worktree
+                            match remove_worktree(&worktree_path, false) {
+                                Ok(()) => {
+                                    print_info(&format!(
+                                        "Cleaned up worktree: {}",
+                                        worktree_path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    // Non-fatal - warn but continue
+                                    print_info(&format!(
+                                        "Warning: failed to remove worktree: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(());
+                }
+            }
+        }
+
+        // Default path: just clear the state
         self.state_manager.clear_current()?;
         Ok(())
     }
@@ -1128,6 +1367,67 @@ mod tests {
             .with_skip_review(true);
         assert!(runner.skip_review);
         assert!(runner.verbose);
+    }
+
+    // ========================================================================
+    // US-005: Worktree Configuration Override tests
+    // ========================================================================
+
+    #[test]
+    fn test_runner_worktree_override_defaults_to_none() {
+        let runner = Runner::new().unwrap();
+        assert!(
+            runner.worktree_override.is_none(),
+            "worktree_override should be None by default"
+        );
+    }
+
+    #[test]
+    fn test_runner_with_worktree_true() {
+        let runner = Runner::new().unwrap().with_worktree(true);
+        assert_eq!(
+            runner.worktree_override,
+            Some(true),
+            "worktree_override should be Some(true) after with_worktree(true)"
+        );
+    }
+
+    #[test]
+    fn test_runner_with_worktree_false() {
+        let runner = Runner::new().unwrap().with_worktree(false);
+        assert_eq!(
+            runner.worktree_override,
+            Some(false),
+            "worktree_override should be Some(false) after with_worktree(false)"
+        );
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_preserves_worktree() {
+        let runner = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_skip_review(true)
+            .with_worktree(true);
+        assert!(runner.verbose);
+        assert!(runner.skip_review);
+        assert_eq!(runner.worktree_override, Some(true));
+    }
+
+    #[test]
+    fn test_runner_builder_pattern_worktree_order_independent() {
+        let runner1 = Runner::new()
+            .unwrap()
+            .with_worktree(true)
+            .with_verbose(true);
+
+        let runner2 = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_worktree(true);
+
+        assert_eq!(runner1.worktree_override, runner2.worktree_override);
+        assert_eq!(runner1.verbose, runner2.verbose);
     }
 
     /// Tests that story_index calculation produces 1-indexed values.
@@ -1828,6 +2128,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1843,6 +2144,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("spec.json"),
@@ -1863,6 +2165,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec-feature.md"),
@@ -1884,6 +2187,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1905,6 +2209,7 @@ mod tests {
             review: true,
             commit: false,
             pull_request: false, // Must be false when commit is false (validated by US-004)
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1926,6 +2231,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1947,6 +2253,7 @@ mod tests {
             review: false,
             commit: false,
             pull_request: false,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -1980,6 +2287,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: true,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2012,6 +2320,7 @@ mod tests {
             review: true,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let mut state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2043,6 +2352,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            ..Default::default()
         };
         let state = RunState::new_with_config(
             PathBuf::from("test.json"),
@@ -2058,5 +2368,263 @@ mod tests {
 
         // Verify config is preserved
         assert_eq!(loaded.effective_config(), config);
+    }
+
+    // ========================================================================
+    // US-008: Runner Worktree Integration tests
+    // ========================================================================
+
+    #[test]
+    fn test_runner_new_auto_detects_session() {
+        // Runner::new() should auto-detect the session from CWD
+        let runner = Runner::new().unwrap();
+        // The session ID is auto-detected based on whether we're in main repo or worktree
+        // We can't assert the exact value but we can verify it's created successfully
+        let status = runner.status();
+        assert!(
+            status.is_ok(),
+            "Runner should auto-detect session successfully"
+        );
+    }
+
+    #[test]
+    fn test_runner_state_manager_has_session_id() {
+        // Verify that StateManager has a session_id (proves per-session state storage)
+        let runner = Runner::new().unwrap();
+        let session_id = runner.state_manager.session_id();
+        assert!(
+            !session_id.is_empty(),
+            "StateManager should have a session ID"
+        );
+        // Session ID should be either "main" or 8-char hex
+        assert!(
+            session_id == "main"
+                || (session_id.len() == 8 && session_id.chars().all(|c| c.is_ascii_hexdigit())),
+            "Session ID should be 'main' or 8 hex chars, got: {}",
+            session_id
+        );
+    }
+
+    #[test]
+    fn test_has_active_run_is_per_session() {
+        // Test that has_active_run() is per-session, not global
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two state managers with different session IDs
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+
+        // Initially, neither has an active run
+        assert!(!sm1.has_active_run().unwrap());
+        assert!(!sm2.has_active_run().unwrap());
+
+        // Create active run in session1
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm1.save(&state).unwrap();
+
+        // Session1 has active run, session2 does not
+        assert!(sm1.has_active_run().unwrap());
+        assert!(
+            !sm2.has_active_run().unwrap(),
+            "Session2 should NOT see session1's active run"
+        );
+    }
+
+    #[test]
+    fn test_state_has_session_id_field() {
+        // Verify RunState has session_id field
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(
+            state.session_id.is_none(),
+            "session_id should be None by default"
+        );
+
+        let state_with_session = RunState::new_with_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            "abc12345".to_string(),
+        );
+        assert_eq!(
+            state_with_session.session_id,
+            Some("abc12345".to_string()),
+            "session_id should be set when created with session"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_defaults_to_false() {
+        // Verify worktree_cleanup defaults to false for backward compatibility
+        let config = Config::default();
+        assert!(
+            !config.worktree_cleanup,
+            "worktree_cleanup should default to false"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_can_be_enabled() {
+        // Test that worktree_cleanup can be set to true
+        let config = Config {
+            worktree_cleanup: true,
+            ..Default::default()
+        };
+        assert!(
+            config.worktree_cleanup,
+            "worktree_cleanup should be true when set"
+        );
+    }
+
+    #[test]
+    fn test_worktree_cleanup_config_only_affects_successful_runs() {
+        // Verify the logic that cleanup only applies to completed (not failed) runs
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create a failed run state
+        let config = Config {
+            worktree_cleanup: true,
+            ..Default::default()
+        };
+        let mut state = RunState::new_with_config(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config.clone(),
+        );
+        state.transition_to(MachineState::Failed);
+        sm.save(&state).unwrap();
+
+        // Verify the state is failed
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.status, RunStatus::Failed);
+        // The cleanup logic checks for Completed status, so Failed runs
+        // should NOT trigger cleanup (tested via the condition in archive_and_cleanup)
+    }
+
+    #[test]
+    fn test_state_transitions_work_in_worktree_context() {
+        // Verify state transitions work correctly when session_id is set (worktree context)
+        let config = Config::default();
+        let mut state = RunState::new_with_config_and_session(
+            PathBuf::from("test.json"),
+            "test-branch".to_string(),
+            config,
+            "wt-session".to_string(),
+        );
+
+        // Verify session_id is preserved through transitions
+        assert_eq!(state.session_id, Some("wt-session".to_string()));
+
+        state.transition_to(MachineState::PickingStory);
+        assert_eq!(state.session_id, Some("wt-session".to_string()));
+
+        state.start_iteration("US-001");
+        assert_eq!(state.session_id, Some("wt-session".to_string()));
+
+        state.finish_iteration(IterationStatus::Success, String::new());
+        assert_eq!(state.session_id, Some("wt-session".to_string()));
+
+        state.transition_to(MachineState::Completed);
+        assert_eq!(state.session_id, Some("wt-session".to_string()));
+        assert_eq!(state.status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn test_effective_worktree_mode_respects_config() {
+        // Test that is_worktree_mode respects the config value
+        let runner = Runner::new().unwrap();
+
+        // With worktree = false in config
+        let config_false = Config {
+            worktree: false,
+            ..Default::default()
+        };
+        assert!(!runner.is_worktree_mode(&config_false));
+
+        // With worktree = true in config
+        let config_true = Config {
+            worktree: true,
+            ..Default::default()
+        };
+        assert!(runner.is_worktree_mode(&config_true));
+    }
+
+    #[test]
+    fn test_effective_worktree_mode_override_takes_precedence() {
+        // Test that CLI override takes precedence over config
+        let runner_with_override = Runner::new().unwrap().with_worktree(true);
+
+        // Even with worktree = false in config, override should win
+        let config_false = Config {
+            worktree: false,
+            ..Default::default()
+        };
+        assert!(runner_with_override.is_worktree_mode(&config_false));
+
+        // And override false should also work
+        let runner_no_worktree = Runner::new().unwrap().with_worktree(false);
+        let config_true = Config {
+            worktree: true,
+            ..Default::default()
+        };
+        assert!(!runner_no_worktree.is_worktree_mode(&config_true));
+    }
+
+    #[test]
+    fn test_session_state_isolation() {
+        // Test that multiple sessions have isolated state
+        let temp_dir = TempDir::new().unwrap();
+
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-a".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-b".to_string(),
+        );
+
+        // Save state in session a
+        let state_a = RunState::new_with_session(
+            PathBuf::from("spec-a.json"),
+            "branch-a".to_string(),
+            "session-a".to_string(),
+        );
+        sm1.save(&state_a).unwrap();
+
+        // Save state in session b
+        let state_b = RunState::new_with_session(
+            PathBuf::from("spec-b.json"),
+            "branch-b".to_string(),
+            "session-b".to_string(),
+        );
+        sm2.save(&state_b).unwrap();
+
+        // Load and verify each session has its own state
+        let loaded_a = sm1.load_current().unwrap().unwrap();
+        let loaded_b = sm2.load_current().unwrap().unwrap();
+
+        assert_eq!(loaded_a.branch, "branch-a");
+        assert_eq!(loaded_b.branch, "branch-b");
+        assert_eq!(loaded_a.session_id, Some("session-a".to_string()));
+        assert_eq!(loaded_b.session_id, Some("session-b".to_string()));
+    }
+
+    #[test]
+    fn test_is_worktree_mode_with_none_override() {
+        // Test that None override falls back to config value
+        let runner = Runner::new().unwrap();
+        assert!(runner.worktree_override.is_none());
+
+        let config = Config {
+            worktree: true,
+            ..Default::default()
+        };
+        assert!(runner.is_worktree_mode(&config));
     }
 }

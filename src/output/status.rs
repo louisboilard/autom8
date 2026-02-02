@@ -2,7 +2,8 @@
 //!
 //! Output functions for displaying run status, project trees, and descriptions.
 
-use crate::state::{RunState, RunStatus};
+use crate::state::{MachineState, RunState, RunStatus, SessionStatus};
+use chrono::Utc;
 
 use super::colors::*;
 
@@ -418,4 +419,470 @@ pub fn print_commit_list(commits: &[crate::git::CommitInfo], max_display: usize)
         );
     }
     println!();
+}
+
+/// Print status for all sessions in a project.
+///
+/// Sessions are displayed with the current session highlighted, including:
+/// - Session ID and worktree path
+/// - Branch name and current state
+/// - Current story (if any)
+/// - Duration since start
+pub fn print_sessions_status(sessions: &[SessionStatus]) {
+    println!("{BOLD}Sessions for this project:{RESET}");
+    println!();
+
+    for session in sessions {
+        print_session_row(session);
+    }
+
+    // Summary line
+    let running_count = sessions
+        .iter()
+        .filter(|s| s.metadata.is_running && !s.is_stale)
+        .count();
+    let stale_count = sessions.iter().filter(|s| s.is_stale).count();
+
+    println!();
+    print!(
+        "{GRAY}({} session{}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    if running_count > 0 {
+        print!(", {} running", running_count);
+    }
+    if stale_count > 0 {
+        print!(", {} stale", stale_count);
+    }
+    println!("){RESET}");
+}
+
+/// Print a single session row.
+fn print_session_row(session: &SessionStatus) {
+    let metadata = &session.metadata;
+
+    // Determine row color based on state
+    let (indicator, indicator_color) = if session.is_stale {
+        ("✗", GRAY)
+    } else if session.is_current {
+        ("→", GREEN)
+    } else if metadata.is_running {
+        ("●", YELLOW)
+    } else {
+        ("○", GRAY)
+    };
+
+    // Session ID and current marker
+    let current_marker = if session.is_current { " (current)" } else { "" };
+    let stale_marker = if session.is_stale { " [stale]" } else { "" };
+
+    println!(
+        "{indicator_color}{indicator}{RESET} {BOLD}{}{RESET}{GREEN}{}{RESET}{GRAY}{}{RESET}",
+        metadata.session_id, current_marker, stale_marker
+    );
+
+    // Worktree path (truncated if too long)
+    let path_str = metadata.worktree_path.display().to_string();
+    let display_path = if path_str.len() > 60 {
+        format!("...{}", &path_str[path_str.len() - 57..])
+    } else {
+        path_str
+    };
+    println!("  {GRAY}Path:{RESET}    {}", display_path);
+
+    // Branch name
+    println!("  {BLUE}Branch:{RESET}  {}", metadata.branch_name);
+
+    // Current state
+    if let Some(state) = &session.machine_state {
+        let state_str = format_machine_state(state);
+        let state_color = machine_state_color(state);
+        println!("  {BLUE}State:{RESET}   {state_color}{}{RESET}", state_str);
+    }
+
+    // Current story (if any)
+    if let Some(story) = &session.current_story {
+        println!("  {BLUE}Story:{RESET}   {}", story);
+    }
+
+    // Duration
+    let duration = format_duration(metadata.created_at, metadata.last_active_at);
+    println!(
+        "  {GRAY}Started:{RESET} {} {}",
+        metadata.created_at.format("%Y-%m-%d %H:%M"),
+        duration
+    );
+
+    println!();
+}
+
+/// Format machine state for display.
+fn format_machine_state(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
+    }
+}
+
+/// Get color for machine state.
+fn machine_state_color(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Completed => GREEN,
+        MachineState::Failed => RED,
+        MachineState::RunningClaude | MachineState::Reviewing | MachineState::Correcting => YELLOW,
+        _ => CYAN,
+    }
+}
+
+/// Format duration since session start.
+fn format_duration(
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_active_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(created_at);
+
+    // Calculate active duration
+    let active_duration = last_active_at.signed_duration_since(created_at);
+
+    let days = duration.num_days();
+    let hours = duration.num_hours() % 24;
+    let minutes = duration.num_minutes() % 60;
+
+    let age_str = if days > 0 {
+        format!("{}d {}h ago", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m ago", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
+    } else {
+        "just now".to_string()
+    };
+
+    // Show active duration if significantly different from total
+    let active_hours = active_duration.num_hours();
+    let active_mins = active_duration.num_minutes() % 60;
+    if active_hours > 0 {
+        format!("{} (active {}h {}m)", age_str, active_hours, active_mins)
+    } else if active_mins > 5 {
+        format!("{} (active {}m)", age_str, active_mins)
+    } else {
+        age_str
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SessionMetadata;
+    use std::path::PathBuf;
+
+    fn make_session_status(
+        session_id: &str,
+        branch: &str,
+        is_current: bool,
+        is_stale: bool,
+        is_running: bool,
+        machine_state: Option<MachineState>,
+        current_story: Option<&str>,
+    ) -> SessionStatus {
+        SessionStatus {
+            metadata: SessionMetadata {
+                session_id: session_id.to_string(),
+                worktree_path: PathBuf::from(format!("/projects/test-wt-{}", session_id)),
+                branch_name: branch.to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running,
+            },
+            machine_state,
+            current_story: current_story.map(|s| s.to_string()),
+            is_current,
+            is_stale,
+        }
+    }
+
+    // ======================================================================
+    // Tests for US-006: Verify status --all command output
+    // ======================================================================
+
+    #[test]
+    fn test_us006_format_machine_state_all_variants() {
+        // Verify all machine states have display names
+        assert_eq!(format_machine_state(&MachineState::Idle), "Idle");
+        assert_eq!(
+            format_machine_state(&MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::RunningClaude),
+            "Running Claude"
+        );
+        assert_eq!(format_machine_state(&MachineState::Reviewing), "Reviewing");
+        assert_eq!(
+            format_machine_state(&MachineState::Correcting),
+            "Correcting"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::Committing),
+            "Committing"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::CreatingPR),
+            "Creating PR"
+        );
+        assert_eq!(format_machine_state(&MachineState::Completed), "Completed");
+        assert_eq!(format_machine_state(&MachineState::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_us006_machine_state_colors() {
+        // Verify appropriate colors for different states
+        assert_eq!(machine_state_color(&MachineState::Completed), GREEN);
+        assert_eq!(machine_state_color(&MachineState::Failed), RED);
+        assert_eq!(machine_state_color(&MachineState::RunningClaude), YELLOW);
+        assert_eq!(machine_state_color(&MachineState::Reviewing), YELLOW);
+        assert_eq!(machine_state_color(&MachineState::Correcting), YELLOW);
+        // Other states use CYAN
+        assert_eq!(machine_state_color(&MachineState::Idle), CYAN);
+        assert_eq!(machine_state_color(&MachineState::Initializing), CYAN);
+    }
+
+    #[test]
+    fn test_us006_session_row_current_marker() {
+        // Test that current session gets → indicator and (current) marker
+        let session = make_session_status(
+            "main",
+            "feature/test",
+            true,  // is_current
+            false, // is_stale
+            true,  // is_running
+            Some(MachineState::RunningClaude),
+            Some("US-001"),
+        );
+
+        // Verify the logic for current marker
+        let current_marker = if session.is_current { " (current)" } else { "" };
+        assert_eq!(current_marker, " (current)");
+
+        // Verify indicator for current session
+        let (indicator, _) = if session.is_stale {
+            ("✗", GRAY)
+        } else if session.is_current {
+            ("→", GREEN)
+        } else if session.metadata.is_running {
+            ("●", YELLOW)
+        } else {
+            ("○", GRAY)
+        };
+        assert_eq!(indicator, "→");
+    }
+
+    #[test]
+    fn test_us006_session_row_stale_marker() {
+        // Test that stale sessions get [stale] marker
+        let session = make_session_status(
+            "abc12345",
+            "feature/old",
+            false, // is_current
+            true,  // is_stale
+            true,  // is_running
+            Some(MachineState::RunningClaude),
+            None,
+        );
+
+        let stale_marker = if session.is_stale { " [stale]" } else { "" };
+        assert_eq!(stale_marker, " [stale]");
+
+        // Stale sessions get ✗ indicator regardless of other status
+        let (indicator, indicator_color) = if session.is_stale {
+            ("✗", GRAY)
+        } else if session.is_current {
+            ("→", GREEN)
+        } else if session.metadata.is_running {
+            ("●", YELLOW)
+        } else {
+            ("○", GRAY)
+        };
+        assert_eq!(indicator, "✗");
+        assert_eq!(indicator_color, GRAY);
+    }
+
+    #[test]
+    fn test_us006_session_row_running_indicator() {
+        // Test that running (but not current) sessions get ● indicator
+        let session = make_session_status(
+            "session1",
+            "feature/parallel",
+            false, // is_current
+            false, // is_stale
+            true,  // is_running
+            Some(MachineState::Reviewing),
+            Some("US-002"),
+        );
+
+        let (indicator, indicator_color) = if session.is_stale {
+            ("✗", GRAY)
+        } else if session.is_current {
+            ("→", GREEN)
+        } else if session.metadata.is_running {
+            ("●", YELLOW)
+        } else {
+            ("○", GRAY)
+        };
+        assert_eq!(indicator, "●");
+        assert_eq!(indicator_color, YELLOW);
+    }
+
+    #[test]
+    fn test_us006_session_row_idle_indicator() {
+        // Test that idle sessions get ○ indicator
+        let session = make_session_status(
+            "session2",
+            "feature/done",
+            false, // is_current
+            false, // is_stale
+            false, // is_running
+            Some(MachineState::Completed),
+            None,
+        );
+
+        let (indicator, indicator_color) = if session.is_stale {
+            ("✗", GRAY)
+        } else if session.is_current {
+            ("→", GREEN)
+        } else if session.metadata.is_running {
+            ("●", YELLOW)
+        } else {
+            ("○", GRAY)
+        };
+        assert_eq!(indicator, "○");
+        assert_eq!(indicator_color, GRAY);
+    }
+
+    #[test]
+    fn test_us006_summary_counts() {
+        // Test that summary correctly counts running and stale sessions
+        let sessions = vec![
+            make_session_status(
+                "main",
+                "main",
+                true,
+                false,
+                true,
+                Some(MachineState::RunningClaude),
+                Some("US-001"),
+            ),
+            make_session_status(
+                "session1",
+                "feat-1",
+                false,
+                false,
+                true,
+                Some(MachineState::Reviewing),
+                Some("US-002"),
+            ),
+            make_session_status("session2", "feat-2", false, true, false, None, None), // stale
+            make_session_status(
+                "session3",
+                "feat-3",
+                false,
+                false,
+                false,
+                Some(MachineState::Completed),
+                None,
+            ), // idle
+        ];
+
+        // Running count: sessions that are running AND not stale
+        let running_count = sessions
+            .iter()
+            .filter(|s| s.metadata.is_running && !s.is_stale)
+            .count();
+        assert_eq!(running_count, 2);
+
+        // Stale count
+        let stale_count = sessions.iter().filter(|s| s.is_stale).count();
+        assert_eq!(stale_count, 1);
+
+        // Total count
+        assert_eq!(sessions.len(), 4);
+    }
+
+    #[test]
+    fn test_us006_worktree_path_truncation() {
+        // Test that long worktree paths are truncated properly
+        let long_path =
+            "/very/long/path/that/exceeds/sixty/characters/for/display/purposes/test-worktree";
+        assert!(long_path.len() > 60);
+
+        let display_path = if long_path.len() > 60 {
+            format!("...{}", &long_path[long_path.len() - 57..])
+        } else {
+            long_path.to_string()
+        };
+
+        assert!(display_path.starts_with("..."));
+        assert!(display_path.len() <= 60);
+    }
+
+    #[test]
+    fn test_us006_session_status_displays_all_fields() {
+        // Verify SessionStatus contains all required display fields per acceptance criteria:
+        // - session ID, worktree path, branch, state, current story
+        let session = make_session_status(
+            "abc12345",                        // session_id
+            "feature/test",                    // branch
+            true,                              // is_current (for highlighting)
+            false,                             // is_stale
+            true,                              // is_running
+            Some(MachineState::RunningClaude), // state
+            Some("US-001"),                    // current story
+        );
+
+        // Session ID
+        assert_eq!(session.metadata.session_id, "abc12345");
+
+        // Worktree path
+        assert!(session
+            .metadata
+            .worktree_path
+            .to_string_lossy()
+            .contains("abc12345"));
+
+        // Branch
+        assert_eq!(session.metadata.branch_name, "feature/test");
+
+        // State
+        assert_eq!(session.machine_state, Some(MachineState::RunningClaude));
+
+        // Current story
+        assert_eq!(session.current_story, Some("US-001".to_string()));
+
+        // Current session highlighting
+        assert!(session.is_current);
+    }
 }

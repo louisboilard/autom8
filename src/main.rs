@@ -3,9 +3,9 @@
 //! Parses command-line arguments and dispatches to the appropriate command handler.
 
 use autom8::commands::{
-    clean_command, default_command, describe_command, global_status_command, init_command,
-    list_command, monitor_command, pr_review_command, projects_command, resume_command,
-    run_command, run_with_file, status_command,
+    all_sessions_status_command, clean_command, default_command, describe_command,
+    global_status_command, init_command, list_command, monitor_command, pr_review_command,
+    projects_command, resume_command, run_command, run_with_file, status_command, CleanOptions,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -17,7 +17,26 @@ use std::path::PathBuf;
 #[command(name = "autom8")]
 #[command(
     version,
-    about = "CLI automation tool for orchestrating Claude-powered development"
+    about = "CLI automation tool for orchestrating Claude-powered development",
+    after_help = "EXAMPLES:
+    # Start a new run from a spec file
+    autom8 spec.json
+    autom8 run --spec feature.json
+
+    # Run multiple features in parallel using worktrees
+    autom8 run --worktree --spec feature-a.json  # Terminal 1
+    autom8 run --worktree --spec feature-b.json  # Terminal 2
+
+    # Check status of all parallel sessions
+    autom8 status --all
+
+    # Resume a specific session
+    autom8 resume --list              # See resumable sessions
+    autom8 resume --session abc123    # Resume by session ID
+
+    # Clean up after completing work
+    autom8 clean                      # Remove completed sessions
+    autom8 clean --worktrees          # Also remove worktree directories"
 )]
 struct Cli {
     /// Path to a spec.md or spec.json file (shorthand for `run --spec <file>`)
@@ -34,6 +53,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the agent loop to implement spec stories
+    #[command(after_help = "EXAMPLES:
+    autom8 run --spec feature.json           # Run on current branch
+    autom8 run --worktree                    # Create dedicated worktree for parallel execution
+    autom8 run --worktree --spec feature.json # Run in worktree with specific spec
+
+WORKTREE MODE:
+    When --worktree is enabled, autom8 creates a separate worktree directory
+    at <repo-parent>/<repo>-wt-<branch>/ allowing multiple specs to run in parallel.
+    Each worktree has its own isolated session state.")]
     Run {
         /// Path to the spec JSON or markdown file
         #[arg(long, default_value = "./spec.json")]
@@ -42,24 +70,101 @@ enum Commands {
         /// Skip the review loop and go directly to committing
         #[arg(long)]
         skip_review: bool,
+
+        /// Enable worktree mode: create a dedicated worktree for this run.
+        /// Allows running multiple specs in parallel with isolated state.
+        #[arg(long, conflicts_with = "no_worktree")]
+        worktree: bool,
+
+        /// Disable worktree mode: run on the current branch (overrides config).
+        /// Use this to override worktree=true in your config file.
+        #[arg(long, conflicts_with = "worktree")]
+        no_worktree: bool,
     },
 
     /// Check the current run status
+    #[command(after_help = "EXAMPLES:
+    autom8 status             # Show current session status
+    autom8 status --all       # Show all sessions for this project
+    autom8 status --global    # Show status across all projects
+
+SESSION STATUS:
+    Sessions are shown with: session ID, worktree path, branch name,
+    current state (e.g., RunningClaude, Reviewing), and current story.
+    The current session (matching CWD) is highlighted.")]
     Status {
-        /// Show status across all projects
+        /// Show all sessions for the current project.
+        /// Lists all active and completed sessions with their status.
         #[arg(short = 'a', long = "all")]
         all: bool,
 
-        /// Show status across all projects (alias for --all)
+        /// Show status across all projects.
+        /// Displays a summary of all projects and their active runs.
         #[arg(short = 'g', long = "global")]
         global: bool,
     },
 
     /// Resume a failed or interrupted run
-    Resume,
+    #[command(after_help = "EXAMPLES:
+    autom8 resume                     # Resume current session (auto-detected from CWD)
+    autom8 resume --list              # List all resumable sessions
+    autom8 resume --session abc123    # Resume a specific session by ID
 
-    /// Clean up spec files from config directory
-    Clean,
+BEHAVIOR:
+    In the main repo with multiple incomplete sessions: prompts for selection.
+    In a worktree: automatically resumes that worktree's session.
+    With --session: changes to the worktree directory before resuming.")]
+    Resume {
+        /// Resume a specific session by ID.
+        /// Use --list to see available session IDs.
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// List all resumable sessions (incomplete runs).
+        /// Shows sessions that can be resumed with --session <id>.
+        #[arg(short, long)]
+        list: bool,
+    },
+
+    /// Clean up sessions and worktrees from the project
+    #[command(after_help = "EXAMPLES:
+    autom8 clean                      # Remove completed/failed session state
+    autom8 clean --worktrees          # Also remove associated worktree directories
+    autom8 clean --all                # Remove ALL sessions (with confirmation)
+    autom8 clean --session abc123     # Remove a specific session
+    autom8 clean --orphaned           # Remove orphaned sessions only
+    autom8 clean --worktrees --force  # Remove even with uncommitted changes
+
+WHAT GETS CLEANED:
+    By default, cleans completed and failed sessions (preserves in-progress).
+    Session state is archived to runs/ directory before deletion.
+    Worktrees with uncommitted changes are preserved unless --force is used.")]
+    Clean {
+        /// Also remove associated worktree directories.
+        /// Without this flag, only session state is removed.
+        #[arg(short, long)]
+        worktrees: bool,
+
+        /// Remove all sessions (with confirmation).
+        /// Includes in-progress sessions - use with caution.
+        #[arg(short, long)]
+        all: bool,
+
+        /// Remove a specific session by ID.
+        /// Use 'autom8 status --all' to see session IDs.
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Only remove orphaned sessions (worktree deleted but state remains).
+        /// Useful for cleaning up after manually deleting worktree directories.
+        #[arg(short, long)]
+        orphaned: bool,
+
+        /// Force removal even if worktrees have uncommitted changes.
+        /// Use with caution - uncommitted work will be lost.
+        #[arg(short, long)]
+        force: bool,
+    },
 
     /// Initialize autom8 config directory structure for current project
     Init,
@@ -114,22 +219,47 @@ fn main() {
         (Some(file), _) => run_with_file(&runner, file),
 
         // Subcommands
-        (None, Some(Commands::Run { spec, skip_review })) => {
-            run_command(cli.verbose, spec, *skip_review)
-        }
+        (
+            None,
+            Some(Commands::Run {
+                spec,
+                skip_review,
+                worktree,
+                no_worktree,
+            }),
+        ) => run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree),
 
         (None, Some(Commands::Status { all, global })) => {
             print_header();
-            if *all || *global {
+            if *global {
                 global_status_command()
+            } else if *all {
+                all_sessions_status_command()
             } else {
                 status_command(&runner)
             }
         }
 
-        (None, Some(Commands::Resume)) => resume_command(&runner),
+        (None, Some(Commands::Resume { session, list })) => {
+            resume_command(session.as_deref(), *list)
+        }
 
-        (None, Some(Commands::Clean)) => clean_command(),
+        (
+            None,
+            Some(Commands::Clean {
+                worktrees,
+                all,
+                session,
+                orphaned,
+                force,
+            }),
+        ) => clean_command(CleanOptions {
+            worktrees: *worktrees,
+            all: *all,
+            session: session.clone(),
+            orphaned: *orphaned,
+            force: *force,
+        }),
 
         (None, Some(Commands::Init)) => init_command(),
 
@@ -214,7 +344,7 @@ mod tests {
     fn test_us006_other_commands_still_work() {
         // Verify that other commands are still routed correctly
         let cli_resume = Cli::try_parse_from(["autom8", "resume"]).unwrap();
-        assert!(matches!(cli_resume.command, Some(Commands::Resume)));
+        assert!(matches!(cli_resume.command, Some(Commands::Resume { .. })));
 
         let cli_status = Cli::try_parse_from(["autom8", "status"]).unwrap();
         assert!(matches!(cli_status.command, Some(Commands::Status { .. })));
@@ -223,7 +353,7 @@ mod tests {
         assert!(matches!(cli_projects.command, Some(Commands::Projects)));
 
         let cli_clean = Cli::try_parse_from(["autom8", "clean"]).unwrap();
-        assert!(matches!(cli_clean.command, Some(Commands::Clean)));
+        assert!(matches!(cli_clean.command, Some(Commands::Clean { .. })));
 
         let cli_init = Cli::try_parse_from(["autom8", "init"]).unwrap();
         assert!(matches!(cli_init.command, Some(Commands::Init)));
@@ -1272,5 +1402,303 @@ mod tests {
         assert!(SUPPORTED_SHELLS.contains(&"bash"));
         assert!(SUPPORTED_SHELLS.contains(&"zsh"));
         assert!(SUPPORTED_SHELLS.contains(&"fish"));
+    }
+
+    // ======================================================================
+    // Tests for US-005: Worktree CLI flags
+    // ======================================================================
+
+    #[test]
+    fn test_us005_run_command_has_worktree_flag() {
+        // Test that --worktree flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "run", "--worktree"]).unwrap();
+        if let Some(Commands::Run {
+            worktree,
+            no_worktree,
+            ..
+        }) = cli.command
+        {
+            assert!(worktree, "--worktree should set worktree to true");
+            assert!(
+                !no_worktree,
+                "no_worktree should be false when --worktree is set"
+            );
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_run_command_has_no_worktree_flag() {
+        // Test that --no-worktree flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "run", "--no-worktree"]).unwrap();
+        if let Some(Commands::Run {
+            worktree,
+            no_worktree,
+            ..
+        }) = cli.command
+        {
+            assert!(
+                !worktree,
+                "worktree should be false when --no-worktree is set"
+            );
+            assert!(no_worktree, "--no-worktree should set no_worktree to true");
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_run_command_worktree_defaults() {
+        // Test that both flags default to false
+        let cli = Cli::try_parse_from(["autom8", "run"]).unwrap();
+        if let Some(Commands::Run {
+            worktree,
+            no_worktree,
+            ..
+        }) = cli.command
+        {
+            assert!(!worktree, "worktree should default to false");
+            assert!(!no_worktree, "no_worktree should default to false");
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_worktree_flags_are_mutually_exclusive() {
+        // Test that --worktree and --no-worktree cannot be used together
+        let result = Cli::try_parse_from(["autom8", "run", "--worktree", "--no-worktree"]);
+        assert!(
+            result.is_err(),
+            "--worktree and --no-worktree should be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn test_us005_worktree_flag_with_spec() {
+        // Test that --worktree works with --spec
+        let cli =
+            Cli::try_parse_from(["autom8", "run", "--spec", "my-spec.json", "--worktree"]).unwrap();
+        if let Some(Commands::Run {
+            spec,
+            worktree,
+            no_worktree,
+            ..
+        }) = cli.command
+        {
+            assert_eq!(spec.to_string_lossy(), "my-spec.json");
+            assert!(worktree);
+            assert!(!no_worktree);
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_no_worktree_flag_with_skip_review() {
+        // Test that --no-worktree works with --skip-review
+        let cli = Cli::try_parse_from(["autom8", "run", "--skip-review", "--no-worktree"]).unwrap();
+        if let Some(Commands::Run {
+            skip_review,
+            worktree,
+            no_worktree,
+            ..
+        }) = cli.command
+        {
+            assert!(skip_review);
+            assert!(!worktree);
+            assert!(no_worktree);
+        } else {
+            panic!("Expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_us005_worktree_config_available() {
+        // Verify the worktree field exists on Config struct
+        let config = autom8::config::Config::default();
+        let _worktree: bool = config.worktree;
+    }
+
+    // ======================================================================
+    // Tests for US-009: Multi-Session Status Command
+    // ======================================================================
+
+    #[test]
+    fn test_us009_status_all_flag() {
+        // Test that --all flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "status", "--all"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(all, "--all should be true");
+            assert!(!global, "--global should be false");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_short_all_flag() {
+        // Test that -a short flag works
+        let cli = Cli::try_parse_from(["autom8", "status", "-a"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(all, "-a should set all to true");
+            assert!(!global);
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_global_flag_separate() {
+        // Test that --global flag is separate from --all
+        let cli = Cli::try_parse_from(["autom8", "status", "--global"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all, "--all should be false");
+            assert!(global, "--global should be true");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_short_global_flag() {
+        // Test that -g short flag works for --global
+        let cli = Cli::try_parse_from(["autom8", "status", "-g"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all);
+            assert!(global, "-g should set global to true");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_no_flags_defaults() {
+        // Test default behavior with no flags
+        let cli = Cli::try_parse_from(["autom8", "status"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all, "all should default to false");
+            assert!(!global, "global should default to false");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_all_sessions_status_command_importable() {
+        // Verify the command function is exported
+        use autom8::commands::all_sessions_status_command;
+        let _: fn() -> autom8::error::Result<()> = all_sessions_status_command;
+    }
+
+    #[test]
+    fn test_us009_session_status_struct_available() {
+        // Verify SessionStatus is exported from state module
+        use autom8::state::SessionStatus;
+
+        // Create a minimal SessionStatus to verify the struct exists
+        let metadata = autom8::state::SessionMetadata {
+            session_id: "test".to_string(),
+            worktree_path: PathBuf::from("/tmp"),
+            branch_name: "main".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        let _status = SessionStatus {
+            metadata,
+            machine_state: None,
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_available() {
+        // Verify the method is available on StateManager
+        use autom8::state::StateManager;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Should be callable and return empty list for new project
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    // ======================================================================
+    // Tests for US-010: Multi-Session Resume Command
+    // ======================================================================
+
+    #[test]
+    fn test_us010_resume_command_no_args() {
+        // Test that resume command works without arguments
+        let cli = Cli::try_parse_from(["autom8", "resume"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none(), "session should be None by default");
+            assert!(!list, "list should be false by default");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_session_flag() {
+        // Test that --session flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "resume", "--session", "abc123"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert_eq!(session, Some("abc123".to_string()));
+            assert!(!list);
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_session_short_flag() {
+        // Test that -s short flag works for --session
+        let cli = Cli::try_parse_from(["autom8", "resume", "-s", "xyz789"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert_eq!(session, Some("xyz789".to_string()));
+            assert!(!list);
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_list_flag() {
+        // Test that --list flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "resume", "--list"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none());
+            assert!(list, "--list should set list to true");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_list_short_flag() {
+        // Test that -l short flag works for --list
+        let cli = Cli::try_parse_from(["autom8", "resume", "-l"]).unwrap();
+        if let Some(Commands::Resume { session, list }) = cli.command {
+            assert!(session.is_none());
+            assert!(list, "-l should set list to true");
+        } else {
+            panic!("Expected Resume command");
+        }
+    }
+
+    #[test]
+    fn test_us010_resume_command_function_signature_changed() {
+        // Verify the resume_command function accepts the new parameters
+        use autom8::commands::resume_command;
+        // Type check: resume_command takes Option<&str> and bool
+        let _: fn(Option<&str>, bool) -> autom8::error::Result<()> = resume_command;
     }
 }
