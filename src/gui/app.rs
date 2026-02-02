@@ -62,7 +62,16 @@ const CARD_SPACING: f32 = 16.0;
 const CARD_PADDING: f32 = 16.0;
 
 /// Minimum height for a card.
-const CARD_MIN_HEIGHT: f32 = 100.0;
+const CARD_MIN_HEIGHT: f32 = 240.0;
+
+/// Number of output lines to display in session cards.
+const OUTPUT_LINES_TO_SHOW: usize = 5;
+
+/// Maximum characters for text truncation before adding ellipsis.
+const MAX_TEXT_LENGTH: usize = 40;
+
+/// Maximum characters for branch name truncation.
+const MAX_BRANCH_LENGTH: usize = 25;
 
 // ============================================================================
 // Data Layer Types
@@ -214,6 +223,17 @@ pub fn format_state(state: MachineState) -> &'static str {
         MachineState::CreatingPR => "Creating PR",
         MachineState::Completed => "Completed",
         MachineState::Failed => "Failed",
+    }
+}
+
+/// Truncate a string with ellipsis if it exceeds the max length.
+pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len <= 3 {
+        s[..max_len].to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
     }
 }
 
@@ -763,6 +783,13 @@ impl Autom8App {
     }
 
     /// Render a single session card.
+    ///
+    /// The card displays:
+    /// - Header: Project name, session badge (main/worktree), branch name
+    /// - Status row: Colored indicator dot with state label
+    /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
+    /// - Duration row: Time elapsed since run started
+    /// - Output section: Last 5 lines of Claude output in monospace font
     fn render_session_card(&self, ui: &mut egui::Ui, session: &SessionData, card_width: f32) {
         // Define card dimensions
         let card_size = Vec2::new(card_width, CARD_MIN_HEIGHT);
@@ -802,70 +829,268 @@ impl Autom8App {
         // Draw card content
         let content_rect = card_rect.shrink(CARD_PADDING);
         let mut cursor_y = content_rect.min.y;
+        let content_width = content_rect.width();
 
-        // Title: Project name with session indicator
-        let title = session.display_title();
-        let title_galley = painter.layout_no_wrap(
-            title,
+        // ====================================================================
+        // HEADER ROW: Project name and session badge
+        // ====================================================================
+        let project_name =
+            truncate_with_ellipsis(&session.project_name, MAX_TEXT_LENGTH.saturating_sub(10));
+        let project_galley = painter.layout_no_wrap(
+            project_name,
             typography::font(FontSize::Body, FontWeight::SemiBold),
             colors::TEXT_PRIMARY,
         );
         painter.galley(
             egui::pos2(content_rect.min.x, cursor_y),
-            title_galley.clone(),
+            project_galley.clone(),
             Color32::TRANSPARENT,
         );
-        cursor_y += title_galley.rect.height() + 8.0;
 
-        // State row with status indicator
-        if let Some(ref run) = session.run {
-            let state_text = format_state(run.machine_state);
-            let state_color = self.state_to_color(run.machine_state);
+        // Session badge (main/worktree ID) - positioned after project name
+        let badge_text = if session.is_main_session {
+            "main".to_string()
+        } else {
+            session.metadata.session_id.clone()
+        };
+        let badge_padding_h = 6.0;
+        let badge_padding_v = 2.0;
+        let badge_galley = painter.layout_no_wrap(
+            badge_text,
+            typography::font(FontSize::Caption, FontWeight::Medium),
+            if session.is_main_session {
+                colors::ACCENT
+            } else {
+                colors::TEXT_SECONDARY
+            },
+        );
+        let badge_x = content_rect.min.x + project_galley.rect.width() + 8.0;
+        let badge_bg_rect = Rect::from_min_size(
+            egui::pos2(badge_x, cursor_y),
+            egui::vec2(
+                badge_galley.rect.width() + badge_padding_h * 2.0,
+                badge_galley.rect.height() + badge_padding_v * 2.0,
+            ),
+        );
+        let badge_bg_color = if session.is_main_session {
+            colors::ACCENT_SUBTLE
+        } else {
+            colors::SURFACE_HOVER
+        };
+        painter.rect_filled(badge_bg_rect, Rounding::same(rounding::SMALL), badge_bg_color);
+        painter.galley(
+            egui::pos2(badge_x + badge_padding_h, cursor_y + badge_padding_v),
+            badge_galley,
+            Color32::TRANSPARENT,
+        );
+        cursor_y += project_galley.rect.height() + 4.0;
 
-            // Status dot
-            let dot_radius = 4.0;
-            let dot_center = egui::pos2(content_rect.min.x + dot_radius, cursor_y + 8.0);
-            painter.circle_filled(dot_center, dot_radius, state_color);
+        // Branch name row
+        let branch_text = format!(
+            "{}",
+            truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH)
+        );
+        let branch_galley = painter.layout_no_wrap(
+            branch_text,
+            typography::font(FontSize::Caption, FontWeight::Regular),
+            colors::TEXT_MUTED,
+        );
+        painter.galley(
+            egui::pos2(content_rect.min.x, cursor_y),
+            branch_galley.clone(),
+            Color32::TRANSPARENT,
+        );
+        cursor_y += branch_galley.rect.height() + 8.0;
 
-            // State text
-            let state_galley = painter.layout_no_wrap(
-                state_text.to_string(),
-                typography::font(FontSize::Caption, FontWeight::Regular),
-                colors::TEXT_SECONDARY,
-            );
-            painter.galley(
-                egui::pos2(content_rect.min.x + dot_radius * 2.0 + 8.0, cursor_y),
-                state_galley.clone(),
-                Color32::TRANSPARENT,
-            );
-            cursor_y += state_galley.rect.height() + 4.0;
-        }
+        // ====================================================================
+        // STATUS ROW: Colored indicator dot with state label
+        // ====================================================================
+        let (state, state_color) = if let Some(ref run) = session.run {
+            (run.machine_state, self.state_to_color(run.machine_state))
+        } else {
+            (MachineState::Idle, colors::STATUS_IDLE)
+        };
 
-        // Error message if present
+        // Status dot
+        let dot_radius = 4.0;
+        let dot_center = egui::pos2(
+            content_rect.min.x + dot_radius,
+            cursor_y + FontSize::Caption.pixels() / 2.0,
+        );
+        painter.circle_filled(dot_center, dot_radius, state_color);
+
+        // State text
+        let state_text = format_state(state);
+        let state_galley = painter.layout_no_wrap(
+            state_text.to_string(),
+            typography::font(FontSize::Caption, FontWeight::Medium),
+            colors::TEXT_PRIMARY,
+        );
+        painter.galley(
+            egui::pos2(content_rect.min.x + dot_radius * 2.0 + 8.0, cursor_y),
+            state_galley.clone(),
+            Color32::TRANSPARENT,
+        );
+        cursor_y += state_galley.rect.height() + 4.0;
+
+        // ====================================================================
+        // ERROR MESSAGE (if present)
+        // ====================================================================
         if let Some(ref error) = session.load_error {
+            let error_text = truncate_with_ellipsis(error, MAX_TEXT_LENGTH);
             let error_galley = painter.layout_no_wrap(
-                error.clone(),
+                error_text,
                 typography::font(FontSize::Caption, FontWeight::Regular),
                 colors::STATUS_ERROR,
             );
             painter.galley(
                 egui::pos2(content_rect.min.x, cursor_y),
-                error_galley,
+                error_galley.clone(),
                 Color32::TRANSPARENT,
             );
+            cursor_y += error_galley.rect.height() + 4.0;
         }
 
-        // Progress info if available
+        // ====================================================================
+        // PROGRESS ROW: Story progress and current story ID
+        // ====================================================================
         if let Some(ref progress) = session.progress {
             let progress_text = progress.as_fraction();
             let progress_galley = painter.layout_no_wrap(
                 progress_text,
                 typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_SECONDARY,
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, cursor_y),
+                progress_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+
+            // Current story ID (if available)
+            if let Some(ref run) = session.run {
+                if let Some(ref story_id) = run.current_story {
+                    let story_text = truncate_with_ellipsis(story_id, 15);
+                    let story_galley = painter.layout_no_wrap(
+                        story_text,
+                        typography::font(FontSize::Caption, FontWeight::Regular),
+                        colors::TEXT_MUTED,
+                    );
+                    painter.galley(
+                        egui::pos2(
+                            content_rect.min.x + progress_galley.rect.width() + 12.0,
+                            cursor_y,
+                        ),
+                        story_galley,
+                        Color32::TRANSPARENT,
+                    );
+                }
+            }
+            cursor_y += progress_galley.rect.height() + 4.0;
+        }
+
+        // ====================================================================
+        // DURATION ROW: Time elapsed since run started
+        // ====================================================================
+        if let Some(ref run) = session.run {
+            let duration_text = format_duration(run.started_at);
+            let duration_galley = painter.layout_no_wrap(
+                duration_text,
+                typography::font(FontSize::Caption, FontWeight::Regular),
                 colors::TEXT_MUTED,
             );
             painter.galley(
                 egui::pos2(content_rect.min.x, cursor_y),
-                progress_galley,
+                duration_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+            cursor_y += duration_galley.rect.height() + 8.0;
+        }
+
+        // ====================================================================
+        // OUTPUT SECTION: Last 5 lines of Claude output in monospace
+        // ====================================================================
+        // Draw a subtle separator line
+        let separator_y = cursor_y;
+        painter.hline(
+            content_rect.x_range(),
+            separator_y,
+            Stroke::new(1.0, colors::BORDER),
+        );
+        cursor_y += 8.0;
+
+        // Output section background
+        let output_rect = Rect::from_min_max(
+            egui::pos2(content_rect.min.x, cursor_y),
+            egui::pos2(content_rect.max.x, content_rect.max.y),
+        );
+        painter.rect_filled(
+            output_rect,
+            Rounding::same(rounding::SMALL),
+            colors::SURFACE_HOVER,
+        );
+
+        // Output lines
+        let output_padding = 6.0;
+        let mut output_y = cursor_y + output_padding;
+        let line_height = FontSize::Caption.pixels() + 2.0;
+        let max_output_chars = ((content_width - output_padding * 2.0) / 6.0) as usize; // Approx chars per line
+
+        if let Some(ref live_output) = session.live_output {
+            // Get last OUTPUT_LINES_TO_SHOW lines
+            let lines: Vec<_> = live_output
+                .output_lines
+                .iter()
+                .rev()
+                .take(OUTPUT_LINES_TO_SHOW)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+
+            if lines.is_empty() {
+                // No output yet
+                let no_output_galley = painter.layout_no_wrap(
+                    "Waiting for output...".to_string(),
+                    typography::mono(FontSize::Caption),
+                    colors::TEXT_DISABLED,
+                );
+                painter.galley(
+                    egui::pos2(content_rect.min.x + output_padding, output_y),
+                    no_output_galley,
+                    Color32::TRANSPARENT,
+                );
+            } else {
+                for line in lines {
+                    let line_text = truncate_with_ellipsis(line.trim(), max_output_chars);
+                    let line_galley = painter.layout_no_wrap(
+                        line_text,
+                        typography::mono(FontSize::Caption),
+                        colors::TEXT_SECONDARY,
+                    );
+                    painter.galley(
+                        egui::pos2(content_rect.min.x + output_padding, output_y),
+                        line_galley,
+                        Color32::TRANSPARENT,
+                    );
+                    output_y += line_height;
+
+                    // Stop if we exceed the output area
+                    if output_y > content_rect.max.y - output_padding {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No live output available
+            let no_output_galley = painter.layout_no_wrap(
+                "No live output".to_string(),
+                typography::mono(FontSize::Caption),
+                colors::TEXT_DISABLED,
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x + output_padding, output_y),
+                no_output_galley,
                 Color32::TRANSPARENT,
             );
         }
@@ -1462,5 +1687,185 @@ mod tests {
             colors::STATUS_ERROR
         );
         assert_eq!(app.state_to_color(MachineState::Idle), colors::STATUS_IDLE);
+    }
+
+    // ========================================================================
+    // Session Card Tests
+    // ========================================================================
+
+    #[test]
+    fn test_truncate_with_ellipsis_short_string() {
+        let result = truncate_with_ellipsis("short", 10);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_exact_length() {
+        let result = truncate_with_ellipsis("exactly10!", 10);
+        assert_eq!(result, "exactly10!");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_long_string() {
+        let result = truncate_with_ellipsis("this is a very long string", 15);
+        assert_eq!(result, "this is a ve...");
+        assert_eq!(result.len(), 15);
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_very_short_max() {
+        // When max_len <= 3, just truncate without ellipsis
+        let result = truncate_with_ellipsis("hello", 3);
+        assert_eq!(result, "hel");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_empty_string() {
+        let result = truncate_with_ellipsis("", 10);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_max_text_length() {
+        let long_text = "a".repeat(50);
+        let result = truncate_with_ellipsis(&long_text, MAX_TEXT_LENGTH);
+        assert_eq!(result.len(), MAX_TEXT_LENGTH);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_max_branch_length() {
+        let long_branch = "feature/very-long-branch-name-that-exceeds-limit";
+        let result = truncate_with_ellipsis(long_branch, MAX_BRANCH_LENGTH);
+        assert_eq!(result.len(), MAX_BRANCH_LENGTH);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_card_constants_for_session_card() {
+        // Card height should be sufficient for all content
+        assert!(
+            CARD_MIN_HEIGHT >= 200.0,
+            "Card height should accommodate header, status, progress, duration, and output"
+        );
+
+        // Output lines count should be reasonable
+        assert!(OUTPUT_LINES_TO_SHOW >= 3 && OUTPUT_LINES_TO_SHOW <= 10);
+
+        // Max text length for truncation
+        assert!(MAX_TEXT_LENGTH >= 20 && MAX_TEXT_LENGTH <= 60);
+
+        // Max branch length for truncation
+        assert!(MAX_BRANCH_LENGTH >= 15 && MAX_BRANCH_LENGTH <= 40);
+    }
+
+    #[test]
+    fn test_session_data_with_live_output() {
+        let live_output = LiveState {
+            output_lines: vec![
+                "Line 1".to_string(),
+                "Line 2".to_string(),
+                "Line 3".to_string(),
+            ],
+            updated_at: Utc::now(),
+            machine_state: MachineState::RunningClaude,
+        };
+
+        let session = SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: "main".to_string(),
+                worktree_path: PathBuf::from("/path/to/project"),
+                branch_name: "feature/test".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: Some(RunProgress {
+                completed: 2,
+                total: 5,
+            }),
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(live_output),
+        };
+
+        assert!(session.live_output.is_some());
+        assert_eq!(session.live_output.as_ref().unwrap().output_lines.len(), 3);
+    }
+
+    #[test]
+    fn test_session_data_with_run_state() {
+        let run = RunState::new(PathBuf::from("/spec.json"), "feature/test".to_string());
+
+        let session = SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: "abc12345".to_string(),
+                worktree_path: PathBuf::from("/path/to/worktree"),
+                branch_name: "feature/test".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: Some(run),
+            progress: Some(RunProgress {
+                completed: 1,
+                total: 3,
+            }),
+            load_error: None,
+            is_main_session: false,
+            is_stale: false,
+            live_output: None,
+        };
+
+        assert!(session.run.is_some());
+        assert!(!session.is_main_session);
+        assert_eq!(session.progress.as_ref().unwrap().as_fraction(), "Story 2/3");
+    }
+
+    #[test]
+    fn test_session_data_with_error() {
+        let session = SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: "main".to_string(),
+                worktree_path: PathBuf::from("/deleted/path"),
+                branch_name: "feature/broken".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: Some("Corrupted state file".to_string()),
+            is_main_session: true,
+            is_stale: true,
+            live_output: None,
+        };
+
+        assert!(session.load_error.is_some());
+        assert!(session.is_stale);
+        assert_eq!(
+            session.load_error.as_ref().unwrap(),
+            "Corrupted state file"
+        );
+    }
+
+    #[test]
+    fn test_long_branch_name_truncation() {
+        let branch = "feature/US-007-implement-session-card-component-with-all-details";
+        let truncated = truncate_with_ellipsis(branch, MAX_BRANCH_LENGTH);
+        assert!(truncated.len() <= MAX_BRANCH_LENGTH);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn test_long_project_name_truncation() {
+        let project = "my-very-long-project-name-that-exceeds-limits";
+        let truncated = truncate_with_ellipsis(project, MAX_TEXT_LENGTH.saturating_sub(10));
+        assert!(truncated.len() <= MAX_TEXT_LENGTH.saturating_sub(10));
     }
 }
