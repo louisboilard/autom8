@@ -256,7 +256,58 @@ impl RunHistoryEntry {
 // Tab Types
 // ============================================================================
 
+/// Unique identifier for tabs.
+/// Static tabs use well-known IDs, dynamic tabs use unique generated IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TabId {
+    /// The Active Runs tab (permanent).
+    ActiveRuns,
+    /// The Projects tab (permanent).
+    Projects,
+    /// A dynamic tab for viewing run details.
+    /// Contains the run_id as identifier.
+    RunDetail(String),
+}
+
+impl Default for TabId {
+    fn default() -> Self {
+        TabId::ActiveRuns
+    }
+}
+
+/// Information about a tab displayed in the tab bar.
+#[derive(Debug, Clone)]
+pub struct TabInfo {
+    /// Unique identifier for this tab.
+    pub id: TabId,
+    /// Display label shown in the tab bar.
+    pub label: String,
+    /// Whether this tab can be closed (permanent tabs cannot be closed).
+    pub closable: bool,
+}
+
+impl TabInfo {
+    /// Create a new permanent (non-closable) tab.
+    pub fn permanent(id: TabId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            closable: false,
+        }
+    }
+
+    /// Create a new closable dynamic tab.
+    pub fn closable(id: TabId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            closable: true,
+        }
+    }
+}
+
 /// The available tabs in the application.
+/// This is kept for backward compatibility and used internally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     /// View of currently active runs.
@@ -279,7 +330,24 @@ impl Tab {
     pub fn all() -> &'static [Tab] {
         &[Tab::ActiveRuns, Tab::Projects]
     }
+
+    /// Convert to TabId.
+    pub fn to_tab_id(self) -> TabId {
+        match self {
+            Tab::ActiveRuns => TabId::ActiveRuns,
+            Tab::Projects => TabId::Projects,
+        }
+    }
 }
+
+/// Maximum width for the tab bar scroll area.
+const TAB_BAR_MAX_SCROLL_WIDTH: f32 = 800.0;
+
+/// Width of the close button area on closable tabs.
+const TAB_CLOSE_BUTTON_SIZE: f32 = 16.0;
+
+/// Padding around the close button.
+const TAB_CLOSE_PADDING: f32 = 4.0;
 
 /// The main GUI application state.
 ///
@@ -288,8 +356,18 @@ impl Tab {
 pub struct Autom8App {
     /// Optional project filter to show only a specific project.
     project_filter: Option<String>,
-    /// Currently selected tab.
+    /// Currently selected tab (legacy, for backward compatibility).
     current_tab: Tab,
+
+    // ========================================================================
+    // Dynamic Tab System
+    // ========================================================================
+    /// All open tabs in order. The first two are always ActiveRuns and Projects.
+    tabs: Vec<TabInfo>,
+    /// The currently active tab ID.
+    active_tab_id: TabId,
+    /// Scroll offset for the tab bar (for horizontal scrolling).
+    tab_scroll_offset: f32,
 
     // ========================================================================
     // Data Layer
@@ -315,6 +393,10 @@ pub struct Autom8App {
     /// Cached run history for the selected project.
     /// Loaded when a project is selected, cleared when deselected.
     run_history: Vec<RunHistoryEntry>,
+
+    /// Cached run details for open detail tabs.
+    /// Maps run_id to the full RunState for rendering detail views.
+    run_detail_cache: std::collections::HashMap<String, crate::state::RunState>,
 
     // ========================================================================
     // Loading State
@@ -355,14 +437,24 @@ impl Autom8App {
         project_filter: Option<String>,
         refresh_interval: Duration,
     ) -> Self {
+        // Initialize permanent tabs
+        let tabs = vec![
+            TabInfo::permanent(TabId::ActiveRuns, "Active Runs"),
+            TabInfo::permanent(TabId::Projects, "Projects"),
+        ];
+
         let mut app = Self {
             project_filter,
             current_tab: Tab::default(),
+            tabs,
+            active_tab_id: TabId::default(),
+            tab_scroll_offset: 0.0,
             projects: Vec::new(),
             sessions: Vec::new(),
             has_active_runs: false,
             selected_project: None,
             run_history: Vec::new(),
+            run_detail_cache: std::collections::HashMap::new(),
             initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
@@ -461,6 +553,149 @@ impl Autom8App {
     /// Returns whether a project is currently selected.
     pub fn is_project_selected(&self, project_name: &str) -> bool {
         self.selected_project.as_deref() == Some(project_name)
+    }
+
+    // ========================================================================
+    // Tab Management
+    // ========================================================================
+
+    /// Returns all open tabs.
+    pub fn tabs(&self) -> &[TabInfo] {
+        &self.tabs
+    }
+
+    /// Returns the currently active tab ID.
+    pub fn active_tab_id(&self) -> &TabId {
+        &self.active_tab_id
+    }
+
+    /// Returns the number of open tabs.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// Returns the number of closable (dynamic) tabs.
+    pub fn closable_tab_count(&self) -> usize {
+        self.tabs.iter().filter(|t| t.closable).count()
+    }
+
+    /// Set the active tab by ID.
+    /// Also updates the legacy current_tab field for backward compatibility.
+    pub fn set_active_tab(&mut self, tab_id: TabId) {
+        // Update legacy field for backward compatibility
+        match &tab_id {
+            TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
+            TabId::Projects => self.current_tab = Tab::Projects,
+            TabId::RunDetail(_) => {
+                // Dynamic tabs don't have a legacy equivalent,
+                // but we keep the last static tab for backward compat
+            }
+        }
+        self.active_tab_id = tab_id;
+    }
+
+    /// Check if a tab with the given ID exists.
+    pub fn has_tab(&self, tab_id: &TabId) -> bool {
+        self.tabs.iter().any(|t| t.id == *tab_id)
+    }
+
+    /// Open a new dynamic tab for run details.
+    /// If a tab with this run_id already exists, switches to it instead of creating a duplicate.
+    /// Returns true if a new tab was created, false if an existing tab was activated.
+    pub fn open_run_detail_tab(&mut self, run_id: &str, run_label: &str) -> bool {
+        let tab_id = TabId::RunDetail(run_id.to_string());
+
+        // Check if tab already exists
+        if self.has_tab(&tab_id) {
+            self.set_active_tab(tab_id);
+            return false;
+        }
+
+        // Create new tab
+        let tab = TabInfo::closable(tab_id.clone(), run_label);
+        self.tabs.push(tab);
+        self.set_active_tab(tab_id);
+        true
+    }
+
+    /// Open a run detail tab from a RunHistoryEntry.
+    /// Caches the run state for rendering and opens the tab.
+    pub fn open_run_detail_from_entry(
+        &mut self,
+        entry: &RunHistoryEntry,
+        run_state: Option<crate::state::RunState>,
+    ) {
+        let label = format!("Run - {}", entry.started_at.format("%Y-%m-%d %H:%M"));
+
+        // Cache the run state if provided
+        if let Some(state) = run_state {
+            self.run_detail_cache
+                .insert(entry.run_id.clone(), state);
+        }
+
+        self.open_run_detail_tab(&entry.run_id, &label);
+    }
+
+    /// Close a tab by ID.
+    /// Returns true if the tab was closed, false if the tab doesn't exist or is not closable.
+    /// If the closed tab was active, switches to the previous tab or Projects tab.
+    pub fn close_tab(&mut self, tab_id: &TabId) -> bool {
+        // Find the tab index
+        let tab_index = match self.tabs.iter().position(|t| t.id == *tab_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        // Check if the tab is closable
+        if !self.tabs[tab_index].closable {
+            return false;
+        }
+
+        // Check if this is the active tab
+        let was_active = self.active_tab_id == *tab_id;
+
+        // Remove the tab
+        self.tabs.remove(tab_index);
+
+        // Clean up cached run state if it's a run detail tab
+        if let TabId::RunDetail(run_id) = tab_id {
+            self.run_detail_cache.remove(run_id);
+        }
+
+        // If the closed tab was active, switch to another tab
+        if was_active {
+            // Try to switch to the previous tab (if it exists)
+            if tab_index > 0 && tab_index <= self.tabs.len() {
+                self.set_active_tab(self.tabs[tab_index - 1].id.clone());
+            } else if !self.tabs.is_empty() {
+                // Fall back to the first available tab or Projects tab
+                self.set_active_tab(TabId::Projects);
+            }
+        }
+
+        true
+    }
+
+    /// Close all closable (dynamic) tabs.
+    /// Returns the number of tabs closed.
+    pub fn close_all_dynamic_tabs(&mut self) -> usize {
+        let to_close: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.closable)
+            .map(|t| t.id.clone())
+            .collect();
+
+        let count = to_close.len();
+        for tab_id in to_close {
+            self.close_tab(&tab_id);
+        }
+        count
+    }
+
+    /// Get cached run state for a run detail tab.
+    pub fn get_cached_run_state(&self, run_id: &str) -> Option<&crate::state::RunState> {
+        self.run_detail_cache.get(run_id)
     }
 
     // ========================================================================
@@ -674,16 +909,51 @@ impl eframe::App for Autom8App {
 impl Autom8App {
     /// Render the header area with tab bar.
     fn render_header(&mut self, ui: &mut egui::Ui) {
+        // Use horizontal scroll for tab bar if there are many tabs
+        let scroll_width = ui.available_width().min(TAB_BAR_MAX_SCROLL_WIDTH);
+
         ui.horizontal_centered(|ui| {
             ui.add_space(spacing::XS);
 
-            for tab in Tab::all() {
-                let is_active = *tab == self.current_tab;
-                if self.render_tab(ui, *tab, is_active) {
-                    self.current_tab = *tab;
-                }
-                ui.add_space(spacing::XS);
-            }
+            egui::ScrollArea::horizontal()
+                .max_width(scroll_width)
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Collect tab actions to process after render loop
+                        let mut tab_to_activate: Option<TabId> = None;
+                        let mut tab_to_close: Option<TabId> = None;
+
+                        // Clone tabs to avoid borrow issues
+                        let tabs_snapshot: Vec<(TabId, String, bool)> = self
+                            .tabs
+                            .iter()
+                            .map(|t| (t.id.clone(), t.label.clone(), t.closable))
+                            .collect();
+
+                        for (tab_id, label, closable) in &tabs_snapshot {
+                            let is_active = self.active_tab_id == *tab_id;
+                            let (clicked, close_clicked) =
+                                self.render_dynamic_tab(ui, label, *closable, is_active);
+
+                            if clicked {
+                                tab_to_activate = Some(tab_id.clone());
+                            }
+                            if close_clicked {
+                                tab_to_close = Some(tab_id.clone());
+                            }
+                            ui.add_space(spacing::XS);
+                        }
+
+                        // Process actions after render loop
+                        if let Some(tab_id) = tab_to_close {
+                            self.close_tab(&tab_id);
+                        } else if let Some(tab_id) = tab_to_activate {
+                            self.set_active_tab(tab_id);
+                        }
+                    });
+                });
         });
 
         // Draw bottom border for header
@@ -695,11 +965,16 @@ impl Autom8App {
         );
     }
 
-    /// Render a single tab button. Returns true if clicked.
-    fn render_tab(&self, ui: &mut egui::Ui, tab: Tab, is_active: bool) -> bool {
-        let label = tab.label();
-
-        // Calculate tab size
+    /// Render a single tab button with optional close button.
+    /// Returns (tab_clicked, close_clicked).
+    fn render_dynamic_tab(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        closable: bool,
+        is_active: bool,
+    ) -> (bool, bool) {
+        // Calculate text size
         let text_galley = ui.fonts(|f| {
             f.layout_no_wrap(
                 label.to_string(),
@@ -708,15 +983,19 @@ impl Autom8App {
             )
         });
         let text_size = text_galley.size();
-        let tab_size = egui::vec2(
-            text_size.x + TAB_PADDING_H * 2.0,
-            HEADER_HEIGHT - TAB_UNDERLINE_HEIGHT,
-        );
 
-        // Allocate space for the tab
+        // Calculate tab width including close button if closable
+        let close_button_space = if closable {
+            TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING
+        } else {
+            0.0
+        };
+        let tab_width = text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
+        let tab_size = egui::vec2(tab_width, HEADER_HEIGHT - TAB_UNDERLINE_HEIGHT);
+
+        // Allocate space for the entire tab
         let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
 
-        // Determine visual state
         let is_hovered = response.hovered();
 
         // Draw tab background on hover (subtle)
@@ -728,7 +1007,7 @@ impl Autom8App {
             );
         }
 
-        // Draw text
+        // Draw text (offset left if closable to make room for close button)
         let text_color = if is_active {
             colors::TEXT_PRIMARY
         } else if is_hovered {
@@ -737,10 +1016,12 @@ impl Autom8App {
             colors::TEXT_MUTED
         };
 
-        let text_pos = egui::pos2(
-            rect.center().x - text_size.x / 2.0,
-            rect.center().y - text_size.y / 2.0,
-        );
+        let text_x = if closable {
+            rect.left() + TAB_PADDING_H
+        } else {
+            rect.center().x - text_size.x / 2.0
+        };
+        let text_pos = egui::pos2(text_x, rect.center().y - text_size.y / 2.0);
 
         ui.painter().galley(
             text_pos,
@@ -761,6 +1042,61 @@ impl Autom8App {
             Color32::TRANSPARENT,
         );
 
+        // Draw close button for closable tabs
+        let mut close_clicked = false;
+        if closable {
+            let close_rect = Rect::from_min_size(
+                egui::pos2(
+                    rect.right() - TAB_PADDING_H - TAB_CLOSE_BUTTON_SIZE,
+                    rect.center().y - TAB_CLOSE_BUTTON_SIZE / 2.0,
+                ),
+                egui::vec2(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE),
+            );
+
+            // Check if mouse is over the close button
+            let close_hovered = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| close_rect.contains(pos));
+
+            // Draw close button background on hover
+            if close_hovered {
+                ui.painter().rect_filled(
+                    close_rect,
+                    Rounding::same(rounding::SMALL),
+                    colors::SURFACE_HOVER,
+                );
+            }
+
+            // Draw X icon
+            let x_color = if close_hovered {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_MUTED
+            };
+            let x_center = close_rect.center();
+            let x_size = TAB_CLOSE_BUTTON_SIZE * 0.35;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x_center.x - x_size, x_center.y - x_size),
+                    egui::pos2(x_center.x + x_size, x_center.y + x_size),
+                ],
+                Stroke::new(1.5, x_color),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x_center.x + x_size, x_center.y - x_size),
+                    egui::pos2(x_center.x - x_size, x_center.y + x_size),
+                ],
+                Stroke::new(1.5, x_color),
+            );
+
+            // Check for close button click
+            if response.clicked() && close_hovered {
+                close_clicked = true;
+            }
+        }
+
         // Draw underline indicator for active tab
         if is_active {
             let underline_rect = egui::Rect::from_min_size(
@@ -771,15 +1107,252 @@ impl Autom8App {
                 .rect_filled(underline_rect, Rounding::ZERO, colors::ACCENT);
         }
 
-        response.clicked()
+        // Tab was clicked if response.clicked() and NOT close button clicked
+        let tab_clicked = response.clicked() && !close_clicked;
+
+        (tab_clicked, close_clicked)
+    }
+
+    /// Render a single tab button. Returns true if clicked.
+    /// Legacy method for backward compatibility with tests.
+    fn render_tab(&self, ui: &mut egui::Ui, tab: Tab, is_active: bool) -> bool {
+        let (clicked, _) = self.render_dynamic_tab(ui, tab.label(), false, is_active);
+        clicked
     }
 
     /// Render the content area based on the current tab.
     fn render_content(&mut self, ui: &mut egui::Ui) {
-        match self.current_tab {
-            Tab::ActiveRuns => self.render_active_runs(ui),
-            Tab::Projects => self.render_projects(ui),
+        match &self.active_tab_id {
+            TabId::ActiveRuns => self.render_active_runs(ui),
+            TabId::Projects => self.render_projects(ui),
+            TabId::RunDetail(run_id) => {
+                let run_id = run_id.clone();
+                self.render_run_detail(ui, &run_id);
+            }
         }
+    }
+
+    /// Render the run detail view for a specific run.
+    fn render_run_detail(&self, ui: &mut egui::Ui, run_id: &str) {
+        ui.vertical(|ui| {
+            // Header
+            ui.label(
+                egui::RichText::new(format!("Run Details: {}", run_id))
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::MD);
+
+            // Check if we have cached run state
+            if let Some(run_state) = self.run_detail_cache.get(run_id) {
+                // Render run details
+                self.render_run_state_details(ui, run_state);
+            } else {
+                // No cached state - show placeholder
+                ui.add_space(spacing::XXL);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Run details not available")
+                            .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                            .color(colors::TEXT_MUTED),
+                    );
+
+                    ui.add_space(spacing::SM);
+
+                    ui.label(
+                        egui::RichText::new("This run may have been archived or the data is unavailable.")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                });
+            }
+        });
+    }
+
+    /// Render detailed information about a run state.
+    fn render_run_state_details(&self, ui: &mut egui::Ui, run_state: &crate::state::RunState) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Status and timing info
+                ui.horizontal(|ui| {
+                    // Status badge
+                    let status_text = match run_state.status {
+                        crate::state::RunStatus::Completed => "Completed",
+                        crate::state::RunStatus::Failed => "Failed",
+                        crate::state::RunStatus::Running => "Running",
+                    };
+                    let status_color = match run_state.status {
+                        crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
+                        crate::state::RunStatus::Failed => colors::STATUS_ERROR,
+                        crate::state::RunStatus::Running => colors::STATUS_RUNNING,
+                    };
+
+                    let badge_galley = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            status_text.to_string(),
+                            typography::font(FontSize::Body, FontWeight::Medium),
+                            colors::TEXT_PRIMARY,
+                        )
+                    });
+                    let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
+                    let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+                    let (badge_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
+
+                    ui.painter().rect_filled(
+                        badge_rect,
+                        Rounding::same(rounding::SMALL),
+                        status_color.gamma_multiply(0.2),
+                    );
+
+                    let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+                    ui.painter().galley(text_pos, badge_galley, status_color);
+                });
+
+                ui.add_space(spacing::MD);
+
+                // Timing information
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Started: {}",
+                        run_state.started_at.format("%Y-%m-%d %H:%M:%S")
+                    ))
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+                );
+
+                if let Some(finished) = run_state.finished_at {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Finished: {}",
+                            finished.format("%Y-%m-%d %H:%M:%S")
+                        ))
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_SECONDARY),
+                    );
+
+                    let duration = finished - run_state.started_at;
+                    let duration_str = if duration.num_hours() > 0 {
+                        format!(
+                            "{}h {}m",
+                            duration.num_hours(),
+                            duration.num_minutes() % 60
+                        )
+                    } else if duration.num_minutes() > 0 {
+                        format!(
+                            "{}m {}s",
+                            duration.num_minutes(),
+                            duration.num_seconds() % 60
+                        )
+                    } else {
+                        format!("{}s", duration.num_seconds())
+                    };
+
+                    ui.label(
+                        egui::RichText::new(format!("Duration: {}", duration_str))
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                }
+
+                ui.add_space(spacing::MD);
+
+                // Branch info
+                ui.label(
+                    egui::RichText::new(format!("Branch: {}", run_state.branch))
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_SECONDARY),
+                );
+
+                ui.add_space(spacing::LG);
+                ui.separator();
+                ui.add_space(spacing::MD);
+
+                // Iterations/Stories section
+                ui.label(
+                    egui::RichText::new("Stories")
+                        .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                        .color(colors::TEXT_PRIMARY),
+                );
+
+                ui.add_space(spacing::SM);
+
+                if run_state.iterations.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No stories processed yet")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                } else {
+                    // Group iterations by story_id
+                    let mut story_iterations: std::collections::HashMap<
+                        String,
+                        Vec<&crate::state::IterationRecord>,
+                    > = std::collections::HashMap::new();
+
+                    for iter in &run_state.iterations {
+                        story_iterations
+                            .entry(iter.story_id.clone())
+                            .or_default()
+                            .push(iter);
+                    }
+
+                    // Render each story
+                    for (story_id, iterations) in story_iterations.iter() {
+                        let last_iter = iterations.last().unwrap();
+                        let status_color = match last_iter.status {
+                            crate::state::IterationStatus::Success => colors::STATUS_SUCCESS,
+                            crate::state::IterationStatus::Failed => colors::STATUS_ERROR,
+                            crate::state::IterationStatus::Running => colors::STATUS_RUNNING,
+                        };
+
+                        ui.horizontal(|ui| {
+                            // Status dot
+                            let (dot_rect, _) = ui.allocate_exact_size(
+                                Vec2::splat(spacing::MD),
+                                Sense::hover(),
+                            );
+                            ui.painter().circle_filled(
+                                dot_rect.center(),
+                                4.0,
+                                status_color,
+                            );
+
+                            // Story ID
+                            ui.label(
+                                egui::RichText::new(story_id)
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(colors::TEXT_PRIMARY),
+                            );
+
+                            // Iteration count if more than 1
+                            if iterations.len() > 1 {
+                                ui.label(
+                                    egui::RichText::new(format!("({} iterations)", iterations.len()))
+                                        .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                        .color(colors::TEXT_MUTED),
+                                );
+                            }
+                        });
+
+                        // Work summary if available
+                        if let Some(ref summary) = last_iter.work_summary {
+                            ui.indent(story_id, |ui| {
+                                ui.label(
+                                    egui::RichText::new(truncate_with_ellipsis(summary, 100))
+                                        .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                        .color(colors::TEXT_SECONDARY),
+                                );
+                            });
+                        }
+
+                        ui.add_space(spacing::SM);
+                    }
+                }
+            });
     }
 
     /// Render the Active Runs view.
@@ -1210,6 +1783,9 @@ impl Autom8App {
         let available_width = ui.available_width();
         let left_panel_width = (available_width / 2.0).max(200.0);
 
+        // We need to collect the clicked_run_id outside the closure
+        let mut clicked_run_id: Option<String> = None;
+
         ui.horizontal(|ui| {
             // Left panel: Project list (takes half the width)
             ui.allocate_ui_with_layout(
@@ -1225,15 +1801,36 @@ impl Autom8App {
             ui.separator();
             ui.add_space(spacing::SM);
 
-            // Right panel: Reserved for future detail view (US-003)
+            // Right panel: Run history for selected project
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), ui.available_height()),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
-                    self.render_projects_right_panel(ui);
+                    clicked_run_id = self.render_projects_right_panel(ui);
                 },
             );
         });
+
+        // Handle click on run history entry - open detail tab
+        if let Some(run_id) = clicked_run_id {
+            // Find the entry in run_history to get the label
+            if let Some(entry) = self.run_history.iter().find(|e| e.run_id == run_id) {
+                let entry_clone = entry.clone();
+
+                // Try to load the full run state for the detail view
+                if let Some(ref project_name) = self.selected_project {
+                    let run_state = StateManager::for_project(project_name)
+                        .ok()
+                        .and_then(|sm| {
+                            sm.list_archived()
+                                .ok()
+                                .and_then(|runs| runs.into_iter().find(|r| r.run_id == run_id))
+                        });
+
+                    self.open_run_detail_from_entry(&entry_clone, run_state);
+                }
+            }
+        }
     }
 
     /// Render the left panel of the Projects view (project list).
@@ -1266,7 +1863,10 @@ impl Autom8App {
 
     /// Render the right panel of the Projects view.
     /// Shows hint text when no project is selected, or run history when selected.
-    fn render_projects_right_panel(&self, ui: &mut egui::Ui) {
+    /// Returns the run_id of a clicked entry, if any.
+    fn render_projects_right_panel(&self, ui: &mut egui::Ui) -> Option<String> {
+        let mut clicked_run_id: Option<String> = None;
+
         if let Some(ref selected_name) = self.selected_project {
             // Header: Project name
             ui.label(
@@ -1304,7 +1904,9 @@ impl Autom8App {
                     )
                     .show(ui, |ui| {
                         for entry in &self.run_history {
-                            self.render_run_history_entry(ui, entry);
+                            if self.render_run_history_entry(ui, entry) {
+                                clicked_run_id = Some(entry.run_id.clone());
+                            }
                             ui.add_space(spacing::SM);
                         }
                     });
@@ -1328,20 +1930,36 @@ impl Autom8App {
                 );
             });
         }
+
+        clicked_run_id
     }
 
     /// Render a single run history entry as a card.
-    fn render_run_history_entry(&self, ui: &mut egui::Ui, entry: &RunHistoryEntry) {
+    /// Returns true if the entry was clicked.
+    fn render_run_history_entry(&self, ui: &mut egui::Ui, entry: &RunHistoryEntry) -> bool {
         // Card background
         let available_width = ui.available_width();
         let card_height = 72.0; // Fixed height for history cards
 
-        let (rect, _response) =
-            ui.allocate_exact_size(Vec2::new(available_width, card_height), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(available_width, card_height), Sense::click());
 
-        // Draw card background
+        let is_hovered = response.hovered();
+
+        // Draw card background with hover state
+        let bg_color = if is_hovered {
+            colors::SURFACE_SELECTED
+        } else {
+            colors::SURFACE_HOVER
+        };
+        let border = if is_hovered {
+            Stroke::new(1.0, colors::BORDER_FOCUSED)
+        } else {
+            Stroke::NONE
+        };
+
         ui.painter()
-            .rect_filled(rect, Rounding::same(rounding::CARD), colors::SURFACE_HOVER);
+            .rect(rect, Rounding::same(rounding::CARD), bg_color, border);
 
         // Card content
         let inner_rect = rect.shrink(spacing::MD);
@@ -1413,6 +2031,8 @@ impl Autom8App {
                     .color(colors::TEXT_MUTED),
             );
         });
+
+        response.clicked()
     }
 
     /// Render the empty state for Projects view.
@@ -2801,5 +3421,230 @@ mod tests {
         app.toggle_project_selection("project-b");
         assert_eq!(app.selected_project(), Some("project-b"));
         // History would be reloaded for the new project
+    }
+
+    // ========================================================================
+    // Dynamic Tab System Tests (US-004)
+    // ========================================================================
+
+    #[test]
+    fn test_tab_id_default() {
+        let tab_id = TabId::default();
+        assert_eq!(tab_id, TabId::ActiveRuns);
+    }
+
+    #[test]
+    fn test_tab_id_equality() {
+        assert_eq!(TabId::ActiveRuns, TabId::ActiveRuns);
+        assert_eq!(TabId::Projects, TabId::Projects);
+        assert_eq!(
+            TabId::RunDetail("run-123".to_string()),
+            TabId::RunDetail("run-123".to_string())
+        );
+        assert_ne!(TabId::ActiveRuns, TabId::Projects);
+        assert_ne!(
+            TabId::RunDetail("run-123".to_string()),
+            TabId::RunDetail("run-456".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tab_info_permanent() {
+        let tab = TabInfo::permanent(TabId::ActiveRuns, "Active Runs");
+        assert_eq!(tab.id, TabId::ActiveRuns);
+        assert_eq!(tab.label, "Active Runs");
+        assert!(!tab.closable);
+    }
+
+    #[test]
+    fn test_tab_info_closable() {
+        let tab = TabInfo::closable(TabId::RunDetail("run-123".to_string()), "Run Details");
+        assert_eq!(tab.id, TabId::RunDetail("run-123".to_string()));
+        assert_eq!(tab.label, "Run Details");
+        assert!(tab.closable);
+    }
+
+    #[test]
+    fn test_tab_to_tab_id() {
+        assert_eq!(Tab::ActiveRuns.to_tab_id(), TabId::ActiveRuns);
+        assert_eq!(Tab::Projects.to_tab_id(), TabId::Projects);
+    }
+
+    #[test]
+    fn test_app_initial_tabs() {
+        let app = Autom8App::new(None);
+        assert_eq!(app.tab_count(), 2);
+        assert_eq!(app.closable_tab_count(), 0);
+        assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
+    }
+
+    #[test]
+    fn test_app_set_active_tab() {
+        let mut app = Autom8App::new(None);
+        app.set_active_tab(TabId::Projects);
+        assert_eq!(*app.active_tab_id(), TabId::Projects);
+        assert_eq!(app.current_tab(), Tab::Projects);
+    }
+
+    #[test]
+    fn test_app_has_tab() {
+        let app = Autom8App::new(None);
+        assert!(app.has_tab(&TabId::ActiveRuns));
+        assert!(app.has_tab(&TabId::Projects));
+        assert!(!app.has_tab(&TabId::RunDetail("nonexistent".to_string())));
+    }
+
+    #[test]
+    fn test_app_open_run_detail_tab() {
+        let mut app = Autom8App::new(None);
+        let created = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
+
+        assert!(created);
+        assert_eq!(app.tab_count(), 3);
+        assert_eq!(app.closable_tab_count(), 1);
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-123".to_string())
+        );
+        assert!(app.has_tab(&TabId::RunDetail("run-123".to_string())));
+    }
+
+    #[test]
+    fn test_app_open_run_detail_tab_no_duplicate() {
+        let mut app = Autom8App::new(None);
+
+        // Open the same tab twice
+        let created1 = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
+        let created2 = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
+
+        assert!(created1);
+        assert!(!created2); // Second call should not create a new tab
+        assert_eq!(app.tab_count(), 3); // Still only 3 tabs
+        assert_eq!(app.closable_tab_count(), 1);
+    }
+
+    #[test]
+    fn test_app_open_multiple_run_detail_tabs() {
+        let mut app = Autom8App::new(None);
+
+        app.open_run_detail_tab("run-1", "Run 1");
+        app.open_run_detail_tab("run-2", "Run 2");
+        app.open_run_detail_tab("run-3", "Run 3");
+
+        assert_eq!(app.tab_count(), 5);
+        assert_eq!(app.closable_tab_count(), 3);
+    }
+
+    #[test]
+    fn test_app_close_tab() {
+        let mut app = Autom8App::new(None);
+        app.open_run_detail_tab("run-123", "Run Details");
+
+        // Close the dynamic tab
+        let closed = app.close_tab(&TabId::RunDetail("run-123".to_string()));
+
+        assert!(closed);
+        assert_eq!(app.tab_count(), 2);
+        assert_eq!(app.closable_tab_count(), 0);
+        assert!(!app.has_tab(&TabId::RunDetail("run-123".to_string())));
+    }
+
+    #[test]
+    fn test_app_close_permanent_tab_fails() {
+        let mut app = Autom8App::new(None);
+
+        // Try to close permanent tabs - should fail
+        let closed1 = app.close_tab(&TabId::ActiveRuns);
+        let closed2 = app.close_tab(&TabId::Projects);
+
+        assert!(!closed1);
+        assert!(!closed2);
+        assert_eq!(app.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_app_close_nonexistent_tab_fails() {
+        let mut app = Autom8App::new(None);
+
+        let closed = app.close_tab(&TabId::RunDetail("nonexistent".to_string()));
+        assert!(!closed);
+    }
+
+    #[test]
+    fn test_app_close_active_tab_switches_to_previous() {
+        let mut app = Autom8App::new(None);
+        app.set_active_tab(TabId::Projects);
+        app.open_run_detail_tab("run-123", "Run Details");
+
+        // Active tab is now the run detail tab
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-123".to_string())
+        );
+
+        // Close it - should switch to Projects (the previous tab)
+        app.close_tab(&TabId::RunDetail("run-123".to_string()));
+        assert_eq!(*app.active_tab_id(), TabId::Projects);
+    }
+
+    #[test]
+    fn test_app_close_all_dynamic_tabs() {
+        let mut app = Autom8App::new(None);
+
+        app.open_run_detail_tab("run-1", "Run 1");
+        app.open_run_detail_tab("run-2", "Run 2");
+        app.open_run_detail_tab("run-3", "Run 3");
+
+        assert_eq!(app.closable_tab_count(), 3);
+
+        let closed = app.close_all_dynamic_tabs();
+
+        assert_eq!(closed, 3);
+        assert_eq!(app.tab_count(), 2);
+        assert_eq!(app.closable_tab_count(), 0);
+    }
+
+    #[test]
+    fn test_app_tabs_accessor() {
+        let app = Autom8App::new(None);
+        let tabs = app.tabs();
+
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].label, "Active Runs");
+        assert_eq!(tabs[1].label, "Projects");
+    }
+
+    #[test]
+    fn test_tab_bar_constants() {
+        assert!(TAB_BAR_MAX_SCROLL_WIDTH > 0.0);
+        assert!(TAB_CLOSE_BUTTON_SIZE > 0.0);
+        assert!(TAB_CLOSE_PADDING >= 0.0);
+    }
+
+    #[test]
+    fn test_run_detail_cache() {
+        use crate::state::RunState;
+
+        let mut app = Autom8App::new(None);
+
+        // Initially no cached run state
+        assert!(app.get_cached_run_state("run-123").is_none());
+
+        // Create a mock run state
+        let run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+
+        // Create entry and open detail tab with cached state
+        let entry = RunHistoryEntry::from_run_state(&run);
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Now we should have cached state
+        assert!(app.get_cached_run_state(&entry.run_id).is_some());
+
+        // Close the tab - cache should be cleared
+        app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
+        assert!(app.get_cached_run_state(&entry.run_id).is_none());
     }
 }
