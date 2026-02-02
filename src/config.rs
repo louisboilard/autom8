@@ -68,7 +68,7 @@ pub struct Config {
     /// When `false`, autom8 runs on the current branch (default behavior).
     ///
     /// Note: Requires a git repository. Has no effect outside of git repos.
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub worktree: bool,
 
     /// Pattern for worktree directory names.
@@ -114,7 +114,7 @@ impl Default for Config {
             review: true,
             commit: true,
             pull_request: true,
-            worktree: false,
+            worktree: true,
             worktree_path_pattern: default_worktree_path_pattern(),
             worktree_cleanup: false,
         }
@@ -234,10 +234,10 @@ commit = true
 pull_request = true
 
 # Worktree mode: Automatic worktree creation for parallel runs
-# - true: Create a dedicated worktree for each run (enables parallel sessions)
-# - false: Run on the current branch (default, single session per project)
+# - true: Create a dedicated worktree for each run (enables parallel sessions, default)
+# - false: Run on the current branch (single session per project)
 # Note: Requires a git repository. Has no effect outside of git repos.
-worktree = false
+worktree = true
 
 # Worktree path pattern: Pattern for naming worktree directories
 # Placeholders: {repo} = repository name, {branch} = branch name (slugified)
@@ -354,8 +354,8 @@ commit = {}
 pull_request = {}
 
 # Worktree mode: Automatic worktree creation for parallel runs
-# - true: Create a dedicated worktree for each run (enables parallel sessions)
-# - false: Run on the current branch (default, single session per project)
+# - true: Create a dedicated worktree for each run (enables parallel sessions, default)
+# - false: Run on the current branch (single session per project)
 # Note: Requires a git repository. Has no effect outside of git repos.
 worktree = {}
 
@@ -2154,7 +2154,7 @@ mod tests {
         assert!(toml_str.contains("review = true"));
         assert!(toml_str.contains("commit = true"));
         assert!(toml_str.contains("pull_request = true"));
-        assert!(toml_str.contains("worktree = false"));
+        assert!(toml_str.contains("worktree = true"));
     }
 
     #[test]
@@ -2279,7 +2279,7 @@ mod tests {
         assert!(content.contains("review = true"));
         assert!(content.contains("commit = true"));
         assert!(content.contains("pull_request = true"));
-        assert!(content.contains("worktree = false"));
+        assert!(content.contains("worktree = true"));
     }
 
     #[test]
@@ -3177,8 +3177,8 @@ review = false
     }
 
     #[test]
-    fn test_worktree_config_missing_defaults_to_false() {
-        // Old config files without worktree field should still work
+    fn test_worktree_config_missing_defaults_to_true() {
+        // Config files without worktree field should default to true
         let toml_str = r#"
             review = true
             commit = true
@@ -3186,8 +3186,8 @@ review = false
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(
-            !config.worktree,
-            "missing worktree field should default to false"
+            config.worktree,
+            "missing worktree field should default to true"
         );
     }
 
