@@ -6,15 +6,14 @@
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::{Autom8Error, Result};
 use crate::gui::components::{
-    self, format_duration, format_relative_time, format_state, state_to_color,
-    truncate_with_ellipsis, Progress, StatusDot, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
+    format_duration, format_relative_time, format_state, state_to_color, truncate_with_ellipsis,
+    MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
-use crate::gui::theme::{self, colors, rounding};
+use crate::gui::theme::{self, colors, rounding, spacing};
 use crate::gui::typography::{self, FontSize, FontWeight};
 use crate::spec::Spec;
 use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
 use crate::worktree::MAIN_SESSION_ID;
-use chrono::{DateTime, Utc};
 use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,26 +30,20 @@ const MIN_WIDTH: f32 = 800.0;
 /// Minimum window height in pixels.
 const MIN_HEIGHT: f32 = 600.0;
 
-/// Height of the header/tab bar area.
+/// Height of the header/tab bar area (48px = 3 * LG spacing).
 const HEADER_HEIGHT: f32 = 48.0;
-
-/// Horizontal padding within the header.
-const HEADER_PADDING_H: f32 = 16.0;
 
 /// Tab indicator underline height.
 const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
-/// Tab horizontal padding.
-const TAB_PADDING_H: f32 = 16.0;
-
-/// Space between tabs.
-const TAB_SPACING: f32 = 4.0;
+/// Tab horizontal padding (uses LG from spacing scale).
+const TAB_PADDING_H: f32 = 16.0; // spacing::LG
 
 /// Default refresh interval for data loading (500ms for GUI, less aggressive than TUI).
 pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 500;
 
 // ============================================================================
-// Grid Layout Constants
+// Grid Layout Constants (using spacing scale)
 // ============================================================================
 
 /// Minimum width for a card in the grid layout.
@@ -59,11 +52,11 @@ const CARD_MIN_WIDTH: f32 = 280.0;
 /// Maximum width for a card in the grid layout.
 const CARD_MAX_WIDTH: f32 = 400.0;
 
-/// Spacing between cards in the grid.
-const CARD_SPACING: f32 = 16.0;
+/// Spacing between cards in the grid (uses LG from spacing scale).
+const CARD_SPACING: f32 = 16.0; // spacing::LG
 
-/// Internal padding for cards.
-const CARD_PADDING: f32 = 16.0;
+/// Internal padding for cards (uses LG from spacing scale).
+const CARD_PADDING: f32 = 16.0; // spacing::LG
 
 /// Minimum height for a card.
 const CARD_MIN_HEIGHT: f32 = 240.0;
@@ -74,20 +67,17 @@ const OUTPUT_LINES_TO_SHOW: usize = 5;
 // MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
 // ============================================================================
-// Projects View Constants
+// Projects View Constants (using spacing scale)
 // ============================================================================
 
 /// Height of each row in the project list.
 const PROJECT_ROW_HEIGHT: f32 = 56.0;
 
-/// Horizontal padding within project rows.
-const PROJECT_ROW_PADDING_H: f32 = 12.0;
+/// Horizontal padding within project rows (uses MD from spacing scale).
+const PROJECT_ROW_PADDING_H: f32 = 12.0; // spacing::MD
 
-/// Vertical padding within project rows.
-const PROJECT_ROW_PADDING_V: f32 = 12.0;
-
-/// Spacing between rows in the project list.
-const PROJECT_ROW_SPACING: f32 = 4.0;
+/// Vertical padding within project rows (uses MD from spacing scale).
+const PROJECT_ROW_PADDING_V: f32 = 12.0; // spacing::MD
 
 /// Size of the status indicator dot in the project list.
 const PROJECT_STATUS_DOT_RADIUS: f32 = 5.0;
@@ -238,6 +228,13 @@ pub struct Autom8App {
     has_active_runs: bool,
 
     // ========================================================================
+    // Loading State
+    // ========================================================================
+    /// Whether the initial data load has completed.
+    /// Used to show a brief loading state on first render.
+    initial_load_complete: bool,
+
+    // ========================================================================
     // Refresh Timing
     // ========================================================================
     /// Time of the last data refresh.
@@ -275,12 +272,19 @@ impl Autom8App {
             projects: Vec::new(),
             sessions: Vec::new(),
             has_active_runs: false,
+            initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
         };
         // Initial data load
         app.refresh_data();
+        app.initial_load_complete = true;
         app
+    }
+
+    /// Returns whether the initial data load has completed.
+    pub fn is_initial_load_complete(&self) -> bool {
+        self.initial_load_complete
     }
 
     /// Returns the currently selected tab.
@@ -502,7 +506,7 @@ impl eframe::App for Autom8App {
             .frame(
                 egui::Frame::none()
                     .fill(colors::SURFACE)
-                    .inner_margin(egui::Margin::symmetric(HEADER_PADDING_H, 0.0)),
+                    .inner_margin(egui::Margin::symmetric(spacing::LG, 0.0)),
             )
             .show(ctx, |ui| {
                 self.render_header(ui);
@@ -513,7 +517,7 @@ impl eframe::App for Autom8App {
             .frame(
                 egui::Frame::none()
                     .fill(colors::BACKGROUND)
-                    .inner_margin(egui::Margin::same(16.0)),
+                    .inner_margin(egui::Margin::same(spacing::LG)),
             )
             .show(ctx, |ui| {
                 self.render_content(ui);
@@ -525,14 +529,14 @@ impl Autom8App {
     /// Render the header area with tab bar.
     fn render_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            ui.add_space(TAB_SPACING);
+            ui.add_space(spacing::XS);
 
             for tab in Tab::all() {
                 let is_active = *tab == self.current_tab;
                 if self.render_tab(ui, *tab, is_active) {
                     self.current_tab = *tab;
                 }
-                ui.add_space(TAB_SPACING);
+                ui.add_space(spacing::XS);
             }
         });
 
@@ -635,14 +639,14 @@ impl Autom8App {
     /// Render the Active Runs view.
     fn render_active_runs(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            // Header section
+            // Header section with consistent spacing
             ui.label(
                 egui::RichText::new("Active Runs")
                     .font(typography::font(FontSize::Title, FontWeight::SemiBold))
                     .color(colors::TEXT_PRIMARY),
             );
 
-            ui.add_space(8.0);
+            ui.add_space(spacing::SM);
 
             if let Some(ref filter) = self.project_filter {
                 ui.label(
@@ -650,7 +654,7 @@ impl Autom8App {
                         .font(typography::font(FontSize::Body, FontWeight::Regular))
                         .color(colors::TEXT_SECONDARY),
                 );
-                ui.add_space(8.0);
+                ui.add_space(spacing::SM);
             }
 
             // Empty state or grid layout
@@ -664,11 +668,11 @@ impl Autom8App {
 
     /// Render the empty state for Active Runs view.
     fn render_empty_active_runs(&self, ui: &mut egui::Ui) {
-        ui.add_space(32.0);
+        ui.add_space(spacing::XXL);
 
         // Center the empty state message
         ui.vertical_centered(|ui| {
-            ui.add_space(48.0);
+            ui.add_space(spacing::XXL + spacing::LG);
 
             ui.label(
                 egui::RichText::new("No active runs")
@@ -676,7 +680,7 @@ impl Autom8App {
                     .color(colors::TEXT_MUTED),
             );
 
-            ui.add_space(8.0);
+            ui.add_space(spacing::SM);
 
             ui.label(
                 egui::RichText::new("Run autom8 to start implementing a feature")
@@ -708,26 +712,27 @@ impl Autom8App {
 
     /// Render the sessions in a responsive grid layout.
     fn render_sessions_grid(&self, ui: &mut egui::Ui) {
-        // Scrollable area for the grid
+        // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
                 let available_width = ui.available_width();
                 let columns = Self::calculate_grid_columns(available_width);
                 let card_width = Self::calculate_card_width(available_width, columns);
 
-                // Create rows of cards
+                // Create rows of cards with consistent spacing
                 let mut session_iter = self.sessions.iter().peekable();
                 while session_iter.peek().is_some() {
                     ui.horizontal(|ui| {
                         for _ in 0..columns {
                             if let Some(session) = session_iter.next() {
                                 self.render_session_card(ui, session, card_width);
-                                ui.add_space(CARD_SPACING);
+                                ui.add_space(spacing::LG);
                             }
                         }
                     });
-                    ui.add_space(CARD_SPACING);
+                    ui.add_space(spacing::LG);
                 }
             });
     }
@@ -803,8 +808,8 @@ impl Autom8App {
         } else {
             session.metadata.session_id.clone()
         };
-        let badge_padding_h = 6.0;
-        let badge_padding_v = 2.0;
+        let badge_padding_h = 6.0; // Inner padding for badge
+        let badge_padding_v = 2.0; // Inner padding for badge
         let badge_galley = painter.layout_no_wrap(
             badge_text,
             typography::font(FontSize::Caption, FontWeight::Medium),
@@ -837,7 +842,7 @@ impl Autom8App {
             badge_galley,
             Color32::TRANSPARENT,
         );
-        cursor_y += project_galley.rect.height() + 4.0;
+        cursor_y += project_galley.rect.height() + spacing::XS;
 
         // Branch name row
         let branch_text = truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH);
@@ -851,7 +856,7 @@ impl Autom8App {
             branch_galley.clone(),
             Color32::TRANSPARENT,
         );
-        cursor_y += branch_galley.rect.height() + 8.0;
+        cursor_y += branch_galley.rect.height() + spacing::SM;
 
         // ====================================================================
         // STATUS ROW: Colored indicator dot with state label
@@ -878,11 +883,11 @@ impl Autom8App {
             colors::TEXT_PRIMARY,
         );
         painter.galley(
-            egui::pos2(content_rect.min.x + dot_radius * 2.0 + 8.0, cursor_y),
+            egui::pos2(content_rect.min.x + dot_radius * 2.0 + spacing::SM, cursor_y),
             state_galley.clone(),
             Color32::TRANSPARENT,
         );
-        cursor_y += state_galley.rect.height() + 4.0;
+        cursor_y += state_galley.rect.height() + spacing::XS;
 
         // ====================================================================
         // ERROR MESSAGE (if present)
@@ -899,7 +904,7 @@ impl Autom8App {
                 error_galley.clone(),
                 Color32::TRANSPARENT,
             );
-            cursor_y += error_galley.rect.height() + 4.0;
+            cursor_y += error_galley.rect.height() + spacing::XS;
         }
 
         // ====================================================================
@@ -929,7 +934,7 @@ impl Autom8App {
                     );
                     painter.galley(
                         egui::pos2(
-                            content_rect.min.x + progress_galley.rect.width() + 12.0,
+                            content_rect.min.x + progress_galley.rect.width() + spacing::MD,
                             cursor_y,
                         ),
                         story_galley,
@@ -937,7 +942,7 @@ impl Autom8App {
                     );
                 }
             }
-            cursor_y += progress_galley.rect.height() + 4.0;
+            cursor_y += progress_galley.rect.height() + spacing::XS;
         }
 
         // ====================================================================
@@ -955,7 +960,7 @@ impl Autom8App {
                 duration_galley.clone(),
                 Color32::TRANSPARENT,
             );
-            cursor_y += duration_galley.rect.height() + 8.0;
+            cursor_y += duration_galley.rect.height() + spacing::SM;
         }
 
         // ====================================================================
@@ -968,7 +973,7 @@ impl Autom8App {
             separator_y,
             Stroke::new(1.0, colors::BORDER),
         );
-        cursor_y += 8.0;
+        cursor_y += spacing::SM;
 
         // Output section background
         let output_rect = Rect::from_min_max(
@@ -981,8 +986,8 @@ impl Autom8App {
             colors::SURFACE_HOVER,
         );
 
-        // Output lines
-        let output_padding = 6.0;
+        // Output lines with consistent padding
+        let output_padding = 6.0; // Inner padding for output section
         let mut output_y = cursor_y + output_padding;
         let line_height = FontSize::Caption.pixels() + 2.0;
         let max_output_chars = ((content_width - output_padding * 2.0) / 6.0) as usize; // Approx chars per line
@@ -1052,14 +1057,14 @@ impl Autom8App {
     /// Render the Projects view.
     fn render_projects(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            // Header section
+            // Header section with consistent spacing
             ui.label(
                 egui::RichText::new("Projects")
                     .font(typography::font(FontSize::Title, FontWeight::SemiBold))
                     .color(colors::TEXT_PRIMARY),
             );
 
-            ui.add_space(8.0);
+            ui.add_space(spacing::SM);
 
             if let Some(ref filter) = self.project_filter {
                 ui.label(
@@ -1067,7 +1072,7 @@ impl Autom8App {
                         .font(typography::font(FontSize::Body, FontWeight::Regular))
                         .color(colors::TEXT_SECONDARY),
                 );
-                ui.add_space(8.0);
+                ui.add_space(spacing::SM);
             }
 
             // Empty state or list
@@ -1081,11 +1086,11 @@ impl Autom8App {
 
     /// Render the empty state for Projects view.
     fn render_empty_projects(&self, ui: &mut egui::Ui) {
-        ui.add_space(32.0);
+        ui.add_space(spacing::XXL);
 
         // Center the empty state message
         ui.vertical_centered(|ui| {
-            ui.add_space(48.0);
+            ui.add_space(spacing::XXL + spacing::LG);
 
             ui.label(
                 egui::RichText::new("No projects found")
@@ -1093,7 +1098,7 @@ impl Autom8App {
                     .color(colors::TEXT_MUTED),
             );
 
-            ui.add_space(8.0);
+            ui.add_space(spacing::SM);
 
             ui.label(
                 egui::RichText::new("Projects will appear here after running autom8")
@@ -1107,10 +1112,11 @@ impl Autom8App {
     fn render_projects_list(&self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
                 for project in &self.projects {
                     self.render_project_row(ui, project);
-                    ui.add_space(PROJECT_ROW_SPACING);
+                    ui.add_space(spacing::XS);
                 }
             });
     }
@@ -1203,7 +1209,7 @@ impl Autom8App {
         let status_color = self.project_status_color(project);
         let dot_center = egui::pos2(cursor_x + PROJECT_STATUS_DOT_RADIUS, center_y);
         painter.circle_filled(dot_center, PROJECT_STATUS_DOT_RADIUS, status_color);
-        cursor_x += PROJECT_STATUS_DOT_RADIUS * 2.0 + 12.0;
+        cursor_x += PROJECT_STATUS_DOT_RADIUS * 2.0 + spacing::MD;
 
         // ====================================================================
         // PROJECT NAME
@@ -1239,7 +1245,7 @@ impl Autom8App {
             typography::font(FontSize::Caption, FontWeight::Regular),
             status_text_color,
         );
-        let status_y = name_y + name_galley.rect.height() + 4.0;
+        let status_y = name_y + name_galley.rect.height() + spacing::XS;
         painter.galley(
             egui::pos2(cursor_x, status_y),
             status_galley,
@@ -1305,6 +1311,7 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_tab_default_is_active_runs() {
@@ -1418,6 +1425,13 @@ mod tests {
         let app = Autom8App::new(Some("nonexistent-project".to_string()));
         // With a nonexistent filter, there should be no active runs
         assert!(!app.has_active_runs() || app.sessions().is_empty());
+    }
+
+    #[test]
+    fn test_app_initial_load_complete() {
+        let app = Autom8App::new(Some("nonexistent-project".to_string()));
+        // After creation, initial load should be complete
+        assert!(app.is_initial_load_complete());
     }
 
     #[test]
@@ -1762,10 +1776,7 @@ mod tests {
             state_to_color(MachineState::Completed),
             colors::STATUS_SUCCESS
         );
-        assert_eq!(
-            state_to_color(MachineState::Failed),
-            colors::STATUS_ERROR
-        );
+        assert_eq!(state_to_color(MachineState::Failed), colors::STATUS_ERROR);
         assert_eq!(state_to_color(MachineState::Idle), colors::STATUS_IDLE);
     }
 

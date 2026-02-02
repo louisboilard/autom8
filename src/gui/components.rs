@@ -4,7 +4,7 @@
 //! status visualization across the application, including status dots, progress
 //! indicators, and time formatting utilities.
 
-use crate::gui::theme::{colors, rounding};
+use crate::gui::theme::colors;
 use crate::gui::typography::{self, FontSize, FontWeight};
 use crate::state::MachineState;
 use chrono::{DateTime, Utc};
@@ -80,11 +80,7 @@ impl StatusDot {
     /// Paint the status dot with an optional border.
     pub fn paint_with_border(&self, painter: &egui::Painter, center: Pos2, border_color: Color32) {
         painter.circle_filled(center, self.radius, self.color);
-        painter.circle_stroke(
-            center,
-            self.radius,
-            egui::Stroke::new(1.0, border_color),
-        );
+        painter.circle_stroke(center, self.radius, egui::Stroke::new(1.0, border_color));
     }
 }
 
@@ -302,10 +298,8 @@ impl ProgressBar {
 
     /// Allocate space and paint the progress bar in a UI.
     pub fn show(&self, ui: &mut egui::Ui, width: f32) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(
-            Vec2::new(width, self.height),
-            egui::Sense::hover(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, self.height), egui::Sense::hover());
         self.paint(ui.painter(), rect);
         response
     }
@@ -492,7 +486,7 @@ impl StatusLabel {
     /// Returns the total width used.
     pub fn paint(
         &self,
-        ui: &egui::Ui,
+        _ui: &egui::Ui,
         painter: &egui::Painter,
         pos: Pos2,
         font: egui::FontId,
@@ -522,13 +516,13 @@ impl StatusLabel {
         let text_color = colors::TEXT_PRIMARY;
 
         // Calculate the approximate width needed
-        let text_galley = ui.fonts(|f| {
-            f.layout_no_wrap(self.label.clone(), font.clone(), text_color)
-        });
+        let text_galley =
+            ui.fonts(|f| f.layout_no_wrap(self.label.clone(), font.clone(), text_color));
         let width = self.dot_radius * 2.0 + self.spacing + text_galley.rect.width();
         let height = text_galley.rect.height().max(self.dot_radius * 2.0);
 
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
 
         if ui.is_rect_visible(rect) {
             self.paint(ui, ui.painter(), rect.min, font, text_color);
@@ -561,46 +555,103 @@ mod tests {
 
     #[test]
     fn test_status_background_colors() {
-        assert_eq!(Status::Running.background_color(), colors::STATUS_RUNNING_BG);
-        assert_eq!(Status::Success.background_color(), colors::STATUS_SUCCESS_BG);
-        assert_eq!(Status::Warning.background_color(), colors::STATUS_WARNING_BG);
+        assert_eq!(
+            Status::Running.background_color(),
+            colors::STATUS_RUNNING_BG
+        );
+        assert_eq!(
+            Status::Success.background_color(),
+            colors::STATUS_SUCCESS_BG
+        );
+        assert_eq!(
+            Status::Warning.background_color(),
+            colors::STATUS_WARNING_BG
+        );
         assert_eq!(Status::Error.background_color(), colors::STATUS_ERROR_BG);
         assert_eq!(Status::Idle.background_color(), colors::STATUS_IDLE_BG);
     }
 
     #[test]
     fn test_status_from_machine_state_running() {
-        assert_eq!(Status::from_machine_state(MachineState::RunningClaude), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::Reviewing), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::Correcting), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::Committing), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::CreatingPR), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::Initializing), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::PickingStory), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::LoadingSpec), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::GeneratingSpec), Status::Running);
+        assert_eq!(
+            Status::from_machine_state(MachineState::RunningClaude),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Reviewing),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Correcting),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Committing),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::CreatingPR),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Initializing),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::PickingStory),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::LoadingSpec),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::GeneratingSpec),
+            Status::Running
+        );
     }
 
     #[test]
     fn test_status_from_machine_state_terminal() {
-        assert_eq!(Status::from_machine_state(MachineState::Completed), Status::Success);
-        assert_eq!(Status::from_machine_state(MachineState::Failed), Status::Error);
+        assert_eq!(
+            Status::from_machine_state(MachineState::Completed),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Failed),
+            Status::Error
+        );
         assert_eq!(Status::from_machine_state(MachineState::Idle), Status::Idle);
     }
 
     #[test]
     fn test_state_to_color() {
-        assert_eq!(state_to_color(MachineState::RunningClaude), colors::STATUS_RUNNING);
-        assert_eq!(state_to_color(MachineState::Completed), colors::STATUS_SUCCESS);
+        assert_eq!(
+            state_to_color(MachineState::RunningClaude),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            state_to_color(MachineState::Completed),
+            colors::STATUS_SUCCESS
+        );
         assert_eq!(state_to_color(MachineState::Failed), colors::STATUS_ERROR);
         assert_eq!(state_to_color(MachineState::Idle), colors::STATUS_IDLE);
     }
 
     #[test]
     fn test_state_to_background_color() {
-        assert_eq!(state_to_background_color(MachineState::RunningClaude), colors::STATUS_RUNNING_BG);
-        assert_eq!(state_to_background_color(MachineState::Completed), colors::STATUS_SUCCESS_BG);
-        assert_eq!(state_to_background_color(MachineState::Failed), colors::STATUS_ERROR_BG);
+        assert_eq!(
+            state_to_background_color(MachineState::RunningClaude),
+            colors::STATUS_RUNNING_BG
+        );
+        assert_eq!(
+            state_to_background_color(MachineState::Completed),
+            colors::STATUS_SUCCESS_BG
+        );
+        assert_eq!(
+            state_to_background_color(MachineState::Failed),
+            colors::STATUS_ERROR_BG
+        );
     }
 
     // ------------------------------------------------------------------------
@@ -843,7 +894,10 @@ mod tests {
     fn test_format_state_all_states() {
         assert_eq!(format_state(MachineState::Idle), "Idle");
         assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
-        assert_eq!(format_state(MachineState::GeneratingSpec), "Generating Spec");
+        assert_eq!(
+            format_state(MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
         assert_eq!(format_state(MachineState::Initializing), "Initializing");
         assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
         assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");

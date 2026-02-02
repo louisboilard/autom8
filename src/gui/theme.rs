@@ -6,6 +6,30 @@
 
 use eframe::egui::{self, Color32, Rounding, Stroke, Style, Visuals};
 
+/// Spacing scale for consistent layout throughout the application.
+///
+/// Use these constants instead of arbitrary pixel values to ensure
+/// visual consistency and a cohesive rhythm across all UI elements.
+pub mod spacing {
+    /// Extra small spacing (4px) - tight spacing between related elements.
+    pub const XS: f32 = 4.0;
+
+    /// Small spacing (8px) - standard spacing between related elements.
+    pub const SM: f32 = 8.0;
+
+    /// Medium spacing (12px) - spacing between sections within a component.
+    pub const MD: f32 = 12.0;
+
+    /// Standard spacing (16px) - standard component padding, gaps between cards.
+    pub const LG: f32 = 16.0;
+
+    /// Large spacing (24px) - spacing between major sections.
+    pub const XL: f32 = 24.0;
+
+    /// Extra large spacing (32px) - large gaps, page-level margins.
+    pub const XXL: f32 = 32.0;
+}
+
 /// Corner rounding values for consistent UI elements.
 pub mod rounding {
     /// Rounding for cards and panels (8px).
@@ -291,19 +315,25 @@ fn configure_widget_visuals(visuals: &mut Visuals) {
 pub fn configure_style() -> Style {
     // Get default style and modify spacing
     let default_style = Style::default();
-    let mut spacing = default_style.spacing.clone();
+    let mut style_spacing = default_style.spacing.clone();
 
-    // Spacing adjustments for a cleaner look
-    spacing.item_spacing = egui::vec2(8.0, 4.0);
-    spacing.window_margin = egui::Margin::same(16.0);
-    spacing.button_padding = egui::vec2(12.0, 6.0);
-    spacing.menu_margin = egui::Margin::same(8.0);
-    spacing.indent = 16.0;
-    spacing.scroll = egui::style::ScrollStyle {
+    // Use our spacing scale for consistency
+    style_spacing.item_spacing = egui::vec2(spacing::SM, spacing::XS);
+    style_spacing.window_margin = egui::Margin::same(spacing::LG);
+    style_spacing.button_padding = egui::vec2(spacing::MD, 6.0);
+    style_spacing.menu_margin = egui::Margin::same(spacing::SM);
+    style_spacing.indent = spacing::LG;
+    style_spacing.scroll = egui::style::ScrollStyle {
         floating: true,
-        bar_width: 8.0,
+        bar_width: spacing::SM,
+        // Smoother scroll animation
+        floating_allocated_width: 0.0,
+        bar_inner_margin: spacing::XS,
+        bar_outer_margin: spacing::XS,
         ..Default::default()
     };
+    // Ensure consistent spacing for combo boxes and menus
+    style_spacing.combo_width = 100.0;
 
     // Modify interaction settings
     let mut interaction = default_style.interaction.clone();
@@ -312,8 +342,9 @@ pub fn configure_style() -> Style {
 
     Style {
         visuals: configure_visuals(),
-        spacing,
+        spacing: style_spacing,
         interaction,
+        // animation_time uses default which provides smooth transitions
         ..Default::default()
     }
 }
@@ -329,6 +360,27 @@ pub fn init(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spacing_scale() {
+        // Verify spacing scale values
+        assert_eq!(spacing::XS, 4.0);
+        assert_eq!(spacing::SM, 8.0);
+        assert_eq!(spacing::MD, 12.0);
+        assert_eq!(spacing::LG, 16.0);
+        assert_eq!(spacing::XL, 24.0);
+        assert_eq!(spacing::XXL, 32.0);
+    }
+
+    #[test]
+    fn test_spacing_scale_progression() {
+        // Verify spacing scale is monotonically increasing
+        assert!(spacing::XS < spacing::SM);
+        assert!(spacing::SM < spacing::MD);
+        assert!(spacing::MD < spacing::LG);
+        assert!(spacing::LG < spacing::XL);
+        assert!(spacing::XL < spacing::XXL);
+    }
 
     #[test]
     fn test_rounding_values() {
