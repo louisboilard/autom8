@@ -759,7 +759,8 @@ pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Pat
                 .unwrap_or_else(|| "parent directory".to_string())
         ));
         message.push_str("  2. Run with appropriate permissions (e.g., sudo if needed)\n");
-        message.push_str("  3. Choose a different location in your config's worktree_path_pattern\n");
+        message
+            .push_str("  3. Choose a different location in your config's worktree_path_pattern\n");
     } else {
         message.push_str(&format!("Error: {}\n\n", error));
         message.push_str("To resolve this, try one of the following:\n");
@@ -1560,7 +1561,10 @@ mod tests {
         );
 
         // What happened
-        assert!(msg.contains("Failed to create worktree"), "Should say what happened");
+        assert!(
+            msg.contains("Failed to create worktree"),
+            "Should say what happened"
+        );
 
         // Why
         assert!(

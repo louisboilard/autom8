@@ -232,7 +232,8 @@ fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()
             {
                 summary.sessions_skipped.push(SkippedSession {
                     session_id: session_id.to_string(),
-                    reason: "Worktree has uncommitted changes (use --force to override)".to_string(),
+                    reason: "Worktree has uncommitted changes (use --force to override)"
+                        .to_string(),
                 });
                 summary.print();
                 return Ok(());

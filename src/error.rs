@@ -150,7 +150,10 @@ mod tests {
         let err = Autom8Error::SpecNotFound(PathBuf::from("/missing/spec.json"));
         let msg = err.to_string();
 
-        assert!(msg.contains("not found"), "Error should describe what happened");
+        assert!(
+            msg.contains("not found"),
+            "Error should describe what happened"
+        );
         assert!(msg.contains("To fix"), "Error should include fix steps");
         assert!(
             msg.contains("autom8 init") || msg.contains("init"),
@@ -221,10 +224,7 @@ mod tests {
             msg.contains("No incomplete specs"),
             "Error should describe what happened"
         );
-        assert!(
-            msg.contains("To start"),
-            "Error should include fix steps"
-        );
+        assert!(msg.contains("To start"), "Error should include fix steps");
     }
 
     #[test]
