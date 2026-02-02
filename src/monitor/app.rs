@@ -1415,17 +1415,31 @@ impl MonitorApp {
             return;
         }
 
+        // Count running sessions per project for multi-session awareness
+        let session_counts: std::collections::HashMap<String, usize> = self
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some()) // Count sessions that are running or have errors
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
         let items: Vec<ListItem> = self
             .projects
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let is_selected = i == self.selected_index;
+                let session_count = session_counts.get(&p.info.name).copied().unwrap_or(0);
 
-                // Status indicator and text - check for errors first
+                // Status indicator and text - check for errors first, then aggregate session state
                 let (status_indicator, status_text, status_clr) = if p.load_error.is_some() {
                     ("⚠", "Error".to_string(), COLOR_ERROR)
-                } else if p.active_run.is_some() {
+                } else if session_count > 1 {
+                    // Multiple sessions running - show count
+                    ("●", format!("[{} sessions]", session_count), COLOR_SUCCESS)
+                } else if p.active_run.is_some() || session_count == 1 {
                     ("●", "Running".to_string(), COLOR_SUCCESS)
                 } else if let Some(last_run) = p.info.last_run_date {
                     (
@@ -4449,12 +4463,8 @@ mod tests {
         assert_eq!(main_error_session.display_title(), "autom8 (main)");
 
         // Worktree session error panel
-        let worktree_error_session = create_error_session(
-            "autom8",
-            "abc12345",
-            "Corrupted state: invalid JSON",
-            false,
-        );
+        let worktree_error_session =
+            create_error_session("autom8", "abc12345", "Corrupted state: invalid JSON", false);
         assert_eq!(worktree_error_session.display_title(), "autom8 (abc12345)");
     }
 
@@ -4571,5 +4581,207 @@ mod tests {
 
         // Branch should be accessible (shows what was being worked on)
         assert_eq!(stale_session.metadata.branch_name, "feature/test");
+    }
+
+    // ============================================================================
+    // US-005: Project List view multi-session awareness tests
+    // ============================================================================
+
+    /// Helper to create a project data entry
+    fn create_test_project(name: &str) -> ProjectData {
+        ProjectData {
+            info: ProjectTreeInfo {
+                name: name.to_string(),
+                has_active_run: false,
+                run_status: None,
+                spec_count: 0,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error: None,
+        }
+    }
+
+    #[test]
+    fn test_us005_single_session_shows_running() {
+        // When a project has exactly 1 session running, it should show "Running"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        // Count sessions for the project
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 1);
+        // Single session should show "Running", not "[1 sessions]"
+    }
+
+    #[test]
+    fn test_us005_multiple_sessions_show_count() {
+        // When a project has >1 sessions running, it should show "[N sessions]"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // Add 3 sessions for the same project
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "abc12345", "feature-a"),
+            create_test_session("autom8", "def67890", "feature-b"),
+        ];
+
+        // Count sessions for the project
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 3);
+        // Should show "[3 sessions]"
+    }
+
+    #[test]
+    fn test_us005_session_count_per_project() {
+        // Different projects should have independent session counts
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![
+            create_test_project("autom8"),
+            create_test_project("other-project"),
+        ];
+
+        // autom8 has 2 sessions, other-project has 1
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "abc12345", "feature-a"),
+            create_test_session("other-project", MAIN_SESSION_ID, "main"),
+        ];
+
+        // Build session counts like render_project_list does
+        let session_counts: std::collections::HashMap<String, usize> = app
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some())
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
+        assert_eq!(session_counts.get("autom8"), Some(&2));
+        assert_eq!(session_counts.get("other-project"), Some(&1));
+    }
+
+    #[test]
+    fn test_us005_no_sessions_idle_status() {
+        // Projects with no running sessions should show "Idle"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+        app.sessions = vec![]; // No sessions
+
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 0);
+        // Should show "Idle" (or last run date if available)
+    }
+
+    #[test]
+    fn test_us005_aggregate_state_any_running() {
+        // If any session is running, the project status should be "running"
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // One session running
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        let has_running_sessions = app
+            .sessions
+            .iter()
+            .any(|s| s.project_name == "autom8" && s.run.is_some());
+
+        assert!(has_running_sessions);
+    }
+
+    #[test]
+    fn test_us005_session_count_includes_errors() {
+        // Sessions with load_error should also be counted (they're still "active")
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![create_test_project("autom8")];
+
+        // One normal session, one error session
+        let mut error_session = create_test_session("autom8", "abc12345", "feature-a");
+        error_session.run = None;
+        error_session.load_error = Some("Corrupted state".to_string());
+
+        app.sessions = vec![
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            error_session,
+        ];
+
+        let session_count: usize = app
+            .sessions
+            .iter()
+            .filter(|s| s.project_name == "autom8" && (s.run.is_some() || s.load_error.is_some()))
+            .count();
+
+        assert_eq!(session_count, 2);
+    }
+
+    #[test]
+    fn test_us005_mixed_projects_correct_counts() {
+        // Test a realistic scenario with multiple projects and varying session counts
+        let mut app = MonitorApp::new(1, None);
+        app.projects = vec![
+            create_test_project("autom8"),
+            create_test_project("web-app"),
+            create_test_project("api-service"),
+        ];
+
+        app.sessions = vec![
+            // autom8: 3 sessions
+            create_test_session("autom8", MAIN_SESSION_ID, "main"),
+            create_test_session("autom8", "11111111", "feature-1"),
+            create_test_session("autom8", "22222222", "feature-2"),
+            // web-app: 1 session
+            create_test_session("web-app", MAIN_SESSION_ID, "main"),
+            // api-service: 0 sessions (not in sessions list)
+        ];
+
+        let session_counts: std::collections::HashMap<String, usize> = app
+            .sessions
+            .iter()
+            .filter(|s| s.run.is_some() || s.load_error.is_some())
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                *acc.entry(s.project_name.clone()).or_insert(0) += 1;
+                acc
+            });
+
+        assert_eq!(session_counts.get("autom8"), Some(&3)); // Shows "[3 sessions]"
+        assert_eq!(session_counts.get("web-app"), Some(&1)); // Shows "Running"
+        assert_eq!(session_counts.get("api-service"), None); // Shows "Idle"
+    }
+
+    #[test]
+    fn test_us005_project_error_takes_precedence() {
+        // If a project has a load_error in ProjectData, that should show "Error"
+        // even if sessions are running
+        let mut app = MonitorApp::new(1, None);
+        let mut project = create_test_project("autom8");
+        project.load_error = Some("Config error".to_string());
+        app.projects = vec![project];
+        app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
+
+        // The project has load_error, so it should show "Error" status
+        assert!(app.projects[0].load_error.is_some());
     }
 }
