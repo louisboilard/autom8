@@ -49,4 +49,4 @@ pub use progress::{Breadcrumb, BreadcrumbState, ProgressContext};
 pub use runner::Runner;
 pub use snapshot::{FileMetadata, SpecSnapshot};
 pub use spec::Spec;
-pub use state::{MachineState, RunState, RunStatus, StateManager};
+pub use state::{MachineState, RunState, RunStatus, SessionMetadata, SessionStatus, StateManager};

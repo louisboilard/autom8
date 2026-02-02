@@ -72,5 +72,6 @@ pub use progress::{
 };
 pub use status::{
     print_branch_context_summary, print_commit_list, print_global_status, print_history_entry,
-    print_missing_spec_warning, print_project_description, print_project_tree, print_status,
+    print_missing_spec_warning, print_project_description, print_project_tree,
+    print_sessions_status, print_status,
 };

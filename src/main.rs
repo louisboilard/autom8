@@ -3,9 +3,9 @@
 //! Parses command-line arguments and dispatches to the appropriate command handler.
 
 use autom8::commands::{
-    clean_command, default_command, describe_command, global_status_command, init_command,
-    list_command, monitor_command, pr_review_command, projects_command, resume_command,
-    run_command, run_with_file, status_command,
+    all_sessions_status_command, clean_command, default_command, describe_command,
+    global_status_command, init_command, list_command, monitor_command, pr_review_command,
+    projects_command, resume_command, run_command, run_with_file, status_command,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -54,11 +54,11 @@ enum Commands {
 
     /// Check the current run status
     Status {
-        /// Show status across all projects
+        /// Show all sessions for the current project
         #[arg(short = 'a', long = "all")]
         all: bool,
 
-        /// Show status across all projects (alias for --all)
+        /// Show status across all projects
         #[arg(short = 'g', long = "global")]
         global: bool,
     },
@@ -134,8 +134,10 @@ fn main() {
 
         (None, Some(Commands::Status { all, global })) => {
             print_header();
-            if *all || *global {
+            if *global {
                 global_status_command()
+            } else if *all {
+                all_sessions_status_command()
             } else {
                 status_command(&runner)
             }
@@ -1403,5 +1405,114 @@ mod tests {
         // Verify the worktree field exists on Config struct
         let config = autom8::config::Config::default();
         let _worktree: bool = config.worktree;
+    }
+
+    // ======================================================================
+    // Tests for US-009: Multi-Session Status Command
+    // ======================================================================
+
+    #[test]
+    fn test_us009_status_all_flag() {
+        // Test that --all flag is recognized
+        let cli = Cli::try_parse_from(["autom8", "status", "--all"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(all, "--all should be true");
+            assert!(!global, "--global should be false");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_short_all_flag() {
+        // Test that -a short flag works
+        let cli = Cli::try_parse_from(["autom8", "status", "-a"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(all, "-a should set all to true");
+            assert!(!global);
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_global_flag_separate() {
+        // Test that --global flag is separate from --all
+        let cli = Cli::try_parse_from(["autom8", "status", "--global"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all, "--all should be false");
+            assert!(global, "--global should be true");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_short_global_flag() {
+        // Test that -g short flag works for --global
+        let cli = Cli::try_parse_from(["autom8", "status", "-g"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all);
+            assert!(global, "-g should set global to true");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_no_flags_defaults() {
+        // Test default behavior with no flags
+        let cli = Cli::try_parse_from(["autom8", "status"]).unwrap();
+        if let Some(Commands::Status { all, global }) = cli.command {
+            assert!(!all, "all should default to false");
+            assert!(!global, "global should default to false");
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_all_sessions_status_command_importable() {
+        // Verify the command function is exported
+        use autom8::commands::all_sessions_status_command;
+        let _: fn() -> autom8::error::Result<()> = all_sessions_status_command;
+    }
+
+    #[test]
+    fn test_us009_session_status_struct_available() {
+        // Verify SessionStatus is exported from state module
+        use autom8::state::SessionStatus;
+
+        // Create a minimal SessionStatus to verify the struct exists
+        let metadata = autom8::state::SessionMetadata {
+            session_id: "test".to_string(),
+            worktree_path: PathBuf::from("/tmp"),
+            branch_name: "main".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        let _status = SessionStatus {
+            metadata,
+            machine_state: None,
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_available() {
+        // Verify the method is available on StateManager
+        use autom8::state::StateManager;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Should be callable and return empty list for new project
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert!(sessions.is_empty());
     }
 }

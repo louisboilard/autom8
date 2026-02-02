@@ -38,6 +38,24 @@ pub struct SessionMetadata {
     pub is_running: bool,
 }
 
+/// Enriched session status for display purposes.
+///
+/// Combines session metadata with state information (current story, machine state)
+/// for the status command's `--all` flag.
+#[derive(Debug, Clone)]
+pub struct SessionStatus {
+    /// Session metadata
+    pub metadata: SessionMetadata,
+    /// Current machine state (e.g., "RunningClaude", "Reviewing")
+    pub machine_state: Option<MachineState>,
+    /// Current story ID being worked on
+    pub current_story: Option<String>,
+    /// Whether this session matches the current working directory
+    pub is_current: bool,
+    /// Whether the worktree path still exists
+    pub is_stale: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
@@ -978,6 +996,63 @@ impl StateManager {
         } else {
             None
         }
+    }
+
+    /// List all sessions with enriched status information.
+    ///
+    /// Returns sessions sorted with current session first, then by last_active_at
+    /// descending. Includes state details (machine state, current story) and
+    /// marks stale sessions (deleted worktrees).
+    pub fn list_sessions_with_status(&self) -> Result<Vec<SessionStatus>> {
+        let sessions = self.list_sessions()?;
+        let current_dir = std::env::current_dir().ok();
+
+        let mut statuses: Vec<SessionStatus> = sessions
+            .into_iter()
+            .map(|metadata| {
+                // Check if this is the current session
+                let is_current = current_dir
+                    .as_ref()
+                    .map(|cwd| cwd == &metadata.worktree_path)
+                    .unwrap_or(false);
+
+                // Check if worktree still exists
+                let is_stale = !metadata.worktree_path.exists();
+
+                // Load state for this session to get machine_state and current_story
+                let (machine_state, current_story) = if let Some(session_sm) =
+                    self.get_session(&metadata.session_id)
+                {
+                    if let Ok(Some(state)) = session_sm.load_current() {
+                        (Some(state.machine_state), state.current_story)
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+
+                SessionStatus {
+                    metadata,
+                    machine_state,
+                    current_story,
+                    is_current,
+                    is_stale,
+                }
+            })
+            .collect();
+
+        // Sort: current first, then by last_active_at descending
+        statuses.sort_by(|a, b| {
+            // Current session always first
+            match (a.is_current, b.is_current) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.metadata.last_active_at.cmp(&a.metadata.last_active_at),
+            }
+        });
+
+        Ok(statuses)
     }
 
     /// Check for branch conflicts with other active sessions.
@@ -3588,5 +3663,211 @@ src/lib.rs | Library module | [Config]
             !metadata.is_running,
             "is_running should default to false for backwards compatibility"
         );
+    }
+
+    // ======================================================================
+    // Tests for US-009: Multi-Session Status Command
+    // ======================================================================
+
+    #[test]
+    fn test_us009_list_sessions_with_status_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_single() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.current_story = Some("US-001".to_string());
+        sm.save(&state).unwrap();
+
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 1);
+
+        let session = &sessions[0];
+        assert_eq!(session.metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(session.metadata.branch_name, "test-branch");
+        assert_eq!(session.current_story, Some("US-001".to_string()));
+        assert_eq!(session.machine_state, Some(MachineState::Initializing));
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_multiple() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create first session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let mut state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
+        state1.current_story = Some("US-001".to_string());
+        state1.transition_to(MachineState::RunningClaude);
+        sm1.save(&state1).unwrap();
+
+        // Create second session
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let mut state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
+        state2.current_story = Some("US-002".to_string());
+        state2.transition_to(MachineState::Reviewing);
+        sm2.save(&state2).unwrap();
+
+        // List sessions
+        let sessions = sm1.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Both sessions should have their state info
+        let session_ids: Vec<&str> = sessions
+            .iter()
+            .map(|s| s.metadata.session_id.as_str())
+            .collect();
+        assert!(session_ids.contains(&"session1"));
+        assert!(session_ids.contains(&"session2"));
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_includes_machine_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.transition_to(MachineState::Reviewing);
+        sm.save(&state).unwrap();
+
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].machine_state, Some(MachineState::Reviewing));
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_detects_stale() {
+        let temp_dir = TempDir::new().unwrap();
+        let worktree_dir = TempDir::new().unwrap();
+
+        // Create a session
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Update metadata to point to the temp worktree directory
+        let metadata_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(METADATA_FILE);
+        let mut metadata: SessionMetadata =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata.worktree_path = worktree_dir.path().to_path_buf();
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        // Session should NOT be stale yet
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(!sessions[0].is_stale);
+
+        // Delete the worktree directory to make it stale
+        drop(worktree_dir);
+
+        // Now session should be marked as stale
+        let sessions = sm.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].is_stale, "Session should be marked stale");
+    }
+
+    #[test]
+    fn test_us009_list_sessions_with_status_current_first() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Lock CWD to ensure consistent test behavior
+        let _lock = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+
+        // Create a temp directory to use as CWD
+        let cwd_temp = TempDir::new().unwrap();
+        std::env::set_current_dir(cwd_temp.path()).unwrap();
+
+        // Create older session pointing to current directory
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "current-session".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Update metadata to point to current directory
+        let metadata_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join("current-session")
+            .join(METADATA_FILE);
+        let mut metadata: SessionMetadata =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata.worktree_path = cwd_temp.path().to_path_buf();
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        // Small delay
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Create newer session pointing elsewhere
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "other-session".to_string(),
+        );
+        let state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
+        sm2.save(&state2).unwrap();
+
+        // List sessions - current should be first despite being older
+        let sessions = sm1.list_sessions_with_status().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].metadata.session_id, "current-session");
+        assert!(sessions[0].is_current, "First session should be current");
+        assert!(!sessions[1].is_current, "Second session should not be current");
+
+        // Restore CWD
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_us009_session_status_struct_fields() {
+        // Verify SessionStatus has all expected fields
+        let metadata = SessionMetadata {
+            session_id: "test".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            branch_name: "test-branch".to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+            is_running: true,
+        };
+
+        let status = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: Some("US-001".to_string()),
+            is_current: true,
+            is_stale: false,
+        };
+
+        assert_eq!(status.metadata.session_id, "test");
+        assert_eq!(status.machine_state, Some(MachineState::RunningClaude));
+        assert_eq!(status.current_story, Some("US-001".to_string()));
+        assert!(status.is_current);
+        assert!(!status.is_stale);
     }
 }

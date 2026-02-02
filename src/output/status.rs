@@ -2,7 +2,8 @@
 //!
 //! Output functions for displaying run status, project trees, and descriptions.
 
-use crate::state::{RunState, RunStatus};
+use crate::state::{MachineState, RunState, RunStatus, SessionStatus};
+use chrono::Utc;
 
 use super::colors::*;
 
@@ -418,4 +419,165 @@ pub fn print_commit_list(commits: &[crate::git::CommitInfo], max_display: usize)
         );
     }
     println!();
+}
+
+/// Print status for all sessions in a project.
+///
+/// Sessions are displayed with the current session highlighted, including:
+/// - Session ID and worktree path
+/// - Branch name and current state
+/// - Current story (if any)
+/// - Duration since start
+pub fn print_sessions_status(sessions: &[SessionStatus]) {
+    println!("{BOLD}Sessions for this project:{RESET}");
+    println!();
+
+    for session in sessions {
+        print_session_row(session);
+    }
+
+    // Summary line
+    let running_count = sessions
+        .iter()
+        .filter(|s| s.metadata.is_running && !s.is_stale)
+        .count();
+    let stale_count = sessions.iter().filter(|s| s.is_stale).count();
+
+    println!();
+    print!(
+        "{GRAY}({} session{}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    if running_count > 0 {
+        print!(", {} running", running_count);
+    }
+    if stale_count > 0 {
+        print!(", {} stale", stale_count);
+    }
+    println!("){RESET}");
+}
+
+/// Print a single session row.
+fn print_session_row(session: &SessionStatus) {
+    let metadata = &session.metadata;
+
+    // Determine row color based on state
+    let (indicator, indicator_color) = if session.is_stale {
+        ("✗", GRAY)
+    } else if session.is_current {
+        ("→", GREEN)
+    } else if metadata.is_running {
+        ("●", YELLOW)
+    } else {
+        ("○", GRAY)
+    };
+
+    // Session ID and current marker
+    let current_marker = if session.is_current { " (current)" } else { "" };
+    let stale_marker = if session.is_stale { " [stale]" } else { "" };
+
+    println!(
+        "{indicator_color}{indicator}{RESET} {BOLD}{}{RESET}{GREEN}{}{RESET}{GRAY}{}{RESET}",
+        metadata.session_id, current_marker, stale_marker
+    );
+
+    // Worktree path (truncated if too long)
+    let path_str = metadata.worktree_path.display().to_string();
+    let display_path = if path_str.len() > 60 {
+        format!("...{}", &path_str[path_str.len() - 57..])
+    } else {
+        path_str
+    };
+    println!("  {GRAY}Path:{RESET}    {}", display_path);
+
+    // Branch name
+    println!("  {BLUE}Branch:{RESET}  {}", metadata.branch_name);
+
+    // Current state
+    if let Some(state) = &session.machine_state {
+        let state_str = format_machine_state(state);
+        let state_color = machine_state_color(state);
+        println!("  {BLUE}State:{RESET}   {state_color}{}{RESET}", state_str);
+    }
+
+    // Current story (if any)
+    if let Some(story) = &session.current_story {
+        println!("  {BLUE}Story:{RESET}   {}", story);
+    }
+
+    // Duration
+    let duration = format_duration(metadata.created_at, metadata.last_active_at);
+    println!(
+        "  {GRAY}Started:{RESET} {} {}",
+        metadata.created_at.format("%Y-%m-%d %H:%M"),
+        duration
+    );
+
+    println!();
+}
+
+/// Format machine state for display.
+fn format_machine_state(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
+    }
+}
+
+/// Get color for machine state.
+fn machine_state_color(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Completed => GREEN,
+        MachineState::Failed => RED,
+        MachineState::RunningClaude | MachineState::Reviewing | MachineState::Correcting => YELLOW,
+        _ => CYAN,
+    }
+}
+
+/// Format duration since session start.
+fn format_duration(
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_active_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(created_at);
+
+    // Calculate active duration
+    let active_duration = last_active_at.signed_duration_since(created_at);
+
+    let days = duration.num_days();
+    let hours = duration.num_hours() % 24;
+    let minutes = duration.num_minutes() % 60;
+
+    let age_str = if days > 0 {
+        format!("{}d {}h ago", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m ago", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
+    } else {
+        "just now".to_string()
+    };
+
+    // Show active duration if significantly different from total
+    let active_hours = active_duration.num_hours();
+    let active_mins = active_duration.num_minutes() % 60;
+    if active_hours > 0 {
+        format!("{} (active {}h {}m)", age_str, active_hours, active_mins)
+    } else if active_mins > 5 {
+        format!("{} (active {}m)", age_str, active_mins)
+    } else {
+        age_str
+    }
 }
