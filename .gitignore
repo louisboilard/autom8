@@ -2,4 +2,5 @@
 /target
 /tasks
 .autom8/
+.DS_Store
 autom8_review.md
