@@ -531,7 +531,10 @@ fn clean_completed_sessions(options: &CleanOptions) -> Result<()> {
                     matches!(
                         state.machine_state,
                         MachineState::Completed | MachineState::Failed
-                    ) || matches!(state.status, RunStatus::Completed | RunStatus::Failed)
+                    ) || matches!(
+                        state.status,
+                        RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
+                    )
                 } else {
                     // No state file - consider it cleanable
                     true

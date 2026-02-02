@@ -106,6 +106,7 @@ pub enum RunStatus {
     Running,
     Completed,
     Failed,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1293,6 +1294,35 @@ mod tests {
                 deserialized, *state,
                 "Deserialization failed for {:?}",
                 state
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_status_serialization_roundtrip() {
+        // Test all RunStatus variants serialize/deserialize correctly with lowercase
+        let test_cases: &[(RunStatus, &str)] = &[
+            (RunStatus::Running, "\"running\""),
+            (RunStatus::Completed, "\"completed\""),
+            (RunStatus::Failed, "\"failed\""),
+            (RunStatus::Interrupted, "\"interrupted\""),
+        ];
+
+        for (status, expected_json) in test_cases {
+            // Test serialization
+            let serialized = serde_json::to_string(status).unwrap();
+            assert_eq!(
+                &serialized, *expected_json,
+                "Serialization failed for {:?}",
+                status
+            );
+
+            // Test deserialization roundtrip
+            let deserialized: RunStatus = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(
+                deserialized, *status,
+                "Deserialization failed for {:?}",
+                status
             );
         }
     }
