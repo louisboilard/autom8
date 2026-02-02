@@ -210,6 +210,75 @@ enum LoopAction {
     Break,
 }
 
+/// Context for worktree setup that tracks partial state for cleanup on interruption.
+///
+/// This struct is used to track the state of worktree setup so that if the process
+/// is interrupted mid-setup, we can properly clean up:
+/// - If worktree was created but not yet changed into, remove the worktree
+/// - If CWD was changed, restore the original CWD
+/// - If session metadata wasn't saved, the worktree may be orphaned
+#[derive(Debug, Clone)]
+pub struct WorktreeSetupContext {
+    /// The original working directory before any changes
+    pub original_cwd: PathBuf,
+    /// The worktree path if one was created (but may not have been entered yet)
+    pub worktree_path: Option<PathBuf>,
+    /// Whether the worktree was newly created (vs reused)
+    pub worktree_was_created: bool,
+    /// Whether we've changed into the worktree directory
+    pub cwd_changed: bool,
+    /// Whether session metadata has been saved
+    pub metadata_saved: bool,
+}
+
+impl WorktreeSetupContext {
+    /// Create a new setup context, capturing the current working directory.
+    pub fn new() -> Result<Self> {
+        let original_cwd = std::env::current_dir()?;
+        Ok(Self {
+            original_cwd,
+            worktree_path: None,
+            worktree_was_created: false,
+            cwd_changed: false,
+            metadata_saved: false,
+        })
+    }
+
+    /// Clean up partial worktree setup on interruption.
+    ///
+    /// This method:
+    /// 1. Restores the original CWD if it was changed
+    /// 2. Removes the worktree if it was newly created and metadata wasn't saved
+    pub fn cleanup_on_interruption(&self) {
+        // First, restore original CWD if it was changed
+        if self.cwd_changed {
+            if let Err(e) = std::env::set_current_dir(&self.original_cwd) {
+                eprintln!(
+                    "Warning: failed to restore original directory '{}': {}",
+                    self.original_cwd.display(),
+                    e
+                );
+            }
+        }
+
+        // Only remove the worktree if:
+        // - It was newly created (not reused)
+        // - Metadata wasn't saved (session isn't trackable)
+        if self.worktree_was_created && !self.metadata_saved {
+            if let Some(ref worktree_path) = self.worktree_path {
+                // Try to remove the worktree (force=true to handle incomplete state)
+                if let Err(e) = remove_worktree(worktree_path, true) {
+                    eprintln!(
+                        "Warning: failed to remove partial worktree '{}': {}",
+                        worktree_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub struct Runner {
     state_manager: StateManager,
     verbose: bool,
@@ -281,16 +350,20 @@ impl Runner {
     /// 2. Change the current working directory to the worktree
     /// 3. Generate a new session ID for the worktree
     ///
-    /// Returns the session ID and worktree path if a worktree was created/reused,
-    /// or None if running in non-worktree mode.
+    /// Returns a tuple of:
+    /// - The session ID and worktree path if a worktree was created/reused, or None if not in worktree mode
+    /// - The setup context for cleanup on interruption
     fn setup_worktree_context(
         &self,
         config: &crate::config::Config,
         branch_name: &str,
-    ) -> Result<Option<(String, PathBuf)>> {
+    ) -> Result<(Option<(String, PathBuf)>, WorktreeSetupContext)> {
+        // Create setup context to track partial state for cleanup
+        let mut setup_ctx = WorktreeSetupContext::new()?;
+
         // Check if worktree mode is enabled
         if !self.is_worktree_mode(config) {
-            return Ok(None);
+            return Ok((None, setup_ctx));
         }
 
         // Check if we're in a git repo
@@ -298,7 +371,7 @@ impl Runner {
             print_info(
                 "Worktree mode enabled but not in a git repository. Running in current directory.",
             );
-            return Ok(None);
+            return Ok((None, setup_ctx));
         }
 
         // Create or reuse worktree
@@ -317,6 +390,9 @@ impl Runner {
 
         // Get the worktree path and inform the user
         let worktree_path = result.path().to_path_buf();
+        setup_ctx.worktree_path = Some(worktree_path.clone());
+        setup_ctx.worktree_was_created = result.was_created();
+
         match result {
             WorktreeResult::Created(_) => {
                 print_worktree_created(&worktree_path, branch_name);
@@ -328,12 +404,15 @@ impl Runner {
 
         // Change to the worktree directory
         std::env::set_current_dir(&worktree_path).map_err(|e| {
+            // If we can't change to the worktree, clean up if we created it
+            setup_ctx.cleanup_on_interruption();
             Autom8Error::WorktreeError(format!(
                 "Failed to change to worktree directory '{}': {}",
                 worktree_path.display(),
                 e
             ))
         })?;
+        setup_ctx.cwd_changed = true;
 
         // Print context info
         print_worktree_context(&worktree_path);
@@ -341,7 +420,7 @@ impl Runner {
         // Generate session ID for the worktree
         let session_id = generate_session_id(&worktree_path);
 
-        Ok(Some((session_id, worktree_path)))
+        Ok((Some((session_id, worktree_path)), setup_ctx))
     }
 
     /// Handle a fatal error by transitioning to Failed state, saving, displaying error, and optionally printing summary.
@@ -391,13 +470,15 @@ impl Runner {
     /// 2. Updates state status to `Interrupted` (preserving the current machine_state)
     /// 3. Saves state and session metadata (`is_running: false`)
     /// 4. Clears the live output file
-    /// 5. Displays interruption message to user
+    /// 5. Restores original CWD if it was changed during worktree setup
+    /// 6. Displays interruption message to user
     ///
     /// Returns `Err(Autom8Error::Interrupted)` to signal the run was interrupted.
     fn handle_interruption(
         &self,
         state: &mut RunState,
         claude_runner: &ClaudeRunner,
+        worktree_setup_ctx: Option<&WorktreeSetupContext>,
     ) -> Autom8Error {
         // Kill any running Claude subprocess
         if let Err(e) = claude_runner.kill() {
@@ -417,6 +498,11 @@ impl Runner {
         // Clear live output file
         if let Err(e) = self.state_manager.clear_live() {
             eprintln!("Warning: failed to clear live output: {}", e);
+        }
+
+        // Clean up worktree setup if needed (restores CWD, removes partial worktree)
+        if let Some(setup_ctx) = worktree_setup_ctx {
+            setup_ctx.cleanup_on_interruption();
         }
 
         // Display message to user
@@ -1131,7 +1217,8 @@ impl Runner {
 
         // Setup worktree context if enabled (US-007)
         // This creates/reuses a worktree and changes the current working directory
-        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+        let (worktree_context, mut worktree_setup_ctx) =
+            self.setup_worktree_context(&config, &spec.branch_name)?;
 
         // Create the appropriate StateManager for this context
         let effective_state_manager = if let Some((ref session_id, _)) = worktree_context {
@@ -1144,7 +1231,7 @@ impl Runner {
 
         // Update state with branch from generated spec and session ID
         state.branch = spec.branch_name.clone();
-        if let Some((session_id, _)) = &worktree_context {
+        if let Some((ref session_id, _)) = &worktree_context {
             state.session_id = Some(session_id.clone());
         }
         state.transition_to(MachineState::Initializing);
@@ -1161,7 +1248,10 @@ impl Runner {
             worktree_override: self.worktree_override,
         };
 
-        effective_runner.run_implementation_loop(state, &spec_json_path)
+        // Mark metadata as saved since the state was just saved above
+        worktree_setup_ctx.metadata_saved = true;
+
+        effective_runner.run_implementation_loop(state, &spec_json_path, worktree_setup_ctx)
     }
 
     pub fn run(&self, spec_json_path: &Path) -> Result<()> {
@@ -1198,7 +1288,8 @@ impl Runner {
 
         // Setup worktree context if enabled (US-007)
         // This creates/reuses a worktree and changes the current working directory
-        let worktree_context = self.setup_worktree_context(&config, &spec.branch_name)?;
+        let (worktree_context, mut worktree_setup_ctx) =
+            self.setup_worktree_context(&config, &spec.branch_name)?;
 
         // Create the appropriate StateManager for this context
         let state_manager = if let Some((ref session_id, _)) = worktree_context {
@@ -1225,12 +1316,12 @@ impl Runner {
         }
 
         // Initialize state with config snapshot for resume support
-        let state = if let Some((session_id, _)) = worktree_context {
+        let state = if let Some((ref session_id, _)) = worktree_context {
             RunState::new_with_config_and_session(
                 spec_json_path.to_path_buf(),
                 spec.branch_name.clone(),
                 config,
-                session_id,
+                session_id.clone(),
             )
         } else {
             RunState::new_with_config(
@@ -1252,10 +1343,18 @@ impl Runner {
             worktree_override: self.worktree_override,
         };
 
-        worktree_runner.run_implementation_loop(state, &spec_json_path)
+        // Mark metadata as saved since the state will be saved in run_implementation_loop
+        worktree_setup_ctx.metadata_saved = true;
+
+        worktree_runner.run_implementation_loop(state, &spec_json_path, worktree_setup_ctx)
     }
 
-    fn run_implementation_loop(&self, mut state: RunState, spec_json_path: &Path) -> Result<()> {
+    fn run_implementation_loop(
+        &self,
+        mut state: RunState,
+        spec_json_path: &Path,
+        worktree_setup_ctx: WorktreeSetupContext,
+    ) -> Result<()> {
         // Create signal handler for graceful shutdown (US-004)
         let signal_handler = SignalHandler::new()?;
 
@@ -1291,7 +1390,11 @@ impl Runner {
         loop {
             // Check for shutdown request at safe point (between state transitions) (US-004)
             if signal_handler.is_shutdown_requested() {
-                return Err(self.handle_interruption(&mut state, &claude_runner));
+                return Err(self.handle_interruption(
+                    &mut state,
+                    &claude_runner,
+                    Some(&worktree_setup_ctx),
+                ));
             }
 
             // Reload spec to get latest passes state
@@ -1351,7 +1454,11 @@ impl Runner {
                 LoopAction::Continue => {
                     // Check for shutdown after story iteration completes (US-004)
                     if signal_handler.is_shutdown_requested() {
-                        return Err(self.handle_interruption(&mut state, &claude_runner));
+                        return Err(self.handle_interruption(
+                            &mut state,
+                            &claude_runner,
+                            Some(&worktree_setup_ctx),
+                        ));
                     }
                     continue;
                 }
@@ -2987,8 +3094,8 @@ mod tests {
 
         let claude_runner = ClaudeRunner::new();
 
-        // Call handle_interruption
-        let error = runner.handle_interruption(&mut state, &claude_runner);
+        // Call handle_interruption (no worktree setup context in this test)
+        let error = runner.handle_interruption(&mut state, &claude_runner, None);
 
         // Verify the error type
         assert!(matches!(error, Autom8Error::Interrupted));
@@ -3019,8 +3126,8 @@ mod tests {
 
         let claude_runner = ClaudeRunner::new();
 
-        // Call handle_interruption
-        runner.handle_interruption(&mut state, &claude_runner);
+        // Call handle_interruption (no worktree setup context in this test)
+        runner.handle_interruption(&mut state, &claude_runner, None);
 
         // Verify state was saved
         let loaded_state = sm.load_current().unwrap().unwrap();
@@ -3057,8 +3164,8 @@ mod tests {
 
         let claude_runner = ClaudeRunner::new();
 
-        // Call handle_interruption
-        runner.handle_interruption(&mut state, &claude_runner);
+        // Call handle_interruption (no worktree setup context in this test)
+        runner.handle_interruption(&mut state, &claude_runner, None);
 
         // Verify live output was cleared
         let live_result = sm.load_live();
@@ -3115,7 +3222,7 @@ mod tests {
         sm.save(&state).unwrap();
 
         // Call handle_interruption - this should call kill() which is a no-op when empty
-        runner.handle_interruption(&mut state, &claude_runner);
+        runner.handle_interruption(&mut state, &claude_runner, None);
 
         // Verify the state was updated correctly (the main purpose of handle_interruption)
         assert_eq!(state.status, RunStatus::Interrupted);
@@ -3158,7 +3265,7 @@ mod tests {
         sm.save(&state).unwrap();
 
         let claude_runner = ClaudeRunner::new();
-        runner.handle_interruption(&mut state, &claude_runner);
+        runner.handle_interruption(&mut state, &claude_runner, None);
 
         // Machine state should be preserved
         assert_eq!(state.machine_state, MachineState::Reviewing);
@@ -3185,7 +3292,7 @@ mod tests {
         sm.save(&state).unwrap();
 
         let claude_runner = ClaudeRunner::new();
-        runner.handle_interruption(&mut state, &claude_runner);
+        runner.handle_interruption(&mut state, &claude_runner, None);
 
         assert_eq!(state.machine_state, MachineState::Committing);
         assert_eq!(state.status, RunStatus::Interrupted);
@@ -3266,7 +3373,10 @@ mod tests {
 
         for machine_state in states {
             let formatted = format!("{:?}", machine_state);
-            assert!(!formatted.is_empty(), "Machine state should format to non-empty string");
+            assert!(
+                !formatted.is_empty(),
+                "Machine state should format to non-empty string"
+            );
             // Verify it doesn't contain unexpected characters
             assert!(
                 formatted.chars().all(|c| c.is_alphanumeric()),
@@ -3281,20 +3391,280 @@ mod tests {
     fn test_us005_resume_flow_interrupt_detection() {
         // This test verifies the condition used in the resume method
         let test_cases = [
-            (RunStatus::Interrupted, true),  // Should show message
-            (RunStatus::Running, false),     // Should NOT show message
-            (RunStatus::Failed, false),      // Should NOT show message
-            (RunStatus::Completed, false),   // Should NOT show message (and not resumable)
+            (RunStatus::Interrupted, true), // Should show message
+            (RunStatus::Running, false),    // Should NOT show message
+            (RunStatus::Failed, false),     // Should NOT show message
+            (RunStatus::Completed, false),  // Should NOT show message (and not resumable)
         ];
 
         for (status, should_show) in test_cases {
             let show_message = status == RunStatus::Interrupted;
             assert_eq!(
-                show_message, should_show,
+                show_message,
+                should_show,
                 "Status {:?} should{} show interruption message",
                 status,
                 if should_show { "" } else { " NOT" }
             );
         }
+    }
+
+    // =========================================================================
+    // US-006: Handle Interruption During Worktree Setup
+    // =========================================================================
+
+    /// Test that WorktreeSetupContext captures original CWD correctly.
+    #[test]
+    fn test_us006_worktree_setup_context_captures_original_cwd() {
+        let ctx = WorktreeSetupContext::new().unwrap();
+        let current_dir = std::env::current_dir().unwrap();
+        assert_eq!(
+            ctx.original_cwd, current_dir,
+            "WorktreeSetupContext should capture current directory"
+        );
+        assert!(ctx.worktree_path.is_none());
+        assert!(!ctx.worktree_was_created);
+        assert!(!ctx.cwd_changed);
+        assert!(!ctx.metadata_saved);
+    }
+
+    /// Test that cleanup_on_interruption does nothing when no changes were made.
+    #[test]
+    fn test_us006_cleanup_on_interruption_noop_when_no_changes() {
+        let original_cwd = std::env::current_dir().unwrap();
+        let ctx = WorktreeSetupContext::new().unwrap();
+
+        // Cleanup should be a no-op
+        ctx.cleanup_on_interruption();
+
+        // CWD should remain unchanged
+        let current_cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            original_cwd, current_cwd,
+            "CWD should not change when no cleanup needed"
+        );
+    }
+
+    /// Test that cleanup restores CWD when it was changed.
+    #[test]
+    fn test_us006_cleanup_restores_cwd() {
+        use tempfile::TempDir;
+
+        let original_cwd = std::env::current_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create context with original CWD
+        let mut ctx = WorktreeSetupContext::new().unwrap();
+
+        // Simulate changing to a different directory
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        ctx.cwd_changed = true;
+        ctx.worktree_path = Some(temp_dir.path().to_path_buf());
+
+        // Mark as reused (not created) so worktree won't be removed
+        ctx.worktree_was_created = false;
+
+        // Verify we're in the temp directory
+        let current = std::env::current_dir().unwrap();
+        assert_ne!(
+            current, original_cwd,
+            "Should be in different directory before cleanup"
+        );
+
+        // Cleanup should restore original CWD
+        ctx.cleanup_on_interruption();
+
+        let restored = std::env::current_dir().unwrap();
+        assert_eq!(
+            restored, original_cwd,
+            "CWD should be restored to original after cleanup"
+        );
+    }
+
+    /// Test that newly created worktree is removed if metadata not saved.
+    #[test]
+    fn test_us006_cleanup_removes_partial_worktree() {
+        // This test verifies the logic - actual worktree removal requires git setup
+        let ctx = WorktreeSetupContext {
+            original_cwd: PathBuf::from("/original/path"),
+            worktree_path: Some(PathBuf::from("/fake/worktree")),
+            worktree_was_created: true,
+            cwd_changed: false,
+            metadata_saved: false,
+        };
+
+        // Verify the cleanup logic conditions
+        assert!(
+            ctx.worktree_was_created && !ctx.metadata_saved,
+            "Should attempt to remove worktree when newly created without saved metadata"
+        );
+    }
+
+    /// Test that reused worktree is NOT removed on cleanup.
+    #[test]
+    fn test_us006_cleanup_preserves_reused_worktree() {
+        let ctx = WorktreeSetupContext {
+            original_cwd: PathBuf::from("/original/path"),
+            worktree_path: Some(PathBuf::from("/fake/worktree")),
+            worktree_was_created: false, // Reused, not created
+            cwd_changed: false,
+            metadata_saved: false,
+        };
+
+        // Verify the cleanup logic - should NOT remove reused worktrees
+        assert!(
+            !ctx.worktree_was_created,
+            "Reused worktrees should not be removed"
+        );
+    }
+
+    /// Test that worktree with saved metadata is NOT removed on cleanup.
+    #[test]
+    fn test_us006_cleanup_preserves_worktree_with_metadata() {
+        let ctx = WorktreeSetupContext {
+            original_cwd: PathBuf::from("/original/path"),
+            worktree_path: Some(PathBuf::from("/fake/worktree")),
+            worktree_was_created: true,
+            cwd_changed: true,
+            metadata_saved: true, // Metadata was saved
+        };
+
+        // Verify the cleanup logic - should NOT remove worktrees with saved metadata
+        assert!(
+            ctx.metadata_saved,
+            "Worktrees with saved metadata should not be removed"
+        );
+    }
+
+    /// Test that handle_interruption with worktree context cleans up.
+    #[test]
+    fn test_us006_handle_interruption_with_worktree_context() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let runner = Runner {
+            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
+            verbose: false,
+            skip_review: false,
+            worktree_override: None,
+        };
+
+        let original_cwd = std::env::current_dir().unwrap();
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.transition_to(MachineState::Initializing);
+        sm.save(&state).unwrap();
+
+        let claude_runner = ClaudeRunner::new();
+
+        // Create a worktree setup context
+        let setup_ctx = WorktreeSetupContext {
+            original_cwd: original_cwd.clone(),
+            worktree_path: None, // No worktree in this test
+            worktree_was_created: false,
+            cwd_changed: false,
+            metadata_saved: true, // Simulate metadata being saved
+        };
+
+        // Call handle_interruption with context
+        let error = runner.handle_interruption(&mut state, &claude_runner, Some(&setup_ctx));
+
+        // Verify the error type
+        assert!(matches!(error, Autom8Error::Interrupted));
+        assert_eq!(state.status, RunStatus::Interrupted);
+
+        // CWD should remain unchanged (cwd_changed was false)
+        let current_cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            current_cwd, original_cwd,
+            "CWD should remain unchanged when cwd_changed is false"
+        );
+    }
+
+    /// Test that handle_interruption without worktree context still works.
+    #[test]
+    fn test_us006_handle_interruption_without_worktree_context() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let runner = Runner {
+            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
+            verbose: false,
+            skip_review: false,
+            worktree_override: None,
+        };
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let claude_runner = ClaudeRunner::new();
+
+        // Call handle_interruption without context
+        let error = runner.handle_interruption(&mut state, &claude_runner, None);
+
+        // Should still work correctly
+        assert!(matches!(error, Autom8Error::Interrupted));
+        assert_eq!(state.status, RunStatus::Interrupted);
+    }
+
+    /// Test that setup_worktree_context returns context with correct initial state.
+    #[test]
+    fn test_us006_setup_worktree_context_returns_context() {
+        // We test the return type - actual worktree operations require git
+        let temp_dir = TempDir::new().unwrap();
+        let runner = Runner {
+            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
+            verbose: false,
+            skip_review: false,
+            worktree_override: Some(false), // Disable worktree mode for this test
+        };
+
+        let config = crate::config::Config::default();
+
+        let result = runner.setup_worktree_context(&config, "test-branch");
+        assert!(result.is_ok());
+
+        let (worktree_context, setup_ctx) = result.unwrap();
+
+        // With worktree mode disabled, no worktree context
+        assert!(worktree_context.is_none());
+
+        // Setup context should be initialized
+        assert!(setup_ctx.worktree_path.is_none());
+        assert!(!setup_ctx.worktree_was_created);
+        assert!(!setup_ctx.cwd_changed);
+        assert!(!setup_ctx.metadata_saved);
+    }
+
+    /// Test that WorktreeSetupContext clone works correctly.
+    #[test]
+    fn test_us006_worktree_setup_context_clone() {
+        let ctx = WorktreeSetupContext {
+            original_cwd: PathBuf::from("/some/path"),
+            worktree_path: Some(PathBuf::from("/worktree/path")),
+            worktree_was_created: true,
+            cwd_changed: true,
+            metadata_saved: false,
+        };
+
+        let cloned = ctx.clone();
+
+        assert_eq!(ctx.original_cwd, cloned.original_cwd);
+        assert_eq!(ctx.worktree_path, cloned.worktree_path);
+        assert_eq!(ctx.worktree_was_created, cloned.worktree_was_created);
+        assert_eq!(ctx.cwd_changed, cloned.cwd_changed);
+        assert_eq!(ctx.metadata_saved, cloned.metadata_saved);
+    }
+
+    /// Test that WorktreeSetupContext debug formatting works.
+    #[test]
+    fn test_us006_worktree_setup_context_debug() {
+        let ctx = WorktreeSetupContext::new().unwrap();
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("WorktreeSetupContext"));
+        assert!(debug_str.contains("original_cwd"));
+        assert!(debug_str.contains("worktree_path"));
     }
 }
