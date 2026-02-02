@@ -1191,6 +1191,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Use the shared CWD_MUTEX for tests that depend on or change the current working directory
+    use crate::test_utils::CWD_MUTEX;
+
     #[test]
     fn test_config_dir_returns_path_ending_with_autom8() {
         // This test verifies the structure without depending on exact paths
@@ -1838,6 +1841,9 @@ mod tests {
 
     #[test]
     fn test_global_status_real_config() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test against real config directory - should not error
         let result = global_status();
         assert!(result.is_ok(), "global_status() should not error");
@@ -1969,6 +1975,9 @@ mod tests {
 
     #[test]
     fn test_list_projects_tree_real_config() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test against real config directory - should not error
         let result = list_projects_tree();
         assert!(result.is_ok(), "list_projects_tree() should not error");
@@ -1995,6 +2004,9 @@ mod tests {
 
     #[test]
     fn test_us008_get_project_description_existing_project() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test getting description for an existing project
         let result = get_project_description("autom8");
         assert!(result.is_ok());
@@ -2020,6 +2032,9 @@ mod tests {
 
     #[test]
     fn test_us008_project_description_has_all_fields() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that ProjectDescription has all expected fields populated
         let desc = get_project_description("autom8").unwrap().unwrap();
 
@@ -2080,6 +2095,9 @@ mod tests {
 
     #[test]
     fn test_us008_project_description_counts_spec_md_files() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that spec_md_count is populated correctly for real project
         let desc = get_project_description("autom8").unwrap().unwrap();
 
@@ -2090,6 +2108,9 @@ mod tests {
 
     #[test]
     fn test_us008_project_description_counts_archived_runs() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that runs_count is populated correctly for real project
         let desc = get_project_description("autom8").unwrap().unwrap();
 
@@ -2099,6 +2120,9 @@ mod tests {
 
     #[test]
     fn test_us008_project_description_run_state_fields() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
         // Test that run state fields are accessible
         let desc = get_project_description("autom8").unwrap().unwrap();
 
