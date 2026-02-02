@@ -23,9 +23,7 @@ use crate::progress::{
 };
 use crate::signal::SignalHandler;
 use crate::spec::{Spec, UserStory};
-use crate::state::{
-    IterationStatus, LiveState, MachineState, RunState, RunStatus, StateManager,
-};
+use crate::state::{IterationStatus, LiveState, MachineState, RunState, RunStatus, StateManager};
 use crate::worktree::{
     ensure_worktree, format_worktree_error, generate_session_id, generate_worktree_path,
     is_in_worktree, remove_worktree, WorktreeResult,
@@ -3025,7 +3023,10 @@ mod tests {
 
         // Verify metadata is_running is false (Interrupted != Running)
         let metadata = sm.load_metadata().unwrap().unwrap();
-        assert!(!metadata.is_running, "Interrupted session should not be marked as running");
+        assert!(
+            !metadata.is_running,
+            "Interrupted session should not be marked as running"
+        );
     }
 
     /// Test that handle_interruption clears live output file.
@@ -3117,9 +3118,7 @@ mod tests {
         // Clean up the leaked process
         #[cfg(unix)]
         {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
         }
     }
 
@@ -3131,10 +3130,7 @@ mod tests {
         let should_resume = status == RunStatus::Running
             || status == RunStatus::Failed
             || status == RunStatus::Interrupted;
-        assert!(
-            should_resume,
-            "Interrupted status should be resumable"
-        );
+        assert!(should_resume, "Interrupted status should be resumable");
     }
 
     /// Test that Interrupted state transitions preserve machine_state.

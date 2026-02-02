@@ -45,7 +45,5 @@ pub fn print_worktree_context(path: &std::path::Path) {
 /// Print interruption message when the user presses Ctrl+C.
 pub fn print_interrupted() {
     println!();
-    println!(
-        "{YELLOW}Interrupted.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue."
-    );
+    println!("{YELLOW}Interrupted.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue.");
 }
