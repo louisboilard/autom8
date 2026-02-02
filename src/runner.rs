@@ -865,6 +865,16 @@ impl Runner {
 
         print_spec_generated(&spec, &spec_json_path);
 
+        // Check for branch conflicts with other active sessions (US-006)
+        // This must happen before any git operations to prevent race conditions
+        if let Some(conflict) = self.state_manager.check_branch_conflict(&spec.branch_name)? {
+            return Err(Autom8Error::BranchConflict {
+                branch: spec.branch_name.clone(),
+                session_id: conflict.session_id,
+                worktree_path: conflict.worktree_path,
+            });
+        }
+
         // Update state with branch from generated spec
         state.branch = spec.branch_name.clone();
         state.transition_to(MachineState::Initializing);
@@ -895,6 +905,16 @@ impl Runner {
 
         // Load and validate spec
         let spec = Spec::load(&spec_json_path)?;
+
+        // Check for branch conflicts with other active sessions (US-006)
+        // This must happen before any git operations to prevent race conditions
+        if let Some(conflict) = self.state_manager.check_branch_conflict(&spec.branch_name)? {
+            return Err(Autom8Error::BranchConflict {
+                branch: spec.branch_name.clone(),
+                session_id: conflict.session_id,
+                worktree_path: conflict.worktree_path,
+            });
+        }
 
         // If in a git repo, ensure we're on the correct branch
         if git::is_git_repo() {

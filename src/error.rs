@@ -62,6 +62,13 @@ pub enum Autom8Error {
 
     #[error("Worktree error: {0}")]
     WorktreeError(String),
+
+    #[error("Branch conflict: branch '{branch}' is already in use by session '{session_id}' at {worktree_path}")]
+    BranchConflict {
+        branch: String,
+        session_id: String,
+        worktree_path: std::path::PathBuf,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

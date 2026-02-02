@@ -27,7 +27,13 @@ use super::{detect_input_type, ensure_project_dir, InputType};
 ///
 /// * `Ok(())` on successful completion
 /// * `Err(Autom8Error)` if implementation fails
-pub fn run_command(verbose: bool, spec: &Path, skip_review: bool, worktree: bool, no_worktree: bool) -> Result<()> {
+pub fn run_command(
+    verbose: bool,
+    spec: &Path,
+    skip_review: bool,
+    worktree: bool,
+    no_worktree: bool,
+) -> Result<()> {
     ensure_project_dir()?;
 
     let mut runner = Runner::new()?

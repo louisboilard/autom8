@@ -32,6 +32,10 @@ pub struct SessionMetadata {
     pub created_at: DateTime<Utc>,
     /// When the session was last active (updated on each state save)
     pub last_active_at: DateTime<Utc>,
+    /// Whether this session is currently running (has an active run).
+    /// Used for branch conflict detection - only running sessions "own" their branch.
+    #[serde(default)]
+    pub is_running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -754,6 +758,7 @@ impl StateManager {
             branch_name: state.branch.clone(),
             created_at: state.started_at,
             last_active_at: state.finished_at.unwrap_or_else(Utc::now),
+            is_running: state.status == RunStatus::Running,
         };
         let metadata_content = serde_json::to_string_pretty(&metadata)?;
         fs::write(main_session_dir.join(METADATA_FILE), metadata_content)?;
@@ -841,6 +846,7 @@ impl StateManager {
     /// Save session metadata based on the current state.
     fn save_metadata(&self, state: &RunState) -> Result<()> {
         let worktree_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let is_running = state.status == RunStatus::Running;
 
         // Load existing metadata or create new
         let metadata = if let Some(existing) = self.load_metadata()? {
@@ -850,6 +856,7 @@ impl StateManager {
                 branch_name: state.branch.clone(),
                 created_at: existing.created_at,
                 last_active_at: Utc::now(),
+                is_running,
             }
         } else {
             SessionMetadata {
@@ -858,6 +865,7 @@ impl StateManager {
                 branch_name: state.branch.clone(),
                 created_at: state.started_at,
                 last_active_at: Utc::now(),
+                is_running,
             }
         };
 
@@ -970,6 +978,55 @@ impl StateManager {
         } else {
             None
         }
+    }
+
+    /// Check for branch conflicts with other active sessions.
+    ///
+    /// Returns the conflicting session metadata if another session is already
+    /// using the specified branch. A session "owns" a branch only while it is
+    /// actively running (status == Running).
+    ///
+    /// Stale sessions (where the worktree directory no longer exists) are
+    /// automatically skipped and do not cause conflicts.
+    ///
+    /// # Arguments
+    /// * `branch_name` - The branch name to check for conflicts
+    ///
+    /// # Returns
+    /// * `Ok(Some(metadata))` - Another session is using this branch
+    /// * `Ok(None)` - No conflict, branch is available
+    /// * `Err` - Error reading session data
+    pub fn check_branch_conflict(&self, branch_name: &str) -> Result<Option<SessionMetadata>> {
+        let sessions = self.list_sessions()?;
+
+        for session in sessions {
+            // Skip our own session
+            if session.session_id == self.session_id {
+                continue;
+            }
+
+            // Skip sessions not using this branch
+            if session.branch_name != branch_name {
+                continue;
+            }
+
+            // Skip sessions that aren't running
+            if !session.is_running {
+                continue;
+            }
+
+            // Check if the worktree still exists (detect stale sessions)
+            if !session.worktree_path.exists() {
+                // Stale session - worktree deleted but metadata remains
+                // Don't block on this session
+                continue;
+            }
+
+            // Found a conflict - another active session is using this branch
+            return Ok(Some(session));
+        }
+
+        Ok(None)
     }
 }
 
@@ -2797,6 +2854,7 @@ src/lib.rs | Library module | [Config]
             branch_name: "feature/test".to_string(),
             created_at: Utc::now(),
             last_active_at: Utc::now(),
+            is_running: true,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -2805,6 +2863,7 @@ src/lib.rs | Library module | [Config]
         assert_eq!(parsed.session_id, "main");
         assert_eq!(parsed.worktree_path, PathBuf::from("/home/user/project"));
         assert_eq!(parsed.branch_name, "feature/test");
+        assert!(parsed.is_running);
     }
 
     #[test]
@@ -2815,6 +2874,7 @@ src/lib.rs | Library module | [Config]
             branch_name: "main".to_string(),
             created_at: Utc::now(),
             last_active_at: Utc::now(),
+            is_running: false,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -2825,6 +2885,7 @@ src/lib.rs | Library module | [Config]
         assert!(json.contains("branchName"));
         assert!(json.contains("createdAt"));
         assert!(json.contains("lastActiveAt"));
+        assert!(json.contains("isRunning"));
 
         // Verify snake_case is NOT used
         assert!(!json.contains("session_id"));
@@ -2832,6 +2893,7 @@ src/lib.rs | Library module | [Config]
         assert!(!json.contains("branch_name"));
         assert!(!json.contains("created_at"));
         assert!(!json.contains("last_active_at"));
+        assert!(!json.contains("is_running"));
     }
 
     #[test]
@@ -3289,5 +3351,232 @@ src/lib.rs | Library module | [Config]
             .collect();
 
         assert_eq!(archives.len(), 2, "Both archives should be in shared runs/");
+    }
+
+    // ======================================================================
+    // Tests for US-006: Branch Conflict Detection
+    // ======================================================================
+
+    #[test]
+    fn test_check_branch_conflict_no_conflict_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No sessions exist, should be no conflict
+        let conflict = sm.check_branch_conflict("feature-branch").unwrap();
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_check_branch_conflict_no_conflict_different_branch() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a session with a different branch
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "other-branch".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Check for conflict on a different branch
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let conflict = sm2.check_branch_conflict("feature-branch").unwrap();
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_check_branch_conflict_no_conflict_same_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create a session
+        let state = RunState::new(PathBuf::from("test.json"), "feature-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Checking from the same session should not cause conflict
+        let conflict = sm.check_branch_conflict("feature-branch").unwrap();
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_check_branch_conflict_no_conflict_not_running() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a session with a completed run
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let mut state1 = RunState::new(PathBuf::from("test1.json"), "feature-branch".to_string());
+        state1.transition_to(MachineState::Completed); // Mark as completed
+        sm1.save(&state1).unwrap();
+
+        // Another session checking for the same branch should NOT find conflict
+        // because the first session is not running
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let conflict = sm2.check_branch_conflict("feature-branch").unwrap();
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_check_branch_conflict_detects_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a running session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "feature-branch".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Another session checking for the same branch should find conflict
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let conflict = sm2.check_branch_conflict("feature-branch").unwrap();
+
+        assert!(conflict.is_some(), "Should detect branch conflict");
+        let conflict = conflict.unwrap();
+        assert_eq!(conflict.session_id, "session1");
+        assert_eq!(conflict.branch_name, "feature-branch");
+        assert!(conflict.is_running);
+    }
+
+    #[test]
+    fn test_check_branch_conflict_stale_session_no_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let worktree_dir = TempDir::new().unwrap();
+
+        // Create a session pointing to a worktree
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "feature-branch".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Manually update the metadata to point to the worktree directory
+        let metadata_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join("session1")
+            .join(METADATA_FILE);
+        let mut metadata: SessionMetadata =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+        metadata.worktree_path = worktree_dir.path().to_path_buf();
+        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+        // Now delete the worktree directory to make it stale
+        drop(worktree_dir);
+
+        // Another session checking for the same branch should NOT find conflict
+        // because the first session's worktree is deleted (stale)
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let conflict = sm2.check_branch_conflict("feature-branch").unwrap();
+        assert!(
+            conflict.is_none(),
+            "Stale sessions should not cause conflicts"
+        );
+    }
+
+    #[test]
+    fn test_check_branch_conflict_returns_correct_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a running session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-abc".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "feature/my-feature".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Check conflict from another session
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-xyz".to_string(),
+        );
+        let conflict = sm2.check_branch_conflict("feature/my-feature").unwrap();
+
+        assert!(conflict.is_some());
+        let conflict = conflict.unwrap();
+        assert_eq!(conflict.session_id, "session-abc");
+        assert_eq!(conflict.branch_name, "feature/my-feature");
+        // worktree_path should be set (to CWD by default in tests)
+        assert!(!conflict.worktree_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_session_metadata_is_running_field() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create a running session
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert!(metadata.is_running, "New RunState should be marked as running");
+
+        // Mark as completed and save again
+        let mut state = sm.load_current().unwrap().unwrap();
+        state.transition_to(MachineState::Completed);
+        sm.save(&state).unwrap();
+
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert!(
+            !metadata.is_running,
+            "Completed run should not be marked as running"
+        );
+    }
+
+    #[test]
+    fn test_session_metadata_is_running_on_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create a running session
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Mark as failed
+        state.transition_to(MachineState::Failed);
+        sm.save(&state).unwrap();
+
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert!(
+            !metadata.is_running,
+            "Failed run should not be marked as running"
+        );
+    }
+
+    #[test]
+    fn test_session_metadata_is_running_default() {
+        // Test that is_running defaults to false when deserializing old metadata
+        let json = r#"{
+            "sessionId": "main",
+            "worktreePath": "/tmp/test",
+            "branchName": "test-branch",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "lastActiveAt": "2024-01-01T00:00:00Z"
+        }"#;
+
+        let metadata: SessionMetadata = serde_json::from_str(json).unwrap();
+        assert!(
+            !metadata.is_running,
+            "is_running should default to false for backwards compatibility"
+        );
     }
 }

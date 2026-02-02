@@ -3088,7 +3088,10 @@ review = false
             worktree = true
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.worktree, "worktree should be true when set in config");
+        assert!(
+            config.worktree,
+            "worktree should be true when set in config"
+        );
     }
 
     #[test]
