@@ -73,7 +73,8 @@ impl<'a> LiveOutputFlusher<'a> {
         self.line_count_since_flush += 1;
 
         // Check if we should flush
-        let time_elapsed = self.last_flush.elapsed() >= Duration::from_millis(LIVE_FLUSH_INTERVAL_MS);
+        let time_elapsed =
+            self.last_flush.elapsed() >= Duration::from_millis(LIVE_FLUSH_INTERVAL_MS);
         let lines_threshold = self.line_count_since_flush >= LIVE_FLUSH_LINE_COUNT;
 
         if time_elapsed || lines_threshold {
@@ -2760,7 +2761,10 @@ mod tests {
         let flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
 
         assert!(flusher.live_state.output_lines.is_empty());
-        assert_eq!(flusher.live_state.machine_state, MachineState::RunningClaude);
+        assert_eq!(
+            flusher.live_state.machine_state,
+            MachineState::RunningClaude
+        );
         assert_eq!(flusher.line_count_since_flush, 0);
     }
 
@@ -2880,7 +2884,10 @@ mod tests {
     #[test]
     fn test_live_flush_constants() {
         // Verify the flush thresholds are reasonable
-        assert_eq!(LIVE_FLUSH_INTERVAL_MS, 200, "Flush interval should be 200ms");
+        assert_eq!(
+            LIVE_FLUSH_INTERVAL_MS, 200,
+            "Flush interval should be 200ms"
+        );
         assert_eq!(LIVE_FLUSH_LINE_COUNT, 10, "Flush line count should be 10");
     }
 }
