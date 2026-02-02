@@ -11,7 +11,7 @@ use crate::spec::Spec;
 use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
 use crate::worktree::MAIN_SESSION_ID;
 use chrono::{DateTime, Utc};
-use eframe::egui::{self, Color32, Rounding, Sense, Stroke};
+use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,25 @@ const TAB_SPACING: f32 = 4.0;
 
 /// Default refresh interval for data loading (500ms for GUI, less aggressive than TUI).
 pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 500;
+
+// ============================================================================
+// Grid Layout Constants
+// ============================================================================
+
+/// Minimum width for a card in the grid layout.
+const CARD_MIN_WIDTH: f32 = 280.0;
+
+/// Maximum width for a card in the grid layout.
+const CARD_MAX_WIDTH: f32 = 400.0;
+
+/// Spacing between cards in the grid.
+const CARD_SPACING: f32 = 16.0;
+
+/// Internal padding for cards.
+const CARD_PADDING: f32 = 16.0;
+
+/// Minimum height for a card.
+const CARD_MIN_HEIGHT: f32 = 100.0;
 
 // ============================================================================
 // Data Layer Types
@@ -646,6 +665,7 @@ impl Autom8App {
     /// Render the Active Runs view.
     fn render_active_runs(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
+            // Header section
             ui.label(
                 egui::RichText::new("Active Runs")
                     .font(typography::font(FontSize::Title, FontWeight::SemiBold))
@@ -660,54 +680,213 @@ impl Autom8App {
                         .font(typography::font(FontSize::Body, FontWeight::Regular))
                         .color(colors::TEXT_SECONDARY),
                 );
+                ui.add_space(8.0);
             }
 
-            ui.add_space(16.0);
-
+            // Empty state or grid layout
             if self.sessions.is_empty() {
-                ui.label(
-                    egui::RichText::new("No active runs.")
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_MUTED),
-                );
+                self.render_empty_active_runs(ui);
             } else {
-                // Show count of active sessions
-                ui.label(
-                    egui::RichText::new(format!("{} active session(s)", self.sessions.len()))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
-                );
-
-                ui.add_space(8.0);
-
-                // List sessions (placeholder - will be expanded in future stories)
-                for session in &self.sessions {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(session.display_title())
-                                .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                .color(colors::TEXT_PRIMARY),
-                        );
-
-                        if let Some(ref run) = session.run {
-                            ui.label(
-                                egui::RichText::new(format_state(run.machine_state))
-                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
-                                    .color(colors::TEXT_MUTED),
-                            );
-                        }
-
-                        if let Some(ref error) = session.load_error {
-                            ui.label(
-                                egui::RichText::new(error)
-                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
-                                    .color(colors::STATUS_ERROR),
-                            );
-                        }
-                    });
-                }
+                self.render_sessions_grid(ui);
             }
         });
+    }
+
+    /// Render the empty state for Active Runs view.
+    fn render_empty_active_runs(&self, ui: &mut egui::Ui) {
+        ui.add_space(32.0);
+
+        // Center the empty state message
+        ui.vertical_centered(|ui| {
+            ui.add_space(48.0);
+
+            ui.label(
+                egui::RichText::new("No active runs")
+                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new("Run autom8 to start implementing a feature")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Calculate the number of grid columns based on available width.
+    fn calculate_grid_columns(available_width: f32) -> usize {
+        // Calculate how many cards fit, accounting for spacing
+        let card_with_spacing = CARD_MIN_WIDTH + CARD_SPACING;
+        let columns = ((available_width + CARD_SPACING) / card_with_spacing).floor() as usize;
+
+        // Clamp to reasonable range: minimum 2, maximum 4
+        columns.clamp(2, 4)
+    }
+
+    /// Calculate the card width for the current number of columns.
+    fn calculate_card_width(available_width: f32, columns: usize) -> f32 {
+        // Total spacing between cards
+        let total_spacing = CARD_SPACING * (columns as f32 - 1.0);
+        let card_width = (available_width - total_spacing) / columns as f32;
+
+        // Clamp to min/max bounds
+        card_width.clamp(CARD_MIN_WIDTH, CARD_MAX_WIDTH)
+    }
+
+    /// Render the sessions in a responsive grid layout.
+    fn render_sessions_grid(&self, ui: &mut egui::Ui) {
+        // Scrollable area for the grid
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let available_width = ui.available_width();
+                let columns = Self::calculate_grid_columns(available_width);
+                let card_width = Self::calculate_card_width(available_width, columns);
+
+                // Create rows of cards
+                let mut session_iter = self.sessions.iter().peekable();
+                while session_iter.peek().is_some() {
+                    ui.horizontal(|ui| {
+                        for _ in 0..columns {
+                            if let Some(session) = session_iter.next() {
+                                self.render_session_card(ui, session, card_width);
+                                ui.add_space(CARD_SPACING);
+                            }
+                        }
+                    });
+                    ui.add_space(CARD_SPACING);
+                }
+            });
+    }
+
+    /// Render a single session card.
+    fn render_session_card(&self, ui: &mut egui::Ui, session: &SessionData, card_width: f32) {
+        // Define card dimensions
+        let card_size = Vec2::new(card_width, CARD_MIN_HEIGHT);
+
+        // Allocate space for the card
+        let (rect, _response) = ui.allocate_exact_size(card_size, Sense::hover());
+
+        // Skip if not visible (optimization for scrolling)
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+
+        // Draw card background with elevation
+        let card_rect = rect;
+        let painter = ui.painter();
+
+        // Shadow for subtle elevation
+        let shadow = theme::shadow::subtle();
+        let shadow_rect = Rect::from_min_size(
+            card_rect.min + shadow.offset,
+            card_rect.size() + Vec2::splat(shadow.spread * 2.0),
+        );
+        painter.rect_filled(
+            shadow_rect.expand(shadow.blur / 2.0),
+            Rounding::same(rounding::CARD),
+            shadow.color,
+        );
+
+        // Card background
+        painter.rect(
+            card_rect,
+            Rounding::same(rounding::CARD),
+            colors::SURFACE,
+            Stroke::new(1.0, colors::BORDER),
+        );
+
+        // Draw card content
+        let content_rect = card_rect.shrink(CARD_PADDING);
+        let mut cursor_y = content_rect.min.y;
+
+        // Title: Project name with session indicator
+        let title = session.display_title();
+        let title_galley = painter.layout_no_wrap(
+            title,
+            typography::font(FontSize::Body, FontWeight::SemiBold),
+            colors::TEXT_PRIMARY,
+        );
+        painter.galley(
+            egui::pos2(content_rect.min.x, cursor_y),
+            title_galley.clone(),
+            Color32::TRANSPARENT,
+        );
+        cursor_y += title_galley.rect.height() + 8.0;
+
+        // State row with status indicator
+        if let Some(ref run) = session.run {
+            let state_text = format_state(run.machine_state);
+            let state_color = self.state_to_color(run.machine_state);
+
+            // Status dot
+            let dot_radius = 4.0;
+            let dot_center = egui::pos2(content_rect.min.x + dot_radius, cursor_y + 8.0);
+            painter.circle_filled(dot_center, dot_radius, state_color);
+
+            // State text
+            let state_galley = painter.layout_no_wrap(
+                state_text.to_string(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_SECONDARY,
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x + dot_radius * 2.0 + 8.0, cursor_y),
+                state_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+            cursor_y += state_galley.rect.height() + 4.0;
+        }
+
+        // Error message if present
+        if let Some(ref error) = session.load_error {
+            let error_galley = painter.layout_no_wrap(
+                error.clone(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::STATUS_ERROR,
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, cursor_y),
+                error_galley,
+                Color32::TRANSPARENT,
+            );
+        }
+
+        // Progress info if available
+        if let Some(ref progress) = session.progress {
+            let progress_text = progress.as_fraction();
+            let progress_galley = painter.layout_no_wrap(
+                progress_text,
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_MUTED,
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, cursor_y),
+                progress_galley,
+                Color32::TRANSPARENT,
+            );
+        }
+    }
+
+    /// Map a machine state to its display color.
+    fn state_to_color(&self, state: MachineState) -> Color32 {
+        match state {
+            MachineState::RunningClaude
+            | MachineState::Reviewing
+            | MachineState::Correcting
+            | MachineState::Committing
+            | MachineState::CreatingPR
+            | MachineState::Initializing
+            | MachineState::PickingStory
+            | MachineState::LoadingSpec
+            | MachineState::GeneratingSpec => colors::STATUS_RUNNING,
+            MachineState::Completed => colors::STATUS_SUCCESS,
+            MachineState::Failed => colors::STATUS_ERROR,
+            MachineState::Idle => colors::STATUS_IDLE,
+        }
     }
 
     /// Render the Projects view.
@@ -1141,5 +1320,147 @@ mod tests {
         let truncated = session.truncated_worktree_path();
         assert!(truncated.starts_with("..."));
         assert!(truncated.contains("my-project-wt-feature"));
+    }
+
+    // ========================================================================
+    // Grid Layout Tests
+    // ========================================================================
+
+    #[test]
+    fn test_calculate_grid_columns_narrow_window() {
+        // Narrow window should show 2 columns (minimum)
+        let columns = Autom8App::calculate_grid_columns(500.0);
+        assert_eq!(columns, 2);
+    }
+
+    #[test]
+    fn test_calculate_grid_columns_medium_window() {
+        // Medium window around 900px should show 3 columns
+        let columns = Autom8App::calculate_grid_columns(900.0);
+        assert_eq!(columns, 3);
+    }
+
+    #[test]
+    fn test_calculate_grid_columns_wide_window() {
+        // Wide window should show 4 columns (maximum)
+        let columns = Autom8App::calculate_grid_columns(1400.0);
+        assert_eq!(columns, 4);
+    }
+
+    #[test]
+    fn test_calculate_grid_columns_very_narrow() {
+        // Very narrow window should still show minimum 2 columns
+        let columns = Autom8App::calculate_grid_columns(300.0);
+        assert_eq!(columns, 2);
+    }
+
+    #[test]
+    fn test_calculate_grid_columns_very_wide() {
+        // Very wide window should cap at 4 columns
+        let columns = Autom8App::calculate_grid_columns(2000.0);
+        assert_eq!(columns, 4);
+    }
+
+    #[test]
+    fn test_calculate_card_width_two_columns() {
+        // With 2 columns and 600px width, cards should be reasonable size
+        let card_width = Autom8App::calculate_card_width(600.0, 2);
+        // (600 - 16) / 2 = 292
+        assert!(card_width >= CARD_MIN_WIDTH);
+        assert!(card_width <= CARD_MAX_WIDTH);
+    }
+
+    #[test]
+    fn test_calculate_card_width_four_columns() {
+        // With 4 columns and 1200px width
+        let card_width = Autom8App::calculate_card_width(1200.0, 4);
+        // (1200 - 48) / 4 = 288
+        assert!(card_width >= CARD_MIN_WIDTH);
+        assert!(card_width <= CARD_MAX_WIDTH);
+    }
+
+    #[test]
+    fn test_calculate_card_width_clamps_to_min() {
+        // Very narrow width should clamp to minimum card width
+        let card_width = Autom8App::calculate_card_width(400.0, 4);
+        assert_eq!(card_width, CARD_MIN_WIDTH);
+    }
+
+    #[test]
+    fn test_calculate_card_width_clamps_to_max() {
+        // Very wide with few columns should clamp to maximum
+        let card_width = Autom8App::calculate_card_width(1000.0, 2);
+        // (1000 - 16) / 2 = 492, which exceeds max of 400
+        assert_eq!(card_width, CARD_MAX_WIDTH);
+    }
+
+    #[test]
+    fn test_grid_constants_are_reasonable() {
+        assert!(
+            CARD_MIN_WIDTH > 200.0,
+            "Cards should be at least 200px wide"
+        );
+        assert!(
+            CARD_MAX_WIDTH > CARD_MIN_WIDTH,
+            "Max width should exceed min width"
+        );
+        assert!(CARD_SPACING >= 8.0, "Cards need adequate spacing");
+        assert!(CARD_PADDING >= 12.0, "Cards need internal padding");
+        assert!(CARD_MIN_HEIGHT >= 80.0, "Cards need minimum height");
+    }
+
+    #[test]
+    fn test_state_to_color_running_states() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        assert_eq!(
+            app.state_to_color(MachineState::RunningClaude),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::Reviewing),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::Correcting),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::Committing),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::CreatingPR),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::Initializing),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::PickingStory),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::LoadingSpec),
+            colors::STATUS_RUNNING
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::GeneratingSpec),
+            colors::STATUS_RUNNING
+        );
+    }
+
+    #[test]
+    fn test_state_to_color_terminal_states() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+        assert_eq!(
+            app.state_to_color(MachineState::Completed),
+            colors::STATUS_SUCCESS
+        );
+        assert_eq!(
+            app.state_to_color(MachineState::Failed),
+            colors::STATUS_ERROR
+        );
+        assert_eq!(app.state_to_color(MachineState::Idle), colors::STATUS_IDLE);
     }
 }
