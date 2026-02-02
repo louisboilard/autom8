@@ -2381,7 +2381,10 @@ mod tests {
         // The session ID is auto-detected based on whether we're in main repo or worktree
         // We can't assert the exact value but we can verify it's created successfully
         let status = runner.status();
-        assert!(status.is_ok(), "Runner should auto-detect session successfully");
+        assert!(
+            status.is_ok(),
+            "Runner should auto-detect session successfully"
+        );
     }
 
     #[test]
@@ -2395,7 +2398,8 @@ mod tests {
         );
         // Session ID should be either "main" or 8-char hex
         assert!(
-            session_id == "main" || (session_id.len() == 8 && session_id.chars().all(|c| c.is_ascii_hexdigit())),
+            session_id == "main"
+                || (session_id.len() == 8 && session_id.chars().all(|c| c.is_ascii_hexdigit())),
             "Session ID should be 'main' or 8 hex chars, got: {}",
             session_id
         );
@@ -2426,14 +2430,20 @@ mod tests {
 
         // Session1 has active run, session2 does not
         assert!(sm1.has_active_run().unwrap());
-        assert!(!sm2.has_active_run().unwrap(), "Session2 should NOT see session1's active run");
+        assert!(
+            !sm2.has_active_run().unwrap(),
+            "Session2 should NOT see session1's active run"
+        );
     }
 
     #[test]
     fn test_state_has_session_id_field() {
         // Verify RunState has session_id field
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        assert!(state.session_id.is_none(), "session_id should be None by default");
+        assert!(
+            state.session_id.is_none(),
+            "session_id should be None by default"
+        );
 
         let state_with_session = RunState::new_with_session(
             PathBuf::from("test.json"),
