@@ -621,15 +621,39 @@ mod tests {
     fn test_us006_format_machine_state_all_variants() {
         // Verify all machine states have display names
         assert_eq!(format_machine_state(&MachineState::Idle), "Idle");
-        assert_eq!(format_machine_state(&MachineState::LoadingSpec), "Loading Spec");
-        assert_eq!(format_machine_state(&MachineState::GeneratingSpec), "Generating Spec");
-        assert_eq!(format_machine_state(&MachineState::Initializing), "Initializing");
-        assert_eq!(format_machine_state(&MachineState::PickingStory), "Picking Story");
-        assert_eq!(format_machine_state(&MachineState::RunningClaude), "Running Claude");
+        assert_eq!(
+            format_machine_state(&MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::RunningClaude),
+            "Running Claude"
+        );
         assert_eq!(format_machine_state(&MachineState::Reviewing), "Reviewing");
-        assert_eq!(format_machine_state(&MachineState::Correcting), "Correcting");
-        assert_eq!(format_machine_state(&MachineState::Committing), "Committing");
-        assert_eq!(format_machine_state(&MachineState::CreatingPR), "Creating PR");
+        assert_eq!(
+            format_machine_state(&MachineState::Correcting),
+            "Correcting"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::Committing),
+            "Committing"
+        );
+        assert_eq!(
+            format_machine_state(&MachineState::CreatingPR),
+            "Creating PR"
+        );
         assert_eq!(format_machine_state(&MachineState::Completed), "Completed");
         assert_eq!(format_machine_state(&MachineState::Failed), "Failed");
     }
@@ -763,10 +787,34 @@ mod tests {
     fn test_us006_summary_counts() {
         // Test that summary correctly counts running and stale sessions
         let sessions = vec![
-            make_session_status("main", "main", true, false, true, Some(MachineState::RunningClaude), Some("US-001")),
-            make_session_status("session1", "feat-1", false, false, true, Some(MachineState::Reviewing), Some("US-002")),
-            make_session_status("session2", "feat-2", false, true, false, None, None),  // stale
-            make_session_status("session3", "feat-3", false, false, false, Some(MachineState::Completed), None),  // idle
+            make_session_status(
+                "main",
+                "main",
+                true,
+                false,
+                true,
+                Some(MachineState::RunningClaude),
+                Some("US-001"),
+            ),
+            make_session_status(
+                "session1",
+                "feat-1",
+                false,
+                false,
+                true,
+                Some(MachineState::Reviewing),
+                Some("US-002"),
+            ),
+            make_session_status("session2", "feat-2", false, true, false, None, None), // stale
+            make_session_status(
+                "session3",
+                "feat-3",
+                false,
+                false,
+                false,
+                Some(MachineState::Completed),
+                None,
+            ), // idle
         ];
 
         // Running count: sessions that are running AND not stale
@@ -787,7 +835,8 @@ mod tests {
     #[test]
     fn test_us006_worktree_path_truncation() {
         // Test that long worktree paths are truncated properly
-        let long_path = "/very/long/path/that/exceeds/sixty/characters/for/display/purposes/test-worktree";
+        let long_path =
+            "/very/long/path/that/exceeds/sixty/characters/for/display/purposes/test-worktree";
         assert!(long_path.len() > 60);
 
         let display_path = if long_path.len() > 60 {
@@ -805,20 +854,24 @@ mod tests {
         // Verify SessionStatus contains all required display fields per acceptance criteria:
         // - session ID, worktree path, branch, state, current story
         let session = make_session_status(
-            "abc12345",          // session_id
-            "feature/test",     // branch
-            true,               // is_current (for highlighting)
-            false,              // is_stale
-            true,               // is_running
-            Some(MachineState::RunningClaude),  // state
-            Some("US-001"),     // current story
+            "abc12345",                        // session_id
+            "feature/test",                    // branch
+            true,                              // is_current (for highlighting)
+            false,                             // is_stale
+            true,                              // is_running
+            Some(MachineState::RunningClaude), // state
+            Some("US-001"),                    // current story
         );
 
         // Session ID
         assert_eq!(session.metadata.session_id, "abc12345");
 
         // Worktree path
-        assert!(session.metadata.worktree_path.to_string_lossy().contains("abc12345"));
+        assert!(session
+            .metadata
+            .worktree_path
+            .to_string_lossy()
+            .contains("abc12345"));
 
         // Branch
         assert_eq!(session.metadata.branch_name, "feature/test");

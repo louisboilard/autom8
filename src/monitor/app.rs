@@ -3858,16 +3858,10 @@ mod tests {
             MAIN_SESSION_ID,
             "main-branch",
         ));
-        app.sessions.push(create_test_session(
-            "my-project",
-            "abc12345",
-            "feature-1",
-        ));
-        app.sessions.push(create_test_session(
-            "my-project",
-            "def67890",
-            "feature-2",
-        ));
+        app.sessions
+            .push(create_test_session("my-project", "abc12345", "feature-1"));
+        app.sessions
+            .push(create_test_session("my-project", "def67890", "feature-2"));
 
         // All three should be in the sessions list
         assert_eq!(app.sessions.len(), 3);
@@ -3931,11 +3925,8 @@ mod tests {
             MAIN_SESSION_ID,
             "main-branch",
         ));
-        app.sessions.push(create_test_session(
-            "project-beta",
-            "12345678",
-            "feature-x",
-        ));
+        app.sessions
+            .push(create_test_session("project-beta", "12345678", "feature-x"));
         app.sessions.push(create_test_session(
             "project-gamma",
             MAIN_SESSION_ID,
