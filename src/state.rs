@@ -3,6 +3,7 @@ use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;
 use crate::knowledge::{Decision, FileChange, FileInfo, Pattern, ProjectKnowledge, StoryChanges};
+use crate::worktree::{get_current_session_id, MAIN_SESSION_ID};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -10,8 +11,28 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 const STATE_FILE: &str = "state.json";
+const METADATA_FILE: &str = "metadata.json";
+const SESSIONS_DIR: &str = "sessions";
 const RUNS_DIR: &str = "runs";
 const SPEC_DIR: &str = "spec";
+
+/// Metadata about a session, stored separately from the full state.
+///
+/// This enables quick session listing without loading the full state file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetadata {
+    /// Unique session identifier (e.g., "main" or 8-char hash)
+    pub session_id: String,
+    /// Absolute path to the worktree directory
+    pub worktree_path: PathBuf,
+    /// The branch being worked on in this session
+    pub branch_name: String,
+    /// When the session was created
+    pub created_at: DateTime<Utc>,
+    /// When the session was last active (updated on each state save)
+    pub last_active_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -564,31 +585,117 @@ impl RunState {
     }
 }
 
+/// Manages session state storage with per-session directory structure.
+///
+/// State is stored in: `~/.config/autom8/<project>/sessions/<session-id>/`
+/// Each session has:
+/// - `state.json` - The full run state
+/// - `metadata.json` - Quick metadata for session listing
+///
+/// The spec/ and runs/ directories remain at the project level (shared across sessions).
 pub struct StateManager {
+    /// Base config directory for the project: `~/.config/autom8/<project>/`
     base_dir: PathBuf,
+    /// Session ID for this manager (auto-detected from CWD or specified)
+    session_id: String,
 }
 
 impl StateManager {
     /// Create a StateManager using the config directory for the current project.
+    /// Auto-detects session ID from the current working directory.
     /// Uses `~/.config/autom8/<project-name>/` as the base directory.
     pub fn new() -> Result<Self> {
         let base_dir = config::project_config_dir()?;
-        Ok(Self { base_dir })
+        let session_id = get_current_session_id()?;
+        let mut manager = Self {
+            base_dir,
+            session_id,
+        };
+        manager.migrate_legacy_state()?;
+        Ok(manager)
+    }
+
+    /// Create a StateManager for a specific session.
+    /// Uses `~/.config/autom8/<project-name>/` as the base directory.
+    pub fn with_session(session_id: String) -> Result<Self> {
+        let base_dir = config::project_config_dir()?;
+        let mut manager = Self {
+            base_dir,
+            session_id,
+        };
+        manager.migrate_legacy_state()?;
+        Ok(manager)
     }
 
     /// Create a StateManager for a specific project name.
+    /// Auto-detects session ID from the current working directory.
     /// Uses `~/.config/autom8/<project-name>/` as the base directory.
     pub fn for_project(project_name: &str) -> Result<Self> {
         let base_dir = config::project_config_dir_for(project_name)?;
-        Ok(Self { base_dir })
+        let session_id = get_current_session_id()?;
+        let mut manager = Self {
+            base_dir,
+            session_id,
+        };
+        manager.migrate_legacy_state()?;
+        Ok(manager)
+    }
+
+    /// Create a StateManager for a specific project and session.
+    /// Uses `~/.config/autom8/<project-name>/` as the base directory.
+    pub fn for_project_session(project_name: &str, session_id: String) -> Result<Self> {
+        let base_dir = config::project_config_dir_for(project_name)?;
+        let mut manager = Self {
+            base_dir,
+            session_id,
+        };
+        manager.migrate_legacy_state()?;
+        Ok(manager)
     }
 
     /// Create a StateManager with a custom base directory (for testing).
     pub fn with_dir(dir: PathBuf) -> Self {
-        Self { base_dir: dir }
+        Self {
+            base_dir: dir,
+            session_id: MAIN_SESSION_ID.to_string(),
+        }
     }
 
+    /// Create a StateManager with a custom base directory and session ID (for testing).
+    pub fn with_dir_and_session(dir: PathBuf, session_id: String) -> Self {
+        Self {
+            base_dir: dir,
+            session_id,
+        }
+    }
+
+    /// Get the session ID for this manager.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Path to the sessions directory: `~/.config/autom8/<project>/sessions/`
+    fn sessions_dir(&self) -> PathBuf {
+        self.base_dir.join(SESSIONS_DIR)
+    }
+
+    /// Path to this session's directory: `~/.config/autom8/<project>/sessions/<session-id>/`
+    fn session_dir(&self) -> PathBuf {
+        self.sessions_dir().join(&self.session_id)
+    }
+
+    /// Path to the state file for this session
     fn state_file(&self) -> PathBuf {
+        self.session_dir().join(STATE_FILE)
+    }
+
+    /// Path to the metadata file for this session
+    fn metadata_file(&self) -> PathBuf {
+        self.session_dir().join(METADATA_FILE)
+    }
+
+    /// Path to the legacy state file (for migration)
+    fn legacy_state_file(&self) -> PathBuf {
         self.base_dir.join(STATE_FILE)
     }
 
@@ -601,8 +708,65 @@ impl StateManager {
         self.base_dir.join(SPEC_DIR)
     }
 
+    /// Migrate legacy state.json to the new sessions structure.
+    ///
+    /// On first run after upgrade, if there's a state.json in the project root,
+    /// migrate it to sessions/main/state.json and create appropriate metadata.
+    fn migrate_legacy_state(&mut self) -> Result<()> {
+        let legacy_path = self.legacy_state_file();
+
+        // Only migrate if legacy file exists and sessions dir doesn't have main session
+        if !legacy_path.exists() {
+            return Ok(());
+        }
+
+        let main_session_dir = self.sessions_dir().join(MAIN_SESSION_ID);
+        let main_state_file = main_session_dir.join(STATE_FILE);
+
+        // Skip if already migrated
+        if main_state_file.exists() {
+            // Remove the legacy file since migration was already done
+            let _ = fs::remove_file(&legacy_path);
+            return Ok(());
+        }
+
+        // Read the legacy state
+        let content = fs::read_to_string(&legacy_path)?;
+        let mut state: RunState = serde_json::from_str(&content)?;
+
+        // Update the state to have the main session ID
+        if state.session_id.is_none() {
+            state.session_id = Some(MAIN_SESSION_ID.to_string());
+        }
+
+        // Create the sessions/main/ directory
+        fs::create_dir_all(&main_session_dir)?;
+
+        // Write state to new location
+        let state_content = serde_json::to_string_pretty(&state)?;
+        fs::write(&main_state_file, state_content)?;
+
+        // Create metadata for the migrated session
+        let worktree_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let metadata = SessionMetadata {
+            session_id: MAIN_SESSION_ID.to_string(),
+            worktree_path,
+            branch_name: state.branch.clone(),
+            created_at: state.started_at,
+            last_active_at: state.finished_at.unwrap_or_else(Utc::now),
+        };
+        let metadata_content = serde_json::to_string_pretty(&metadata)?;
+        fs::write(main_session_dir.join(METADATA_FILE), metadata_content)?;
+
+        // Remove the legacy state file
+        fs::remove_file(&legacy_path)?;
+
+        Ok(())
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         fs::create_dir_all(&self.base_dir)?;
+        fs::create_dir_all(self.session_dir())?;
         fs::create_dir_all(self.runs_dir())?;
         Ok(())
     }
@@ -649,10 +813,57 @@ impl StateManager {
         Ok(Some(state))
     }
 
+    /// Load the metadata for the current session.
+    pub fn load_metadata(&self) -> Result<Option<SessionMetadata>> {
+        let path = self.metadata_file();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path)?;
+        let metadata: SessionMetadata = serde_json::from_str(&content)?;
+        Ok(Some(metadata))
+    }
+
+    /// Save the run state and update session metadata.
     pub fn save(&self, state: &RunState) -> Result<()> {
         self.ensure_dirs()?;
+
+        // Save the state
         let content = serde_json::to_string_pretty(state)?;
         fs::write(self.state_file(), content)?;
+
+        // Update or create metadata
+        self.save_metadata(state)?;
+
+        Ok(())
+    }
+
+    /// Save session metadata based on the current state.
+    fn save_metadata(&self, state: &RunState) -> Result<()> {
+        let worktree_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Load existing metadata or create new
+        let metadata = if let Some(existing) = self.load_metadata()? {
+            SessionMetadata {
+                session_id: self.session_id.clone(),
+                worktree_path,
+                branch_name: state.branch.clone(),
+                created_at: existing.created_at,
+                last_active_at: Utc::now(),
+            }
+        } else {
+            SessionMetadata {
+                session_id: self.session_id.clone(),
+                worktree_path,
+                branch_name: state.branch.clone(),
+                created_at: state.started_at,
+                last_active_at: Utc::now(),
+            }
+        };
+
+        let content = serde_json::to_string_pretty(&metadata)?;
+        fs::write(self.metadata_file(), content)?;
+
         Ok(())
     }
 
@@ -661,6 +872,14 @@ impl StateManager {
         if path.exists() {
             fs::remove_file(path)?;
         }
+        // Also clear metadata
+        let metadata_path = self.metadata_file();
+        if metadata_path.exists() {
+            fs::remove_file(metadata_path)?;
+        }
+        // Try to remove the session directory if empty
+        let session_dir = self.session_dir();
+        let _ = fs::remove_dir(&session_dir); // Ignore error if not empty
         Ok(())
     }
 
@@ -705,6 +924,51 @@ impl StateManager {
             Ok(state.status == RunStatus::Running)
         } else {
             Ok(false)
+        }
+    }
+
+    /// List all sessions for this project with their metadata.
+    ///
+    /// Returns sessions sorted by last_active_at descending (most recent first).
+    /// Sessions without valid metadata are skipped.
+    pub fn list_sessions(&self) -> Result<Vec<SessionMetadata>> {
+        let sessions_dir = self.sessions_dir();
+        if !sessions_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(&sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let metadata_path = path.join(METADATA_FILE);
+                if let Ok(content) = fs::read_to_string(&metadata_path) {
+                    if let Ok(metadata) = serde_json::from_str::<SessionMetadata>(&content) {
+                        sessions.push(metadata);
+                    }
+                }
+            }
+        }
+
+        // Sort by last_active_at descending
+        sessions.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+        Ok(sessions)
+    }
+
+    /// Get a specific session by ID.
+    ///
+    /// Returns a new StateManager configured for the specified session.
+    /// Returns None if the session doesn't exist.
+    pub fn get_session(&self, session_id: &str) -> Option<StateManager> {
+        let session_dir = self.sessions_dir().join(session_id);
+        if session_dir.exists() && session_dir.join(STATE_FILE).exists() {
+            Some(StateManager {
+                base_dir: self.base_dir.clone(),
+                session_id: session_id.to_string(),
+            })
+        } else {
+            None
         }
     }
 }
@@ -931,15 +1195,20 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_state_manager_with_dir_creates_state_file_in_base_dir() {
+    fn test_state_manager_with_dir_creates_state_file_in_session_dir() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
         let run_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         sm.save(&run_state).unwrap();
 
-        // state.json should be in the base dir
-        assert!(temp_dir.path().join(STATE_FILE).exists());
+        // state.json should be in sessions/main/ (default session for with_dir)
+        assert!(temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(STATE_FILE)
+            .exists());
     }
 
     #[test]
@@ -949,9 +1218,28 @@ mod tests {
 
         sm.ensure_dirs().unwrap();
 
-        // runs/ should be in the base dir
+        // runs/ should be in the base dir (shared across sessions)
         assert!(temp_dir.path().join(RUNS_DIR).exists());
         assert!(temp_dir.path().join(RUNS_DIR).is_dir());
+    }
+
+    #[test]
+    fn test_state_manager_with_dir_creates_sessions_subdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        sm.ensure_dirs().unwrap();
+
+        // sessions/ should be in the base dir
+        assert!(temp_dir.path().join(SESSIONS_DIR).exists());
+        assert!(temp_dir.path().join(SESSIONS_DIR).is_dir());
+
+        // sessions/main/ should exist for the default session
+        assert!(temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .exists());
     }
 
     #[test]
@@ -2483,5 +2771,527 @@ src/lib.rs | Library module | [Config]
         let session_id = state.session_id.unwrap();
         assert_eq!(session_id.len(), 8);
         assert!(session_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ======================================================================
+    // Tests for US-003: Per-Session State Storage
+    // ======================================================================
+
+    #[test]
+    fn test_session_metadata_serialization() {
+        let metadata = SessionMetadata {
+            session_id: "main".to_string(),
+            worktree_path: PathBuf::from("/home/user/project"),
+            branch_name: "feature/test".to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: SessionMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.session_id, "main");
+        assert_eq!(parsed.worktree_path, PathBuf::from("/home/user/project"));
+        assert_eq!(parsed.branch_name, "feature/test");
+    }
+
+    #[test]
+    fn test_session_metadata_camel_case() {
+        let metadata = SessionMetadata {
+            session_id: "main".to_string(),
+            worktree_path: PathBuf::from("/path"),
+            branch_name: "main".to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+
+        // Verify camelCase serialization
+        assert!(json.contains("sessionId"));
+        assert!(json.contains("worktreePath"));
+        assert!(json.contains("branchName"));
+        assert!(json.contains("createdAt"));
+        assert!(json.contains("lastActiveAt"));
+
+        // Verify snake_case is NOT used
+        assert!(!json.contains("session_id"));
+        assert!(!json.contains("worktree_path"));
+        assert!(!json.contains("branch_name"));
+        assert!(!json.contains("created_at"));
+        assert!(!json.contains("last_active_at"));
+    }
+
+    #[test]
+    fn test_state_manager_session_id_accessor() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert_eq!(sm.session_id(), MAIN_SESSION_ID);
+    }
+
+    #[test]
+    fn test_state_manager_with_custom_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "abc12345".to_string(),
+        );
+        assert_eq!(sm.session_id(), "abc12345");
+    }
+
+    #[test]
+    fn test_state_manager_session_directory_structure() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Verify the directory structure
+        let sessions_dir = temp_dir.path().join(SESSIONS_DIR);
+        let session_dir = sessions_dir.join(MAIN_SESSION_ID);
+        let state_file = session_dir.join(STATE_FILE);
+        let metadata_file = session_dir.join(METADATA_FILE);
+
+        assert!(sessions_dir.exists(), "sessions/ should exist");
+        assert!(session_dir.exists(), "sessions/main/ should exist");
+        assert!(state_file.exists(), "sessions/main/state.json should exist");
+        assert!(
+            metadata_file.exists(),
+            "sessions/main/metadata.json should exist"
+        );
+    }
+
+    #[test]
+    fn test_state_manager_creates_metadata_on_save() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "feature-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Load metadata and verify
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(metadata.session_id, MAIN_SESSION_ID);
+        assert_eq!(metadata.branch_name, "feature-branch");
+    }
+
+    #[test]
+    fn test_state_manager_load_metadata_returns_none_for_new_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No save yet - metadata should be None
+        let metadata = sm.load_metadata().unwrap();
+        assert!(metadata.is_none());
+    }
+
+    #[test]
+    fn test_state_manager_list_sessions_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let sessions = sm.list_sessions().unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_state_manager_list_sessions_single() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let sessions = sm.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, MAIN_SESSION_ID);
+        assert_eq!(sessions[0].branch_name, "test-branch");
+    }
+
+    #[test]
+    fn test_state_manager_list_sessions_multiple() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create first session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Create second session
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
+        );
+        let state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
+        sm2.save(&state2).unwrap();
+
+        // List sessions from either manager
+        let sessions = sm1.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Both sessions should be present
+        let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert!(session_ids.contains(&"session1"));
+        assert!(session_ids.contains(&"session2"));
+    }
+
+    #[test]
+    fn test_state_manager_list_sessions_sorted_by_last_active() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create older session first
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "older".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Small delay to ensure different timestamps
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Create newer session
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "newer".to_string(),
+        );
+        let state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
+        sm2.save(&state2).unwrap();
+
+        let sessions = sm1.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+
+        // Newer session should be first (sorted by last_active_at descending)
+        assert_eq!(sessions[0].session_id, "newer");
+        assert_eq!(sessions[1].session_id, "older");
+    }
+
+    #[test]
+    fn test_state_manager_get_session_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Get the session
+        let session_sm = sm.get_session(MAIN_SESSION_ID);
+        assert!(session_sm.is_some());
+
+        let session_sm = session_sm.unwrap();
+        assert_eq!(session_sm.session_id(), MAIN_SESSION_ID);
+
+        // Load state from the returned manager
+        let loaded = session_sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.run_id, state.run_id);
+    }
+
+    #[test]
+    fn test_state_manager_get_session_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let session = sm.get_session("nonexistent");
+        assert!(session.is_none());
+    }
+
+    #[test]
+    fn test_state_manager_get_session_different_id() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-abc".to_string(),
+        );
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm1.save(&state).unwrap();
+
+        // Get session from a different StateManager
+        let sm2 = StateManager::with_dir(temp_dir.path().to_path_buf());
+        let session_sm = sm2.get_session("session-abc");
+        assert!(session_sm.is_some());
+
+        let session_sm = session_sm.unwrap();
+        assert_eq!(session_sm.session_id(), "session-abc");
+    }
+
+    #[test]
+    fn test_state_manager_migrate_legacy_state() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a legacy state.json in the root
+        let legacy_state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let legacy_content = serde_json::to_string_pretty(&legacy_state).unwrap();
+        let legacy_path = temp_dir.path().join(STATE_FILE);
+        fs::write(&legacy_path, &legacy_content).unwrap();
+
+        assert!(legacy_path.exists(), "Legacy state file should exist");
+
+        // Create a StateManager - this should trigger migration
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap(); // Trigger migration if needed
+
+        // Now create a new manager that will migrate
+        let sm = {
+            let mut sm = StateManager {
+                base_dir: temp_dir.path().to_path_buf(),
+                session_id: MAIN_SESSION_ID.to_string(),
+            };
+            // Manually call migrate since with_dir doesn't call it
+            sm.migrate_legacy_state().unwrap();
+            sm
+        };
+
+        // Legacy file should be removed
+        assert!(
+            !legacy_path.exists(),
+            "Legacy state file should be removed after migration"
+        );
+
+        // State should exist in new location
+        let new_state_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(STATE_FILE);
+        assert!(new_state_path.exists(), "Migrated state file should exist");
+
+        // Metadata should be created
+        let metadata_path = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(METADATA_FILE);
+        assert!(metadata_path.exists(), "Metadata file should be created");
+
+        // Load and verify state
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.run_id, legacy_state.run_id);
+        assert_eq!(loaded.session_id, Some(MAIN_SESSION_ID.to_string()));
+    }
+
+    #[test]
+    fn test_state_manager_migrate_preserves_state_data() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a legacy state with lots of data
+        let mut legacy_state = RunState::new(PathBuf::from("test.json"), "feature-x".to_string());
+        legacy_state.start_iteration("US-001");
+        legacy_state
+            .iterations
+            .last_mut()
+            .unwrap()
+            .work_summary = Some("Did some work".to_string());
+        legacy_state.review_iteration = 2;
+        legacy_state.knowledge.baseline_commit = Some("abc123".to_string());
+
+        let legacy_content = serde_json::to_string_pretty(&legacy_state).unwrap();
+        fs::write(temp_dir.path().join(STATE_FILE), &legacy_content).unwrap();
+
+        // Trigger migration
+        let sm = {
+            let mut sm = StateManager {
+                base_dir: temp_dir.path().to_path_buf(),
+                session_id: MAIN_SESSION_ID.to_string(),
+            };
+            sm.migrate_legacy_state().unwrap();
+            sm
+        };
+
+        // Verify all data preserved
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.branch, "feature-x");
+        assert_eq!(loaded.iteration, 1);
+        assert_eq!(loaded.review_iteration, 2);
+        assert_eq!(
+            loaded.iterations[0].work_summary,
+            Some("Did some work".to_string())
+        );
+        assert_eq!(
+            loaded.knowledge.baseline_commit,
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_state_manager_migrate_skips_if_already_migrated() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create session structure first
+        let session_dir = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID);
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let state = RunState::new(PathBuf::from("new.json"), "new-branch".to_string());
+        let content = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(session_dir.join(STATE_FILE), &content).unwrap();
+
+        // Create legacy file with DIFFERENT content
+        let legacy_state = RunState::new(PathBuf::from("legacy.json"), "legacy-branch".to_string());
+        let legacy_content = serde_json::to_string_pretty(&legacy_state).unwrap();
+        let legacy_path = temp_dir.path().join(STATE_FILE);
+        fs::write(&legacy_path, &legacy_content).unwrap();
+
+        // Trigger migration
+        let sm = {
+            let mut sm = StateManager {
+                base_dir: temp_dir.path().to_path_buf(),
+                session_id: MAIN_SESSION_ID.to_string(),
+            };
+            sm.migrate_legacy_state().unwrap();
+            sm
+        };
+
+        // Legacy file should still be removed
+        assert!(!legacy_path.exists());
+
+        // But the existing session state should NOT be overwritten
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.branch, "new-branch"); // Not legacy-branch
+    }
+
+    #[test]
+    fn test_state_manager_clear_removes_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Both files should exist
+        let session_dir = temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID);
+        assert!(session_dir.join(STATE_FILE).exists());
+        assert!(session_dir.join(METADATA_FILE).exists());
+
+        // Clear
+        sm.clear_current().unwrap();
+
+        // Both files should be removed
+        assert!(!session_dir.join(STATE_FILE).exists());
+        assert!(!session_dir.join(METADATA_FILE).exists());
+    }
+
+    #[test]
+    fn test_state_manager_metadata_updates_last_active_on_save() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let metadata1 = sm.load_metadata().unwrap().unwrap();
+        let first_active = metadata1.last_active_at;
+
+        // Wait a bit
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Save again
+        sm.save(&state).unwrap();
+
+        let metadata2 = sm.load_metadata().unwrap().unwrap();
+        assert!(
+            metadata2.last_active_at > first_active,
+            "last_active_at should be updated on save"
+        );
+
+        // created_at should remain the same
+        assert_eq!(
+            metadata2.created_at, metadata1.created_at,
+            "created_at should not change"
+        );
+    }
+
+    #[test]
+    fn test_state_manager_different_sessions_isolated() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create first session
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-a".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("a.json"), "branch-a".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Create second session
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-b".to_string(),
+        );
+        let state2 = RunState::new(PathBuf::from("b.json"), "branch-b".to_string());
+        sm2.save(&state2).unwrap();
+
+        // Each should load their own state
+        let loaded1 = sm1.load_current().unwrap().unwrap();
+        let loaded2 = sm2.load_current().unwrap().unwrap();
+
+        assert_eq!(loaded1.branch, "branch-a");
+        assert_eq!(loaded2.branch, "branch-b");
+
+        // Clearing one shouldn't affect the other
+        sm1.clear_current().unwrap();
+
+        assert!(sm1.load_current().unwrap().is_none());
+        assert!(sm2.load_current().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_state_manager_spec_dir_shared_across_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two sessions
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-1".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-2".to_string(),
+        );
+
+        // Both should share the same spec directory
+        assert_eq!(sm1.spec_dir(), sm2.spec_dir());
+        assert_eq!(sm1.spec_dir(), temp_dir.path().join(SPEC_DIR));
+    }
+
+    #[test]
+    fn test_state_manager_runs_dir_shared_across_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two sessions
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-1".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-2".to_string(),
+        );
+
+        // Archive from both sessions
+        let state1 = RunState::new(PathBuf::from("test1.json"), "branch1".to_string());
+        let state2 = RunState::new(PathBuf::from("test2.json"), "branch2".to_string());
+
+        sm1.archive(&state1).unwrap();
+        sm2.archive(&state2).unwrap();
+
+        // Both archives should be in the shared runs/ directory
+        let runs_dir = temp_dir.path().join(RUNS_DIR);
+        let archives: Vec<_> = fs::read_dir(&runs_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+
+        assert_eq!(archives.len(), 2, "Both archives should be in shared runs/");
     }
 }

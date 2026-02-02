@@ -862,9 +862,7 @@ mod tests {
     fn test_main_session_id_constant() {
         assert_eq!(MAIN_SESSION_ID, "main");
         assert!(MAIN_SESSION_ID.len() <= 12);
-        assert!(MAIN_SESSION_ID
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric()));
+        assert!(MAIN_SESSION_ID.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
@@ -963,7 +961,10 @@ mod tests {
 
         let main_root = get_main_repo_root().unwrap();
         let id = get_session_id_for_path(&main_root).unwrap();
-        assert_eq!(id, MAIN_SESSION_ID, "Main repo path should return 'main' ID");
+        assert_eq!(
+            id, MAIN_SESSION_ID,
+            "Main repo path should return 'main' ID"
+        );
     }
 
     #[test]
@@ -980,7 +981,10 @@ mod tests {
             "/opt/work/feature-y",
         ];
 
-        let ids: Vec<String> = paths.iter().map(|p| generate_session_id(Path::new(p))).collect();
+        let ids: Vec<String> = paths
+            .iter()
+            .map(|p| generate_session_id(Path::new(p)))
+            .collect();
 
         // Check all IDs are unique
         let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
