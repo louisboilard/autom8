@@ -258,21 +258,16 @@ impl RunHistoryEntry {
 
 /// Unique identifier for tabs.
 /// Static tabs use well-known IDs, dynamic tabs use unique generated IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum TabId {
     /// The Active Runs tab (permanent).
+    #[default]
     ActiveRuns,
     /// The Projects tab (permanent).
     Projects,
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
-}
-
-impl Default for TabId {
-    fn default() -> Self {
-        TabId::ActiveRuns
-    }
 }
 
 /// Information about a tab displayed in the tab bar.
@@ -366,8 +361,6 @@ pub struct Autom8App {
     tabs: Vec<TabInfo>,
     /// The currently active tab ID.
     active_tab_id: TabId,
-    /// Scroll offset for the tab bar (for horizontal scrolling).
-    tab_scroll_offset: f32,
 
     // ========================================================================
     // Data Layer
@@ -448,7 +441,6 @@ impl Autom8App {
             current_tab: Tab::default(),
             tabs,
             active_tab_id: TabId::default(),
-            tab_scroll_offset: 0.0,
             projects: Vec::new(),
             sessions: Vec::new(),
             has_active_runs: false,
@@ -629,8 +621,7 @@ impl Autom8App {
 
         // Cache the run state if provided
         if let Some(state) = run_state {
-            self.run_detail_cache
-                .insert(entry.run_id.clone(), state);
+            self.run_detail_cache.insert(entry.run_id.clone(), state);
         }
 
         self.open_run_detail_tab(&entry.run_id, &label);
@@ -1113,13 +1104,6 @@ impl Autom8App {
         (tab_clicked, close_clicked)
     }
 
-    /// Render a single tab button. Returns true if clicked.
-    /// Legacy method for backward compatibility with tests.
-    fn render_tab(&self, ui: &mut egui::Ui, tab: Tab, is_active: bool) -> bool {
-        let (clicked, _) = self.render_dynamic_tab(ui, tab.label(), false, is_active);
-        clicked
-    }
-
     /// Render the content area based on the current tab.
     fn render_content(&mut self, ui: &mut egui::Ui) {
         match &self.active_tab_id {
@@ -1161,9 +1145,11 @@ impl Autom8App {
                     ui.add_space(spacing::SM);
 
                     ui.label(
-                        egui::RichText::new("This run may have been archived or the data is unavailable.")
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_MUTED),
+                        egui::RichText::new(
+                            "This run may have been archived or the data is unavailable.",
+                        )
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_MUTED),
                     );
                 });
             }
@@ -1175,103 +1161,18 @@ impl Autom8App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Status and timing info
-                ui.horizontal(|ui| {
-                    // Status badge
-                    let status_text = match run_state.status {
-                        crate::state::RunStatus::Completed => "Completed",
-                        crate::state::RunStatus::Failed => "Failed",
-                        crate::state::RunStatus::Running => "Running",
-                    };
-                    let status_color = match run_state.status {
-                        crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
-                        crate::state::RunStatus::Failed => colors::STATUS_ERROR,
-                        crate::state::RunStatus::Running => colors::STATUS_RUNNING,
-                    };
-
-                    let badge_galley = ui.fonts(|f| {
-                        f.layout_no_wrap(
-                            status_text.to_string(),
-                            typography::font(FontSize::Body, FontWeight::Medium),
-                            colors::TEXT_PRIMARY,
-                        )
-                    });
-                    let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
-                    let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
-
-                    let (badge_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
-
-                    ui.painter().rect_filled(
-                        badge_rect,
-                        Rounding::same(rounding::SMALL),
-                        status_color.gamma_multiply(0.2),
-                    );
-
-                    let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
-                    ui.painter().galley(text_pos, badge_galley, status_color);
-                });
-
-                ui.add_space(spacing::MD);
-
-                // Timing information
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Started: {}",
-                        run_state.started_at.format("%Y-%m-%d %H:%M:%S")
-                    ))
-                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                    .color(colors::TEXT_SECONDARY),
-                );
-
-                if let Some(finished) = run_state.finished_at {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Finished: {}",
-                            finished.format("%Y-%m-%d %H:%M:%S")
-                        ))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
-                    );
-
-                    let duration = finished - run_state.started_at;
-                    let duration_str = if duration.num_hours() > 0 {
-                        format!(
-                            "{}h {}m",
-                            duration.num_hours(),
-                            duration.num_minutes() % 60
-                        )
-                    } else if duration.num_minutes() > 0 {
-                        format!(
-                            "{}m {}s",
-                            duration.num_minutes(),
-                            duration.num_seconds() % 60
-                        )
-                    } else {
-                        format!("{}s", duration.num_seconds())
-                    };
-
-                    ui.label(
-                        egui::RichText::new(format!("Duration: {}", duration_str))
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_SECONDARY),
-                    );
-                }
-
-                ui.add_space(spacing::MD);
-
-                // Branch info
-                ui.label(
-                    egui::RichText::new(format!("Branch: {}", run_state.branch))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
-                );
+                // ================================================================
+                // RUN SUMMARY SECTION
+                // ================================================================
+                self.render_run_summary_card(ui, run_state);
 
                 ui.add_space(spacing::LG);
                 ui.separator();
                 ui.add_space(spacing::MD);
 
-                // Iterations/Stories section
+                // ================================================================
+                // STORIES SECTION
+                // ================================================================
                 ui.label(
                     egui::RichText::new("Stories")
                         .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
@@ -1287,72 +1188,385 @@ impl Autom8App {
                             .color(colors::TEXT_MUTED),
                     );
                 } else {
-                    // Group iterations by story_id
+                    // Group iterations by story_id while preserving order
+                    let mut story_order: Vec<String> = Vec::new();
                     let mut story_iterations: std::collections::HashMap<
                         String,
                         Vec<&crate::state::IterationRecord>,
                     > = std::collections::HashMap::new();
 
                     for iter in &run_state.iterations {
+                        if !story_iterations.contains_key(&iter.story_id) {
+                            story_order.push(iter.story_id.clone());
+                        }
                         story_iterations
                             .entry(iter.story_id.clone())
                             .or_default()
                             .push(iter);
                     }
 
-                    // Render each story
-                    for (story_id, iterations) in story_iterations.iter() {
-                        let last_iter = iterations.last().unwrap();
-                        let status_color = match last_iter.status {
+                    // Render each story in order
+                    for story_id in &story_order {
+                        let iterations = story_iterations.get(story_id).unwrap();
+                        self.render_story_detail_card(ui, story_id, iterations);
+                        ui.add_space(spacing::MD);
+                    }
+                }
+            });
+    }
+
+    /// Render the run summary card with status, timing, and metadata.
+    fn render_run_summary_card(&self, ui: &mut egui::Ui, run_state: &crate::state::RunState) {
+        // Status badge and run ID row
+        ui.horizontal(|ui| {
+            // Status badge
+            let status_text = match run_state.status {
+                crate::state::RunStatus::Completed => "Completed",
+                crate::state::RunStatus::Failed => "Failed",
+                crate::state::RunStatus::Running => "Running",
+            };
+            let status_color = match run_state.status {
+                crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
+                crate::state::RunStatus::Failed => colors::STATUS_ERROR,
+                crate::state::RunStatus::Running => colors::STATUS_RUNNING,
+            };
+
+            let badge_galley = ui.fonts(|f| {
+                f.layout_no_wrap(
+                    status_text.to_string(),
+                    typography::font(FontSize::Body, FontWeight::Medium),
+                    colors::TEXT_PRIMARY,
+                )
+            });
+            let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
+            let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+            let (badge_rect, _) =
+                ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
+
+            ui.painter().rect_filled(
+                badge_rect,
+                Rounding::same(rounding::SMALL),
+                status_color.gamma_multiply(0.2),
+            );
+
+            let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+            ui.painter().galley(text_pos, badge_galley, status_color);
+
+            ui.add_space(spacing::MD);
+
+            // Run ID (smaller, muted)
+            ui.label(
+                egui::RichText::new(format!("Run ID: {}", &run_state.run_id[..8.min(run_state.run_id.len())]))
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+
+        ui.add_space(spacing::MD);
+
+        // Grid layout for timing information
+        egui::Grid::new("run_timing_grid")
+            .num_columns(2)
+            .spacing([spacing::LG, spacing::XS])
+            .show(ui, |ui| {
+                // Start time
+                ui.label(
+                    egui::RichText::new("Start Time:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new(run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_PRIMARY),
+                );
+                ui.end_row();
+
+                // End time
+                ui.label(
+                    egui::RichText::new("End Time:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                if let Some(finished) = run_state.finished_at {
+                    ui.label(
+                        egui::RichText::new(finished.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("In progress...")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::STATUS_RUNNING),
+                    );
+                }
+                ui.end_row();
+
+                // Duration
+                ui.label(
+                    egui::RichText::new("Duration:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                let duration_str = if let Some(finished) = run_state.finished_at {
+                    let duration = finished - run_state.started_at;
+                    Self::format_duration_detailed(duration)
+                } else {
+                    let duration = chrono::Utc::now() - run_state.started_at;
+                    format!("{} (ongoing)", Self::format_duration_detailed(duration))
+                };
+                ui.label(
+                    egui::RichText::new(duration_str)
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_PRIMARY),
+                );
+                ui.end_row();
+
+                // Branch
+                ui.label(
+                    egui::RichText::new("Branch:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new(&run_state.branch)
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::ACCENT),
+                );
+                ui.end_row();
+
+                // Story summary
+                let completed_count = run_state
+                    .iterations
+                    .iter()
+                    .filter(|i| i.status == crate::state::IterationStatus::Success)
+                    .map(|i| &i.story_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                let total_stories = run_state
+                    .iterations
+                    .iter()
+                    .map(|i| &i.story_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+
+                if total_stories > 0 {
+                    ui.label(
+                        egui::RichText::new("Stories:")
+                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{}/{} completed", completed_count, total_stories))
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+                    ui.end_row();
+                }
+            });
+    }
+
+    /// Render a detailed card for a single story with all its iterations.
+    fn render_story_detail_card(
+        &self,
+        ui: &mut egui::Ui,
+        story_id: &str,
+        iterations: &[&crate::state::IterationRecord],
+    ) {
+        let last_iter = iterations.last().unwrap();
+        let status_color = match last_iter.status {
+            crate::state::IterationStatus::Success => colors::STATUS_SUCCESS,
+            crate::state::IterationStatus::Failed => colors::STATUS_ERROR,
+            crate::state::IterationStatus::Running => colors::STATUS_RUNNING,
+        };
+
+        // Story card background
+        let available_width = ui.available_width();
+        egui::Frame::none()
+            .fill(colors::SURFACE_HOVER)
+            .rounding(Rounding::same(rounding::CARD))
+            .inner_margin(egui::Margin::same(spacing::MD))
+            .show(ui, |ui| {
+                ui.set_min_width(available_width - spacing::MD * 2.0);
+
+                // Story header row
+                ui.horizontal(|ui| {
+                    // Status dot
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(spacing::MD), Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 5.0, status_color);
+
+                    // Story ID
+                    ui.label(
+                        egui::RichText::new(story_id)
+                            .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+
+                    // Status text badge
+                    let status_text = match last_iter.status {
+                        crate::state::IterationStatus::Success => "Success",
+                        crate::state::IterationStatus::Failed => "Failed",
+                        crate::state::IterationStatus::Running => "Running",
+                    };
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let badge_galley = ui.fonts(|f| {
+                            f.layout_no_wrap(
+                                status_text.to_string(),
+                                typography::font(FontSize::Small, FontWeight::Medium),
+                                status_color,
+                            )
+                        });
+                        let badge_width = badge_galley.rect.width() + spacing::SM * 2.0;
+                        let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+                        let (badge_rect, _) = ui.allocate_exact_size(
+                            Vec2::new(badge_width, badge_height),
+                            Sense::hover(),
+                        );
+
+                        ui.painter().rect_filled(
+                            badge_rect,
+                            Rounding::same(rounding::SMALL),
+                            status_color.gamma_multiply(0.15),
+                        );
+
+                        let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+                        ui.painter().galley(text_pos, badge_galley, status_color);
+                    });
+                });
+
+                // Work summary if available (from the last successful iteration)
+                let work_summary = iterations
+                    .iter()
+                    .rev()
+                    .find_map(|iter| iter.work_summary.as_ref());
+
+                if let Some(summary) = work_summary {
+                    ui.add_space(spacing::SM);
+                    ui.label(
+                        egui::RichText::new(truncate_with_ellipsis(summary, 200))
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                }
+
+                // Iteration details section (shown if there are multiple iterations)
+                if iterations.len() > 1 {
+                    ui.add_space(spacing::SM);
+                    ui.separator();
+                    ui.add_space(spacing::SM);
+
+                    ui.label(
+                        egui::RichText::new(format!("Iterations ({} total)", iterations.len()))
+                            .font(typography::font(FontSize::Small, FontWeight::SemiBold))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+
+                    ui.add_space(spacing::XS);
+
+                    // Show each iteration in a compact format
+                    for (idx, iter) in iterations.iter().enumerate() {
+                        let iter_status_color = match iter.status {
                             crate::state::IterationStatus::Success => colors::STATUS_SUCCESS,
                             crate::state::IterationStatus::Failed => colors::STATUS_ERROR,
                             crate::state::IterationStatus::Running => colors::STATUS_RUNNING,
                         };
 
                         ui.horizontal(|ui| {
-                            // Status dot
-                            let (dot_rect, _) = ui.allocate_exact_size(
-                                Vec2::splat(spacing::MD),
-                                Sense::hover(),
-                            );
-                            ui.painter().circle_filled(
-                                dot_rect.center(),
-                                4.0,
-                                status_color,
-                            );
+                            // Small status indicator
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(spacing::SM), Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot_rect.center(), 3.0, iter_status_color);
 
-                            // Story ID
+                            // Iteration number
                             ui.label(
-                                egui::RichText::new(story_id)
-                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                egui::RichText::new(format!("#{}", idx + 1))
+                                    .font(typography::font(FontSize::Caption, FontWeight::Medium))
                                     .color(colors::TEXT_PRIMARY),
                             );
 
-                            // Iteration count if more than 1
-                            if iterations.len() > 1 {
+                            // Status
+                            let status_str = match iter.status {
+                                crate::state::IterationStatus::Success => "Success",
+                                crate::state::IterationStatus::Failed => "Failed (review cycle)",
+                                crate::state::IterationStatus::Running => "Running",
+                            };
+                            ui.label(
+                                egui::RichText::new(status_str)
+                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                    .color(iter_status_color),
+                            );
+
+                            // Duration if available
+                            if let Some(finished) = iter.finished_at {
+                                let duration = finished - iter.started_at;
+                                let duration_str = Self::format_duration_short(duration);
                                 ui.label(
-                                    egui::RichText::new(format!("({} iterations)", iterations.len()))
-                                        .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                    egui::RichText::new(format!("({})", duration_str))
+                                        .font(typography::font(
+                                            FontSize::Caption,
+                                            FontWeight::Regular,
+                                        ))
                                         .color(colors::TEXT_MUTED),
                                 );
                             }
                         });
-
-                        // Work summary if available
-                        if let Some(ref summary) = last_iter.work_summary {
-                            ui.indent(story_id, |ui| {
-                                ui.label(
-                                    egui::RichText::new(truncate_with_ellipsis(summary, 100))
-                                        .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                        .color(colors::TEXT_SECONDARY),
-                                );
-                            });
-                        }
-
-                        ui.add_space(spacing::SM);
+                    }
+                } else {
+                    // Single iteration - show duration
+                    let iter = iterations[0];
+                    if let Some(finished) = iter.finished_at {
+                        ui.add_space(spacing::XS);
+                        let duration = finished - iter.started_at;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Duration: {}",
+                                Self::format_duration_detailed(duration)
+                            ))
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                        );
                     }
                 }
             });
+    }
+
+    /// Format a chrono Duration as a detailed string (e.g., "1h 23m 45s").
+    fn format_duration_detailed(duration: chrono::Duration) -> String {
+        let total_seconds = duration.num_seconds().max(0);
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+
+        if hours > 0 {
+            format!("{}h {}m {}s", hours, minutes, seconds)
+        } else if minutes > 0 {
+            format!("{}m {}s", minutes, seconds)
+        } else {
+            format!("{}s", seconds)
+        }
+    }
+
+    /// Format a chrono Duration as a short string (e.g., "2m 30s").
+    fn format_duration_short(duration: chrono::Duration) -> String {
+        let total_seconds = duration.num_seconds().max(0);
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+
+        if hours > 0 {
+            format!("{}h{}m", hours, minutes)
+        } else if minutes > 0 {
+            format!("{}m{}s", minutes, seconds)
+        } else {
+            format!("{}s", seconds)
+        }
     }
 
     /// Render the Active Runs view.
@@ -1819,13 +2033,11 @@ impl Autom8App {
 
                 // Try to load the full run state for the detail view
                 if let Some(ref project_name) = self.selected_project {
-                    let run_state = StateManager::for_project(project_name)
-                        .ok()
-                        .and_then(|sm| {
-                            sm.list_archived()
-                                .ok()
-                                .and_then(|runs| runs.into_iter().find(|r| r.run_id == run_id))
-                        });
+                    let run_state = StateManager::for_project(project_name).ok().and_then(|sm| {
+                        sm.list_archived()
+                            .ok()
+                            .and_then(|runs| runs.into_iter().find(|r| r.run_id == run_id))
+                    });
 
                     self.open_run_detail_from_entry(&entry_clone, run_state);
                 }
@@ -3646,5 +3858,411 @@ mod tests {
         // Close the tab - cache should be cleared
         app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
         assert!(app.get_cached_run_state(&entry.run_id).is_none());
+    }
+
+    // ========================================================================
+    // Run Detail View Tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn test_format_duration_detailed_seconds_only() {
+        let duration = chrono::Duration::seconds(45);
+        let result = Autom8App::format_duration_detailed(duration);
+        assert_eq!(result, "45s");
+    }
+
+    #[test]
+    fn test_format_duration_detailed_minutes_and_seconds() {
+        let duration = chrono::Duration::seconds(125); // 2m 5s
+        let result = Autom8App::format_duration_detailed(duration);
+        assert_eq!(result, "2m 5s");
+    }
+
+    #[test]
+    fn test_format_duration_detailed_hours_minutes_seconds() {
+        let duration = chrono::Duration::seconds(3725); // 1h 2m 5s
+        let result = Autom8App::format_duration_detailed(duration);
+        assert_eq!(result, "1h 2m 5s");
+    }
+
+    #[test]
+    fn test_format_duration_detailed_zero() {
+        let duration = chrono::Duration::seconds(0);
+        let result = Autom8App::format_duration_detailed(duration);
+        assert_eq!(result, "0s");
+    }
+
+    #[test]
+    fn test_format_duration_detailed_negative_becomes_zero() {
+        let duration = chrono::Duration::seconds(-100);
+        let result = Autom8App::format_duration_detailed(duration);
+        assert_eq!(result, "0s");
+    }
+
+    #[test]
+    fn test_format_duration_short_seconds_only() {
+        let duration = chrono::Duration::seconds(45);
+        let result = Autom8App::format_duration_short(duration);
+        assert_eq!(result, "45s");
+    }
+
+    #[test]
+    fn test_format_duration_short_minutes_and_seconds() {
+        let duration = chrono::Duration::seconds(125); // 2m 5s
+        let result = Autom8App::format_duration_short(duration);
+        assert_eq!(result, "2m5s");
+    }
+
+    #[test]
+    fn test_format_duration_short_hours_and_minutes() {
+        let duration = chrono::Duration::seconds(3725); // 1h 2m 5s
+        let result = Autom8App::format_duration_short(duration);
+        assert_eq!(result, "1h2m");
+    }
+
+    #[test]
+    fn test_run_detail_tab_opens_from_history_entry() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+
+        // Open detail tab from entry
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Tab should be created with correct format
+        assert!(app.has_tab(&TabId::RunDetail(entry.run_id.clone())));
+        assert_eq!(app.tab_count(), 3); // ActiveRuns, Projects, RunDetail
+
+        // Should be the active tab
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail(entry.run_id.clone())
+        );
+    }
+
+    #[test]
+    fn test_run_detail_tab_label_format() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Find the tab and check label format
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| t.id == TabId::RunDetail(entry.run_id.clone()));
+        assert!(tab.is_some());
+        let tab = tab.unwrap();
+
+        // Label should start with "Run - " and contain date
+        assert!(tab.label.starts_with("Run - "));
+        // Label should contain a date in YYYY-MM-DD format
+        assert!(tab.label.contains('-'));
+    }
+
+    #[test]
+    fn test_run_detail_tab_is_closable() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Find the tab and verify it's closable
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| t.id == TabId::RunDetail(entry.run_id.clone()));
+        assert!(tab.is_some());
+        assert!(tab.unwrap().closable);
+    }
+
+    #[test]
+    fn test_multiple_run_detail_tabs() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+
+        // Create multiple runs
+        let mut run1 = RunState::new(
+            std::path::PathBuf::from("test1.json"),
+            "feature/one".to_string(),
+        );
+        run1.status = RunStatus::Completed;
+
+        let mut run2 = RunState::new(
+            std::path::PathBuf::from("test2.json"),
+            "feature/two".to_string(),
+        );
+        run2.status = RunStatus::Failed;
+
+        let mut run3 = RunState::new(
+            std::path::PathBuf::from("test3.json"),
+            "feature/three".to_string(),
+        );
+        run3.status = RunStatus::Completed;
+
+        // Open detail tabs for all three
+        let entry1 = RunHistoryEntry::from_run_state(&run1);
+        let entry2 = RunHistoryEntry::from_run_state(&run2);
+        let entry3 = RunHistoryEntry::from_run_state(&run3);
+
+        app.open_run_detail_from_entry(&entry1, Some(run1.clone()));
+        app.open_run_detail_from_entry(&entry2, Some(run2.clone()));
+        app.open_run_detail_from_entry(&entry3, Some(run3.clone()));
+
+        // All tabs should exist
+        assert_eq!(app.tab_count(), 5); // 2 permanent + 3 detail tabs
+        assert_eq!(app.closable_tab_count(), 3);
+
+        assert!(app.has_tab(&TabId::RunDetail(entry1.run_id.clone())));
+        assert!(app.has_tab(&TabId::RunDetail(entry2.run_id.clone())));
+        assert!(app.has_tab(&TabId::RunDetail(entry3.run_id.clone())));
+    }
+
+    #[test]
+    fn test_closing_run_detail_tab_returns_to_projects() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+
+        // Navigate to Projects tab first
+        app.set_active_tab(TabId::Projects);
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Now on run detail tab
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail(entry.run_id.clone())
+        );
+
+        // Close it
+        app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
+
+        // Should return to Projects (the previous tab)
+        assert_eq!(*app.active_tab_id(), TabId::Projects);
+    }
+
+    #[test]
+    fn test_run_detail_cached_state_access() {
+        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
+
+        let mut app = Autom8App::new(None);
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        // Add iterations to verify they're cached
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: Some("Implemented feature X".to_string()),
+        });
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        app.open_run_detail_from_entry(&entry, Some(run.clone()));
+
+        // Verify cached state has the correct data
+        let cached = app.get_cached_run_state(&entry.run_id);
+        assert!(cached.is_some());
+
+        let cached = cached.unwrap();
+        assert_eq!(cached.branch, "feature/test");
+        assert_eq!(cached.iterations.len(), 1);
+        assert_eq!(cached.iterations[0].story_id, "US-001");
+        assert_eq!(
+            cached.iterations[0].work_summary,
+            Some("Implemented feature X".to_string())
+        );
+    }
+
+    #[test]
+    fn test_run_detail_shows_all_stories() {
+        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        // Add multiple stories
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: Some("Story 1 complete".to_string()),
+        });
+        run.iterations.push(IterationRecord {
+            number: 2,
+            story_id: "US-002".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: Some("Story 2 complete".to_string()),
+        });
+        run.iterations.push(IterationRecord {
+            number: 3,
+            story_id: "US-003".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            status: IterationStatus::Failed,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+
+        // Verify entry has correct story counts
+        assert_eq!(entry.completed_stories, 2);
+        assert_eq!(entry.total_stories, 3);
+    }
+
+    #[test]
+    fn test_run_detail_shows_iteration_details() {
+        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        // Add multiple iterations for the same story (review cycles)
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now() - chrono::Duration::minutes(10),
+            finished_at: Some(Utc::now() - chrono::Duration::minutes(5)),
+            status: IterationStatus::Failed, // First attempt failed review
+            output_snippet: String::new(),
+            work_summary: Some("Initial implementation".to_string()),
+        });
+        run.iterations.push(IterationRecord {
+            number: 2,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now() - chrono::Duration::minutes(5),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success, // Second attempt succeeded
+            output_snippet: String::new(),
+            work_summary: Some("Fixed issues from review".to_string()),
+        });
+
+        // The run should have 1 unique story with 2 iterations
+        let story_ids: std::collections::HashSet<_> =
+            run.iterations.iter().map(|i| &i.story_id).collect();
+        assert_eq!(story_ids.len(), 1);
+        assert_eq!(run.iterations.len(), 2);
+
+        // The entry should count 1 completed story (based on final success)
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.completed_stories, 1);
+        assert_eq!(entry.total_stories, 1);
+    }
+
+    #[test]
+    fn test_run_with_no_iterations() {
+        use crate::state::{RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Running;
+
+        // No iterations yet
+        assert!(run.iterations.is_empty());
+
+        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.completed_stories, 0);
+        // total_stories defaults to 1 when no iterations
+        assert_eq!(entry.total_stories, 1);
+    }
+
+    #[test]
+    fn test_run_detail_preserves_story_order() {
+        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
+
+        let mut run = RunState::new(
+            std::path::PathBuf::from("test.json"),
+            "feature/test".to_string(),
+        );
+        run.status = RunStatus::Completed;
+
+        // Add stories in specific order
+        let now = Utc::now();
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-003".to_string(),
+            started_at: now,
+            finished_at: Some(now),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+        run.iterations.push(IterationRecord {
+            number: 2,
+            story_id: "US-001".to_string(),
+            started_at: now,
+            finished_at: Some(now),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+        run.iterations.push(IterationRecord {
+            number: 3,
+            story_id: "US-002".to_string(),
+            started_at: now,
+            finished_at: Some(now),
+            status: IterationStatus::Success,
+            output_snippet: String::new(),
+            work_summary: None,
+        });
+
+        // Verify we have 3 unique stories
+        let story_ids: Vec<_> = run.iterations.iter().map(|i| &i.story_id).collect();
+        assert_eq!(story_ids[0], "US-003");
+        assert_eq!(story_ids[1], "US-001");
+        assert_eq!(story_ids[2], "US-002");
     }
 }
