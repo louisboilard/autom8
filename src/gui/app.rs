@@ -391,6 +391,13 @@ pub struct Autom8App {
     /// Maps run_id to the full RunState for rendering detail views.
     run_detail_cache: std::collections::HashMap<String, crate::state::RunState>,
 
+    /// Loading state for run history.
+    /// True while run history is being loaded from disk.
+    run_history_loading: bool,
+
+    /// Error message if run history failed to load.
+    run_history_error: Option<String>,
+
     // ========================================================================
     // Loading State
     // ========================================================================
@@ -447,6 +454,8 @@ impl Autom8App {
             selected_project: None,
             run_history: Vec::new(),
             run_detail_cache: std::collections::HashMap::new(),
+            run_history_loading: false,
+            run_history_error: None,
             initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
@@ -503,9 +512,11 @@ impl Autom8App {
     /// Also loads/clears run history for the selected project.
     pub fn toggle_project_selection(&mut self, project_name: &str) {
         if self.selected_project.as_deref() == Some(project_name) {
-            // Deselect: clear selection and history
+            // Deselect: clear selection, history, and error state
             self.selected_project = None;
             self.run_history.clear();
+            self.run_history_loading = false;
+            self.run_history_error = None;
         } else {
             // Select new project: update selection and load history
             self.selected_project = Some(project_name.to_string());
@@ -515,19 +526,30 @@ impl Autom8App {
 
     /// Load run history for a specific project.
     /// Populates self.run_history with archived runs, sorted newest first.
+    /// Sets loading and error states appropriately.
     fn load_run_history(&mut self, project_name: &str) {
         self.run_history.clear();
+        self.run_history_error = None;
+        self.run_history_loading = true;
 
         // Get the StateManager for this project
         let sm = match StateManager::for_project(project_name) {
             Ok(sm) => sm,
-            Err(_) => return, // Can't load history
+            Err(e) => {
+                self.run_history_loading = false;
+                self.run_history_error = Some(format!("Failed to access project: {}", e));
+                return;
+            }
         };
 
         // Load archived runs
         let archived = match sm.list_archived() {
             Ok(runs) => runs,
-            Err(_) => return, // Can't load history
+            Err(e) => {
+                self.run_history_loading = false;
+                self.run_history_error = Some(format!("Failed to load run history: {}", e));
+                return;
+            }
         };
 
         // Convert to RunHistoryEntry and store (already sorted newest first by list_archived)
@@ -535,11 +557,23 @@ impl Autom8App {
             .iter()
             .map(RunHistoryEntry::from_run_state)
             .collect();
+
+        self.run_history_loading = false;
     }
 
     /// Returns the run history for the selected project.
     pub fn run_history(&self) -> &[RunHistoryEntry] {
         &self.run_history
+    }
+
+    /// Returns whether run history is currently loading.
+    pub fn is_run_history_loading(&self) -> bool {
+        self.run_history_loading
+    }
+
+    /// Returns the run history error message, if any.
+    pub fn run_history_error(&self) -> Option<&str> {
+        self.run_history_error.as_deref()
     }
 
     /// Returns whether a project is currently selected.
@@ -2097,24 +2131,15 @@ impl Autom8App {
 
             ui.add_space(spacing::MD);
 
-            if self.run_history.is_empty() {
+            // Check for error state first
+            if let Some(ref error) = self.run_history_error {
+                self.render_run_history_error(ui, error);
+            } else if self.run_history_loading {
+                // Show loading indicator
+                self.render_run_history_loading(ui);
+            } else if self.run_history.is_empty() {
                 // Empty state for no run history
-                ui.add_space(spacing::LG);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("No run history")
-                            .font(typography::font(FontSize::Body, FontWeight::Medium))
-                            .color(colors::TEXT_MUTED),
-                    );
-
-                    ui.add_space(spacing::XS);
-
-                    ui.label(
-                        egui::RichText::new("Completed runs will appear here")
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_MUTED),
-                    );
-                });
+                self.render_run_history_empty(ui);
             } else {
                 // Scrollable run history list
                 egui::ScrollArea::vertical()
@@ -2133,25 +2158,87 @@ impl Autom8App {
             }
         } else {
             // Empty state when no project is selected
-            ui.add_space(spacing::XXL);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("Select a project")
-                        .font(typography::font(FontSize::Heading, FontWeight::Medium))
-                        .color(colors::TEXT_MUTED),
-                );
-
-                ui.add_space(spacing::SM);
-
-                ui.label(
-                    egui::RichText::new("Click on a project to view its run history")
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_MUTED),
-                );
-            });
+            self.render_no_project_selected(ui);
         }
 
         clicked_run_id
+    }
+
+    /// Render loading indicator for run history.
+    fn render_run_history_loading(&self, ui: &mut egui::Ui) {
+        ui.add_space(spacing::LG);
+        ui.vertical_centered(|ui| {
+            // Spinner/loading indicator using egui's built-in spinner
+            ui.spinner();
+
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Loading run history...")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Render error state for run history.
+    fn render_run_history_error(&self, ui: &mut egui::Ui, error: &str) {
+        ui.add_space(spacing::LG);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Failed to load run history")
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::STATUS_ERROR),
+            );
+
+            ui.add_space(spacing::XS);
+
+            ui.label(
+                egui::RichText::new(truncate_with_ellipsis(error, 60))
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Render empty state when run history has no entries.
+    fn render_run_history_empty(&self, ui: &mut egui::Ui) {
+        ui.add_space(spacing::LG);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("No run history")
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(spacing::XS);
+
+            ui.label(
+                egui::RichText::new("Completed runs will appear here")
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Render empty state when no project is selected.
+    fn render_no_project_selected(&self, ui: &mut egui::Ui) {
+        ui.add_space(spacing::XXL);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Select a project")
+                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Click on a project to view its run history")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        });
     }
 
     /// Render a single run history entry as a card.
@@ -4266,5 +4353,136 @@ mod tests {
         assert_eq!(story_ids[0], "US-003");
         assert_eq!(story_ids[1], "US-001");
         assert_eq!(story_ids[2], "US-002");
+    }
+
+    // ========================================================================
+    // Empty States and Loading Tests (US-006)
+    // ========================================================================
+
+    #[test]
+    fn test_run_history_loading_initially_false() {
+        let app = Autom8App::new(None);
+        assert!(!app.is_run_history_loading());
+    }
+
+    #[test]
+    fn test_run_history_error_initially_none() {
+        let app = Autom8App::new(None);
+        assert!(app.run_history_error().is_none());
+    }
+
+    #[test]
+    fn test_run_history_loading_cleared_on_deselect() {
+        let mut app = Autom8App::new(None);
+
+        // Select a project (exercises loading code path)
+        app.toggle_project_selection("some-project");
+
+        // Deselect - loading should be cleared
+        app.toggle_project_selection("some-project");
+        assert!(!app.is_run_history_loading());
+    }
+
+    #[test]
+    fn test_run_history_error_cleared_on_deselect() {
+        let mut app = Autom8App::new(None);
+
+        // Select a project (which will set an error since project doesn't exist)
+        app.toggle_project_selection("nonexistent-project");
+
+        // Deselect - error should be cleared
+        app.toggle_project_selection("nonexistent-project");
+        assert!(app.run_history_error().is_none());
+    }
+
+    #[test]
+    fn test_run_history_for_nonexistent_project_is_empty() {
+        let mut app = Autom8App::new(None);
+
+        // Select a project that doesn't exist - should succeed but have empty history
+        // Note: StateManager creates the config dir if it doesn't exist,
+        // so this doesn't produce an error, just empty results
+        app.toggle_project_selection("definitely-not-a-real-project-12345");
+
+        // Should not have an error (empty results is not an error)
+        assert!(app.run_history_error().is_none());
+        // Should not be loading anymore
+        assert!(!app.is_run_history_loading());
+        // Should have empty history (project has no archived runs)
+        assert!(app.run_history().is_empty());
+    }
+
+    #[test]
+    fn test_run_history_error_message_format() {
+        // This test validates the error message format when we manually set it
+        // Since StateManager gracefully handles nonexistent projects,
+        // we test the error display format directly
+        let mut app = Autom8App::new(None);
+
+        // Manually set an error to test the getter
+        app.run_history_error = Some("Test error: failed to load".to_string());
+
+        let error = app.run_history_error();
+        assert!(error.is_some());
+        let error_msg = error.unwrap();
+        assert!(!error_msg.is_empty());
+        assert!(error_msg.contains("failed"));
+    }
+
+    #[test]
+    fn test_run_history_state_reset_on_new_selection() {
+        let mut app = Autom8App::new(None);
+
+        // Manually set an error first
+        app.toggle_project_selection("project-1");
+        app.run_history_error = Some("Some error".to_string());
+        assert!(app.run_history_error().is_some());
+
+        // Select different project - error should be cleared
+        app.toggle_project_selection("project-2");
+        // The error should be reset to None (new project has no error)
+        assert!(app.run_history_error().is_none());
+        assert_eq!(app.selected_project(), Some("project-2"));
+    }
+
+    #[test]
+    fn test_empty_state_projects_no_filter() {
+        // With a nonexistent filter, projects should be empty
+        let app = Autom8App::new(Some("definitely-not-a-project-xxxxx".to_string()));
+        assert!(app.projects().is_empty());
+    }
+
+    #[test]
+    fn test_empty_state_sessions_no_active_runs() {
+        // With a nonexistent filter, there should be no active sessions
+        let app = Autom8App::new(Some("definitely-not-a-project-xxxxx".to_string()));
+        assert!(app.sessions().is_empty());
+        assert!(!app.has_active_runs());
+    }
+
+    #[test]
+    fn test_empty_projects_constants() {
+        // Verify the constants used for empty states are reasonable
+        // The empty state spacing should be positive
+        assert!(spacing::XXL > 0.0);
+        assert!(spacing::LG > 0.0);
+        assert!(spacing::SM > 0.0);
+    }
+
+    #[test]
+    fn test_loading_state_transitions() {
+        let mut app = Autom8App::new(None);
+
+        // Initially not loading
+        assert!(!app.is_run_history_loading());
+
+        // After selecting a project, loading should be false
+        // (since the load completes synchronously in the current impl)
+        app.toggle_project_selection("test-project");
+        assert!(!app.is_run_history_loading());
+
+        // After deselecting, still not loading
+        app.toggle_project_selection("test-project");
+        assert!(!app.is_run_history_loading());
     }
 }
