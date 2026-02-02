@@ -22,14 +22,14 @@ use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
 };
 use crate::spec::{Spec, UserStory};
-use crate::state::{IterationStatus, MachineState, RunState, StateManager};
+use crate::state::{IterationStatus, LiveState, MachineState, RunState, StateManager};
 use crate::worktree::{
     ensure_worktree, format_worktree_error, generate_session_id, generate_worktree_path,
     is_in_worktree, remove_worktree, WorktreeResult,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // Constants
@@ -42,6 +42,60 @@ const MAX_REVIEW_ITERATIONS: u32 = 3;
 // ============================================================================
 // Progress Display Helper (US-006)
 // ============================================================================
+
+/// Flush thresholds for live output (US-003).
+/// Flush when either threshold is reached.
+const LIVE_FLUSH_INTERVAL_MS: u64 = 200;
+const LIVE_FLUSH_LINE_COUNT: usize = 10;
+
+/// Helper struct that wraps a callback and periodically flushes output to live.json.
+/// Flushes every ~200ms or every ~10 lines, whichever comes first.
+struct LiveOutputFlusher<'a> {
+    state_manager: &'a StateManager,
+    live_state: LiveState,
+    line_count_since_flush: usize,
+    last_flush: Instant,
+}
+
+impl<'a> LiveOutputFlusher<'a> {
+    fn new(state_manager: &'a StateManager, machine_state: MachineState) -> Self {
+        Self {
+            state_manager,
+            live_state: LiveState::new(machine_state),
+            line_count_since_flush: 0,
+            last_flush: Instant::now(),
+        }
+    }
+
+    /// Append a line to the buffer and flush if thresholds are met.
+    fn append(&mut self, line: &str) {
+        self.live_state.append_line(line.to_string());
+        self.line_count_since_flush += 1;
+
+        // Check if we should flush
+        let time_elapsed = self.last_flush.elapsed() >= Duration::from_millis(LIVE_FLUSH_INTERVAL_MS);
+        let lines_threshold = self.line_count_since_flush >= LIVE_FLUSH_LINE_COUNT;
+
+        if time_elapsed || lines_threshold {
+            self.flush();
+        }
+    }
+
+    /// Flush the current state to live.json.
+    fn flush(&mut self) {
+        // Ignore errors - live output is best-effort for monitoring
+        let _ = self.state_manager.save_live(&self.live_state);
+        self.line_count_since_flush = 0;
+        self.last_flush = Instant::now();
+    }
+
+    /// Final flush to ensure all remaining output is written.
+    fn final_flush(&mut self) {
+        if self.line_count_since_flush > 0 {
+            self.flush();
+        }
+    }
+}
 
 /// Runs an operation with either a verbose timer or spinner display,
 /// handling the display lifecycle (start, update, finish with outcome).
@@ -86,6 +140,63 @@ where
         spinner.finish_with_outcome(outcome);
         result
     }
+}
+
+/// Runs an operation with progress display and live output streaming to live.json.
+///
+/// Similar to `with_progress_display`, but also writes streaming output to live.json
+/// for the monitor command to read. Flushes every ~200ms or ~10 lines.
+///
+/// # Arguments
+/// * `verbose` - Whether to use verbose mode (timer) or spinner mode
+/// * `state_manager` - StateManager for writing live output
+/// * `machine_state` - Current machine state to include in live.json
+/// * `create_timer` - Factory function to create a VerboseTimer
+/// * `create_spinner` - Factory function to create a ClaudeSpinner
+/// * `run_operation` - The operation to run, receiving a callback for progress updates
+/// * `map_outcome` - Maps the operation result to an Outcome for display
+///
+/// # Returns
+/// The result of the operation, after the display has been finished with the appropriate outcome.
+fn with_progress_display_and_live<T, F, M>(
+    verbose: bool,
+    state_manager: &StateManager,
+    machine_state: MachineState,
+    create_timer: impl FnOnce() -> VerboseTimer,
+    create_spinner: impl FnOnce() -> ClaudeSpinner,
+    run_operation: F,
+    map_outcome: M,
+) -> Result<T>
+where
+    F: FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
+    M: FnOnce(&Result<T>) -> Outcome,
+{
+    let mut live_flusher = LiveOutputFlusher::new(state_manager, machine_state);
+
+    let result = if verbose {
+        let mut timer = create_timer();
+        let result = run_operation(&mut |line| {
+            print_claude_output(line);
+            live_flusher.append(line);
+        });
+        let outcome = map_outcome(&result);
+        timer.finish_with_outcome(outcome);
+        result
+    } else {
+        let mut spinner = create_spinner();
+        let result = run_operation(&mut |line| {
+            spinner.update(line);
+            live_flusher.append(line);
+        });
+        let outcome = map_outcome(&result);
+        spinner.finish_with_outcome(outcome);
+        result
+    };
+
+    // Ensure any remaining output is flushed
+    live_flusher.final_flush();
+
+    result
 }
 
 /// Control flow action returned from extracted helper methods
@@ -621,6 +732,8 @@ impl Runner {
     ) -> Result<LoopAction> {
         state.finish_iteration(IterationStatus::Failed, error_msg.to_string());
         state.transition_to(MachineState::Failed);
+        // Clear live output when iteration finishes (US-003)
+        let _ = self.state_manager.clear_live();
         self.state_manager.save(state)?;
 
         story_results.push(StoryResult {
@@ -661,9 +774,11 @@ impl Runner {
         let iterations = state.iterations.clone();
         let knowledge = state.knowledge.clone();
 
-        // Run Claude with progress display
-        let result = with_progress_display(
+        // Run Claude with progress display and live output streaming (US-003)
+        let result = with_progress_display_and_live(
             self.verbose,
+            &self.state_manager,
+            MachineState::RunningClaude,
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
             |callback| {
@@ -757,6 +872,8 @@ impl Runner {
     ) -> Result<LoopAction> {
         state.finish_iteration(IterationStatus::Success, full_output.to_string());
         state.set_work_summary(work_summary.clone());
+        // Clear live output when iteration finishes (US-003)
+        let _ = self.state_manager.clear_live();
 
         // Capture story knowledge from git diff and agent output (US-006)
         state.capture_story_knowledge(&story.id, full_output, None);
@@ -834,6 +951,8 @@ impl Runner {
     ) -> Result<LoopAction> {
         state.finish_iteration(IterationStatus::Success, full_output.to_string());
         state.set_work_summary(work_summary.clone());
+        // Clear live output when iteration finishes (US-003)
+        let _ = self.state_manager.clear_live();
 
         // Capture story knowledge from git diff and agent output (US-006)
         state.capture_story_knowledge(&story.id, full_output, None);
@@ -2626,5 +2745,142 @@ mod tests {
             ..Default::default()
         };
         assert!(runner.is_worktree_mode(&config));
+    }
+
+    // ========================================================================
+    // US-003: Live Output Flusher tests
+    // ========================================================================
+
+    #[test]
+    fn test_live_output_flusher_new() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        assert!(flusher.live_state.output_lines.is_empty());
+        assert_eq!(flusher.live_state.machine_state, MachineState::RunningClaude);
+        assert_eq!(flusher.line_count_since_flush, 0);
+    }
+
+    #[test]
+    fn test_live_output_flusher_append_accumulates_lines() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        flusher.append("Line 1");
+        flusher.append("Line 2");
+        flusher.append("Line 3");
+
+        assert_eq!(flusher.live_state.output_lines.len(), 3);
+        assert_eq!(flusher.live_state.output_lines[0], "Line 1");
+        assert_eq!(flusher.live_state.output_lines[1], "Line 2");
+        assert_eq!(flusher.live_state.output_lines[2], "Line 3");
+    }
+
+    #[test]
+    fn test_live_output_flusher_flush_resets_line_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        flusher.append("Line 1");
+        flusher.append("Line 2");
+        assert_eq!(flusher.line_count_since_flush, 2);
+
+        flusher.flush();
+        assert_eq!(flusher.line_count_since_flush, 0);
+    }
+
+    #[test]
+    fn test_live_output_flusher_auto_flush_on_line_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Add 10 lines (should trigger auto-flush)
+        for i in 0..10 {
+            flusher.append(&format!("Line {}", i));
+        }
+
+        // After 10 lines, should have auto-flushed
+        assert_eq!(flusher.line_count_since_flush, 0);
+
+        // Verify file was written
+        let loaded = sm.load_live();
+        assert!(loaded.is_some());
+        let live = loaded.unwrap();
+        assert_eq!(live.output_lines.len(), 10);
+    }
+
+    #[test]
+    fn test_live_output_flusher_final_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Add a few lines (not enough to trigger auto-flush)
+        flusher.append("Line 1");
+        flusher.append("Line 2");
+        flusher.append("Line 3");
+
+        assert!(flusher.line_count_since_flush > 0);
+
+        // Final flush should write remaining output
+        flusher.final_flush();
+        assert_eq!(flusher.line_count_since_flush, 0);
+
+        // Verify file was written
+        let loaded = sm.load_live();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().output_lines.len(), 3);
+    }
+
+    #[test]
+    fn test_live_output_flusher_final_flush_no_op_when_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // No lines added, final flush should be a no-op
+        flusher.final_flush();
+        assert_eq!(flusher.line_count_since_flush, 0);
+
+        // File should not exist (no flush needed)
+        let loaded = sm.load_live();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_live_output_flusher_preserves_machine_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::Reviewing);
+        flusher.append("Output");
+        flusher.flush();
+
+        let loaded = sm.load_live().unwrap();
+        assert_eq!(loaded.machine_state, MachineState::Reviewing);
+    }
+
+    #[test]
+    fn test_live_flush_constants() {
+        // Verify the flush thresholds are reasonable
+        assert_eq!(LIVE_FLUSH_INTERVAL_MS, 200, "Flush interval should be 200ms");
+        assert_eq!(LIVE_FLUSH_LINE_COUNT, 10, "Flush line count should be 10");
     }
 }

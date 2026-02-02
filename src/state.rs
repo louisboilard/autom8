@@ -4102,7 +4102,10 @@ src/lib.rs | Library module | [Config]
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
         let loaded = sm.load_live();
-        assert!(loaded.is_none(), "Should return None when live.json doesn't exist");
+        assert!(
+            loaded.is_none(),
+            "Should return None when live.json doesn't exist"
+        );
     }
 
     #[test]
@@ -4167,7 +4170,10 @@ src/lib.rs | Library module | [Config]
         sm.clear_current().unwrap();
 
         assert!(sm.load_current().unwrap().is_none());
-        assert!(sm.load_live().is_none(), "clear_current should also clear live state");
+        assert!(
+            sm.load_live().is_none(),
+            "clear_current should also clear live state"
+        );
     }
 
     #[test]
@@ -4185,7 +4191,10 @@ src/lib.rs | Library module | [Config]
             .join(SESSIONS_DIR)
             .join(MAIN_SESSION_ID)
             .join("live.json.tmp");
-        assert!(!temp_path.exists(), "Temp file should be renamed, not remain");
+        assert!(
+            !temp_path.exists(),
+            "Temp file should be renamed, not remain"
+        );
 
         // Verify actual file exists
         let live_path = temp_dir
