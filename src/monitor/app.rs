@@ -1387,7 +1387,7 @@ impl MonitorApp {
                 if age.num_seconds() < Self::LIVE_OUTPUT_STALE_SECONDS
                     && !live.output_lines.is_empty()
                 {
-                    // Take last 5-10 lines from live output (consistent with iteration output)
+                    // Take last 5 lines from live output (consistent with iteration output)
                     let take_count = 5.min(live.output_lines.len());
                     let start = live.output_lines.len().saturating_sub(take_count);
                     return live.output_lines[start..].join("\n");

@@ -1165,6 +1165,9 @@ impl Runner {
             StateManager::new()?
         };
 
+        // Clear any stale live output from a previous crashed run (US-003)
+        let _ = state_manager.clear_live();
+
         // If NOT in worktree mode and in a git repo, ensure we're on the correct branch
         if worktree_context.is_none() && git::is_git_repo() {
             let current_branch = git::current_branch()?;
