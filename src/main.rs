@@ -17,7 +17,26 @@ use std::path::PathBuf;
 #[command(name = "autom8")]
 #[command(
     version,
-    about = "CLI automation tool for orchestrating Claude-powered development"
+    about = "CLI automation tool for orchestrating Claude-powered development",
+    after_help = "EXAMPLES:
+    # Start a new run from a spec file
+    autom8 spec.json
+    autom8 run --spec feature.json
+
+    # Run multiple features in parallel using worktrees
+    autom8 run --worktree --spec feature-a.json  # Terminal 1
+    autom8 run --worktree --spec feature-b.json  # Terminal 2
+
+    # Check status of all parallel sessions
+    autom8 status --all
+
+    # Resume a specific session
+    autom8 resume --list              # See resumable sessions
+    autom8 resume --session abc123    # Resume by session ID
+
+    # Clean up after completing work
+    autom8 clean                      # Remove completed sessions
+    autom8 clean --worktrees          # Also remove worktree directories"
 )]
 struct Cli {
     /// Path to a spec.md or spec.json file (shorthand for `run --spec <file>`)
@@ -34,6 +53,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the agent loop to implement spec stories
+    #[command(after_help = "EXAMPLES:
+    autom8 run --spec feature.json           # Run on current branch
+    autom8 run --worktree                    # Create dedicated worktree for parallel execution
+    autom8 run --worktree --spec feature.json # Run in worktree with specific spec
+
+WORKTREE MODE:
+    When --worktree is enabled, autom8 creates a separate worktree directory
+    at <repo-parent>/<repo>-wt-<branch>/ allowing multiple specs to run in parallel.
+    Each worktree has its own isolated session state.")]
     Run {
         /// Path to the spec JSON or markdown file
         #[arg(long, default_value = "./spec.json")]
@@ -43,56 +71,97 @@ enum Commands {
         #[arg(long)]
         skip_review: bool,
 
-        /// Enable worktree mode: create a dedicated worktree for this run
+        /// Enable worktree mode: create a dedicated worktree for this run.
+        /// Allows running multiple specs in parallel with isolated state.
         #[arg(long, conflicts_with = "no_worktree")]
         worktree: bool,
 
-        /// Disable worktree mode: run on the current branch (overrides config)
+        /// Disable worktree mode: run on the current branch (overrides config).
+        /// Use this to override worktree=true in your config file.
         #[arg(long, conflicts_with = "worktree")]
         no_worktree: bool,
     },
 
     /// Check the current run status
+    #[command(after_help = "EXAMPLES:
+    autom8 status             # Show current session status
+    autom8 status --all       # Show all sessions for this project
+    autom8 status --global    # Show status across all projects
+
+SESSION STATUS:
+    Sessions are shown with: session ID, worktree path, branch name,
+    current state (e.g., RunningClaude, Reviewing), and current story.
+    The current session (matching CWD) is highlighted.")]
     Status {
-        /// Show all sessions for the current project
+        /// Show all sessions for the current project.
+        /// Lists all active and completed sessions with their status.
         #[arg(short = 'a', long = "all")]
         all: bool,
 
-        /// Show status across all projects
+        /// Show status across all projects.
+        /// Displays a summary of all projects and their active runs.
         #[arg(short = 'g', long = "global")]
         global: bool,
     },
 
     /// Resume a failed or interrupted run
+    #[command(after_help = "EXAMPLES:
+    autom8 resume                     # Resume current session (auto-detected from CWD)
+    autom8 resume --list              # List all resumable sessions
+    autom8 resume --session abc123    # Resume a specific session by ID
+
+BEHAVIOR:
+    In the main repo with multiple incomplete sessions: prompts for selection.
+    In a worktree: automatically resumes that worktree's session.
+    With --session: changes to the worktree directory before resuming.")]
     Resume {
-        /// Resume a specific session by ID
+        /// Resume a specific session by ID.
+        /// Use --list to see available session IDs.
         #[arg(short, long)]
         session: Option<String>,
 
-        /// List all resumable sessions (incomplete runs)
+        /// List all resumable sessions (incomplete runs).
+        /// Shows sessions that can be resumed with --session <id>.
         #[arg(short, long)]
         list: bool,
     },
 
     /// Clean up sessions and worktrees from the project
+    #[command(after_help = "EXAMPLES:
+    autom8 clean                      # Remove completed/failed session state
+    autom8 clean --worktrees          # Also remove associated worktree directories
+    autom8 clean --all                # Remove ALL sessions (with confirmation)
+    autom8 clean --session abc123     # Remove a specific session
+    autom8 clean --orphaned           # Remove orphaned sessions only
+    autom8 clean --worktrees --force  # Remove even with uncommitted changes
+
+WHAT GETS CLEANED:
+    By default, cleans completed and failed sessions (preserves in-progress).
+    Session state is archived to runs/ directory before deletion.
+    Worktrees with uncommitted changes are preserved unless --force is used.")]
     Clean {
-        /// Also remove associated worktrees
+        /// Also remove associated worktree directories.
+        /// Without this flag, only session state is removed.
         #[arg(short, long)]
         worktrees: bool,
 
-        /// Remove all sessions (with confirmation)
+        /// Remove all sessions (with confirmation).
+        /// Includes in-progress sessions - use with caution.
         #[arg(short, long)]
         all: bool,
 
-        /// Remove a specific session by ID
+        /// Remove a specific session by ID.
+        /// Use 'autom8 status --all' to see session IDs.
         #[arg(short, long)]
         session: Option<String>,
 
-        /// Only remove orphaned sessions (worktree deleted but state remains)
+        /// Only remove orphaned sessions (worktree deleted but state remains).
+        /// Useful for cleaning up after manually deleting worktree directories.
         #[arg(short, long)]
         orphaned: bool,
 
-        /// Force removal even if worktrees have uncommitted changes
+        /// Force removal even if worktrees have uncommitted changes.
+        /// Use with caution - uncommitted work will be lost.
         #[arg(short, long)]
         force: bool,
     },

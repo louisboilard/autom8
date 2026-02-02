@@ -703,6 +703,7 @@ pub fn ensure_worktree(pattern: &str, branch_name: &str) -> Result<WorktreeResul
 /// Get detailed information about worktree creation failure.
 ///
 /// Provides suggestions for how to resolve common worktree creation issues.
+/// Error messages follow the pattern: what happened → why → how to fix.
 ///
 /// # Arguments
 /// * `error` - The error message from the failed git command
@@ -721,31 +722,56 @@ pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Pat
     // Analyze the error and provide specific suggestions
     if error.contains("already checked out") {
         message.push_str("Reason: Branch is already checked out in another worktree.\n\n");
-        message.push_str("Suggestions:\n");
+        message.push_str("To resolve this, try one of the following:\n");
         message.push_str("  1. Use a different branch name in your spec\n");
         message.push_str("  2. Run `git worktree list` to see existing worktrees\n");
         message
             .push_str("  3. Remove the conflicting worktree with `git worktree remove <path>`\n");
+        message.push_str("\nManual worktree creation steps:\n");
+        message.push_str(&format!(
+            "  git worktree add -b {} '{}'\n",
+            branch_name,
+            worktree_path.display()
+        ));
     } else if error.contains("already exists") {
         message.push_str("Reason: A directory or worktree already exists at this path.\n\n");
-        message.push_str("Suggestions:\n");
+        message.push_str("To resolve this, try one of the following:\n");
         message.push_str(&format!(
             "  1. Remove the existing directory: rm -rf '{}'\n",
             worktree_path.display()
         ));
         message.push_str("  2. Use a different branch name in your spec\n");
         message.push_str("  3. Configure a different worktree_path_pattern in config\n");
+        message.push_str("\nManual worktree creation steps (after removing existing):\n");
+        message.push_str(&format!(
+            "  git worktree add '{}' {}\n",
+            worktree_path.display(),
+            branch_name
+        ));
     } else if error.contains("permission denied") || error.contains("Permission denied") {
         message.push_str("Reason: Insufficient permissions to create the worktree directory.\n\n");
-        message.push_str("Suggestions:\n");
-        message.push_str("  1. Check write permissions on the parent directory\n");
-        message.push_str("  2. Run with appropriate permissions\n");
+        message.push_str("To resolve this, try one of the following:\n");
+        message.push_str(&format!(
+            "  1. Check write permissions on: {}\n",
+            worktree_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "parent directory".to_string())
+        ));
+        message.push_str("  2. Run with appropriate permissions (e.g., sudo if needed)\n");
+        message.push_str("  3. Choose a different location in your config's worktree_path_pattern\n");
     } else {
         message.push_str(&format!("Error: {}\n\n", error));
-        message.push_str("Suggestions:\n");
+        message.push_str("To resolve this, try one of the following:\n");
         message.push_str("  1. Ensure you're in a git repository\n");
         message.push_str("  2. Run `git worktree list` to check current worktrees\n");
         message.push_str("  3. Check git configuration and permissions\n");
+        message.push_str("\nManual worktree creation steps:\n");
+        message.push_str(&format!(
+            "  git worktree add '{}' {}\n",
+            worktree_path.display(),
+            branch_name
+        ));
     }
 
     message
@@ -1480,7 +1506,10 @@ mod tests {
 
         assert!(msg.contains("main"));
         assert!(msg.contains("already checked out"));
-        assert!(msg.contains("Suggestions:"));
+        assert!(
+            msg.contains("To resolve"),
+            "Error should include resolution steps"
+        );
     }
 
     #[test]
@@ -1492,7 +1521,98 @@ mod tests {
         );
 
         assert!(msg.contains("already exists"));
-        assert!(msg.contains("Suggestions:"));
+        assert!(
+            msg.contains("To resolve"),
+            "Error should include resolution steps"
+        );
+    }
+
+    // ========================================================================
+    // US-012 Error message tests
+    // ========================================================================
+
+    #[test]
+    fn test_us012_format_worktree_error_includes_manual_steps() {
+        // Test that error messages include manual git worktree commands
+        let msg = format_worktree_error(
+            "fatal: branch 'main' is already checked out",
+            "feature/test",
+            Path::new("/path/to/worktree"),
+        );
+
+        assert!(
+            msg.contains("Manual worktree creation"),
+            "Error should include manual steps"
+        );
+        assert!(
+            msg.contains("git worktree add"),
+            "Error should include git worktree command"
+        );
+    }
+
+    #[test]
+    fn test_us012_format_worktree_error_follows_pattern() {
+        // Test that error follows "what → why → how to fix" pattern
+        let msg = format_worktree_error(
+            "fatal: permission denied",
+            "feature/test",
+            Path::new("/restricted/path"),
+        );
+
+        // What happened
+        assert!(msg.contains("Failed to create worktree"), "Should say what happened");
+
+        // Why
+        assert!(
+            msg.contains("Reason:") || msg.contains("permission"),
+            "Should explain why"
+        );
+
+        // How to fix
+        assert!(
+            msg.contains("To resolve"),
+            "Should include resolution steps"
+        );
+    }
+
+    #[test]
+    fn test_us012_format_worktree_error_generic_includes_manual_steps() {
+        let msg = format_worktree_error(
+            "unknown error occurred",
+            "feature/login",
+            Path::new("/home/user/myproject-wt-feature-login"),
+        );
+
+        assert!(
+            msg.contains("Manual worktree creation"),
+            "Generic error should include manual steps"
+        );
+        assert!(
+            msg.contains("feature/login"),
+            "Manual steps should include branch name"
+        );
+        assert!(
+            msg.contains("myproject-wt-feature-login"),
+            "Manual steps should include worktree path"
+        );
+    }
+
+    #[test]
+    fn test_us012_format_worktree_error_already_exists_includes_manual_steps() {
+        let msg = format_worktree_error(
+            "fatal: already exists",
+            "feature/new",
+            Path::new("/path/to/worktree"),
+        );
+
+        assert!(
+            msg.contains("Manual worktree creation"),
+            "Already exists error should include manual steps"
+        );
+        assert!(
+            msg.contains("after removing existing"),
+            "Should mention removing existing first"
+        );
     }
 
     #[test]

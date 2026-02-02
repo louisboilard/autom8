@@ -19,10 +19,16 @@ cargo fmt --check
 cargo clippy -- -D warnings
 
 # Common commands
-cargo run -- run spec.json      # Run implementation from spec
-cargo run -- status             # Check current run status
-cargo run -- resume             # Resume interrupted run
-cargo run -- list               # List available specs
+cargo run -- run spec.json         # Run implementation from spec
+cargo run -- status                # Check current run status
+cargo run -- resume                # Resume interrupted run
+cargo run -- list                  # List available specs
+
+# Multi-session commands (worktree mode)
+cargo run -- run --worktree        # Run in a dedicated worktree
+cargo run -- status --all          # Show all sessions for project
+cargo run -- resume --session ID   # Resume specific session
+cargo run -- clean --worktrees     # Clean up sessions and worktrees
 ```
 
 ## Architecture
@@ -53,12 +59,13 @@ Domain Logic
 | File/Module | LOC | Purpose |
 |-------------|-----|---------|
 | `main.rs` | ~1,150 | CLI entry point, command parsing (clap) |
-| `commands/` | ~1,100 | Command handlers (12 files: run, status, resume, etc.) |
-| `runner.rs` | ~2,150 | Main orchestration loop, state transitions |
-| `state.rs` | ~1,100 | State machine (12 states), persistence |
+| `commands/` | ~1,100 | Command handlers (12 files: run, status, resume, clean, etc.) |
+| `runner.rs` | ~2,150 | Main orchestration loop, state transitions, worktree context |
+| `state.rs` | ~1,100 | State machine (12 states), session management, metadata |
+| `worktree.rs` | ~1,500 | Git worktree operations, session ID generation |
 | `claude/` | ~1,500 | Claude CLI integration (9 files: runner, stream, types, etc.) |
 | `gh/` | ~950 | GitHub CLI integration (7 files: pr, detection, context, etc.) |
-| `config.rs` | ~3,100 | TOML config, validation, defaults |
+| `config.rs` | ~3,100 | TOML config, validation, defaults, worktree settings |
 | `output/` | ~2,500 | CLI formatting (9 files: banner, messages, status, etc.) |
 | `progress.rs` | ~2,200 | Spinners, progress bars, breadcrumbs |
 | `display.rs` | ~940 | DisplayAdapter trait (strategy pattern) |
@@ -78,7 +85,7 @@ Idle → Initializing → PickingStory → RunningClaude → Reviewing → Corre
                                               (on issues)
 ```
 
-States are defined in `state.rs` as `MachineState` enum. Transitions are explicit and persisted to `.autom8/state.json`.
+States are defined in `state.rs` as `MachineState` enum. Transitions are explicit and persisted to the session's `state.json` file (see [Directory Structure](#directory-structure) in Worktree Architecture).
 
 ## Important Patterns
 
@@ -139,9 +146,14 @@ pub struct Spec { ... }
 review = true       # Enable review step
 commit = true       # Auto-commit changes
 pull_request = true # Auto-create PR
+
+# Worktree settings (for parallel sessions)
+worktree = false              # Enable automatic worktree creation
+worktree_path_pattern = "{repo}-wt-{branch}"  # Worktree naming pattern
+worktree_cleanup = false      # Remove worktrees after completion
 ```
 
-**State persistence:** `.autom8/state.json` (per-project)
+**State persistence:** `~/.config/autom8/<project>/sessions/<session-id>/state.json`
 
 ## Claude Integration Notes
 
@@ -200,9 +212,12 @@ cargo test runner::tests
 ## File Locations
 
 - **Specs:** `~/.config/autom8/<project>/spec/spec-<feature>.json`
-- **State:** `.autom8/state.json`
-- **Archived runs:** `.autom8/runs/`
-- **Config:** `~/.config/autom8/config.toml`
+- **Session state:** `~/.config/autom8/<project>/sessions/<session-id>/state.json`
+- **Session metadata:** `~/.config/autom8/<project>/sessions/<session-id>/metadata.json`
+- **Archived runs:** `~/.config/autom8/<project>/runs/`
+- **Global config:** `~/.config/autom8/config.toml`
+- **Project config:** `~/.config/autom8/<project>/config.toml`
+- **Worktrees:** `<repo-parent>/<repo>-wt-<branch>/` (when `worktree = true`)
 
 ## Dependencies (Key)
 
@@ -229,6 +244,95 @@ All checks must pass before merging PRs.
 3. **Output buffer limit:** TUI caps output at 1,000 lines to prevent memory growth
 4. **State persistence:** Config snapshot saved at run start; resumed runs use same settings
 5. **Branch handling:** Runner auto-creates/checkouts branches from spec's `branch_name`
+6. **Branch conflicts:** Two sessions cannot use the same branch simultaneously; autom8 detects this and errors early
+7. **Session identity:** In main repo, session ID is `"main"`; in worktrees, it's a hash of the path
+8. **Stale sessions:** If a worktree is manually deleted, its session becomes "stale" and won't block new runs
+9. **Project identity:** Project name is derived from git repo root, not CWD (ensures all worktrees share config)
+
+## Worktree Architecture
+
+autom8 supports running multiple parallel sessions for the same project using git worktrees. This enables concurrent implementation of multiple features.
+
+### Session Identity
+
+Each session is identified by a deterministic session ID:
+- **Main repository**: Uses the well-known ID `"main"`
+- **Worktrees**: Uses an 8-character hex hash of the worktree's absolute path
+
+Session IDs are filesystem-safe and stable (same path always produces the same ID).
+
+### Directory Structure
+
+```
+~/.config/autom8/<project>/
+├── config.toml                    # Project-level config
+├── spec/                          # Spec files (shared across sessions)
+│   └── spec-*.json
+├── runs/                          # Archived runs (shared across sessions)
+└── sessions/                      # Per-session state
+    ├── main/                      # Main repo session
+    │   ├── state.json             # Run state
+    │   └── metadata.json          # Session metadata
+    └── <session-id>/              # Worktree sessions
+        ├── state.json
+        └── metadata.json
+```
+
+### Worktree Modes
+
+**When `worktree = false` (default):**
+- Runs on current branch in main repository
+- Single session per project (backward-compatible behavior)
+- State stored in `sessions/main/`
+
+**When `worktree = true`:**
+- Creates dedicated worktree at `<repo-parent>/<repo>-wt-<branch>/`
+- Each worktree gets its own session with isolated state
+- Multiple specs can run in parallel
+- Worktrees can be auto-cleaned after successful completion (`worktree_cleanup = true`)
+
+### Branch Conflict Detection
+
+Before starting a run, autom8 checks if the branch is already in use:
+1. Scans all session metadata files
+2. Skips: own session, different branches, non-running sessions, stale sessions
+3. Returns `BranchConflict` error if conflict found
+
+A session is considered "stale" if its worktree path no longer exists.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `worktree.rs` | Git worktree operations and session ID generation |
+| `state.rs` | SessionMetadata struct, StateManager with session support |
+| `config.rs` | `worktree`, `worktree_path_pattern`, `worktree_cleanup` fields |
+| `runner.rs` | Worktree context setup and lifecycle management |
+
+### Common Worktree Operations
+
+```bash
+# Run with worktree mode enabled (CLI override)
+autom8 run --worktree --spec spec.json
+
+# Check all sessions for current project
+autom8 status --all
+
+# Resume a specific session by ID
+autom8 resume --session <id>
+
+# List resumable sessions
+autom8 resume --list
+
+# Clean up completed sessions (preserves worktrees)
+autom8 clean
+
+# Clean up sessions and their worktrees
+autom8 clean --worktrees
+
+# Remove orphaned sessions (worktree deleted but state remains)
+autom8 clean --orphaned
+```
 
 ## Module Exports
 
