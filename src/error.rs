@@ -59,6 +59,9 @@ pub enum Autom8Error {
 
     #[error("Shell completion error: {0}")]
     ShellCompletion(String),
+
+    #[error("Worktree error: {0}")]
+    WorktreeError(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

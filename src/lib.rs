@@ -41,6 +41,7 @@ pub mod spec;
 pub mod state;
 #[cfg(test)]
 pub mod test_utils;
+pub mod worktree;
 
 pub use display::{BannerColor, StoryResult};
 pub use error::{Autom8Error, Result};
