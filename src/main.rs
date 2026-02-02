@@ -189,10 +189,6 @@ WHAT GETS CLEANED:
         /// Filter to a specific project
         #[arg(short, long)]
         project: Option<String>,
-
-        /// Polling interval in seconds (default: 1)
-        #[arg(short, long, default_value = "1")]
-        interval: u64,
     },
 
     /// Output shell completion script to stdout (hidden utility command)
@@ -276,9 +272,7 @@ fn main() {
             pr_review_command(cli.verbose)
         }
 
-        (None, Some(Commands::Monitor { project, interval })) => {
-            monitor_command(project.as_deref(), *interval)
-        }
+        (None, Some(Commands::Monitor { project })) => monitor_command(project.as_deref()),
 
         (None, Some(Commands::Completions { shell })) => match ShellType::from_name(shell) {
             Ok(shell_type) => {
@@ -1209,12 +1203,11 @@ mod tests {
         // Test that `autom8 monitor` parses to the Monitor variant with defaults
         let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
         assert!(cli.file.is_none(), "No file should be set");
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
+        if let Some(Commands::Monitor { project }) = cli.command {
             assert!(
                 project.is_none(),
                 "Project filter should be None by default"
             );
-            assert_eq!(interval, 1, "Default interval should be 1 second");
         } else {
             panic!("Expected Monitor command");
         }
@@ -1224,9 +1217,8 @@ mod tests {
     fn test_us003_monitor_project_flag() {
         // Test that --project flag works
         let cli = Cli::try_parse_from(["autom8", "monitor", "--project", "myapp"]).unwrap();
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
+        if let Some(Commands::Monitor { project }) = cli.command {
             assert_eq!(project, Some("myapp".to_string()));
-            assert_eq!(interval, 1);
         } else {
             panic!("Expected Monitor command");
         }
@@ -1236,47 +1228,8 @@ mod tests {
     fn test_us003_monitor_project_short_flag() {
         // Test that -p short flag works for --project
         let cli = Cli::try_parse_from(["autom8", "monitor", "-p", "myapp"]).unwrap();
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
+        if let Some(Commands::Monitor { project }) = cli.command {
             assert_eq!(project, Some("myapp".to_string()));
-            assert_eq!(interval, 1);
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
-    fn test_us003_monitor_interval_flag() {
-        // Test that --interval flag works
-        let cli = Cli::try_parse_from(["autom8", "monitor", "--interval", "5"]).unwrap();
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
-            assert!(project.is_none());
-            assert_eq!(interval, 5, "Interval should be 5 seconds");
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
-    fn test_us003_monitor_interval_short_flag() {
-        // Test that -i short flag works for --interval
-        let cli = Cli::try_parse_from(["autom8", "monitor", "-i", "2"]).unwrap();
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
-            assert!(project.is_none());
-            assert_eq!(interval, 2, "Interval should be 2 seconds");
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
-    fn test_us003_monitor_both_flags() {
-        // Test that both flags work together
-        let cli =
-            Cli::try_parse_from(["autom8", "monitor", "--project", "myapp", "--interval", "3"])
-                .unwrap();
-        if let Some(Commands::Monitor { project, interval }) = cli.command {
-            assert_eq!(project, Some("myapp".to_string()));
-            assert_eq!(interval, 3);
         } else {
             panic!("Expected Monitor command");
         }
@@ -1293,10 +1246,7 @@ mod tests {
     fn test_us003_monitor_command_appears_in_help() {
         // Verify that monitor command appears in the Commands enum
         // (if this compiles, the variant exists)
-        let _cmd = Commands::Monitor {
-            project: None,
-            interval: 1,
-        };
+        let _cmd = Commands::Monitor { project: None };
     }
 
     // ======================================================================
