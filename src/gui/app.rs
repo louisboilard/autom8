@@ -228,6 +228,13 @@ pub struct Autom8App {
     has_active_runs: bool,
 
     // ========================================================================
+    // Selection State
+    // ========================================================================
+    /// Currently selected project name in the Projects tab.
+    /// Used for the master-detail split view.
+    selected_project: Option<String>,
+
+    // ========================================================================
     // Loading State
     // ========================================================================
     /// Whether the initial data load has completed.
@@ -272,6 +279,7 @@ impl Autom8App {
             projects: Vec::new(),
             sessions: Vec::new(),
             has_active_runs: false,
+            selected_project: None,
             initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
@@ -315,6 +323,27 @@ impl Autom8App {
     /// Sets the refresh interval.
     pub fn set_refresh_interval(&mut self, interval: Duration) {
         self.refresh_interval = interval;
+    }
+
+    /// Returns the currently selected project name.
+    pub fn selected_project(&self) -> Option<&str> {
+        self.selected_project.as_deref()
+    }
+
+    /// Toggles the selection of a project.
+    /// If the project is already selected, it becomes deselected.
+    /// If a different project is selected, it becomes the new selection.
+    pub fn toggle_project_selection(&mut self, project_name: &str) {
+        if self.selected_project.as_deref() == Some(project_name) {
+            self.selected_project = None;
+        } else {
+            self.selected_project = Some(project_name.to_string());
+        }
+    }
+
+    /// Returns whether a project is currently selected.
+    pub fn is_project_selected(&self, project_name: &str) -> bool {
+        self.selected_project.as_deref() == Some(project_name)
     }
 
     // ========================================================================
@@ -629,7 +658,7 @@ impl Autom8App {
     }
 
     /// Render the content area based on the current tab.
-    fn render_content(&self, ui: &mut egui::Ui) {
+    fn render_content(&mut self, ui: &mut egui::Ui) {
         match self.current_tab {
             Tab::ActiveRuns => self.render_active_runs(ui),
             Tab::Projects => self.render_projects(ui),
@@ -1057,34 +1086,104 @@ impl Autom8App {
 
     // state_to_color is now imported from the components module.
 
-    /// Render the Projects view.
-    fn render_projects(&self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            // Header section with consistent spacing
+    /// Render the Projects view with split layout.
+    /// Left half shows the compact project list, right half is reserved for detail panel.
+    fn render_projects(&mut self, ui: &mut egui::Ui) {
+        // Use horizontal layout for split view
+        let available_width = ui.available_width();
+        let left_panel_width = (available_width / 2.0).max(200.0);
+
+        ui.horizontal(|ui| {
+            // Left panel: Project list (takes half the width)
+            ui.allocate_ui_with_layout(
+                Vec2::new(left_panel_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    self.render_projects_left_panel(ui);
+                },
+            );
+
+            // Vertical separator between panels
+            ui.add_space(spacing::SM);
+            ui.separator();
+            ui.add_space(spacing::SM);
+
+            // Right panel: Reserved for future detail view (US-003)
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), ui.available_height()),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    self.render_projects_right_panel(ui);
+                },
+            );
+        });
+    }
+
+    /// Render the left panel of the Projects view (project list).
+    fn render_projects_left_panel(&mut self, ui: &mut egui::Ui) {
+        // Header section with consistent spacing
+        ui.label(
+            egui::RichText::new("Projects")
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::SM);
+
+        if let Some(ref filter) = self.project_filter {
             ui.label(
-                egui::RichText::new("Projects")
-                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                egui::RichText::new(format!("Filtering by project: {}", filter))
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+            ui.add_space(spacing::SM);
+        }
+
+        // Empty state or list
+        if self.projects.is_empty() {
+            self.render_empty_projects(ui);
+        } else {
+            self.render_projects_list(ui);
+        }
+    }
+
+    /// Render the right panel of the Projects view.
+    /// Shows hint text when no project is selected, or detail view when selected.
+    fn render_projects_right_panel(&self, ui: &mut egui::Ui) {
+        if let Some(ref selected_name) = self.selected_project {
+            // Show selected project info (placeholder for US-003 run history)
+            ui.label(
+                egui::RichText::new(format!("Selected: {}", selected_name))
+                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
                     .color(colors::TEXT_PRIMARY),
             );
 
             ui.add_space(spacing::SM);
 
-            if let Some(ref filter) = self.project_filter {
+            ui.label(
+                egui::RichText::new("Run history will appear here")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        } else {
+            // Empty state when no project is selected
+            ui.add_space(spacing::XXL);
+            ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("Filtering by project: {}", filter))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
+                    egui::RichText::new("Select a project")
+                        .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                        .color(colors::TEXT_MUTED),
                 );
-                ui.add_space(spacing::SM);
-            }
 
-            // Empty state or list
-            if self.projects.is_empty() {
-                self.render_empty_projects(ui);
-            } else {
-                self.render_projects_list(ui);
-            }
-        });
+                ui.add_space(spacing::SM);
+
+                ui.label(
+                    egui::RichText::new("Click on a project to view its run history")
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_MUTED),
+                );
+            });
+        }
     }
 
     /// Render the empty state for Projects view.
@@ -1112,13 +1211,23 @@ impl Autom8App {
     }
 
     /// Render the projects list with scrolling.
-    fn render_projects_list(&self, ui: &mut egui::Ui) {
+    fn render_projects_list(&mut self, ui: &mut egui::Ui) {
+        // Clone project names to avoid borrow issues when handling clicks
+        let project_names: Vec<String> =
+            self.projects.iter().map(|p| p.info.name.clone()).collect();
+        let selected = self.selected_project.clone();
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
-                for project in &self.projects {
-                    self.render_project_row(ui, project);
+                for (idx, project_name) in project_names.iter().enumerate() {
+                    let project = &self.projects[idx];
+                    let is_selected = selected.as_deref() == Some(project_name.as_str());
+                    let clicked = self.render_project_row(ui, project, is_selected);
+                    if clicked {
+                        self.toggle_project_selection(project_name);
+                    }
                     ui.add_space(spacing::XS);
                 }
             });
@@ -1174,31 +1283,52 @@ impl Autom8App {
     }
 
     /// Render a single project row.
-    fn render_project_row(&self, ui: &mut egui::Ui, project: &ProjectData) {
+    /// Returns true if the row was clicked.
+    fn render_project_row(
+        &self,
+        ui: &mut egui::Ui,
+        project: &ProjectData,
+        is_selected: bool,
+    ) -> bool {
         let row_size = Vec2::new(ui.available_width(), PROJECT_ROW_HEIGHT);
 
-        // Allocate space for the row with hover interaction
-        let (rect, response) = ui.allocate_exact_size(row_size, Sense::hover());
+        // Allocate space for the row with click interaction
+        let (rect, response) = ui.allocate_exact_size(row_size, Sense::click());
 
         // Skip if not visible (optimization for scrolling)
         if !ui.is_rect_visible(rect) {
-            return;
+            return false;
         }
 
         let painter = ui.painter();
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
 
-        // Draw row background with hover state
-        let bg_color = if is_hovered {
+        // Draw row background with hover and selected states
+        let bg_color = if is_selected {
+            colors::SURFACE_SELECTED
+        } else if is_hovered {
             colors::SURFACE_HOVER
         } else {
             colors::SURFACE
         };
+
+        // Use accent color border for selected state, stronger border for hover
+        let border_color = if is_selected {
+            colors::ACCENT
+        } else if is_hovered {
+            colors::BORDER_FOCUSED
+        } else {
+            colors::BORDER
+        };
+
+        let border_width = if is_selected { 2.0 } else { 1.0 };
+
         painter.rect(
             rect,
             Rounding::same(rounding::BUTTON),
             bg_color,
-            Stroke::new(1.0, colors::BORDER),
+            Stroke::new(border_width, border_color),
         );
 
         // Content layout within the row
@@ -1273,6 +1403,8 @@ impl Autom8App {
                 Color32::TRANSPARENT,
             );
         }
+
+        was_clicked
     }
 }
 
@@ -2222,5 +2354,77 @@ mod tests {
                     .iter()
                     .any(|p| p.info.name == "definitely-not-a-project")
         );
+    }
+
+    // ========================================================================
+    // Project Selection Tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_selected_project_initially_none() {
+        let app = Autom8App::new(None);
+        assert!(app.selected_project().is_none());
+    }
+
+    #[test]
+    fn test_toggle_project_selection_select() {
+        let mut app = Autom8App::new(None);
+        assert!(app.selected_project().is_none());
+
+        app.toggle_project_selection("my-project");
+        assert_eq!(app.selected_project(), Some("my-project"));
+    }
+
+    #[test]
+    fn test_toggle_project_selection_deselect() {
+        let mut app = Autom8App::new(None);
+        app.toggle_project_selection("my-project");
+        assert_eq!(app.selected_project(), Some("my-project"));
+
+        // Toggle again to deselect
+        app.toggle_project_selection("my-project");
+        assert!(app.selected_project().is_none());
+    }
+
+    #[test]
+    fn test_toggle_project_selection_switch() {
+        let mut app = Autom8App::new(None);
+        app.toggle_project_selection("project-a");
+        assert_eq!(app.selected_project(), Some("project-a"));
+
+        // Select a different project
+        app.toggle_project_selection("project-b");
+        assert_eq!(app.selected_project(), Some("project-b"));
+    }
+
+    #[test]
+    fn test_is_project_selected_true() {
+        let mut app = Autom8App::new(None);
+        app.toggle_project_selection("test-project");
+        assert!(app.is_project_selected("test-project"));
+    }
+
+    #[test]
+    fn test_is_project_selected_false() {
+        let mut app = Autom8App::new(None);
+        app.toggle_project_selection("project-a");
+        assert!(!app.is_project_selected("project-b"));
+    }
+
+    #[test]
+    fn test_is_project_selected_none() {
+        let app = Autom8App::new(None);
+        assert!(!app.is_project_selected("any-project"));
+    }
+
+    #[test]
+    fn test_selected_project_empty_string() {
+        let mut app = Autom8App::new(None);
+        app.toggle_project_selection("");
+        assert_eq!(app.selected_project(), Some(""));
+
+        // Toggle again to deselect
+        app.toggle_project_selection("");
+        assert!(app.selected_project().is_none());
     }
 }
