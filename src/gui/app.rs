@@ -4,6 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
+use crate::gui::typography::{self, FontSize, FontWeight};
 use eframe::egui;
 
 /// Default window width in pixels.
@@ -38,21 +39,34 @@ impl Autom8App {
 impl eframe::App for Autom8App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("autom8");
+            // Title using custom typography
+            ui.label(
+                egui::RichText::new("autom8")
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold)),
+            );
 
             ui.add_space(20.0);
 
             if let Some(ref filter) = self.project_filter {
-                ui.label(format!("Filtering: {}", filter));
+                ui.label(
+                    egui::RichText::new(format!("Filtering: {}", filter))
+                        .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                );
             } else {
-                ui.label("Monitoring all projects");
+                ui.label(
+                    egui::RichText::new("Monitoring all projects")
+                        .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                );
             }
 
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(10.0);
 
-            ui.label("GUI initialized successfully. Ready for implementation.");
+            ui.label(
+                egui::RichText::new("GUI initialized successfully. Ready for implementation.")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular)),
+            );
         });
     }
 }
@@ -81,7 +95,11 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
     eframe::run_native(
         "autom8",
         options,
-        Box::new(|_cc| Ok(Box::new(Autom8App::new(project_filter)))),
+        Box::new(|cc| {
+            // Initialize custom typography (fonts and text styles)
+            typography::init(&cc.egui_ctx);
+            Ok(Box::new(Autom8App::new(project_filter)))
+        }),
     )
     .map_err(|e| Autom8Error::GuiError(e.to_string()))
 }

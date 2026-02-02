@@ -4,3 +4,4 @@
 //! sessions using eframe/egui.
 
 pub mod app;
+pub mod typography;
