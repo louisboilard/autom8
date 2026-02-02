@@ -8,7 +8,6 @@ use crate::error::Result;
 use crate::spec::Spec;
 use crate::state::{MachineState, RunState, SessionMetadata, StateManager};
 use crate::worktree::MAIN_SESSION_ID;
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -24,6 +23,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::Duration;
 
 // ============================================================================
@@ -155,9 +155,7 @@ impl SessionData {
         if components.len() <= 2 {
             path.display().to_string()
         } else {
-            let last_two: PathBuf = components[components.len() - 2..]
-                .iter()
-                .collect();
+            let last_two: PathBuf = components[components.len() - 2..].iter().collect();
             format!(".../{}", last_two.display())
         }
     }
@@ -439,15 +437,15 @@ impl MonitorApp {
                 let is_main_session = metadata.session_id == MAIN_SESSION_ID;
 
                 // Load the run state for this session
-                let (run, load_error) = if let Some(session_sm) = sm.get_session(&metadata.session_id)
-                {
-                    match session_sm.load_current() {
-                        Ok(run) => (run, None),
-                        Err(e) => (None, Some(format!("Corrupted state: {}", e))),
-                    }
-                } else {
-                    (None, Some("Session not found".to_string()))
-                };
+                let (run, load_error) =
+                    if let Some(session_sm) = sm.get_session(&metadata.session_id) {
+                        match session_sm.load_current() {
+                            Ok(run) => (run, None),
+                            Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+                        }
+                    } else {
+                        (None, Some("Session not found".to_string()))
+                    };
 
                 // Load spec to get progress information
                 let progress = run.as_ref().and_then(|r| {
@@ -924,7 +922,13 @@ impl MonitorApp {
 
             match opt_session {
                 Some(session) => {
-                    self.render_session_or_error(frame, quadrant_areas[i], session, false, is_selected);
+                    self.render_session_or_error(
+                        frame,
+                        quadrant_areas[i],
+                        session,
+                        false,
+                        is_selected,
+                    );
                 }
                 None => {
                     // Empty bordered box for unused quadrants
@@ -1073,7 +1077,10 @@ impl MonitorApp {
             Line::from(""),
             Line::from(vec![
                 Span::styled("Session: ", Style::default().fg(COLOR_DIM)),
-                Span::styled(&session.metadata.session_id, Style::default().fg(COLOR_PRIMARY)),
+                Span::styled(
+                    &session.metadata.session_id,
+                    Style::default().fg(COLOR_PRIMARY),
+                ),
             ]),
             Line::from(Span::styled(
                 "The state file may be corrupted or unreadable.",
@@ -1782,11 +1789,7 @@ mod tests {
     use super::*;
 
     /// Helper function to create a test SessionData for use in tests
-    fn create_test_session(
-        project_name: &str,
-        session_id: &str,
-        branch: &str,
-    ) -> SessionData {
+    fn create_test_session(project_name: &str, session_id: &str, branch: &str) -> SessionData {
         let is_main = session_id == MAIN_SESSION_ID;
         SessionData {
             project_name: project_name.to_string(),
@@ -3101,7 +3104,7 @@ mod tests {
         let mut app = MonitorApp::new(1, None);
         app.current_view = View::ActiveRuns;
         app.quadrant_page = 5; // Out of bounds
-        // Only 3 sessions = 1 page (max page index = 0)
+                               // Only 3 sessions = 1 page (max page index = 0)
         add_test_sessions(&mut app, 3);
 
         app.clamp_selection_index();
@@ -3312,11 +3315,13 @@ mod tests {
 
     fn create_four_active_sessions() -> Vec<SessionData> {
         (1..=4)
-            .map(|i| create_test_session(
-                &format!("project-{}", i),
-                &format!("{:08x}", i),
-                &format!("branch-{}", i),
-            ))
+            .map(|i| {
+                create_test_session(
+                    &format!("project-{}", i),
+                    &format!("{:08x}", i),
+                    &format!("branch-{}", i),
+                )
+            })
             .collect()
     }
 
