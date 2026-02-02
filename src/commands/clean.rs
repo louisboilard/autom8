@@ -72,12 +72,20 @@ impl CleanupSummary {
 
         if !self.sessions_skipped.is_empty() {
             println!();
-            println!("{YELLOW}Skipped {} session{}:{RESET}",
+            println!(
+                "{YELLOW}Skipped {} session{}:{RESET}",
                 self.sessions_skipped.len(),
-                if self.sessions_skipped.len() == 1 { "" } else { "s" }
+                if self.sessions_skipped.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             );
             for skipped in &self.sessions_skipped {
-                println!("  {GRAY}-{RESET} {}: {}", skipped.session_id, skipped.reason);
+                println!(
+                    "  {GRAY}-{RESET} {}: {}",
+                    skipped.session_id, skipped.reason
+                );
             }
         }
 
@@ -139,7 +147,12 @@ pub fn worktree_has_uncommitted_changes(worktree_path: &Path) -> bool {
 
     // Run git status in the worktree directory
     let output = std::process::Command::new("git")
-        .args(["-C", &worktree_path.to_string_lossy(), "status", "--porcelain"])
+        .args([
+            "-C",
+            &worktree_path.to_string_lossy(),
+            "status",
+            "--porcelain",
+        ])
         .output();
 
     match output {
@@ -212,24 +225,22 @@ fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()
             }
 
             // Check for uncommitted changes if worktree exists
-            if options.worktrees && metadata.worktree_path.exists() {
-                if worktree_has_uncommitted_changes(&metadata.worktree_path) && !options.force {
-                    summary.sessions_skipped.push(SkippedSession {
-                        session_id: session_id.to_string(),
-                        reason: "Worktree has uncommitted changes (use --force to override)"
-                            .to_string(),
-                    });
-                    summary.print();
-                    return Ok(());
-                }
+            if options.worktrees
+                && metadata.worktree_path.exists()
+                && worktree_has_uncommitted_changes(&metadata.worktree_path)
+                && !options.force
+            {
+                summary.sessions_skipped.push(SkippedSession {
+                    session_id: session_id.to_string(),
+                    reason: "Worktree has uncommitted changes (use --force to override)".to_string(),
+                });
+                summary.print();
+                return Ok(());
             }
 
             // Confirm deletion
             let prompt_msg = if options.worktrees && metadata.worktree_path.exists() {
-                format!(
-                    "Remove session '{}' and its worktree?",
-                    metadata.session_id
-                )
+                format!("Remove session '{}' and its worktree?", metadata.session_id)
             } else {
                 format!("Remove session '{}'?", metadata.session_id)
             };
@@ -243,10 +254,7 @@ fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()
             if let Some(session_sm) = state_manager.get_session(session_id) {
                 if let Ok(Some(state)) = session_sm.load_current() {
                     if let Ok(archive_path) = session_sm.archive(&state) {
-                        println!(
-                            "{GRAY}Archived to: {}{RESET}",
-                            archive_path.display()
-                        );
+                        println!("{GRAY}Archived to: {}{RESET}", archive_path.display());
                     }
                 }
             }
@@ -312,7 +320,8 @@ fn clean_orphaned_sessions(_options: &CleanOptions) -> Result<()> {
     }
     println!();
 
-    let prompt_msg = format!("Remove {} orphaned session{}?",
+    let prompt_msg = format!(
+        "Remove {} orphaned session{}?",
         orphaned.len(),
         if orphaned.len() == 1 { "" } else { "s" }
     );
@@ -368,13 +377,18 @@ fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
             .unwrap_or(false);
 
         let is_orphaned = !session.worktree_path.exists();
-        let has_uncommitted = !is_orphaned && worktree_has_uncommitted_changes(&session.worktree_path);
+        let has_uncommitted =
+            !is_orphaned && worktree_has_uncommitted_changes(&session.worktree_path);
 
         let status_markers = format!(
             "{}{}{}",
             if is_current { " (current)" } else { "" },
             if is_orphaned { " [orphaned]" } else { "" },
-            if has_uncommitted { " [uncommitted changes]" } else { "" }
+            if has_uncommitted {
+                " [uncommitted changes]"
+            } else {
+                ""
+            }
         );
 
         let indicator = if is_orphaned {
@@ -402,8 +416,16 @@ fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
         println!(
             "{YELLOW}Warning: {} session{} {} uncommitted changes.{RESET}",
             sessions_with_uncommitted.len(),
-            if sessions_with_uncommitted.len() == 1 { "" } else { "s" },
-            if sessions_with_uncommitted.len() == 1 { "has" } else { "have" }
+            if sessions_with_uncommitted.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if sessions_with_uncommitted.len() == 1 {
+                "has"
+            } else {
+                "have"
+            }
         );
         println!("{YELLOW}These will be skipped unless you use --force.{RESET}");
         println!();
@@ -444,14 +466,16 @@ fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
         }
 
         // Check for uncommitted changes
-        if options.worktrees && session.worktree_path.exists() {
-            if worktree_has_uncommitted_changes(&session.worktree_path) && !options.force {
-                summary.sessions_skipped.push(SkippedSession {
-                    session_id: session.session_id.clone(),
-                    reason: "Uncommitted changes".to_string(),
-                });
-                continue;
-            }
+        if options.worktrees
+            && session.worktree_path.exists()
+            && worktree_has_uncommitted_changes(&session.worktree_path)
+            && !options.force
+        {
+            summary.sessions_skipped.push(SkippedSession {
+                session_id: session.session_id.clone(),
+                reason: "Uncommitted changes".to_string(),
+            });
+            continue;
         }
 
         // Archive before deletion
@@ -610,14 +634,16 @@ fn clean_completed_sessions(options: &CleanOptions) -> Result<()> {
         }
 
         // Check for uncommitted changes
-        if options.worktrees && session.worktree_path.exists() {
-            if worktree_has_uncommitted_changes(&session.worktree_path) && !options.force {
-                summary.sessions_skipped.push(SkippedSession {
-                    session_id: session.session_id.clone(),
-                    reason: "Uncommitted changes".to_string(),
-                });
-                continue;
-            }
+        if options.worktrees
+            && session.worktree_path.exists()
+            && worktree_has_uncommitted_changes(&session.worktree_path)
+            && !options.force
+        {
+            summary.sessions_skipped.push(SkippedSession {
+                session_id: session.session_id.clone(),
+                reason: "Uncommitted changes".to_string(),
+            });
+            continue;
         }
 
         // Archive before deletion
@@ -905,10 +931,7 @@ mod tests {
         let state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
         // Note: We can't easily test the full machine_state check without more setup,
         // but we verify the pattern
-        assert!(matches!(
-            state.machine_state,
-            MachineState::Initializing
-        ));
+        assert!(matches!(state.machine_state, MachineState::Initializing));
     }
 
     #[test]
