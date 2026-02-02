@@ -347,10 +347,7 @@ impl Autom8App {
         self.last_refresh = Instant::now();
 
         // Load projects (handles errors gracefully)
-        let tree_infos = match list_projects_tree() {
-            Ok(infos) => infos,
-            Err(_) => Vec::new(), // Continue with empty list on error
-        };
+        let tree_infos = list_projects_tree().unwrap_or_default();
 
         // Filter by project if specified
         let filtered: Vec<_> = if let Some(ref filter) = self.project_filter {
@@ -380,10 +377,12 @@ impl Autom8App {
 
                 // Load spec to get progress information
                 let progress = active_run.as_ref().and_then(|run| {
-                    Spec::load(&run.spec_json_path).ok().map(|spec| RunProgress {
-                        completed: spec.completed_count(),
-                        total: spec.total_count(),
-                    })
+                    Spec::load(&run.spec_json_path)
+                        .ok()
+                        .map(|spec| RunProgress {
+                            completed: spec.completed_count(),
+                            total: spec.total_count(),
+                        })
                 });
 
                 ProjectData {
@@ -914,8 +913,20 @@ mod tests {
     #[test]
     fn test_app_initializes_with_empty_data() {
         let app = Autom8App::new(Some("nonexistent-project".to_string()));
-        assert!(app.projects().is_empty() || !app.projects().iter().any(|p| p.info.name == "nonexistent-project"));
-        assert!(app.sessions().is_empty() || !app.sessions().iter().any(|s| s.project_name == "nonexistent-project"));
+        assert!(
+            app.projects().is_empty()
+                || !app
+                    .projects()
+                    .iter()
+                    .any(|p| p.info.name == "nonexistent-project")
+        );
+        assert!(
+            app.sessions().is_empty()
+                || !app
+                    .sessions()
+                    .iter()
+                    .any(|s| s.project_name == "nonexistent-project")
+        );
     }
 
     #[test]
@@ -1027,7 +1038,10 @@ mod tests {
     fn test_format_state_all_states() {
         assert_eq!(format_state(MachineState::Idle), "Idle");
         assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
-        assert_eq!(format_state(MachineState::GeneratingSpec), "Generating Spec");
+        assert_eq!(
+            format_state(MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
         assert_eq!(format_state(MachineState::Initializing), "Initializing");
         assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
         assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");
