@@ -161,6 +161,7 @@ impl RunHistoryEntryExt for RunHistoryEntry {
             crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
             crate::state::RunStatus::Failed => colors::STATUS_ERROR,
             crate::state::RunStatus::Running => colors::STATUS_RUNNING,
+            crate::state::RunStatus::Interrupted => colors::STATUS_WARNING,
         }
     }
 }
@@ -1583,11 +1584,13 @@ impl Autom8App {
                 crate::state::RunStatus::Completed => "Completed",
                 crate::state::RunStatus::Failed => "Failed",
                 crate::state::RunStatus::Running => "Running",
+                crate::state::RunStatus::Interrupted => "Interrupted",
             };
             let status_color = match run_state.status {
                 crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
                 crate::state::RunStatus::Failed => colors::STATUS_ERROR,
                 crate::state::RunStatus::Running => colors::STATUS_RUNNING,
+                crate::state::RunStatus::Interrupted => colors::STATUS_WARNING,
             };
 
             let badge_galley = ui.fonts(|f| {

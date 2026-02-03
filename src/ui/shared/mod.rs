@@ -194,6 +194,7 @@ impl RunHistoryEntry {
             RunStatus::Completed => "Completed",
             RunStatus::Failed => "Failed",
             RunStatus::Running => "Running",
+            RunStatus::Interrupted => "Interrupted",
         }
     }
 }
