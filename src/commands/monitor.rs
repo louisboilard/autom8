@@ -4,7 +4,7 @@
 //! activity across all projects.
 
 use crate::error::Result;
-use crate::monitor::app::run_monitor;
+use crate::ui::tui::app::run_monitor;
 
 /// Launch the monitor TUI dashboard.
 ///

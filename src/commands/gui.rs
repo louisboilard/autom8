@@ -4,7 +4,7 @@
 //! real-time status of autom8 activity across all projects.
 
 use crate::error::Result;
-use crate::gui::app::run_gui;
+use crate::ui::gui::app::run_gui;
 
 /// Launch the native GUI application.
 ///

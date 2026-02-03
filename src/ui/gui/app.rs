@@ -5,12 +5,12 @@
 
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::{Autom8Error, Result};
-use crate::gui::components::{
+use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
-use crate::gui::theme::{self, colors, rounding, spacing};
-use crate::gui::typography::{self, FontSize, FontWeight};
+use crate::ui::gui::theme::{self, colors, rounding, spacing};
+use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::spec::Spec;
 use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
 use crate::worktree::MAIN_SESSION_ID;

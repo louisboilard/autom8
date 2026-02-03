@@ -227,7 +227,7 @@ pub mod colors {
 }
 
 // Note: The Status enum is defined in the components module to avoid duplication.
-// Use `crate::gui::components::Status` for status state to color mapping.
+// Use `crate::ui::gui::components::Status` for status state to color mapping.
 
 /// Configure egui Visuals for the light theme.
 ///
