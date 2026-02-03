@@ -1784,42 +1784,44 @@ impl Autom8App {
 
     /// Render the run detail view for a specific run.
     fn render_run_detail(&self, ui: &mut egui::Ui, run_id: &str) {
-        ui.vertical(|ui| {
-            // Header
-            ui.label(
-                egui::RichText::new(format!("Run Details: {}", run_id))
-                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
-                    .color(colors::TEXT_PRIMARY),
-            );
+        // Header (fixed, not scrollable)
+        ui.label(
+            egui::RichText::new(format!("Run Details: {}", run_id))
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
 
-            ui.add_space(spacing::MD);
+        ui.add_space(spacing::MD);
 
-            // Check if we have cached run state
-            if let Some(run_state) = self.run_detail_cache.get(run_id) {
-                // Render run details
-                self.render_run_state_details(ui, run_state);
-            } else {
-                // No cached state - show placeholder
-                ui.add_space(spacing::XXL);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Run details not available")
-                            .font(typography::font(FontSize::Heading, FontWeight::Medium))
+        // Check if we have cached run state
+        if let Some(run_state) = self.run_detail_cache.get(run_id) {
+            // Render run details in a ScrollArea that fills remaining space
+            self.render_run_state_details(ui, run_state);
+        } else {
+            // No cached state - show placeholder (also in ScrollArea for consistency)
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(spacing::XXL);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Run details not available")
+                                .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                                .color(colors::TEXT_MUTED),
+                        );
+
+                        ui.add_space(spacing::SM);
+
+                        ui.label(
+                            egui::RichText::new(
+                                "This run may have been archived or the data is unavailable.",
+                            )
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
                             .color(colors::TEXT_MUTED),
-                    );
-
-                    ui.add_space(spacing::SM);
-
-                    ui.label(
-                        egui::RichText::new(
-                            "This run may have been archived or the data is unavailable.",
-                        )
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_MUTED),
-                    );
+                        );
+                    });
                 });
-            }
-        });
+        }
     }
 
     /// Render detailed information about a run state.
