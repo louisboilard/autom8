@@ -2354,10 +2354,8 @@ impl Autom8App {
                 })
                 .collect();
 
-            ui.painter().add(egui::Shape::line(
-                points,
-                Stroke::new(2.0, colors::ACCENT),
-            ));
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(2.0, colors::ACCENT)));
 
             // Request repaint for animation
             ui.ctx().request_repaint();
@@ -2372,7 +2370,7 @@ impl Autom8App {
         _cache_key: &str,
     ) {
         // Calculate a unique ID for scroll state
-        let scroll_id = egui::Id::new("command_output_scroll").with(&execution.id.cache_key());
+        let scroll_id = egui::Id::new("command_output_scroll").with(execution.id.cache_key());
 
         // Build scroll area - auto-scroll to bottom when auto_scroll is enabled
         let scroll_area = egui::ScrollArea::vertical()
