@@ -34,9 +34,9 @@ mod run;
 mod status;
 
 pub use clean::{
-    clean_command, clean_orphaned_direct, clean_worktrees_direct, format_bytes_display,
-    remove_project_direct, CleanOptions, CleanupSummary, DirectCleanOptions, RemovalSummary,
-    SkippedSession, SkippedWorktree,
+    clean_command, clean_data_direct, clean_orphaned_direct, clean_worktrees_direct,
+    format_bytes_display, remove_project_direct, CleanOptions, CleanupSummary, DataCleanupSummary,
+    DirectCleanOptions, RemovalSummary, SkippedSession, SkippedWorktree,
 };
 pub use config::{
     config_display_command, config_reset_command, config_set_command, ConfigScope, ConfigSubcommand,

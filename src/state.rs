@@ -810,7 +810,8 @@ impl StateManager {
         self.base_dir.join(STATE_FILE)
     }
 
-    fn runs_dir(&self) -> PathBuf {
+    /// Path to the runs directory (archived runs)
+    pub fn runs_dir(&self) -> PathBuf {
         self.base_dir.join(RUNS_DIR)
     }
 
