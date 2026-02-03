@@ -9,6 +9,11 @@ use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
+use crate::ui::gui::config::{
+    BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
+    ConfigTextField, TextFieldChanges, CONFIG_SCOPE_ROW_HEIGHT, CONFIG_SCOPE_ROW_PADDING_H,
+    CONFIG_SCOPE_ROW_PADDING_V,
+};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
@@ -259,112 +264,6 @@ impl Tab {
     }
 }
 
-// ============================================================================
-// Config Scope Types (Config Tab - US-002)
-// ============================================================================
-
-/// Represents the scope of configuration being edited.
-///
-/// The Config tab supports editing both global configuration and
-/// per-project configuration. This enum represents which scope is
-/// currently selected.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ConfigScope {
-    /// Global configuration (`~/.config/autom8/config.toml`).
-    /// This is the default selection when the Config tab is opened.
-    #[default]
-    Global,
-    /// Project-specific configuration (`~/.config/autom8/<project>/config.toml`).
-    /// Contains the project name.
-    Project(String),
-}
-
-impl ConfigScope {
-    /// Returns the display name for this scope.
-    pub fn display_name(&self) -> &str {
-        match self {
-            ConfigScope::Global => "Global",
-            ConfigScope::Project(name) => name,
-        }
-    }
-
-    /// Returns whether this scope is the global scope.
-    pub fn is_global(&self) -> bool {
-        matches!(self, ConfigScope::Global)
-    }
-}
-
-// ============================================================================
-// Config Field Change Types (Config Tab - US-006)
-// ============================================================================
-
-/// Represents a change to a boolean config field (US-006).
-///
-/// When a toggle is clicked, the render method returns this change to indicate
-/// which field was modified and its new value. The change is then processed
-/// by the parent method which has mutable access to save the config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigBoolField {
-    /// The `review` field.
-    Review,
-    /// The `commit` field.
-    Commit,
-    /// The `pull_request` field.
-    PullRequest,
-    /// The `worktree` field.
-    Worktree,
-    /// The `worktree_cleanup` field.
-    WorktreeCleanup,
-}
-
-/// Identifier for text config fields (US-007).
-///
-/// Used to track which text field changed when processing editor actions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigTextField {
-    /// The `worktree_path_pattern` field.
-    WorktreePathPattern,
-}
-
-/// Type alias for a collection of boolean field changes (US-006).
-type BoolFieldChanges = Vec<(ConfigBoolField, bool)>;
-
-/// Type alias for a collection of text field changes (US-007).
-type TextFieldChanges = Vec<(ConfigTextField, String)>;
-
-/// Actions that can be returned from config editor rendering (US-006, US-007, US-009).
-///
-/// This struct collects all actions that require mutation, allowing the
-/// render methods to remain `&self` while the parent processes mutations.
-#[derive(Debug, Default)]
-struct ConfigEditorActions {
-    /// If set, create a project config from global (US-005).
-    create_project_config: Option<String>,
-    /// Boolean field changes with (field, new_value) (US-006).
-    bool_changes: Vec<(ConfigBoolField, bool)>,
-    /// Text field changes with (field, new_value) (US-007).
-    text_changes: Vec<(ConfigTextField, String)>,
-    /// Whether we're editing global (true) or project (false) config.
-    is_global: bool,
-    /// Project name if editing project config.
-    project_name: Option<String>,
-    /// If true, reset the config to defaults (US-009).
-    reset_to_defaults: bool,
-}
-
-// ============================================================================
-// Config Scope Constants (Config Tab - US-002)
-// ============================================================================
-
-/// Height of each row in the config scope list.
-const CONFIG_SCOPE_ROW_HEIGHT: f32 = 44.0;
-
-/// Horizontal padding within config scope rows (uses MD from spacing scale).
-const CONFIG_SCOPE_ROW_PADDING_H: f32 = 12.0; // spacing::MD
-
-/// Vertical padding within config scope rows (uses SM from spacing scale).
-const CONFIG_SCOPE_ROW_PADDING_V: f32 = 8.0; // spacing::SM
-
 /// Maximum width for the tab bar scroll area.
 const TAB_BAR_MAX_SCROLL_WIDTH: f32 = 800.0;
 
@@ -454,48 +353,11 @@ pub struct Autom8App {
     sidebar_collapsed: bool,
 
     // ========================================================================
-    // Config Tab State (Config Tab - US-002)
+    // Config Tab State
     // ========================================================================
-    /// Currently selected config scope in the Config tab.
-    /// Defaults to Global when the Config tab is first opened.
-    selected_config_scope: ConfigScope,
-
-    /// Cached list of project names for the config scope selector.
-    /// Loaded from `~/.config/autom8/*/` directories.
-    config_scope_projects: Vec<String>,
-
-    /// Cached information about which projects have their own config file.
-    /// Maps project name to whether it has a `config.toml` file.
-    config_scope_has_config: std::collections::HashMap<String, bool>,
-
-    // ========================================================================
-    // Config Editor State (Config Tab - US-003)
-    // ========================================================================
-    /// Cached global configuration for editing.
-    /// Loaded via `config::load_global_config()` when Global scope is selected.
-    cached_global_config: Option<crate::config::Config>,
-
-    /// Error message if global config failed to load.
-    global_config_error: Option<String>,
-
-    // ========================================================================
-    // Project Config Editor State (Config Tab - US-004)
-    // ========================================================================
-    /// Cached project configuration for editing.
-    /// Loaded when a project with its own config file is selected.
-    /// Key is the project name, value is the loaded config.
-    cached_project_config: Option<(String, crate::config::Config)>,
-
-    /// Error message if project config failed to load.
-    project_config_error: Option<String>,
-
-    // ========================================================================
-    // Config Toggle State (Config Tab - US-006)
-    // ========================================================================
-    /// Timestamp of the last config modification.
-    /// Used to show the "Changes take effect on next run" notice.
-    /// Set to Some(Instant) when a config field is modified, cleared after timeout.
-    config_last_modified: Option<Instant>,
+    /// State for the Config tab (scope selection, cached configs, etc.).
+    /// Public for test access.
+    pub config_state: ConfigTabState,
 }
 
 impl Default for Autom8App {
@@ -539,14 +401,7 @@ impl Autom8App {
             last_refresh: Instant::now(),
             refresh_interval,
             sidebar_collapsed: false,
-            selected_config_scope: ConfigScope::default(),
-            config_scope_projects: Vec::new(),
-            config_scope_has_config: std::collections::HashMap::new(),
-            cached_global_config: None,
-            global_config_error: None,
-            cached_project_config: None,
-            project_config_error: None,
-            config_last_modified: None,
+            config_state: ConfigTabState::new(),
         };
         // Initial data load
         app.refresh_data();
@@ -609,343 +464,85 @@ impl Autom8App {
     }
 
     // ========================================================================
-    // Config Tab State (Config Tab - US-002)
+    // Config Tab State (delegating to ConfigTabState)
     // ========================================================================
 
     /// Returns the currently selected config scope.
     pub fn selected_config_scope(&self) -> &ConfigScope {
-        &self.selected_config_scope
+        self.config_state.selected_scope()
     }
 
     /// Sets the selected config scope.
     pub fn set_selected_config_scope(&mut self, scope: ConfigScope) {
-        self.selected_config_scope = scope;
+        self.config_state.set_selected_scope(scope);
     }
 
     /// Returns the cached list of project names for config scope selection.
     pub fn config_scope_projects(&self) -> &[String] {
-        &self.config_scope_projects
+        self.config_state.scope_projects()
     }
 
     /// Returns whether a project has its own config file.
     pub fn project_has_config(&self, project_name: &str) -> bool {
-        self.config_scope_has_config
-            .get(project_name)
-            .copied()
-            .unwrap_or(false)
+        self.config_state.project_has_config(project_name)
     }
 
     /// Refresh the config scope data (project list and config file status).
-    /// Called when the Config tab is rendered or data needs to be refreshed.
     fn refresh_config_scope_data(&mut self) {
-        // Load project list from config directory
-        if let Ok(projects) = crate::config::list_projects() {
-            self.config_scope_projects = projects;
-
-            // Check which projects have their own config file
-            self.config_scope_has_config.clear();
-            for project in &self.config_scope_projects {
-                if let Ok(config_path) = crate::config::project_config_path_for(project) {
-                    self.config_scope_has_config
-                        .insert(project.clone(), config_path.exists());
-                }
-            }
-        }
-
-        // Load global config when Global scope is selected
-        if self.selected_config_scope.is_global() && self.cached_global_config.is_none() {
-            self.load_global_config();
-        }
-
-        // Load project config when a project scope is selected (US-004)
-        if let ConfigScope::Project(project_name) = &self.selected_config_scope {
-            // Only load if not already cached for this project
-            let needs_load = match &self.cached_project_config {
-                Some((cached_name, _)) => cached_name != project_name,
-                None => self.project_has_config(project_name),
-            };
-            if needs_load {
-                let project_name = project_name.clone();
-                self.load_project_config_for_name(&project_name);
-            }
-        }
-    }
-
-    /// Load the global configuration from disk.
-    /// Called when Global scope is selected in the Config tab.
-    fn load_global_config(&mut self) {
-        match crate::config::load_global_config() {
-            Ok(config) => {
-                self.cached_global_config = Some(config);
-                self.global_config_error = None;
-            }
-            Err(e) => {
-                self.cached_global_config = None;
-                self.global_config_error = Some(format!("Failed to load config: {}", e));
-            }
-        }
+        self.config_state.refresh_scope_data();
     }
 
     /// Returns the cached global config, if loaded.
     pub fn cached_global_config(&self) -> Option<&crate::config::Config> {
-        self.cached_global_config.as_ref()
+        self.config_state.cached_global_config()
     }
 
     /// Returns the global config error, if any.
     pub fn global_config_error(&self) -> Option<&str> {
-        self.global_config_error.as_deref()
+        self.config_state.global_config_error()
     }
 
     /// Returns the cached project config for a specific project, if loaded.
     pub fn cached_project_config(&self, project_name: &str) -> Option<&crate::config::Config> {
-        self.cached_project_config
-            .as_ref()
-            .filter(|(name, _)| name == project_name)
-            .map(|(_, config)| config)
+        self.config_state.cached_project_config(project_name)
     }
 
     /// Returns the project config error, if any.
     pub fn project_config_error(&self) -> Option<&str> {
-        self.project_config_error.as_deref()
-    }
-
-    /// Load the project configuration from disk for a specific project.
-    /// Called when a project scope is selected in the Config tab.
-    fn load_project_config_for_name(&mut self, project_name: &str) {
-        // Check if the project has a config file
-        let config_path = match crate::config::project_config_path_for(project_name) {
-            Ok(path) => path,
-            Err(e) => {
-                self.cached_project_config = None;
-                self.project_config_error = Some(format!("Failed to get config path: {}", e));
-                return;
-            }
-        };
-
-        if !config_path.exists() {
-            // No config file for this project
-            self.cached_project_config = None;
-            self.project_config_error = None;
-            return;
-        }
-
-        // Read and parse the config file
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => match toml::from_str::<crate::config::Config>(&content) {
-                Ok(config) => {
-                    self.cached_project_config = Some((project_name.to_string(), config));
-                    self.project_config_error = None;
-                }
-                Err(e) => {
-                    self.cached_project_config = None;
-                    self.project_config_error = Some(format!("Failed to parse config: {}", e));
-                }
-            },
-            Err(e) => {
-                self.cached_project_config = None;
-                self.project_config_error = Some(format!("Failed to read config: {}", e));
-            }
-        }
+        self.config_state.project_config_error()
     }
 
     /// Create a project config file from the current global configuration.
-    ///
-    /// This copies the global config values to a new project-specific config file.
-    /// After creation, the project is marked as having its own config and the
-    /// view is refreshed to show the config editor (US-005).
-    ///
-    /// # Arguments
-    ///
-    /// * `project_name` - The name of the project to create a config for
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the config was created successfully, or an error message.
     fn create_project_config_from_global(
         &mut self,
         project_name: &str,
     ) -> std::result::Result<(), String> {
-        // Load the current global config
-        let global_config = crate::config::load_global_config()
-            .map_err(|e| format!("Failed to load global config: {}", e))?;
-
-        // Save it to the project's config path
-        crate::config::save_project_config_for(project_name, &global_config)
-            .map_err(|e| format!("Failed to create project config: {}", e))?;
-
-        // Update the state to reflect that this project now has a config
-        self.config_scope_has_config
-            .insert(project_name.to_string(), true);
-
-        // Load the newly created config into cache
-        self.load_project_config_for_name(project_name);
-
-        Ok(())
+        self.config_state.create_project_config_from_global(project_name)
     }
 
     /// Apply boolean field changes to the config and save immediately (US-006).
-    ///
-    /// This method:
-    /// 1. Updates the cached config with the new values
-    /// 2. Saves the config to disk
-    /// 3. Updates the `config_last_modified` timestamp to show the notice
-    ///
-    /// # Arguments
-    ///
-    /// * `is_global` - Whether we're editing global config (true) or project config (false)
-    /// * `project_name` - The project name if editing project config
-    /// * `changes` - Vector of (field, new_value) pairs to apply
     fn apply_config_bool_changes(
         &mut self,
         is_global: bool,
         project_name: Option<&str>,
         changes: &[(ConfigBoolField, bool)],
     ) {
-        if changes.is_empty() {
-            return;
-        }
-
-        if is_global {
-            // Apply changes to global config
-            if let Some(config) = &mut self.cached_global_config {
-                for (field, value) in changes {
-                    match field {
-                        ConfigBoolField::Review => config.review = *value,
-                        ConfigBoolField::Commit => config.commit = *value,
-                        ConfigBoolField::PullRequest => config.pull_request = *value,
-                        ConfigBoolField::Worktree => config.worktree = *value,
-                        ConfigBoolField::WorktreeCleanup => config.worktree_cleanup = *value,
-                    }
-                }
-
-                // Save to disk
-                if let Err(e) = crate::config::save_global_config(config) {
-                    self.global_config_error = Some(format!("Failed to save config: {}", e));
-                } else {
-                    // Update modification timestamp to show notice
-                    self.config_last_modified = Some(Instant::now());
-                }
-            }
-        } else if let Some(project) = project_name {
-            // Apply changes to project config
-            if let Some((cached_project, config)) = &mut self.cached_project_config {
-                if cached_project == project {
-                    for (field, value) in changes {
-                        match field {
-                            ConfigBoolField::Review => config.review = *value,
-                            ConfigBoolField::Commit => config.commit = *value,
-                            ConfigBoolField::PullRequest => config.pull_request = *value,
-                            ConfigBoolField::Worktree => config.worktree = *value,
-                            ConfigBoolField::WorktreeCleanup => config.worktree_cleanup = *value,
-                        }
-                    }
-
-                    // Save to disk
-                    if let Err(e) = crate::config::save_project_config_for(project, config) {
-                        self.project_config_error = Some(format!("Failed to save config: {}", e));
-                    } else {
-                        // Update modification timestamp to show notice
-                        self.config_last_modified = Some(Instant::now());
-                    }
-                }
-            }
-        }
+        self.config_state.apply_bool_changes(is_global, project_name, changes);
     }
 
     /// Apply text field changes to the config (US-007).
-    ///
-    /// Updates the cached config and saves to disk immediately.
-    /// Invalid patterns (missing placeholders) are still saved with a warning shown in the UI.
     fn apply_config_text_changes(
         &mut self,
         is_global: bool,
         project_name: Option<&str>,
         changes: &[(ConfigTextField, String)],
     ) {
-        if changes.is_empty() {
-            return;
-        }
-
-        if is_global {
-            // Apply changes to global config
-            if let Some(config) = &mut self.cached_global_config {
-                for (field, value) in changes {
-                    match field {
-                        ConfigTextField::WorktreePathPattern => {
-                            config.worktree_path_pattern = value.clone()
-                        }
-                    }
-                }
-
-                // Save to disk
-                if let Err(e) = crate::config::save_global_config(config) {
-                    self.global_config_error = Some(format!("Failed to save config: {}", e));
-                } else {
-                    // Update modification timestamp to show notice
-                    self.config_last_modified = Some(Instant::now());
-                }
-            }
-        } else if let Some(project) = project_name {
-            // Apply changes to project config
-            if let Some((cached_project, config)) = &mut self.cached_project_config {
-                if cached_project == project {
-                    for (field, value) in changes {
-                        match field {
-                            ConfigTextField::WorktreePathPattern => {
-                                config.worktree_path_pattern = value.clone()
-                            }
-                        }
-                    }
-
-                    // Save to disk
-                    if let Err(e) = crate::config::save_project_config_for(project, config) {
-                        self.project_config_error = Some(format!("Failed to save config: {}", e));
-                    } else {
-                        // Update modification timestamp to show notice
-                        self.config_last_modified = Some(Instant::now());
-                    }
-                }
-            }
-        }
+        self.config_state.apply_text_changes(is_global, project_name, changes);
     }
 
     /// Reset config to application defaults (US-009).
-    ///
-    /// Replaces the current config with `Config::default()` values:
-    /// - review = true
-    /// - commit = true
-    /// - pull_request = true
-    /// - worktree = true
-    /// - worktree_path_pattern = "{repo}-wt-{branch}"
-    /// - worktree_cleanup = false
-    ///
-    /// The config is saved immediately and the UI updates to reflect the new values.
     fn reset_config_to_defaults(&mut self, is_global: bool, project_name: Option<&str>) {
-        let default_config = crate::config::Config::default();
-
-        if is_global {
-            // Reset global config
-            self.cached_global_config = Some(default_config.clone());
-
-            // Save to disk
-            if let Err(e) = crate::config::save_global_config(&default_config) {
-                self.global_config_error = Some(format!("Failed to save config: {}", e));
-            } else {
-                // Update modification timestamp to show notice
-                self.config_last_modified = Some(Instant::now());
-            }
-        } else if let Some(project) = project_name {
-            // Reset project config
-            self.cached_project_config = Some((project.to_string(), default_config.clone()));
-
-            // Save to disk
-            if let Err(e) = crate::config::save_project_config_for(project, &default_config) {
-                self.project_config_error = Some(format!("Failed to save config: {}", e));
-            } else {
-                // Update modification timestamp to show notice
-                self.config_last_modified = Some(Instant::now());
-            }
-        }
+        self.config_state.reset_to_defaults(is_global, project_name);
     }
 
     /// Returns the currently selected project name.
@@ -2043,7 +1640,7 @@ impl Autom8App {
         // Process the create config action outside of the closure (US-005)
         if let Some(project_name) = editor_actions.create_project_config {
             if let Err(e) = self.create_project_config_from_global(&project_name) {
-                self.project_config_error = Some(e);
+                self.config_state.project_config_error = Some(e);
             }
         }
 
@@ -2096,18 +1693,18 @@ impl Autom8App {
             .show(ui, |ui| {
                 // Global scope item (always first, always has config)
                 if self.render_config_scope_item(ui, ConfigScope::Global, true) {
-                    self.selected_config_scope = ConfigScope::Global;
+                    self.config_state.selected_scope = ConfigScope::Global;
                 }
 
                 ui.add_space(spacing::SM);
 
                 // Project scope items
-                let projects: Vec<String> = self.config_scope_projects.clone();
+                let projects: Vec<String> = self.config_state.scope_projects.clone();
                 for project in projects {
                     let has_config = self.project_has_config(&project);
                     let scope = ConfigScope::Project(project.clone());
                     if self.render_config_scope_item(ui, scope.clone(), has_config) {
-                        self.selected_config_scope = scope;
+                        self.config_state.selected_scope = scope;
                     }
                     ui.add_space(spacing::XS);
                 }
@@ -2123,7 +1720,7 @@ impl Autom8App {
         scope: ConfigScope,
         has_config: bool,
     ) -> bool {
-        let is_selected = self.selected_config_scope == scope;
+        let is_selected = self.config_state.selected_scope == scope;
 
         // Determine display text and styling
         let (display_text, text_color) = match &scope {
@@ -2215,7 +1812,7 @@ impl Autom8App {
         let mut actions = ConfigEditorActions::default();
 
         // Header showing the selected scope with tooltip for config path
-        let (header_text, tooltip_text) = match &self.selected_config_scope {
+        let (header_text, tooltip_text) = match &self.config_state.selected_scope {
             ConfigScope::Global => {
                 actions.is_global = true;
                 let path = crate::config::global_config_path()
@@ -2248,7 +1845,7 @@ impl Autom8App {
         ui.add_space(spacing::MD);
 
         // Render content based on scope
-        match &self.selected_config_scope {
+        match &self.config_state.selected_scope {
             ConfigScope::Global => {
                 let (bool_changes, text_changes, reset_clicked) =
                     self.render_global_config_editor(ui);
@@ -2296,7 +1893,7 @@ impl Autom8App {
         }
 
         // Show "Changes take effect on next run" notice if config was recently modified (US-006)
-        if self.config_last_modified.is_some() {
+        if self.config_state.last_modified.is_some() {
             ui.add_space(spacing::MD);
             ui.label(
                 egui::RichText::new("Changes take effect on next run")
@@ -2439,7 +2036,7 @@ impl Autom8App {
         let mut reset_clicked = false;
 
         // Show error if config failed to load
-        if let Some(error) = &self.global_config_error {
+        if let Some(error) = &self.config_state.global_config_error {
             ui.add_space(spacing::MD);
             ui.label(
                 egui::RichText::new(error)
@@ -2450,7 +2047,7 @@ impl Autom8App {
         }
 
         // Show loading state or editor
-        let Some(config) = &self.cached_global_config else {
+        let Some(config) = &self.config_state.cached_global_config else {
             ui.add_space(spacing::MD);
             ui.label(
                 egui::RichText::new("Loading configuration...")
@@ -2592,7 +2189,7 @@ impl Autom8App {
         let mut reset_clicked = false;
 
         // Show error if config failed to load
-        if let Some(error) = &self.project_config_error {
+        if let Some(error) = &self.config_state.project_config_error {
             ui.add_space(spacing::MD);
             ui.label(
                 egui::RichText::new(error)
@@ -4950,7 +4547,7 @@ mod tests {
     fn test_app_initial_config_scope_is_global() {
         // Verify the app initializes with Global scope selected by default
         let app = Autom8App::new();
-        assert_eq!(*app.selected_config_scope(), ConfigScope::Global);
+        assert_eq!(*app.config_state.selected_scope(), ConfigScope::Global);
     }
 
     #[test]
@@ -4960,12 +4557,12 @@ mod tests {
 
         app.set_selected_config_scope(ConfigScope::Project("my-project".to_string()));
         assert_eq!(
-            *app.selected_config_scope(),
+            *app.config_state.selected_scope(),
             ConfigScope::Project("my-project".to_string())
         );
 
         app.set_selected_config_scope(ConfigScope::Global);
-        assert_eq!(*app.selected_config_scope(), ConfigScope::Global);
+        assert_eq!(*app.config_state.selected_scope(), ConfigScope::Global);
     }
 
     #[test]
@@ -4974,7 +4571,7 @@ mod tests {
         // (may or may not be empty depending on actual config directory contents)
         let app = Autom8App::new();
         // Just verify the field exists and is accessible
-        let _projects = app.config_scope_projects();
+        let _projects = app.config_state.scope_projects();
     }
 
     #[test]
@@ -5012,7 +4609,7 @@ mod tests {
         let app = Autom8App::new();
         // Note: After initial load with Global scope, config may be loaded
         // depending on refresh behavior - test the accessor exists
-        let _ = app.cached_global_config();
+        let _ = app.config_state.cached_global_config();
     }
 
     #[test]
@@ -5029,11 +4626,11 @@ mod tests {
     fn test_us003_load_global_config_populates_cache() {
         // Test that load_global_config() populates the cache
         let mut app = Autom8App::new();
-        app.load_global_config();
+        app.config_state.load_global_config();
 
         // After loading, either config is populated or error is set
         // (depends on whether global config file exists)
-        let has_config = app.cached_global_config().is_some();
+        let has_config = app.config_state.cached_global_config().is_some();
         let has_error = app.global_config_error().is_some();
         assert!(
             has_config || has_error,
@@ -5045,9 +4642,9 @@ mod tests {
     fn test_us003_global_config_fields_accessible() {
         // Test that when global config is loaded, all fields are accessible
         let mut app = Autom8App::new();
-        app.load_global_config();
+        app.config_state.load_global_config();
 
-        if let Some(config) = app.cached_global_config() {
+        if let Some(config) = app.config_state.cached_global_config() {
             // All 6 config fields should be accessible
             let _ = config.review;
             let _ = config.commit;
@@ -5063,7 +4660,7 @@ mod tests {
         // Test that refresh_config_scope_data loads global config when Global scope is selected
         let mut app = Autom8App::new();
         // Clear any existing cached config
-        app.cached_global_config = None;
+        app.config_state.cached_global_config = None;
 
         // Ensure Global scope is selected
         app.set_selected_config_scope(ConfigScope::Global);
@@ -5072,7 +4669,7 @@ mod tests {
         app.refresh_config_scope_data();
 
         // Config should be loaded (or error set)
-        let has_config = app.cached_global_config().is_some();
+        let has_config = app.config_state.cached_global_config().is_some();
         let has_error = app.global_config_error().is_some();
         assert!(
             has_config || has_error,
@@ -5084,11 +4681,11 @@ mod tests {
     fn test_us003_config_scope_change_does_not_reload_if_cached() {
         // Test that switching away and back to Global scope uses cached config
         let mut app = Autom8App::new();
-        app.load_global_config();
+        app.config_state.load_global_config();
 
-        if app.cached_global_config().is_some() {
+        if app.config_state.cached_global_config().is_some() {
             // Get a reference to check later
-            let config_review = app.cached_global_config().map(|c| c.review);
+            let config_review = app.config_state.cached_global_config().map(|c| c.review);
 
             // Switch to a project scope
             app.set_selected_config_scope(ConfigScope::Project("test-project".to_string()));
@@ -5098,11 +4695,11 @@ mod tests {
 
             // Config should still be cached
             assert!(
-                app.cached_global_config().is_some(),
+                app.config_state.cached_global_config().is_some(),
                 "Global config should remain cached"
             );
             assert_eq!(
-                app.cached_global_config().map(|c| c.review),
+                app.config_state.cached_global_config().map(|c| c.review),
                 config_review,
                 "Cached config should have same values"
             );
@@ -5151,7 +4748,7 @@ mod tests {
         // Verify the cached project config is initially None
         let app = Autom8App::new();
         assert!(
-            app.cached_project_config("any-project").is_none(),
+            app.config_state.cached_project_config("any-project").is_none(),
             "Project config should be None initially"
         );
     }
@@ -5161,7 +4758,7 @@ mod tests {
         // Verify error state is initially None
         let app = Autom8App::new();
         assert!(
-            app.project_config_error().is_none(),
+            app.config_state.project_config_error().is_none(),
             "Project config error should be None initially"
         );
     }
@@ -5170,11 +4767,11 @@ mod tests {
     fn test_us004_load_project_config_for_nonexistent_project() {
         // Test that loading config for a nonexistent project doesn't set error
         let mut app = Autom8App::new();
-        app.load_project_config_for_name("nonexistent-project-xyz-123");
+        app.config_state.load_project_config("nonexistent-project-xyz-123");
 
         // Since the config file doesn't exist, it should be None without error
         assert!(
-            app.cached_project_config("nonexistent-project-xyz-123")
+            app.config_state.cached_project_config("nonexistent-project-xyz-123")
                 .is_none(),
             "Config should be None for nonexistent project"
         );
@@ -5186,18 +4783,18 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Manually set a cached config
-        app.cached_project_config =
+        app.config_state.cached_project_config =
             Some(("test-project".to_string(), crate::config::Config::default()));
 
         // Should return Some for matching project
         assert!(
-            app.cached_project_config("test-project").is_some(),
+            app.config_state.cached_project_config("test-project").is_some(),
             "Should return config for matching project"
         );
 
         // Should return None for different project
         assert!(
-            app.cached_project_config("different-project").is_none(),
+            app.config_state.cached_project_config("different-project").is_none(),
             "Should return None for different project"
         );
     }
@@ -5216,9 +4813,9 @@ mod tests {
         config.worktree_cleanup = true;
         config.worktree_path_pattern = "custom-{repo}-{branch}".to_string();
 
-        app.cached_project_config = Some(("test-project".to_string(), config));
+        app.config_state.cached_project_config = Some(("test-project".to_string(), config));
 
-        if let Some(config) = app.cached_project_config("test-project") {
+        if let Some(config) = app.config_state.cached_project_config("test-project") {
             // All 6 config fields should be accessible with correct values
             assert!(config.review);
             assert!(!config.commit);
@@ -5237,8 +4834,8 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Clear any cached config
-        app.cached_project_config = None;
-        app.project_config_error = None;
+        app.config_state.cached_project_config = None;
+        app.config_state.project_config_error = None;
 
         // Select a project scope (that doesn't have a config file)
         app.set_selected_config_scope(ConfigScope::Project("nonexistent-project".to_string()));
@@ -5249,7 +4846,7 @@ mod tests {
         // Since the project doesn't exist, config should still be None
         // and no error (file simply doesn't exist)
         assert!(
-            app.cached_project_config("nonexistent-project").is_none(),
+            app.config_state.cached_project_config("nonexistent-project").is_none(),
             "Config should be None for project without config file"
         );
     }
@@ -5299,22 +4896,22 @@ mod tests {
             review: true,
             ..Default::default()
         };
-        app.cached_project_config = Some(("project-a".to_string(), config_a));
+        app.config_state.cached_project_config = Some(("project-a".to_string(), config_a));
 
         // Verify project-a config is cached
-        assert!(app.cached_project_config("project-a").is_some());
-        assert!(app.cached_project_config("project-b").is_none());
+        assert!(app.config_state.cached_project_config("project-a").is_some());
+        assert!(app.config_state.cached_project_config("project-b").is_none());
 
         // Set cached config for project-b
         let config_b = crate::config::Config {
             review: false,
             ..Default::default()
         };
-        app.cached_project_config = Some(("project-b".to_string(), config_b));
+        app.config_state.cached_project_config = Some(("project-b".to_string(), config_b));
 
         // Verify project-b config is cached and project-a is no longer
-        assert!(app.cached_project_config("project-a").is_none());
-        assert!(app.cached_project_config("project-b").is_some());
+        assert!(app.config_state.cached_project_config("project-a").is_none());
+        assert!(app.config_state.cached_project_config("project-b").is_some());
     }
 
     // ========================================================================
@@ -5328,7 +4925,7 @@ mod tests {
 
         // Add a project that doesn't have a config
         let project_name = "test-project-no-config";
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), false);
 
         // Verify it starts without config
@@ -5338,7 +4935,7 @@ mod tests {
         // the config_scope_has_config should be updated
         // Note: We can't easily test the full flow without file system access,
         // but we can verify the state update logic works
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), true);
         assert!(app.project_has_config(project_name));
     }
@@ -5361,7 +4958,7 @@ mod tests {
     fn test_us005_render_config_right_panel_returns_none_for_global() {
         // Test that render_config_right_panel returns None when global is selected
         let app = Autom8App::new();
-        assert_eq!(app.selected_config_scope, ConfigScope::Global);
+        assert_eq!(app.config_state.selected_scope, ConfigScope::Global);
 
         // The function should return None for global scope since there's no
         // "Create Project Config" button for global
@@ -5376,13 +4973,13 @@ mod tests {
 
         // Set up a project scope without config
         let project_name = "my-project";
-        app.selected_config_scope = ConfigScope::Project(project_name.to_string());
-        app.config_scope_has_config
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), false);
 
         // Verify initial state
         assert!(!app.project_has_config(project_name));
-        assert!(matches!(app.selected_config_scope, ConfigScope::Project(_)));
+        assert!(matches!(app.config_state.selected_scope, ConfigScope::Project(_)));
     }
 
     #[test]
@@ -5391,9 +4988,9 @@ mod tests {
         let mut app = Autom8App::new();
         let project_name = "project-no-config";
 
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), false);
-        app.selected_config_scope = ConfigScope::Project(project_name.to_string());
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
 
         // The header text for projects without config should indicate they use global
         let has_config = app.project_has_config(project_name);
@@ -5409,9 +5006,9 @@ mod tests {
         let mut app = Autom8App::new();
         let project_name = "project-with-config";
 
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), true);
-        app.selected_config_scope = ConfigScope::Project(project_name.to_string());
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
 
         let has_config = app.project_has_config(project_name);
         assert!(has_config);
@@ -5426,21 +5023,21 @@ mod tests {
         let project_name = "test-load-after-create";
 
         // Initially no cached config
-        assert!(app.cached_project_config(project_name).is_none());
+        assert!(app.config_state.cached_project_config(project_name).is_none());
 
         // After successful create_project_config_from_global, it should:
         // 1. Update config_scope_has_config to true
         // 2. Load the config into cache via load_project_config_for_name
 
         // We can simulate the state update part
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), true);
 
         // And simulate loading a config
-        app.cached_project_config =
+        app.config_state.cached_project_config =
             Some((project_name.to_string(), crate::config::Config::default()));
 
-        assert!(app.cached_project_config(project_name).is_some());
+        assert!(app.config_state.cached_project_config(project_name).is_some());
     }
 
     #[test]
@@ -5479,14 +5076,14 @@ mod tests {
         let project_name = "styled-project";
 
         // Initially without config (greyed out)
-        app.config_scope_projects.push(project_name.to_string());
-        app.config_scope_has_config
+        app.config_state.scope_projects.push(project_name.to_string());
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), false);
 
         assert!(!app.project_has_config(project_name));
 
         // After creating config (normal styling)
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert(project_name.to_string(), true);
 
         assert!(app.project_has_config(project_name));
@@ -5527,7 +5124,7 @@ mod tests {
         // Test that config_last_modified is None initially
         let app = Autom8App::new();
         assert!(
-            app.config_last_modified.is_none(),
+            app.config_state.last_modified.is_none(),
             "config_last_modified should be None initially"
         );
     }
@@ -5538,7 +5135,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: true,
             commit: true,
             pull_request: true,
@@ -5552,7 +5149,7 @@ mod tests {
         app.apply_config_bool_changes(true, None, &changes);
 
         // Verify the cached config was updated
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(!config.review, "review should be false after change");
             assert!(config.commit, "commit should remain unchanged");
         } else {
@@ -5566,7 +5163,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: true,
             commit: true,
             pull_request: true,
@@ -5584,7 +5181,7 @@ mod tests {
         app.apply_config_bool_changes(true, None, &changes);
 
         // Verify all changes were applied
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(!config.review, "review should be false");
             assert!(!config.commit, "commit should be false");
             assert!(config.worktree_cleanup, "worktree_cleanup should be true");
@@ -5603,7 +5200,7 @@ mod tests {
         let project_name = "test-project";
 
         // Set up a cached project config
-        app.cached_project_config = Some((
+        app.config_state.cached_project_config = Some((
             project_name.to_string(),
             crate::config::Config {
                 review: true,
@@ -5620,7 +5217,7 @@ mod tests {
         app.apply_config_bool_changes(false, Some(project_name), &changes);
 
         // Verify the cached config was updated
-        if let Some((_, config)) = &app.cached_project_config {
+        if let Some((_, config)) = &app.config_state.cached_project_config {
             assert!(!config.worktree, "worktree should be false after change");
             assert!(config.review, "review should remain unchanged");
         } else {
@@ -5635,7 +5232,7 @@ mod tests {
 
         // Set up a cached global config
         let original_review = true;
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: original_review,
             ..Default::default()
         });
@@ -5645,13 +5242,13 @@ mod tests {
         app.apply_config_bool_changes(true, None, &changes);
 
         // Verify config is unchanged
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert_eq!(config.review, original_review, "review should be unchanged");
         }
 
         // Verify config_last_modified was not set
         assert!(
-            app.config_last_modified.is_none(),
+            app.config_state.last_modified.is_none(),
             "config_last_modified should not be set for empty changes"
         );
     }
@@ -5662,7 +5259,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config with all false
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: false,
             commit: false,
             pull_request: false,
@@ -5682,7 +5279,7 @@ mod tests {
         app.apply_config_bool_changes(true, None, &changes);
 
         // Verify all fields were updated
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(config.review, "review should be true");
             assert!(config.commit, "commit should be true");
             assert!(config.pull_request, "pull_request should be true");
@@ -5701,7 +5298,7 @@ mod tests {
         let wrong_project = "wrong-project";
 
         // Set up a cached project config
-        app.cached_project_config = Some((
+        app.config_state.cached_project_config = Some((
             actual_project.to_string(),
             crate::config::Config {
                 review: true,
@@ -5714,7 +5311,7 @@ mod tests {
         app.apply_config_bool_changes(false, Some(wrong_project), &changes);
 
         // Verify config is unchanged (wrong project name)
-        if let Some((_, config)) = &app.cached_project_config {
+        if let Some((_, config)) = &app.config_state.cached_project_config {
             assert!(
                 config.review,
                 "review should be unchanged when project name doesn't match"
@@ -5727,7 +5324,7 @@ mod tests {
         // Test toggling a value from false to true
         let mut app = Autom8App::new();
 
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: false,
             ..Default::default()
         });
@@ -5735,7 +5332,7 @@ mod tests {
         let changes = vec![(ConfigBoolField::Review, true)];
         app.apply_config_bool_changes(true, None, &changes);
 
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(config.review, "review should be toggled to true");
         }
     }
@@ -5745,7 +5342,7 @@ mod tests {
         // Test toggling a value from true to false
         let mut app = Autom8App::new();
 
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             commit: true,
             ..Default::default()
         });
@@ -5753,7 +5350,7 @@ mod tests {
         let changes = vec![(ConfigBoolField::Commit, false)];
         app.apply_config_bool_changes(true, None, &changes);
 
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(!config.commit, "commit should be toggled to false");
         }
     }
@@ -5811,7 +5408,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
             ..Default::default()
         });
@@ -5824,7 +5421,7 @@ mod tests {
         app.apply_config_text_changes(true, None, &changes);
 
         // Verify the cached config was updated
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert_eq!(
                 config.worktree_path_pattern, "{repo}-custom-{branch}",
                 "worktree_path_pattern should be updated"
@@ -5841,7 +5438,7 @@ mod tests {
         let project_name = "test-project";
 
         // Set up a cached project config
-        app.cached_project_config = Some((
+        app.config_state.cached_project_config = Some((
             project_name.to_string(),
             crate::config::Config {
                 worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
@@ -5857,7 +5454,7 @@ mod tests {
         app.apply_config_text_changes(false, Some(project_name), &changes);
 
         // Verify the cached config was updated
-        if let Some((_, config)) = &app.cached_project_config {
+        if let Some((_, config)) = &app.config_state.cached_project_config {
             assert_eq!(
                 config.worktree_path_pattern, "custom-{repo}-{branch}",
                 "worktree_path_pattern should be updated"
@@ -5874,7 +5471,7 @@ mod tests {
 
         // Set up a cached global config
         let original_pattern = "{repo}-wt-{branch}";
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             worktree_path_pattern: original_pattern.to_string(),
             ..Default::default()
         });
@@ -5884,7 +5481,7 @@ mod tests {
         app.apply_config_text_changes(true, None, &changes);
 
         // Verify config is unchanged
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert_eq!(
                 config.worktree_path_pattern, original_pattern,
                 "worktree_path_pattern should be unchanged"
@@ -5893,7 +5490,7 @@ mod tests {
 
         // Verify config_last_modified was not set
         assert!(
-            app.config_last_modified.is_none(),
+            app.config_state.last_modified.is_none(),
             "config_last_modified should not be set for empty changes"
         );
     }
@@ -5906,7 +5503,7 @@ mod tests {
         let wrong_project = "wrong-project";
 
         // Set up a cached project config
-        app.cached_project_config = Some((
+        app.config_state.cached_project_config = Some((
             actual_project.to_string(),
             crate::config::Config {
                 worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
@@ -5919,7 +5516,7 @@ mod tests {
         app.apply_config_text_changes(false, Some(wrong_project), &changes);
 
         // Verify config is unchanged (wrong project name)
-        if let Some((_, config)) = &app.cached_project_config {
+        if let Some((_, config)) = &app.config_state.cached_project_config {
             assert_eq!(
                 config.worktree_path_pattern, "{repo}-wt-{branch}",
                 "worktree_path_pattern should be unchanged when project name doesn't match"
@@ -5990,7 +5587,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
             ..Default::default()
         });
@@ -6004,7 +5601,7 @@ mod tests {
         app.apply_config_text_changes(true, None, &changes);
 
         // Verify the invalid pattern was still saved
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert_eq!(
                 config.worktree_path_pattern, invalid_pattern,
                 "Invalid pattern should still be saved"
@@ -6020,10 +5617,10 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Initially no last modified
-        assert!(app.config_last_modified.is_none());
+        assert!(app.config_state.last_modified.is_none());
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config::default());
+        app.config_state.cached_global_config = Some(crate::config::Config::default());
 
         // Apply a text change
         let changes = vec![(
@@ -6054,7 +5651,7 @@ mod tests {
         let _method_exists = Autom8App::render_config_bool_field_with_disabled;
 
         // app should be created successfully
-        assert!(app.cached_global_config.is_none());
+        assert!(app.config_state.cached_global_config.is_none());
     }
 
     /// Test that the original render_config_bool_field delegates to the new method.
@@ -6066,7 +5663,7 @@ mod tests {
 
         // This is a compile-time verification that the method signature is preserved
         let app = Autom8App::new();
-        assert!(app.cached_global_config.is_none());
+        assert!(app.config_state.cached_global_config.is_none());
     }
 
     /// Test that toggle_switch_disabled exists and can be constructed.
@@ -6227,7 +5824,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config with both commit and pull_request enabled
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: true,
             commit: true,
             pull_request: true,
@@ -6244,7 +5841,7 @@ mod tests {
         app.apply_config_bool_changes(true, None, &changes);
 
         // Verify both fields were updated in the cached config
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(!config.commit, "commit should be false");
             assert!(
                 !config.pull_request,
@@ -6276,7 +5873,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config with non-default values
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: false,
             commit: false,
             pull_request: false,
@@ -6289,7 +5886,7 @@ mod tests {
         app.reset_config_to_defaults(true, None);
 
         // Verify config was reset to defaults
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert!(config.review, "review should be true (default)");
             assert!(config.commit, "commit should be true (default)");
             assert!(config.pull_request, "pull_request should be true (default)");
@@ -6314,7 +5911,7 @@ mod tests {
         let project_name = "test-project";
 
         // Set up a cached project config with non-default values
-        app.cached_project_config = Some((
+        app.config_state.cached_project_config = Some((
             project_name.to_string(),
             crate::config::Config {
                 review: false,
@@ -6330,7 +5927,7 @@ mod tests {
         app.reset_config_to_defaults(false, Some(project_name));
 
         // Verify config was reset to defaults
-        if let Some((cached_name, config)) = &app.cached_project_config {
+        if let Some((cached_name, config)) = &app.config_state.cached_project_config {
             assert_eq!(
                 cached_name, project_name,
                 "project name should be preserved"
@@ -6358,8 +5955,8 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a cached global config
-        app.cached_global_config = Some(crate::config::Config::default());
-        app.config_last_modified = None;
+        app.config_state.cached_global_config = Some(crate::config::Config::default());
+        app.config_state.last_modified = None;
 
         // Reset to defaults
         app.reset_config_to_defaults(true, None);
@@ -6367,7 +5964,7 @@ mod tests {
         // Note: config_last_modified may not be set if save fails (no file system)
         // but the config should still be reset in memory
         assert!(
-            app.cached_global_config.is_some(),
+            app.config_state.cached_global_config.is_some(),
             "cached config should exist after reset"
         );
     }
@@ -6426,7 +6023,7 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up a config with ALL fields set to non-default values
-        app.cached_global_config = Some(crate::config::Config {
+        app.config_state.cached_global_config = Some(crate::config::Config {
             review: false,                                                  // default is true
             commit: false,                                                  // default is true
             pull_request: false,                                            // default is true
@@ -6440,7 +6037,7 @@ mod tests {
 
         // All fields should now match Config::default()
         let default = crate::config::Config::default();
-        if let Some(config) = &app.cached_global_config {
+        if let Some(config) = &app.config_state.cached_global_config {
             assert_eq!(config.review, default.review);
             assert_eq!(config.commit, default.commit);
             assert_eq!(config.pull_request, default.pull_request);
@@ -6620,7 +6217,7 @@ mod tests {
         let app = Autom8App::new();
         // Initially empty before first refresh
         assert!(
-            app.config_scope_projects.is_empty(),
+            app.config_state.scope_projects.is_empty(),
             "Project list should be empty before refresh"
         );
     }
@@ -6630,7 +6227,7 @@ mod tests {
         // Test that config_scope_has_config starts empty before refresh
         let app = Autom8App::new();
         assert!(
-            app.config_scope_has_config.is_empty(),
+            app.config_state.scope_has_config.is_empty(),
             "Config status map should be empty before refresh"
         );
     }
@@ -6646,11 +6243,11 @@ mod tests {
         // After refresh, project list should be valid (may be empty if no projects exist)
         // The key test is that it doesn't panic and returns valid data
         // If projects exist, the config_scope_has_config map should also be populated
-        if !app.config_scope_projects.is_empty() {
+        if !app.config_state.scope_projects.is_empty() {
             // Each project should have an entry in the has_config map
-            for project in &app.config_scope_projects {
+            for project in &app.config_state.scope_projects {
                 assert!(
-                    app.config_scope_has_config.contains_key(project),
+                    app.config_state.scope_has_config.contains_key(project),
                     "Each project should have a config status entry"
                 );
             }
@@ -6681,9 +6278,9 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up test data
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert("project-with-config".to_string(), true);
-        app.config_scope_has_config
+        app.config_state.scope_has_config
             .insert("project-without-config".to_string(), false);
 
         // Test retrieval
