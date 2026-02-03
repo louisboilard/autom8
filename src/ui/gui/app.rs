@@ -174,6 +174,21 @@ const CONTEXT_MENU_ARROW_SIZE: f32 = 8.0;
 /// Offset from cursor for menu positioning.
 const CONTEXT_MENU_CURSOR_OFFSET: f32 = 2.0;
 
+/// Horizontal gap between submenu and parent menu.
+const CONTEXT_MENU_SUBMENU_GAP: f32 = 2.0;
+
+/// Response from rendering a context menu item.
+///
+/// Contains information about user interaction with the item.
+struct ContextMenuItemResponse {
+    /// Whether the item was clicked.
+    clicked: bool,
+    /// Whether the item is currently hovered.
+    hovered: bool,
+    /// The screen-space rect of the item (for positioning submenus).
+    rect: Rect,
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1950,6 +1965,7 @@ impl Autom8App {
     /// This method renders the context menu as a floating panel at the stored position.
     /// The menu is rendered on top of all other content using `Order::Foreground`.
     /// Handles click-outside-to-close and menu item interactions.
+    /// Also handles submenu rendering for items like Resume and Clean (US-005, US-006).
     fn render_context_menu(&mut self, ctx: &egui::Context) {
         // Early return if no context menu is open
         let menu_state = match &self.context_menu {
@@ -1999,11 +2015,14 @@ impl Autom8App {
         let mut should_close = false;
         let mut selected_action: Option<ContextMenuAction> = None;
 
+        // Track submenu hover state: (submenu_id, items, trigger_rect)
+        let mut hovered_submenu: Option<(String, Vec<ContextMenuItem>, Rect)> = None;
+
         // Check for click outside the menu
         let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
         let primary_clicked = ctx.input(|i| i.pointer.primary_clicked());
 
-        // Render the menu using an Area overlay
+        // Render the main menu using an Area overlay
         egui::Area::new(egui::Id::new("context_menu"))
             .order(Order::Foreground)
             .fixed_pos(menu_pos)
@@ -2024,9 +2043,9 @@ impl Autom8App {
                                     action,
                                     enabled,
                                 } => {
-                                    if self.render_context_menu_item(ui, label, *enabled, false)
-                                        && *enabled
-                                    {
+                                    let response =
+                                        self.render_context_menu_item(ui, label, *enabled, false);
+                                    if response.clicked {
                                         selected_action = Some(action.clone());
                                         should_close = true;
                                     }
@@ -2046,13 +2065,17 @@ impl Autom8App {
                                 }
                                 ContextMenuItem::Submenu {
                                     label,
-                                    id: _,
+                                    id,
                                     enabled,
-                                    items: _,
+                                    items,
                                 } => {
                                     // Render submenu trigger with arrow indicator
-                                    if self.render_context_menu_item(ui, label, *enabled, true) {
-                                        // TODO: Open submenu on hover (US-006)
+                                    let response =
+                                        self.render_context_menu_item(ui, label, *enabled, true);
+                                    if response.hovered && *enabled && !items.is_empty() {
+                                        // Track this submenu as hovered for rendering
+                                        hovered_submenu =
+                                            Some((id.clone(), items.clone(), response.rect));
                                     }
                                 }
                             }
@@ -2060,11 +2083,152 @@ impl Autom8App {
                     });
             });
 
-        // Check if click was outside the menu area
+        // Calculate the main menu rect for click-outside detection
+        let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(menu_width, menu_height));
+
+        // Track submenu rect for click-outside detection
+        let mut submenu_rect: Option<Rect> = None;
+
+        // Render submenu if one is hovered or already open
+        // Priority: currently hovered submenu > previously open submenu
+        let submenu_to_render = if let Some((id, items, trigger_rect)) = hovered_submenu {
+            // Update the open_submenu state with the hovered submenu
+            if let Some(menu) = &mut self.context_menu {
+                let submenu_pos = Pos2::new(
+                    menu_pos.x + menu_width + CONTEXT_MENU_SUBMENU_GAP,
+                    trigger_rect.min.y,
+                );
+                menu.open_submenu(id.clone(), submenu_pos);
+            }
+            Some((items, trigger_rect))
+        } else if let (Some(open_id), Some(open_pos)) =
+            (&menu_state.open_submenu, menu_state.submenu_position)
+        {
+            // Find the items for the currently open submenu
+            let items = menu_state.items.iter().find_map(|item| {
+                if let ContextMenuItem::Submenu { id, items, .. } = item {
+                    if id == open_id {
+                        return Some(items.clone());
+                    }
+                }
+                None
+            });
+            // Find the trigger rect (approximate from stored position)
+            let trigger_rect = Rect::from_min_size(
+                Pos2::new(menu_pos.x, open_pos.y),
+                Vec2::new(menu_width, CONTEXT_MENU_ITEM_HEIGHT),
+            );
+            items.map(|i| (i, trigger_rect))
+        } else {
+            // No submenu to render, close any open submenu
+            if let Some(menu) = &mut self.context_menu {
+                menu.close_submenu();
+            }
+            None
+        };
+
+        // Render the submenu if we have one
+        if let Some((submenu_items, trigger_rect)) = submenu_to_render {
+            if !submenu_items.is_empty() {
+                // Calculate submenu dimensions
+                let submenu_item_count = submenu_items
+                    .iter()
+                    .filter(|item| !matches!(item, ContextMenuItem::Separator))
+                    .count();
+                let submenu_separator_count = submenu_items
+                    .iter()
+                    .filter(|item| matches!(item, ContextMenuItem::Separator))
+                    .count();
+                let submenu_height = (submenu_item_count as f32 * CONTEXT_MENU_ITEM_HEIGHT)
+                    + (submenu_separator_count as f32 * (spacing::SM + 1.0))
+                    + (CONTEXT_MENU_PADDING_V * 2.0);
+
+                // Position submenu to the right of the main menu
+                let mut submenu_pos = Pos2::new(
+                    menu_pos.x + menu_width + CONTEXT_MENU_SUBMENU_GAP,
+                    trigger_rect.min.y - CONTEXT_MENU_PADDING_V,
+                );
+
+                // Ensure submenu doesn't go off the right edge
+                if submenu_pos.x + menu_width > screen_rect.max.x - spacing::SM {
+                    // Position to the left of the main menu instead
+                    submenu_pos.x = menu_pos.x - menu_width - CONTEXT_MENU_SUBMENU_GAP;
+                }
+
+                // Ensure submenu doesn't go off the bottom edge
+                if submenu_pos.y + submenu_height > screen_rect.max.y - spacing::SM {
+                    submenu_pos.y = screen_rect.max.y - submenu_height - spacing::SM;
+                }
+
+                // Ensure submenu doesn't go off the top edge
+                submenu_pos.y = submenu_pos.y.max(spacing::SM);
+
+                // Store submenu rect for click-outside detection
+                submenu_rect = Some(Rect::from_min_size(
+                    submenu_pos,
+                    Vec2::new(menu_width, submenu_height),
+                ));
+
+                // Render the submenu
+                egui::Area::new(egui::Id::new("context_submenu"))
+                    .order(Order::Foreground)
+                    .fixed_pos(submenu_pos)
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(colors::SURFACE)
+                            .rounding(Rounding::same(rounding::CARD))
+                            .shadow(crate::ui::gui::theme::shadow::elevated())
+                            .stroke(Stroke::new(1.0, colors::BORDER))
+                            .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
+                            .show(ui, |ui| {
+                                ui.set_min_width(menu_width);
+
+                                for item in &submenu_items {
+                                    match item {
+                                        ContextMenuItem::Action {
+                                            label,
+                                            action,
+                                            enabled,
+                                        } => {
+                                            let response = self.render_context_menu_item(
+                                                ui, label, *enabled, false,
+                                            );
+                                            if response.clicked {
+                                                selected_action = Some(action.clone());
+                                                should_close = true;
+                                            }
+                                        }
+                                        ContextMenuItem::Separator => {
+                                            ui.add_space(spacing::XS);
+                                            let rect = ui.available_rect_before_wrap();
+                                            let separator_rect = Rect::from_min_size(
+                                                rect.min,
+                                                Vec2::new(menu_width, 1.0),
+                                            );
+                                            ui.painter().rect_filled(
+                                                separator_rect,
+                                                Rounding::ZERO,
+                                                colors::SEPARATOR,
+                                            );
+                                            ui.allocate_space(Vec2::new(menu_width, 1.0));
+                                            ui.add_space(spacing::XS);
+                                        }
+                                        ContextMenuItem::Submenu { .. } => {
+                                            // Nested submenus not supported (not needed for current use cases)
+                                        }
+                                    }
+                                }
+                            });
+                    });
+            }
+        }
+
+        // Check if click was outside both the menu and submenu areas
         if primary_clicked {
             if let Some(pos) = pointer_pos {
-                let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(menu_width, menu_height));
-                if !menu_rect.contains(pos) {
+                let in_menu = menu_rect.contains(pos);
+                let in_submenu = submenu_rect.map(|r| r.contains(pos)).unwrap_or(false);
+                if !in_menu && !in_submenu {
                     should_close = true;
                 }
             }
@@ -2113,14 +2277,14 @@ impl Autom8App {
 
     /// Render a single context menu item.
     ///
-    /// Returns true if the item was clicked.
+    /// Returns a `ContextMenuItemResponse` with click/hover state and item rect.
     fn render_context_menu_item(
         &self,
         ui: &mut egui::Ui,
         label: &str,
         enabled: bool,
         has_submenu: bool,
-    ) -> bool {
+    ) -> ContextMenuItemResponse {
         let item_size = Vec2::new(ui.available_width(), CONTEXT_MENU_ITEM_HEIGHT);
         let (rect, response) = ui.allocate_exact_size(item_size, Sense::click());
 
@@ -2175,7 +2339,18 @@ impl Autom8App {
             );
         }
 
-        response.clicked() && enabled
+        // Convert local rect to screen rect for submenu positioning
+        let screen_rect = ui.clip_rect();
+        let screen_item_rect = Rect::from_min_max(
+            Pos2::new(screen_rect.min.x, rect.min.y),
+            Pos2::new(screen_rect.min.x + ui.available_width(), rect.max.y),
+        );
+
+        ContextMenuItemResponse {
+            clicked: response.clicked() && enabled,
+            hovered: is_hovered,
+            rect: screen_item_rect,
+        }
     }
 
     /// Render the sidebar toggle button in the title bar.
