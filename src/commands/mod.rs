@@ -33,7 +33,10 @@ mod resume;
 mod run;
 mod status;
 
-pub use clean::{clean_command, CleanOptions, CleanupSummary, SkippedSession};
+pub use clean::{
+    clean_command, clean_orphaned_direct, clean_worktrees_direct, format_bytes_display,
+    CleanOptions, CleanupSummary, DirectCleanOptions, SkippedSession,
+};
 pub use config::{
     config_display_command, config_reset_command, config_set_command, ConfigScope, ConfigSubcommand,
 };

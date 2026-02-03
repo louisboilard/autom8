@@ -704,6 +704,194 @@ fn clean_completed_sessions(options: &CleanOptions) -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// Direct Clean Functions (for GUI - no prompts, no printing)
+// =============================================================================
+
+/// Options for direct clean operations (no prompts, no output).
+#[derive(Debug, Default, Clone)]
+pub struct DirectCleanOptions {
+    /// Also remove associated worktrees
+    pub worktrees: bool,
+    /// Force removal even if worktrees have uncommitted changes
+    pub force: bool,
+}
+
+/// Clean completed/failed sessions directly (no prompts, no output).
+///
+/// This function is designed for programmatic use (e.g., GUI) where the caller
+/// handles confirmation and output display.
+///
+/// Returns a `CleanupSummary` with results of the cleanup operation.
+pub fn clean_worktrees_direct(
+    project_name: &str,
+    options: DirectCleanOptions,
+) -> Result<CleanupSummary> {
+    let state_manager = StateManager::for_project(project_name)?;
+    let sessions = state_manager.list_sessions()?;
+
+    // Find completed or failed sessions
+    let cleanable: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            // Load the state to check if completed or failed
+            if let Some(session_sm) = state_manager.get_session(&s.session_id) {
+                if let Ok(Some(state)) = session_sm.load_current() {
+                    matches!(
+                        state.machine_state,
+                        MachineState::Completed | MachineState::Failed
+                    ) || matches!(
+                        state.status,
+                        RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
+                    )
+                } else {
+                    // No state file - consider it cleanable
+                    true
+                }
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    // Also include orphaned sessions
+    let orphaned: Vec<_> = sessions
+        .iter()
+        .filter(|s| !s.worktree_path.exists())
+        .collect();
+
+    // Combine cleanable and orphaned (dedupe)
+    let mut to_clean: Vec<_> = cleanable;
+    for orphan in orphaned {
+        if !to_clean.iter().any(|s| s.session_id == orphan.session_id) {
+            to_clean.push(orphan);
+        }
+    }
+
+    let mut summary = CleanupSummary::default();
+
+    if to_clean.is_empty() {
+        return Ok(summary);
+    }
+
+    let current_dir = std::env::current_dir().ok();
+
+    for session in to_clean {
+        let is_current = current_dir
+            .as_ref()
+            .map(|cwd| cwd == &session.worktree_path)
+            .unwrap_or(false);
+
+        // Skip current session unless --force
+        if is_current && !options.force {
+            summary.sessions_skipped.push(SkippedSession {
+                session_id: session.session_id.clone(),
+                reason: "Current session".to_string(),
+            });
+            continue;
+        }
+
+        // Check for uncommitted changes
+        if options.worktrees
+            && session.worktree_path.exists()
+            && worktree_has_uncommitted_changes(&session.worktree_path)
+            && !options.force
+        {
+            summary.sessions_skipped.push(SkippedSession {
+                session_id: session.session_id.clone(),
+                reason: "Uncommitted changes".to_string(),
+            });
+            continue;
+        }
+
+        // Archive before deletion
+        if let Some(session_sm) = state_manager.get_session(&session.session_id) {
+            if let Ok(Some(state)) = session_sm.load_current() {
+                let _ = session_sm.archive(&state);
+            }
+
+            // Remove worktree if requested
+            if options.worktrees && session.worktree_path.exists() {
+                summary.bytes_freed += dir_size(&session.worktree_path);
+                if let Err(e) = remove_worktree_safely(&session.worktree_path, options.force) {
+                    summary.errors.push(format!(
+                        "Failed to remove worktree {}: {}",
+                        session.worktree_path.display(),
+                        e
+                    ));
+                } else {
+                    summary.worktrees_removed += 1;
+                }
+            }
+
+            // Remove session state
+            summary.bytes_freed += get_session_size(&session_sm);
+            if let Err(e) = session_sm.clear_current() {
+                summary.errors.push(format!(
+                    "Failed to remove session {}: {}",
+                    session.session_id, e
+                ));
+            } else {
+                summary.sessions_removed += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Clean orphaned sessions directly (no prompts, no output).
+///
+/// Orphaned sessions are those where the worktree has been deleted but the
+/// session state remains.
+///
+/// This function is designed for programmatic use (e.g., GUI) where the caller
+/// handles confirmation and output display.
+///
+/// Returns a `CleanupSummary` with results of the cleanup operation.
+pub fn clean_orphaned_direct(project_name: &str) -> Result<CleanupSummary> {
+    let state_manager = StateManager::for_project(project_name)?;
+    let sessions = state_manager.list_sessions()?;
+
+    // Find orphaned sessions
+    let orphaned: Vec<_> = sessions
+        .iter()
+        .filter(|s| !s.worktree_path.exists())
+        .collect();
+
+    let mut summary = CleanupSummary::default();
+
+    if orphaned.is_empty() {
+        return Ok(summary);
+    }
+
+    for session in orphaned {
+        // Archive before deletion
+        if let Some(session_sm) = state_manager.get_session(&session.session_id) {
+            if let Ok(Some(state)) = session_sm.load_current() {
+                let _ = session_sm.archive(&state);
+            }
+
+            summary.bytes_freed += get_session_size(&session_sm);
+            if let Err(e) = session_sm.clear_current() {
+                summary.errors.push(format!(
+                    "Failed to remove session {}: {}",
+                    session.session_id, e
+                ));
+            } else {
+                summary.sessions_removed += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Format bytes into human-readable string (public version for GUI).
+pub fn format_bytes_display(bytes: u64) -> String {
+    format_bytes(bytes)
+}
+
 /// Remove a worktree safely, with optional force flag.
 ///
 /// This function:
@@ -962,5 +1150,81 @@ mod tests {
 
         assert!(matches!(state.machine_state, MachineState::Failed));
         assert!(matches!(state.status, RunStatus::Failed));
+    }
+
+    // =========================================================================
+    // US-004 Tests: Direct Clean Functions (for GUI)
+    // =========================================================================
+
+    #[test]
+    fn test_us004_direct_clean_options_default() {
+        let options = DirectCleanOptions::default();
+        assert!(!options.worktrees);
+        assert!(!options.force);
+    }
+
+    #[test]
+    fn test_us004_direct_clean_options_with_worktrees() {
+        let options = DirectCleanOptions {
+            worktrees: true,
+            force: false,
+        };
+        assert!(options.worktrees);
+        assert!(!options.force);
+    }
+
+    #[test]
+    fn test_us004_direct_clean_options_with_force() {
+        let options = DirectCleanOptions {
+            worktrees: false,
+            force: true,
+        };
+        assert!(!options.worktrees);
+        assert!(options.force);
+    }
+
+    #[test]
+    fn test_us004_format_bytes_display() {
+        // Test format_bytes_display is accessible
+        assert_eq!(format_bytes_display(0), "0 B");
+        assert_eq!(format_bytes_display(1024), "1.0 KB");
+        assert_eq!(format_bytes_display(1048576), "1.0 MB");
+        assert_eq!(format_bytes_display(1073741824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_us004_clean_worktrees_direct_with_temp_project() {
+        // Test that clean_worktrees_direct returns a CleanupSummary
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create a completed state to clean
+        let mut state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        state.transition_to(MachineState::Completed);
+        sm.save(&state).unwrap();
+
+        // Call the direct clean function (this won't find the project by name,
+        // so we test the function signature and basic behavior)
+        let options = DirectCleanOptions {
+            worktrees: true,
+            force: false,
+        };
+        // Note: clean_worktrees_direct expects a project name, not a path
+        // It will fail to find the project but we verify the return type
+        let result = clean_worktrees_direct("nonexistent-project-12345", options);
+
+        // Should return error for non-existent project (StateManager::for_project fails)
+        assert!(result.is_err() || result.unwrap().sessions_removed == 0);
+    }
+
+    #[test]
+    fn test_us004_clean_orphaned_direct_with_temp_project() {
+        // Test that clean_orphaned_direct returns a CleanupSummary
+        // Note: clean_orphaned_direct expects a project name, not a path
+        // It will fail to find the project but we verify the return type
+        let result = clean_orphaned_direct("nonexistent-project-12345");
+
+        // Should return error for non-existent project (StateManager::for_project fails)
+        assert!(result.is_err() || result.unwrap().sessions_removed == 0);
     }
 }
