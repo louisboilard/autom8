@@ -106,7 +106,10 @@ fn resume_specific_session(state_manager: &StateManager, session_id: &str) -> Re
     }
     let state = state.unwrap();
 
-    if state.status != RunStatus::Running && state.status != RunStatus::Failed {
+    if state.status != RunStatus::Running
+        && state.status != RunStatus::Failed
+        && state.status != RunStatus::Interrupted
+    {
         return Err(Autom8Error::StateError(format!(
             "Session '{}' has no resumable run (status: {:?})",
             session_id, state.status

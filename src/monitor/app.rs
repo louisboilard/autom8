@@ -1553,6 +1553,7 @@ impl MonitorApp {
                     crate::state::RunStatus::Completed => ("✓", COLOR_SUCCESS),
                     crate::state::RunStatus::Failed => ("✗", COLOR_ERROR),
                     crate::state::RunStatus::Running => ("●", COLOR_WARNING),
+                    crate::state::RunStatus::Interrupted => ("⚠", COLOR_WARNING),
                 };
 
                 // Format date/time
@@ -1663,6 +1664,7 @@ impl MonitorApp {
             crate::state::RunStatus::Completed => ("Completed", COLOR_SUCCESS),
             crate::state::RunStatus::Failed => ("Failed", COLOR_ERROR),
             crate::state::RunStatus::Running => ("Running", COLOR_WARNING),
+            crate::state::RunStatus::Interrupted => ("Interrupted", COLOR_WARNING),
         };
 
         // Duration

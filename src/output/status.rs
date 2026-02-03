@@ -46,6 +46,7 @@ pub fn print_global_status(statuses: &[crate::config::ProjectStatus]) {
             let status_indicator = match status.run_status {
                 Some(RunStatus::Running) => format!("{YELLOW}[running]{RESET}"),
                 Some(RunStatus::Failed) => format!("{RED}[failed]{RESET}"),
+                Some(RunStatus::Interrupted) => format!("{YELLOW}[interrupted]{RESET}"),
                 Some(RunStatus::Completed) => String::new(),
                 None => String::new(),
             };
@@ -126,6 +127,7 @@ pub fn print_project_tree(projects: &[crate::config::ProjectTreeInfo]) {
         let (status_indicator, status_color) = match project.run_status {
             Some(RunStatus::Running) => ("[running]", YELLOW),
             Some(RunStatus::Failed) => ("[failed]", RED),
+            Some(RunStatus::Interrupted) => ("[interrupted]", YELLOW),
             Some(RunStatus::Completed) if project.incomplete_spec_count > 0 => {
                 ("[incomplete]", CYAN)
             }
@@ -198,6 +200,7 @@ pub fn print_project_description(desc: &crate::config::ProjectDescription) {
     let status_indicator = match desc.run_status {
         Some(RunStatus::Running) => format!("{YELLOW}[running]{RESET}"),
         Some(RunStatus::Failed) => format!("{RED}[failed]{RESET}"),
+        Some(RunStatus::Interrupted) => format!("{YELLOW}[interrupted]{RESET}"),
         Some(RunStatus::Completed) => format!("{GREEN}[completed]{RESET}"),
         None => format!("{GRAY}[idle]{RESET}"),
     };
