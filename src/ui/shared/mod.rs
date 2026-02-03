@@ -8,7 +8,9 @@
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
 use crate::spec::Spec;
-use crate::state::{IterationStatus, LiveState, RunState, RunStatus, SessionMetadata, StateManager};
+use crate::state::{
+    IterationStatus, LiveState, RunState, RunStatus, SessionMetadata, StateManager,
+};
 use crate::worktree::MAIN_SESSION_ID;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -264,10 +266,7 @@ pub fn load_ui_data(project_filter: Option<&str>) -> Result<UiData> {
     };
 
     // Collect project data including active runs and progress
-    let projects: Vec<ProjectData> = filtered
-        .iter()
-        .map(|info| load_project_data(info))
-        .collect();
+    let projects: Vec<ProjectData> = filtered.iter().map(load_project_data).collect();
 
     // Collect sessions for Active Runs view
     let sessions = load_sessions(&filtered, project_filter);
@@ -318,7 +317,10 @@ fn load_project_data(info: &ProjectTreeInfo) -> ProjectData {
 ///
 /// Collects all running sessions across all projects, filtering out
 /// stale sessions (where the worktree no longer exists).
-fn load_sessions(project_infos: &[ProjectTreeInfo], project_filter: Option<&str>) -> Vec<SessionData> {
+fn load_sessions(
+    project_infos: &[ProjectTreeInfo],
+    project_filter: Option<&str>,
+) -> Vec<SessionData> {
     let mut sessions: Vec<SessionData> = Vec::new();
 
     // Get all project names to check
@@ -429,7 +431,8 @@ pub fn load_run_history(
     include_full_state: bool,
 ) -> Result<RunHistoryData> {
     let mut history: Vec<RunHistoryEntry> = Vec::new();
-    let mut run_states: std::collections::HashMap<String, RunState> = std::collections::HashMap::new();
+    let mut run_states: std::collections::HashMap<String, RunState> =
+        std::collections::HashMap::new();
 
     // Determine which projects to load history from
     let project_names: Vec<String> = if let Some(ref filter) = options.project_filter {
@@ -503,7 +506,10 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
     let archived = sm.list_archived()?;
 
     for run in archived {
-        history.push(RunHistoryEntry::from_run_state(project_name.to_string(), &run));
+        history.push(RunHistoryEntry::from_run_state(
+            project_name.to_string(),
+            &run,
+        ));
     }
 
     // Already sorted by list_archived, but ensure newest first

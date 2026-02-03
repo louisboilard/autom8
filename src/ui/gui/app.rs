@@ -341,6 +341,12 @@ pub struct Autom8App {
     sidebar_collapsed: bool,
 }
 
+impl Default for Autom8App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Autom8App {
     /// Create a new application instance.
     pub fn new() -> Self {
