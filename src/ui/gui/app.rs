@@ -478,10 +478,35 @@ fn format_project_description_as_text(desc: &crate::config::ProjectDescription) 
 }
 
 /// Format a single spec summary as plain text lines.
+///
+/// Shows full details (with user stories) only for the active spec.
+/// All other specs (including when no spec is active) show condensed view.
 fn format_spec_summary_as_text(spec: &crate::config::SpecSummary) -> Vec<String> {
     let mut lines = Vec::new();
 
-    lines.push(format!("━━━ {}", spec.filename));
+    // Show "(Active)" indicator for the active spec
+    let active_label = if spec.is_active { " (Active)" } else { "" };
+    lines.push(format!("━━━ {}{}", spec.filename, active_label));
+
+    // Only show full details for the active spec
+    // All other specs (or when no spec is active) show condensed view
+    if !spec.is_active {
+        let desc_preview = if spec.description.len() > 80 {
+            format!("{}...", &spec.description[..80])
+        } else {
+            spec.description.clone()
+        };
+        let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
+        lines.push(first_line.to_string());
+        lines.push(format!(
+            "({}/{} stories complete)",
+            spec.completed_count, spec.total_count
+        ));
+        lines.push(String::new());
+        return lines;
+    }
+
+    // Full display for active spec only
     lines.push(format!("Project: {}", spec.project_name));
     lines.push(format!("Branch:  {}", spec.branch_name));
 
@@ -5868,9 +5893,16 @@ impl Autom8App {
             return;
         }
 
-        // Draw card background with elevation
+        // Draw card background with elevation and state-specific styling
         let card_rect = rect;
         let painter = ui.painter();
+
+        // Determine state-specific colors for the card
+        let state_color = if let Some(ref run) = session.run {
+            state_to_color(run.machine_state)
+        } else {
+            colors::STATUS_IDLE
+        };
 
         // Shadow for subtle elevation
         let shadow = theme::shadow::subtle();
@@ -5884,12 +5916,29 @@ impl Autom8App {
             shadow.color,
         );
 
-        // Card background
+        // Card background with state-colored left border accent
+        // First draw the full card background
         painter.rect(
             card_rect,
             Rounding::same(rounding::CARD),
             colors::SURFACE,
             Stroke::new(1.0, colors::BORDER),
+        );
+
+        // Draw a colored accent stripe on the left edge for state differentiation
+        // This provides subtle but clear visual indication of the current phase
+        let accent_width = 3.0;
+        let accent_rect =
+            Rect::from_min_size(card_rect.min, egui::vec2(accent_width, card_rect.height()));
+        painter.rect_filled(
+            accent_rect,
+            Rounding {
+                nw: rounding::CARD,
+                sw: rounding::CARD,
+                ne: 0.0,
+                se: 0.0,
+            },
+            state_color,
         );
 
         // Draw card content
@@ -5904,7 +5953,7 @@ impl Autom8App {
             truncate_with_ellipsis(&session.project_name, MAX_TEXT_LENGTH.saturating_sub(10));
         let project_galley = painter.layout_no_wrap(
             project_name,
-            typography::font(FontSize::Body, FontWeight::SemiBold),
+            typography::font(FontSize::Heading, FontWeight::SemiBold),
             colors::TEXT_PRIMARY,
         );
         painter.galley(
@@ -5959,7 +6008,7 @@ impl Autom8App {
         let branch_text = truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH);
         let branch_galley = painter.layout_no_wrap(
             branch_text,
-            typography::font(FontSize::Caption, FontWeight::Regular),
+            typography::font(FontSize::Heading, FontWeight::Regular),
             colors::TEXT_MUTED,
         );
         painter.galley(
@@ -5972,8 +6021,18 @@ impl Autom8App {
         // ====================================================================
         // STATUS ROW: Colored indicator dot with state label
         // ====================================================================
+        // Check if session appears stuck (heartbeat is stale)
+        let appears_stuck = session.appears_stuck();
+
         let (state, state_color) = if let Some(ref run) = session.run {
-            (run.machine_state, state_to_color(run.machine_state))
+            let base_color = state_to_color(run.machine_state);
+            // Override color to warning if session appears stuck
+            let color = if appears_stuck {
+                colors::STATUS_WARNING
+            } else {
+                base_color
+            };
+            (run.machine_state, color)
         } else {
             (MachineState::Idle, colors::STATUS_IDLE)
         };
@@ -5982,15 +6041,19 @@ impl Autom8App {
         let dot_radius = 4.0;
         let dot_center = egui::pos2(
             content_rect.min.x + dot_radius,
-            cursor_y + FontSize::Caption.pixels() / 2.0,
+            cursor_y + FontSize::Body.pixels() / 2.0,
         );
         painter.circle_filled(dot_center, dot_radius, state_color);
 
-        // State text
-        let state_text = format_state(state);
+        // State text - append "(Not responding)" if stuck
+        let state_text = if appears_stuck {
+            format!("{} (Not responding)", format_state(state))
+        } else {
+            format_state(state).to_string()
+        };
         let state_galley = painter.layout_no_wrap(
-            state_text.to_string(),
-            typography::font(FontSize::Caption, FontWeight::Medium),
+            state_text,
+            typography::font(FontSize::Body, FontWeight::Medium),
             colors::TEXT_PRIMARY,
         );
         painter.galley(
@@ -6010,7 +6073,7 @@ impl Autom8App {
             let error_text = truncate_with_ellipsis(error, MAX_TEXT_LENGTH);
             let error_galley = painter.layout_no_wrap(
                 error_text,
-                typography::font(FontSize::Caption, FontWeight::Regular),
+                typography::font(FontSize::Body, FontWeight::Regular),
                 colors::STATUS_ERROR,
             );
             painter.galley(
@@ -6028,7 +6091,7 @@ impl Autom8App {
             let progress_text = progress.as_fraction();
             let progress_galley = painter.layout_no_wrap(
                 progress_text,
-                typography::font(FontSize::Caption, FontWeight::Regular),
+                typography::font(FontSize::Body, FontWeight::Regular),
                 colors::TEXT_SECONDARY,
             );
             painter.galley(
@@ -6043,7 +6106,7 @@ impl Autom8App {
                     let story_text = truncate_with_ellipsis(story_id, 15);
                     let story_galley = painter.layout_no_wrap(
                         story_text,
-                        typography::font(FontSize::Caption, FontWeight::Regular),
+                        typography::font(FontSize::Body, FontWeight::Regular),
                         colors::TEXT_MUTED,
                     );
                     painter.galley(
@@ -6066,7 +6129,7 @@ impl Autom8App {
             let duration_text = format_duration(run.started_at);
             let duration_galley = painter.layout_no_wrap(
                 duration_text,
-                typography::font(FontSize::Caption, FontWeight::Regular),
+                typography::font(FontSize::Body, FontWeight::Regular),
                 colors::TEXT_MUTED,
             );
             painter.galley(
@@ -6103,8 +6166,9 @@ impl Autom8App {
         // Output lines with consistent padding
         let output_padding = 6.0; // Inner padding for output section
         let mut output_y = cursor_y + output_padding;
-        let line_height = FontSize::Caption.pixels() + 2.0;
-        let max_output_chars = ((content_width - output_padding * 2.0) / 6.0) as usize; // Approx chars per line
+        let line_height = FontSize::Large.pixels() + 2.0;
+        // Adjust chars per line for larger font (approx 9.6px per char for Large mono)
+        let max_output_chars = ((content_width - output_padding * 2.0) / 9.6) as usize;
 
         if let Some(ref live_output) = session.live_output {
             // Get last OUTPUT_LINES_TO_SHOW lines
@@ -6122,7 +6186,7 @@ impl Autom8App {
                 // No output yet
                 let no_output_galley = painter.layout_no_wrap(
                     "Waiting for output...".to_string(),
-                    typography::mono(FontSize::Caption),
+                    typography::mono(FontSize::Large),
                     colors::TEXT_DISABLED,
                 );
                 painter.galley(
@@ -6135,7 +6199,7 @@ impl Autom8App {
                     let line_text = truncate_with_ellipsis(line.trim(), max_output_chars);
                     let line_galley = painter.layout_no_wrap(
                         line_text,
-                        typography::mono(FontSize::Caption),
+                        typography::mono(FontSize::Large),
                         colors::TEXT_SECONDARY,
                     );
                     painter.galley(
@@ -6155,7 +6219,7 @@ impl Autom8App {
             // No live output available
             let no_output_galley = painter.layout_no_wrap(
                 "No live output".to_string(),
-                typography::mono(FontSize::Caption),
+                typography::mono(FontSize::Large),
                 colors::TEXT_DISABLED,
             );
             painter.galley(
@@ -10918,7 +10982,8 @@ mod tests {
         use crate::config::{SpecSummary, StorySummary};
         use std::path::PathBuf;
 
-        let spec = SpecSummary {
+        // Test active spec - shows full details
+        let active_spec = SpecSummary {
             filename: "spec-feature.json".to_string(),
             path: PathBuf::from("/test/spec-feature.json"),
             project_name: "my-project".to_string(),
@@ -10938,12 +11003,14 @@ mod tests {
             ],
             completed_count: 1,
             total_count: 2,
+            is_active: true, // Active spec shows full details
         };
 
-        let lines = format_spec_summary_as_text(&spec);
+        let lines = format_spec_summary_as_text(&active_spec);
 
-        // Should have filename header
+        // Should have filename header with (Active) indicator
         assert!(lines.iter().any(|l| l.contains("spec-feature.json")));
+        assert!(lines.iter().any(|l| l.contains("(Active)")));
 
         // Should have project name
         assert!(lines.iter().any(|l| l.contains("Project: my-project")));
@@ -12357,5 +12424,126 @@ mod tests {
         assert!(msg.contains("2 sessions,"), "Should use plural for 2+");
         assert!(msg.contains("2 sessions were skipped"), "Should use plural");
         assert!(msg.contains("2 errors occurred"), "Should use plural");
+    }
+
+    // US-001: Conditional Story Display in Describe View
+
+    #[test]
+    fn test_us001_format_spec_active_shows_full_details() {
+        use crate::config::{SpecSummary, StorySummary};
+        use std::path::PathBuf;
+
+        let spec = SpecSummary {
+            filename: "spec-active.json".to_string(),
+            path: PathBuf::from("/test/spec-active.json"),
+            project_name: "my-project".to_string(),
+            branch_name: "feature/active".to_string(),
+            description: "Active spec description".to_string(),
+            stories: vec![
+                StorySummary {
+                    id: "US-001".to_string(),
+                    title: "First story".to_string(),
+                    passes: true,
+                },
+                StorySummary {
+                    id: "US-002".to_string(),
+                    title: "Second story".to_string(),
+                    passes: false,
+                },
+            ],
+            completed_count: 1,
+            total_count: 2,
+            is_active: true,
+        };
+
+        // When this spec is active, it should show full details
+        let lines = format_spec_summary_as_text(&spec);
+
+        // Should have "(Active)" indicator
+        assert!(
+            lines.iter().any(|l| l.contains("(Active)")),
+            "Active spec should have (Active) indicator"
+        );
+
+        // Should have full details: Project, Branch, Description, Progress, User Stories
+        assert!(lines.iter().any(|l| l.contains("Project:")));
+        assert!(lines.iter().any(|l| l.contains("Branch:")));
+        assert!(lines.iter().any(|l| l.contains("Description:")));
+        assert!(lines.iter().any(|l| l.contains("Progress:")));
+        assert!(lines.iter().any(|l| l.contains("User Stories:")));
+
+        // Should list individual stories
+        assert!(lines.iter().any(|l| l.contains("US-001")));
+        assert!(lines.iter().any(|l| l.contains("US-002")));
+    }
+
+    #[test]
+    fn test_us001_format_spec_inactive_shows_condensed() {
+        use crate::config::{SpecSummary, StorySummary};
+        use std::path::PathBuf;
+
+        let spec = SpecSummary {
+            filename: "spec-inactive.json".to_string(),
+            path: PathBuf::from("/test/spec-inactive.json"),
+            project_name: "my-project".to_string(),
+            branch_name: "feature/inactive".to_string(),
+            description: "Inactive spec description that should be shown".to_string(),
+            stories: vec![
+                StorySummary {
+                    id: "US-001".to_string(),
+                    title: "First story".to_string(),
+                    passes: true,
+                },
+                StorySummary {
+                    id: "US-002".to_string(),
+                    title: "Second story".to_string(),
+                    passes: false,
+                },
+            ],
+            completed_count: 1,
+            total_count: 2,
+            is_active: false,
+        };
+
+        // Inactive specs always show condensed view (regardless of whether another spec is active)
+        let lines = format_spec_summary_as_text(&spec);
+
+        // Should NOT have "(Active)" indicator
+        assert!(
+            !lines.iter().any(|l| l.contains("(Active)")),
+            "Inactive spec should not have (Active) indicator"
+        );
+
+        // Should have filename
+        assert!(lines.iter().any(|l| l.contains("spec-inactive.json")));
+
+        // Should have description (first line)
+        assert!(lines.iter().any(|l| l.contains("Inactive spec")));
+
+        // Should have progress count in condensed format
+        assert!(
+            lines.iter().any(|l| l.contains("1/2 stories complete")),
+            "Should show story count in condensed format"
+        );
+
+        // Should NOT have full details
+        assert!(
+            !lines.iter().any(|l| l.contains("Project:")),
+            "Condensed view should not show Project:"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("Branch:")),
+            "Condensed view should not show Branch:"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("User Stories:")),
+            "Condensed view should not show User Stories:"
+        );
+
+        // Should NOT list individual stories
+        assert!(
+            !lines.iter().any(|l| l.contains("US-001")),
+            "Condensed view should not list individual stories"
+        );
     }
 }

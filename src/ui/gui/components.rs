@@ -7,7 +7,11 @@
 use crate::state::MachineState;
 use crate::ui::gui::theme::colors;
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
-use chrono::{DateTime, Utc};
+// Import and re-export shared types and functions for backward compatibility
+use crate::ui::shared::format_state_label;
+pub use crate::ui::shared::{
+    format_duration, format_duration_secs, format_relative_time, format_relative_time_secs, Status,
+};
 use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Vec2};
 
 // ============================================================================
@@ -94,29 +98,33 @@ impl Default for StatusDot {
 }
 
 // ============================================================================
-// Status Enum and Color Mapping
+// Status Color Mapping (GUI-specific extension)
 // ============================================================================
 
-/// Semantic status states for consistent color mapping across the application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    /// Active/running state - displayed in blue.
-    Running,
-    /// Successful completion - displayed in green.
-    Success,
-    /// Warning/attention needed - displayed in amber.
-    Warning,
-    /// Error/failure state - displayed in red.
-    Error,
-    /// Idle/inactive state - displayed in gray.
-    Idle,
+// The Status enum is imported from crate::ui::shared and re-exported above.
+// This module provides GUI-specific color mapping via the StatusColors trait.
+
+/// GUI-specific color mapping for the shared Status enum.
+///
+/// This trait extends the shared Status enum with GUI-specific colors
+/// using the theme's color palette. The shared Status enum defines the
+/// semantic categorization (Setup, Running, etc.), and this trait provides
+/// the visual representation for the GUI.
+pub trait StatusColors {
+    /// Returns the primary color for this status.
+    fn color(self) -> Color32;
+
+    /// Returns the background color for this status (for badges/highlights).
+    fn background_color(self) -> Color32;
 }
 
-impl Status {
-    /// Returns the primary color for this status.
-    pub fn color(self) -> Color32 {
+impl StatusColors for Status {
+    fn color(self) -> Color32 {
         match self {
+            Status::Setup => colors::STATUS_IDLE,
             Status::Running => colors::STATUS_RUNNING,
+            Status::Reviewing => colors::STATUS_WARNING,
+            Status::Correcting => colors::STATUS_CORRECTING,
             Status::Success => colors::STATUS_SUCCESS,
             Status::Warning => colors::STATUS_WARNING,
             Status::Error => colors::STATUS_ERROR,
@@ -124,38 +132,16 @@ impl Status {
         }
     }
 
-    /// Returns the background color for this status (for badges/highlights).
-    pub fn background_color(self) -> Color32 {
+    fn background_color(self) -> Color32 {
         match self {
+            Status::Setup => colors::STATUS_IDLE_BG,
             Status::Running => colors::STATUS_RUNNING_BG,
+            Status::Reviewing => colors::STATUS_WARNING_BG,
+            Status::Correcting => colors::STATUS_CORRECTING_BG,
             Status::Success => colors::STATUS_SUCCESS_BG,
             Status::Warning => colors::STATUS_WARNING_BG,
             Status::Error => colors::STATUS_ERROR_BG,
             Status::Idle => colors::STATUS_IDLE_BG,
-        }
-    }
-
-    /// Convert a MachineState to the appropriate Status.
-    ///
-    /// This mapping matches the TUI semantics:
-    /// - Running states (RunningClaude, Reviewing, etc.) -> Status::Running
-    /// - Completed -> Status::Success
-    /// - Failed -> Status::Error
-    /// - Idle -> Status::Idle
-    pub fn from_machine_state(state: MachineState) -> Self {
-        match state {
-            MachineState::RunningClaude
-            | MachineState::Reviewing
-            | MachineState::Correcting
-            | MachineState::Committing
-            | MachineState::CreatingPR
-            | MachineState::Initializing
-            | MachineState::PickingStory
-            | MachineState::LoadingSpec
-            | MachineState::GeneratingSpec => Status::Running,
-            MachineState::Completed => Status::Success,
-            MachineState::Failed => Status::Error,
-            MachineState::Idle => Status::Idle,
         }
     }
 }
@@ -329,70 +315,8 @@ impl Default for ProgressBar {
     }
 }
 
-// ============================================================================
-// Time Formatting Utilities
-// ============================================================================
-
-/// Format a duration from a start time as a human-readable string.
-///
-/// Examples: "5s", "2m 30s", "1h 5m"
-///
-/// - Durations under 1 minute show only seconds
-/// - Durations between 1-60 minutes show minutes and seconds
-/// - Durations over 1 hour show hours and minutes (no seconds)
-pub fn format_duration(started_at: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(started_at);
-    format_duration_secs(duration.num_seconds().max(0) as u64)
-}
-
-/// Format a duration in seconds as a human-readable string.
-///
-/// This is useful when you have a pre-calculated duration.
-pub fn format_duration_secs(total_secs: u64) -> String {
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
-/// Format a timestamp as a relative time string.
-///
-/// Examples: "just now", "5m ago", "2h ago", "3d ago"
-///
-/// - Under 1 minute: "just now"
-/// - 1-59 minutes: "Xm ago"
-/// - 1-23 hours: "Xh ago"
-/// - 1+ days: "Xd ago"
-pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(timestamp);
-    format_relative_time_secs(duration.num_seconds().max(0) as u64)
-}
-
-/// Format a relative time from seconds ago.
-pub fn format_relative_time_secs(total_secs: u64) -> String {
-    let minutes = total_secs / 60;
-    let hours = total_secs / 3600;
-    let days = total_secs / 86400;
-
-    if days > 0 {
-        format!("{}d ago", days)
-    } else if hours > 0 {
-        format!("{}h ago", hours)
-    } else if minutes > 0 {
-        format!("{}m ago", minutes)
-    } else {
-        "just now".to_string()
-    }
-}
+// Time formatting utilities are re-exported from crate::ui::shared above.
+// See format_duration, format_duration_secs, format_relative_time, format_relative_time_secs.
 
 // ============================================================================
 // Text Utilities
@@ -431,21 +355,12 @@ pub const MAX_BRANCH_LENGTH: usize = 25;
 // ============================================================================
 
 /// Format a machine state as a human-readable string.
+///
+/// This is a re-export of the shared `format_state_label` function for
+/// backward compatibility. Both GUI and TUI use the same underlying
+/// function from `ui::shared` to ensure consistent state labels.
 pub fn format_state(state: MachineState) -> &'static str {
-    match state {
-        MachineState::Idle => "Idle",
-        MachineState::LoadingSpec => "Loading Spec",
-        MachineState::GeneratingSpec => "Generating Spec",
-        MachineState::Initializing => "Initializing",
-        MachineState::PickingStory => "Picking Story",
-        MachineState::RunningClaude => "Running Claude",
-        MachineState::Reviewing => "Reviewing",
-        MachineState::Correcting => "Correcting",
-        MachineState::Committing => "Committing",
-        MachineState::CreatingPR => "Creating PR",
-        MachineState::Completed => "Completed",
-        MachineState::Failed => "Failed",
-    }
+    format_state_label(state)
 }
 
 // ============================================================================
@@ -568,7 +483,11 @@ mod tests {
 
     #[test]
     fn test_status_colors() {
+        // All status variants should return their designated colors
+        assert_eq!(Status::Setup.color(), colors::STATUS_IDLE);
         assert_eq!(Status::Running.color(), colors::STATUS_RUNNING);
+        assert_eq!(Status::Reviewing.color(), colors::STATUS_WARNING);
+        assert_eq!(Status::Correcting.color(), colors::STATUS_CORRECTING);
         assert_eq!(Status::Success.color(), colors::STATUS_SUCCESS);
         assert_eq!(Status::Warning.color(), colors::STATUS_WARNING);
         assert_eq!(Status::Error.color(), colors::STATUS_ERROR);
@@ -577,9 +496,18 @@ mod tests {
 
     #[test]
     fn test_status_background_colors() {
+        assert_eq!(Status::Setup.background_color(), colors::STATUS_IDLE_BG);
         assert_eq!(
             Status::Running.background_color(),
             colors::STATUS_RUNNING_BG
+        );
+        assert_eq!(
+            Status::Reviewing.background_color(),
+            colors::STATUS_WARNING_BG
+        );
+        assert_eq!(
+            Status::Correcting.background_color(),
+            colors::STATUS_CORRECTING_BG
         );
         assert_eq!(
             Status::Success.background_color(),
@@ -594,51 +522,73 @@ mod tests {
     }
 
     #[test]
-    fn test_status_from_machine_state_running() {
-        assert_eq!(
-            Status::from_machine_state(MachineState::RunningClaude),
-            Status::Running
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::Reviewing),
-            Status::Running
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::Correcting),
-            Status::Running
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::Committing),
-            Status::Running
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::CreatingPR),
-            Status::Running
-        );
+    fn test_status_from_machine_state_setup_phase() {
+        // Setup phases should map to Status::Setup (gray)
         assert_eq!(
             Status::from_machine_state(MachineState::Initializing),
-            Status::Running
+            Status::Setup
         );
         assert_eq!(
             Status::from_machine_state(MachineState::PickingStory),
-            Status::Running
+            Status::Setup
         );
         assert_eq!(
             Status::from_machine_state(MachineState::LoadingSpec),
-            Status::Running
+            Status::Setup
         );
         assert_eq!(
             Status::from_machine_state(MachineState::GeneratingSpec),
+            Status::Setup
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_running() {
+        // Active implementation should map to Status::Running (blue)
+        assert_eq!(
+            Status::from_machine_state(MachineState::RunningClaude),
             Status::Running
         );
     }
 
     #[test]
-    fn test_status_from_machine_state_terminal() {
+    fn test_status_from_machine_state_reviewing() {
+        // Evaluation phase should map to Status::Reviewing (amber)
+        assert_eq!(
+            Status::from_machine_state(MachineState::Reviewing),
+            Status::Reviewing
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_correcting() {
+        // Attention needed should map to Status::Correcting (orange)
+        assert_eq!(
+            Status::from_machine_state(MachineState::Correcting),
+            Status::Correcting
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_success_path() {
+        // Success path states should map to Status::Success (green)
+        assert_eq!(
+            Status::from_machine_state(MachineState::Committing),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::CreatingPR),
+            Status::Success
+        );
         assert_eq!(
             Status::from_machine_state(MachineState::Completed),
             Status::Success
         );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_terminal() {
+        // Terminal states
         assert_eq!(
             Status::from_machine_state(MachineState::Failed),
             Status::Error
@@ -647,16 +597,53 @@ mod tests {
     }
 
     #[test]
-    fn test_state_to_color() {
+    fn test_state_to_color_semantic_mapping() {
+        // Setup phases -> gray (STATUS_IDLE)
+        assert_eq!(
+            state_to_color(MachineState::Initializing),
+            colors::STATUS_IDLE
+        );
+        assert_eq!(
+            state_to_color(MachineState::PickingStory),
+            colors::STATUS_IDLE
+        );
+
+        // Active implementation -> blue
         assert_eq!(
             state_to_color(MachineState::RunningClaude),
             colors::STATUS_RUNNING
+        );
+
+        // Evaluation -> amber (warning)
+        assert_eq!(
+            state_to_color(MachineState::Reviewing),
+            colors::STATUS_WARNING
+        );
+
+        // Attention needed -> orange
+        assert_eq!(
+            state_to_color(MachineState::Correcting),
+            colors::STATUS_CORRECTING
+        );
+
+        // Success path -> green
+        assert_eq!(
+            state_to_color(MachineState::Committing),
+            colors::STATUS_SUCCESS
+        );
+        assert_eq!(
+            state_to_color(MachineState::CreatingPR),
+            colors::STATUS_SUCCESS
         );
         assert_eq!(
             state_to_color(MachineState::Completed),
             colors::STATUS_SUCCESS
         );
+
+        // Failure -> red
         assert_eq!(state_to_color(MachineState::Failed), colors::STATUS_ERROR);
+
+        // Idle -> gray
         assert_eq!(state_to_color(MachineState::Idle), colors::STATUS_IDLE);
     }
 
@@ -673,6 +660,10 @@ mod tests {
         assert_eq!(
             state_to_background_color(MachineState::Failed),
             colors::STATUS_ERROR_BG
+        );
+        assert_eq!(
+            state_to_background_color(MachineState::Correcting),
+            colors::STATUS_CORRECTING_BG
         );
     }
 
@@ -740,48 +731,8 @@ mod tests {
         assert!((ProgressBar::from_progress(&Progress::new(3, 10)).progress() - 0.3).abs() < 0.001);
     }
 
-    // ------------------------------------------------------------------------
-    // Duration Formatting Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_format_duration_secs() {
-        // Seconds only
-        assert_eq!(format_duration_secs(0), "0s");
-        assert_eq!(format_duration_secs(30), "30s");
-        assert_eq!(format_duration_secs(59), "59s");
-
-        // Minutes and seconds
-        assert_eq!(format_duration_secs(60), "1m 0s");
-        assert_eq!(format_duration_secs(125), "2m 5s");
-
-        // Hours and minutes
-        assert_eq!(format_duration_secs(3600), "1h 0m");
-        assert_eq!(format_duration_secs(7265), "2h 1m");
-    }
-
-    // ------------------------------------------------------------------------
-    // Relative Time Formatting Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_format_relative_time_secs() {
-        // Just now (< 1 minute)
-        assert_eq!(format_relative_time_secs(0), "just now");
-        assert_eq!(format_relative_time_secs(59), "just now");
-
-        // Minutes
-        assert_eq!(format_relative_time_secs(60), "1m ago");
-        assert_eq!(format_relative_time_secs(300), "5m ago");
-
-        // Hours
-        assert_eq!(format_relative_time_secs(3600), "1h ago");
-        assert_eq!(format_relative_time_secs(7200), "2h ago");
-
-        // Days
-        assert_eq!(format_relative_time_secs(86400), "1d ago");
-        assert_eq!(format_relative_time_secs(172800), "2d ago");
-    }
+    // Duration and relative time formatting tests are in ui::shared::tests.
+    // The functions are re-exported from shared for backward compatibility.
 
     // ------------------------------------------------------------------------
     // Text Utility Tests
