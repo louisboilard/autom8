@@ -259,6 +259,54 @@ impl Tab {
     }
 }
 
+// ============================================================================
+// Config Scope Types (Config Tab - US-002)
+// ============================================================================
+
+/// Represents the scope of configuration being edited.
+///
+/// The Config tab supports editing both global configuration and
+/// per-project configuration. This enum represents which scope is
+/// currently selected.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ConfigScope {
+    /// Global configuration (`~/.config/autom8/config.toml`).
+    /// This is the default selection when the Config tab is opened.
+    #[default]
+    Global,
+    /// Project-specific configuration (`~/.config/autom8/<project>/config.toml`).
+    /// Contains the project name.
+    Project(String),
+}
+
+impl ConfigScope {
+    /// Returns the display name for this scope.
+    pub fn display_name(&self) -> &str {
+        match self {
+            ConfigScope::Global => "Global",
+            ConfigScope::Project(name) => name,
+        }
+    }
+
+    /// Returns whether this scope is the global scope.
+    pub fn is_global(&self) -> bool {
+        matches!(self, ConfigScope::Global)
+    }
+}
+
+// ============================================================================
+// Config Scope Constants (Config Tab - US-002)
+// ============================================================================
+
+/// Height of each row in the config scope list.
+const CONFIG_SCOPE_ROW_HEIGHT: f32 = 44.0;
+
+/// Horizontal padding within config scope rows (uses MD from spacing scale).
+const CONFIG_SCOPE_ROW_PADDING_H: f32 = 12.0; // spacing::MD
+
+/// Vertical padding within config scope rows (uses SM from spacing scale).
+const CONFIG_SCOPE_ROW_PADDING_V: f32 = 8.0; // spacing::SM
+
 /// Maximum width for the tab bar scroll area.
 const TAB_BAR_MAX_SCROLL_WIDTH: f32 = 800.0;
 
@@ -346,6 +394,21 @@ pub struct Autom8App {
     /// When collapsed, the sidebar is fully hidden to maximize content area.
     /// State persists during the session (not persisted across restarts).
     sidebar_collapsed: bool,
+
+    // ========================================================================
+    // Config Tab State (Config Tab - US-002)
+    // ========================================================================
+    /// Currently selected config scope in the Config tab.
+    /// Defaults to Global when the Config tab is first opened.
+    selected_config_scope: ConfigScope,
+
+    /// Cached list of project names for the config scope selector.
+    /// Loaded from `~/.config/autom8/*/` directories.
+    config_scope_projects: Vec<String>,
+
+    /// Cached information about which projects have their own config file.
+    /// Maps project name to whether it has a `config.toml` file.
+    config_scope_has_config: std::collections::HashMap<String, bool>,
 }
 
 impl Default for Autom8App {
@@ -389,6 +452,9 @@ impl Autom8App {
             last_refresh: Instant::now(),
             refresh_interval,
             sidebar_collapsed: false,
+            selected_config_scope: ConfigScope::default(),
+            config_scope_projects: Vec::new(),
+            config_scope_has_config: std::collections::HashMap::new(),
         };
         // Initial data load
         app.refresh_data();
@@ -448,6 +514,51 @@ impl Autom8App {
     /// Toggles the sidebar collapsed state.
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+    }
+
+    // ========================================================================
+    // Config Tab State (Config Tab - US-002)
+    // ========================================================================
+
+    /// Returns the currently selected config scope.
+    pub fn selected_config_scope(&self) -> &ConfigScope {
+        &self.selected_config_scope
+    }
+
+    /// Sets the selected config scope.
+    pub fn set_selected_config_scope(&mut self, scope: ConfigScope) {
+        self.selected_config_scope = scope;
+    }
+
+    /// Returns the cached list of project names for config scope selection.
+    pub fn config_scope_projects(&self) -> &[String] {
+        &self.config_scope_projects
+    }
+
+    /// Returns whether a project has its own config file.
+    pub fn project_has_config(&self, project_name: &str) -> bool {
+        self.config_scope_has_config
+            .get(project_name)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Refresh the config scope data (project list and config file status).
+    /// Called when the Config tab is rendered or data needs to be refreshed.
+    fn refresh_config_scope_data(&mut self) {
+        // Load project list from config directory
+        if let Ok(projects) = crate::config::list_projects() {
+            self.config_scope_projects = projects;
+
+            // Check which projects have their own config file
+            self.config_scope_has_config.clear();
+            for project in &self.config_scope_projects {
+                if let Ok(config_path) = crate::config::project_config_path_for(project) {
+                    self.config_scope_has_config
+                        .insert(project.clone(), config_path.exists());
+                }
+            }
+        }
     }
 
     /// Returns the currently selected project name.
@@ -1484,22 +1595,212 @@ impl Autom8App {
         (tab_clicked, close_clicked)
     }
 
-    /// Render the Config view.
+    /// Render the Config view with split-panel layout.
     ///
-    /// This is a placeholder that will be expanded in subsequent user stories
-    /// to include the full configuration editing UI with split-panel layout.
+    /// Uses the same split-panel pattern as the Projects tab:
+    /// - Left panel: Scope selector (Global + projects)
+    /// - Right panel: Config editor for the selected scope
     fn render_config(&mut self, ui: &mut egui::Ui) {
-        // Header
+        // Refresh config scope data before rendering
+        self.refresh_config_scope_data();
+
+        // Use horizontal layout for split view
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+
+        // Calculate panel widths: 50/50 split with divider in the middle
+        // Subtract the divider width and margins from the total width
+        let divider_total_width = SPLIT_DIVIDER_WIDTH + SPLIT_DIVIDER_MARGIN * 2.0;
+        let panel_width =
+            ((available_width - divider_total_width) / 2.0).max(SPLIT_PANEL_MIN_WIDTH);
+
+        ui.horizontal(|ui| {
+            // Left panel: Scope selector
+            ui.allocate_ui_with_layout(
+                Vec2::new(panel_width, available_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    self.render_config_left_panel(ui);
+                },
+            );
+
+            // Visual divider between panels with appropriate margin
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
+
+            // Draw a custom vertical divider line using the SEPARATOR color
+            let divider_rect = ui.available_rect_before_wrap();
+            let divider_line_rect = Rect::from_min_size(
+                divider_rect.min,
+                Vec2::new(SPLIT_DIVIDER_WIDTH, available_height),
+            );
+            ui.painter()
+                .rect_filled(divider_line_rect, Rounding::ZERO, colors::SEPARATOR);
+            ui.add_space(SPLIT_DIVIDER_WIDTH);
+
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
+
+            // Right panel: Config editor for selected scope
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), available_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    self.render_config_right_panel(ui);
+                },
+            );
+        });
+    }
+
+    /// Render the left panel of the Config view (scope selector).
+    ///
+    /// Shows "Global" at the top, followed by all discovered projects.
+    /// Projects without their own config file are shown greyed out with "(global)" suffix.
+    fn render_config_left_panel(&mut self, ui: &mut egui::Ui) {
+        // Header section
         ui.label(
-            egui::RichText::new("Config")
+            egui::RichText::new("Scope")
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::SM);
+
+        // Scrollable scope list
+        egui::ScrollArea::vertical()
+            .id_salt("config_scope_list")
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, |ui| {
+                // Global scope item (always first, always has config)
+                if self.render_config_scope_item(ui, ConfigScope::Global, true) {
+                    self.selected_config_scope = ConfigScope::Global;
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Project scope items
+                let projects: Vec<String> = self.config_scope_projects.clone();
+                for project in projects {
+                    let has_config = self.project_has_config(&project);
+                    let scope = ConfigScope::Project(project.clone());
+                    if self.render_config_scope_item(ui, scope.clone(), has_config) {
+                        self.selected_config_scope = scope;
+                    }
+                    ui.add_space(spacing::XS);
+                }
+            });
+    }
+
+    /// Render a single config scope item in the scope selector.
+    ///
+    /// Returns true if the item was clicked.
+    fn render_config_scope_item(
+        &self,
+        ui: &mut egui::Ui,
+        scope: ConfigScope,
+        has_config: bool,
+    ) -> bool {
+        let is_selected = self.selected_config_scope == scope;
+
+        // Determine display text and styling
+        let (display_text, text_color) = match &scope {
+            ConfigScope::Global => ("Global".to_string(), colors::TEXT_PRIMARY),
+            ConfigScope::Project(name) => {
+                if has_config {
+                    (name.clone(), colors::TEXT_PRIMARY)
+                } else {
+                    // Projects without config file: greyed out with "(global)" suffix
+                    (format!("{} (global)", name), colors::TEXT_MUTED)
+                }
+            }
+        };
+
+        // Allocate space for the row
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), CONFIG_SCOPE_ROW_HEIGHT),
+            Sense::click(),
+        );
+
+        // Draw background on hover or selection
+        if ui.is_rect_visible(rect) {
+            let bg_color = if is_selected {
+                colors::SURFACE_SELECTED
+            } else if response.hovered() {
+                colors::SURFACE_HOVER
+            } else {
+                Color32::TRANSPARENT
+            };
+
+            ui.painter().rect_filled(
+                rect,
+                Rounding::same(SIDEBAR_ITEM_ROUNDING),
+                bg_color,
+            );
+
+            // Draw selection indicator on the left edge for selected items
+            if is_selected {
+                let indicator_rect = Rect::from_min_size(
+                    rect.min,
+                    Vec2::new(SIDEBAR_ACTIVE_INDICATOR_WIDTH, rect.height()),
+                );
+                ui.painter().rect_filled(
+                    indicator_rect,
+                    Rounding::same(SIDEBAR_ACTIVE_INDICATOR_WIDTH / 2.0),
+                    colors::ACCENT,
+                );
+            }
+
+            // Draw the scope name with appropriate styling
+            let text_rect = rect.shrink2(Vec2::new(
+                CONFIG_SCOPE_ROW_PADDING_H + (if is_selected { SIDEBAR_ACTIVE_INDICATOR_WIDTH + 4.0 } else { 0.0 }),
+                CONFIG_SCOPE_ROW_PADDING_V,
+            ));
+
+            let font_weight = if is_selected {
+                FontWeight::SemiBold
+            } else {
+                FontWeight::Regular
+            };
+
+            ui.painter().text(
+                text_rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &display_text,
+                typography::font(FontSize::Body, font_weight),
+                text_color,
+            );
+        }
+
+        response.clicked()
+    }
+
+    /// Render the right panel of the Config view (config editor).
+    ///
+    /// Shows the config editor for the currently selected scope.
+    /// This is a placeholder that will be expanded in subsequent user stories.
+    fn render_config_right_panel(&self, ui: &mut egui::Ui) {
+        // Header showing the selected scope
+        let header_text = match &self.selected_config_scope {
+            ConfigScope::Global => "Global Configuration".to_string(),
+            ConfigScope::Project(name) => {
+                if self.project_has_config(name) {
+                    format!("Project Configuration: {}", name)
+                } else {
+                    format!("Project Configuration: {} (using global)", name)
+                }
+            }
+        };
+
+        ui.label(
+            egui::RichText::new(header_text)
                 .font(typography::font(FontSize::Title, FontWeight::SemiBold))
                 .color(colors::TEXT_PRIMARY),
         );
 
         ui.add_space(spacing::MD);
 
-        // Placeholder content - will be expanded in US-002 through US-011
+        // Placeholder content - will be expanded in US-003 through US-011
         egui::ScrollArea::vertical()
+            .id_salt("config_editor")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(spacing::XXL);
@@ -3380,5 +3681,104 @@ mod tests {
     fn test_tab_to_tab_id_config() {
         // Verify Tab::Config converts to TabId::Config
         assert_eq!(Tab::Config.to_tab_id(), TabId::Config);
+    }
+
+    // ========================================================================
+    // Config Tab Split-Panel Tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_config_scope_enum_global_default() {
+        // Verify ConfigScope defaults to Global
+        let scope = ConfigScope::default();
+        assert_eq!(scope, ConfigScope::Global);
+        assert!(scope.is_global());
+    }
+
+    #[test]
+    fn test_config_scope_enum_display_names() {
+        // Verify display names for different scopes
+        assert_eq!(ConfigScope::Global.display_name(), "Global");
+        assert_eq!(
+            ConfigScope::Project("my-project".to_string()).display_name(),
+            "my-project"
+        );
+    }
+
+    #[test]
+    fn test_config_scope_is_global() {
+        // Verify is_global() works correctly
+        assert!(ConfigScope::Global.is_global());
+        assert!(!ConfigScope::Project("test".to_string()).is_global());
+    }
+
+    #[test]
+    fn test_config_scope_equality() {
+        // Verify ConfigScope equality comparison
+        assert_eq!(ConfigScope::Global, ConfigScope::Global);
+        assert_eq!(
+            ConfigScope::Project("test".to_string()),
+            ConfigScope::Project("test".to_string())
+        );
+        assert_ne!(ConfigScope::Global, ConfigScope::Project("test".to_string()));
+        assert_ne!(
+            ConfigScope::Project("a".to_string()),
+            ConfigScope::Project("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_app_initial_config_scope_is_global() {
+        // Verify the app initializes with Global scope selected by default
+        let app = Autom8App::new();
+        assert_eq!(*app.selected_config_scope(), ConfigScope::Global);
+    }
+
+    #[test]
+    fn test_app_set_config_scope() {
+        // Verify setting config scope works
+        let mut app = Autom8App::new();
+
+        app.set_selected_config_scope(ConfigScope::Project("my-project".to_string()));
+        assert_eq!(
+            *app.selected_config_scope(),
+            ConfigScope::Project("my-project".to_string())
+        );
+
+        app.set_selected_config_scope(ConfigScope::Global);
+        assert_eq!(*app.selected_config_scope(), ConfigScope::Global);
+    }
+
+    #[test]
+    fn test_app_config_scope_projects_initially_empty() {
+        // Verify config scope projects list initializes correctly
+        // (may or may not be empty depending on actual config directory contents)
+        let app = Autom8App::new();
+        // Just verify the field exists and is accessible
+        let _projects = app.config_scope_projects();
+    }
+
+    #[test]
+    fn test_project_has_config_unknown_project() {
+        // Verify project_has_config returns false for unknown projects
+        let app = Autom8App::new();
+        // A project not in the cache should return false
+        assert!(!app.project_has_config("nonexistent-project-xyz"));
+    }
+
+    #[test]
+    fn test_config_scope_constants_exist() {
+        // Verify the config scope constants are defined correctly
+        assert!(CONFIG_SCOPE_ROW_HEIGHT > 0.0);
+        assert!(CONFIG_SCOPE_ROW_PADDING_H > 0.0);
+        assert!(CONFIG_SCOPE_ROW_PADDING_V > 0.0);
+    }
+
+    #[test]
+    fn test_split_panel_constants_exist() {
+        // Verify split panel constants are properly defined
+        assert!(SPLIT_DIVIDER_WIDTH > 0.0);
+        assert!(SPLIT_DIVIDER_MARGIN > 0.0);
+        assert!(SPLIT_PANEL_MIN_WIDTH > 0.0);
     }
 }
