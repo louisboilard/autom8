@@ -4,9 +4,10 @@
 
 use autom8::commands::{
     all_sessions_status_command, clean_command, config_display_command, config_reset_command,
-    config_set_command, default_command, describe_command, global_status_command, init_command,
-    list_command, monitor_command, pr_review_command, projects_command, resume_command,
-    run_command, run_with_file, status_command, CleanOptions, ConfigScope, ConfigSubcommand,
+    config_set_command, default_command, describe_command, global_status_command, gui_command,
+    init_command, list_command, monitor_command, pr_review_command, projects_command,
+    resume_command, run_command, run_with_file, status_command, CleanOptions, ConfigScope,
+    ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -230,11 +231,10 @@ Run 'autom8 config <subcommand> --help' for more details on each subcommand.")]
     PrReview,
 
     /// Monitor autom8 activity across all projects (dashboard view)
-    Monitor {
-        /// Filter to a specific project
-        #[arg(short, long)]
-        project: Option<String>,
-    },
+    Monitor,
+
+    /// Launch the native GUI to monitor autom8 activity
+    Gui,
 
     /// Output shell completion script to stdout (hidden utility command)
     #[command(hide = true)]
@@ -370,7 +370,9 @@ fn main() {
                     pr_review_command(cli.verbose)
                 }
 
-                (None, Some(Commands::Monitor { project })) => monitor_command(project.as_deref()),
+                (None, Some(Commands::Monitor)) => monitor_command(),
+
+                (None, Some(Commands::Gui)) => gui_command(),
 
                 // Completions already handled above
                 (None, Some(Commands::Completions { .. })) => unreachable!(),
@@ -1283,44 +1285,32 @@ mod tests {
     fn test_us003_monitor_command_is_recognized() {
         // Test that the monitor command is recognized
         let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Monitor { .. })));
+        assert!(matches!(cli.command, Some(Commands::Monitor)));
     }
 
     #[test]
     fn test_us003_monitor_command_parses_correctly() {
-        // Test that `autom8 monitor` parses to the Monitor variant with defaults
+        // Test that `autom8 monitor` parses to the Monitor variant
         let cli = Cli::try_parse_from(["autom8", "monitor"]).unwrap();
         assert!(cli.file.is_none(), "No file should be set");
-        if let Some(Commands::Monitor { project }) = cli.command {
-            assert!(
-                project.is_none(),
-                "Project filter should be None by default"
-            );
-        } else {
-            panic!("Expected Monitor command");
-        }
+        assert!(
+            matches!(cli.command, Some(Commands::Monitor)),
+            "Expected Monitor command"
+        );
     }
 
     #[test]
-    fn test_us003_monitor_project_flag() {
-        // Test that --project flag works
-        let cli = Cli::try_parse_from(["autom8", "monitor", "--project", "myapp"]).unwrap();
-        if let Some(Commands::Monitor { project }) = cli.command {
-            assert_eq!(project, Some("myapp".to_string()));
-        } else {
-            panic!("Expected Monitor command");
-        }
+    fn test_us005_monitor_project_flag_removed() {
+        // Test that --project flag is no longer recognized (US-005)
+        let result = Cli::try_parse_from(["autom8", "monitor", "--project", "myapp"]);
+        assert!(result.is_err(), "--project flag should produce an error");
     }
 
     #[test]
-    fn test_us003_monitor_project_short_flag() {
-        // Test that -p short flag works for --project
-        let cli = Cli::try_parse_from(["autom8", "monitor", "-p", "myapp"]).unwrap();
-        if let Some(Commands::Monitor { project }) = cli.command {
-            assert_eq!(project, Some("myapp".to_string()));
-        } else {
-            panic!("Expected Monitor command");
-        }
+    fn test_us005_monitor_project_short_flag_removed() {
+        // Test that -p short flag is no longer recognized (US-005)
+        let result = Cli::try_parse_from(["autom8", "monitor", "-p", "myapp"]);
+        assert!(result.is_err(), "-p flag should produce an error");
     }
 
     #[test]
@@ -1334,7 +1324,7 @@ mod tests {
     fn test_us003_monitor_command_appears_in_help() {
         // Verify that monitor command appears in the Commands enum
         // (if this compiles, the variant exists)
-        let _cmd = Commands::Monitor { project: None };
+        let _cmd = Commands::Monitor;
     }
 
     // ======================================================================
@@ -2204,5 +2194,55 @@ mod tests {
         } else {
             panic!("Expected Config command");
         }
+    }
+
+    // ======================================================================
+    // Tests for US-001 (egui-gui): GUI Command and Window Bootstrap
+    // ======================================================================
+
+    #[test]
+    fn test_gui_us001_gui_command_is_recognized() {
+        // Test that the gui command is recognized
+        let cli = Cli::try_parse_from(["autom8", "gui"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Gui)));
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_parses_correctly() {
+        // Test that `autom8 gui` parses to the Gui variant
+        let cli = Cli::try_parse_from(["autom8", "gui"]).unwrap();
+        assert!(cli.file.is_none(), "No file should be set");
+        assert!(
+            matches!(cli.command, Some(Commands::Gui)),
+            "Expected Gui command"
+        );
+    }
+
+    #[test]
+    fn test_gui_us004_project_flag_removed() {
+        // Test that --project flag is no longer recognized (US-004)
+        let result = Cli::try_parse_from(["autom8", "gui", "--project", "myapp"]);
+        assert!(result.is_err(), "--project flag should produce an error");
+    }
+
+    #[test]
+    fn test_gui_us004_project_short_flag_removed() {
+        // Test that -p short flag is no longer recognized (US-004)
+        let result = Cli::try_parse_from(["autom8", "gui", "-p", "myapp"]);
+        assert!(result.is_err(), "-p flag should produce an error");
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_function_available() {
+        // Verify the gui_command function is exported with no parameters
+        use autom8::commands::gui_command;
+        let _: fn() -> autom8::error::Result<()> = gui_command;
+    }
+
+    #[test]
+    fn test_gui_us001_gui_command_appears_in_enum() {
+        // Verify that Gui command appears in the Commands enum
+        // (if this compiles, the variant exists)
+        let _cmd = Commands::Gui;
     }
 }

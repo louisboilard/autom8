@@ -3,11 +3,11 @@
 //! The main application struct and event loop for the monitor command.
 
 use super::views::View;
-use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
-use crate::spec::Spec;
-use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
-use crate::worktree::MAIN_SESSION_ID;
+use crate::state::{LiveState, MachineState, RunState};
+use crate::ui::shared::{
+    load_run_history, load_ui_data, ProjectData, RunHistoryEntry, RunHistoryOptions, SessionData,
+};
 use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -23,7 +23,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
-use std::path::PathBuf;
 use std::time::Duration;
 
 // ============================================================================
@@ -80,103 +79,8 @@ impl From<crate::error::Autom8Error> for MonitorError {
     }
 }
 
-/// Progress information for a run.
-#[derive(Debug, Clone)]
-pub struct RunProgress {
-    /// Number of completed stories
-    pub completed: usize,
-    /// Total number of stories
-    pub total: usize,
-}
-
-impl RunProgress {
-    /// Format progress as a fraction string (e.g., "Story 2/5")
-    pub fn as_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
-    }
-
-    /// Format progress as a percentage (e.g., "40%")
-    pub fn as_percentage(&self) -> String {
-        if self.total == 0 {
-            return "0%".to_string();
-        }
-        let pct = (self.completed * 100) / self.total;
-        format!("{}%", pct)
-    }
-}
-
-/// Data collected from a single project for display.
-#[derive(Debug, Clone)]
-pub struct ProjectData {
-    pub info: ProjectTreeInfo,
-    pub active_run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file)
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable
-    pub load_error: Option<String>,
-}
-
-/// Data for a single session in the Active Runs view.
-///
-/// This struct represents one running session, which can be from
-/// the main repo or a worktree. Multiple sessions can belong to
-/// the same project (when using worktree mode).
-#[derive(Debug, Clone)]
-pub struct SessionData {
-    /// Project name (e.g., "autom8")
-    pub project_name: String,
-    /// Session metadata (includes session_id, worktree_path, branch)
-    pub metadata: SessionMetadata,
-    /// The active run state for this session
-    pub run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file)
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable
-    pub load_error: Option<String>,
-    /// Whether this is the main repo session (vs. a worktree)
-    pub is_main_session: bool,
-    /// Whether this session is stale (worktree was deleted)
-    pub is_stale: bool,
-    /// Live output state for streaming Claude output (from live.json)
-    pub live_output: Option<LiveState>,
-}
-
-impl SessionData {
-    /// Format the display title for this session.
-    /// Returns "project-name (main)" or "project-name (abc12345)"
-    pub fn display_title(&self) -> String {
-        if self.is_main_session {
-            format!("{} (main)", self.project_name)
-        } else {
-            format!("{} ({})", self.project_name, &self.metadata.session_id)
-        }
-    }
-
-    /// Get a truncated worktree path for display (last 2 components)
-    pub fn truncated_worktree_path(&self) -> String {
-        let path = &self.metadata.worktree_path;
-        let components: Vec<_> = path.components().collect();
-        if components.len() <= 2 {
-            path.display().to_string()
-        } else {
-            let last_two: PathBuf = components[components.len() - 2..].iter().collect();
-            format!(".../{}", last_two.display())
-        }
-    }
-}
-
-/// A single entry in the run history view.
-#[derive(Debug, Clone)]
-pub struct RunHistoryEntry {
-    /// The project this run belongs to
-    pub project_name: String,
-    /// The run state data
-    pub run: RunState,
-    /// Number of stories that were completed
-    pub completed_stories: usize,
-    /// Total number of stories in the spec
-    pub total_stories: usize,
-}
+// Data types (RunProgress, ProjectData, SessionData, RunHistoryEntry) are imported
+// from crate::ui::shared.
 
 /// Format a duration in seconds as a human-readable string (e.g., "5m 32s", "1h 5m")
 pub fn format_duration(started_at: DateTime<Utc>) -> String {
@@ -254,8 +158,6 @@ fn state_color(state: MachineState) -> Color {
 pub struct MonitorApp {
     /// Current view being displayed
     current_view: View,
-    /// Optional project filter
-    project_filter: Option<String>,
     /// Cached project data (used for Project List view)
     projects: Vec<ProjectData>,
     /// Cached session data for Active Runs view.
@@ -283,14 +185,21 @@ pub struct MonitorApp {
     quadrant_col: usize,
     /// Scroll offset for detail view
     detail_scroll_offset: usize,
+    /// Cache of full RunState objects for detail view (keyed by run_id)
+    run_state_cache: std::collections::HashMap<String, RunState>,
+}
+
+impl Default for MonitorApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MonitorApp {
-    /// Create a new MonitorApp with the given configuration.
-    pub fn new(project_filter: Option<String>) -> Self {
+    /// Create a new MonitorApp.
+    pub fn new() -> Self {
         Self {
             current_view: View::ProjectList, // Will be updated on first refresh
-            project_filter,
             projects: Vec::new(),
             sessions: Vec::new(),
             run_history: Vec::new(),
@@ -304,6 +213,7 @@ impl MonitorApp {
             quadrant_row: 0,
             quadrant_col: 0,
             detail_scroll_offset: 0,
+            run_state_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -312,74 +222,20 @@ impl MonitorApp {
     /// This method handles corrupted or invalid state files gracefully,
     /// showing error indicators in the UI instead of crashing.
     pub fn refresh_data(&mut self) -> Result<()> {
-        // Handle list_projects_tree failure gracefully
-        let tree_infos = match list_projects_tree() {
-            Ok(infos) => infos,
+        // Use shared data loading function
+        // TUI handles errors gracefully - log and continue with defaults
+        let ui_data = match load_ui_data(None) {
+            Ok(data) => data,
             Err(e) => {
-                // Log error but continue with empty list
-                // This handles cases where the config directory is inaccessible
-                eprintln!("Warning: Failed to list projects: {}", e);
-                Vec::new()
+                // Log error but continue with empty data
+                eprintln!("Warning: Failed to load UI data: {}", e);
+                Default::default()
             }
         };
 
-        // Filter by project if specified
-        let filtered: Vec<_> = if let Some(ref filter) = self.project_filter {
-            tree_infos
-                .into_iter()
-                .filter(|p| p.name == *filter)
-                .collect()
-        } else {
-            tree_infos
-        };
-
-        // Collect project data including active runs and progress (for Project List view)
-        // Handle corrupted state files gracefully
-        self.projects = filtered
-            .iter()
-            .map(|info| {
-                let (active_run, load_error) = if info.has_active_run {
-                    match StateManager::for_project(&info.name) {
-                        Ok(sm) => match sm.load_current() {
-                            Ok(run) => (run, None),
-                            Err(e) => {
-                                // State file exists but is corrupted/invalid
-                                (None, Some(format!("Corrupted state: {}", e)))
-                            }
-                        },
-                        Err(e) => {
-                            // Failed to create state manager
-                            (None, Some(format!("State error: {}", e)))
-                        }
-                    }
-                } else {
-                    (None, None)
-                };
-
-                // Load spec to get progress information (gracefully handle errors)
-                let progress = active_run.as_ref().and_then(|run| {
-                    Spec::load(&run.spec_json_path)
-                        .ok()
-                        .map(|spec| RunProgress {
-                            completed: spec.completed_count(),
-                            total: spec.total_count(),
-                        })
-                });
-
-                ProjectData {
-                    info: info.clone(),
-                    active_run,
-                    progress,
-                    load_error,
-                }
-            })
-            .collect();
-
-        // Refresh sessions for Active Runs view
-        self.refresh_sessions(&filtered);
-
-        // Update active runs status based on sessions (not projects)
-        self.has_active_runs = !self.sessions.is_empty();
+        self.projects = ui_data.projects;
+        self.sessions = ui_data.sessions;
+        self.has_active_runs = ui_data.has_active_runs;
 
         // If current view is ActiveRuns but no active runs, switch to ProjectList
         if self.current_view == View::ActiveRuns && !self.has_active_runs {
@@ -393,103 +249,6 @@ impl MonitorApp {
         let _ = self.refresh_run_history();
 
         Ok(())
-    }
-
-    /// Refresh sessions for the Active Runs view.
-    ///
-    /// Collects all running sessions across all projects, filtering out
-    /// stale sessions (where the worktree no longer exists).
-    fn refresh_sessions(&mut self, project_infos: &[ProjectTreeInfo]) {
-        let mut sessions: Vec<SessionData> = Vec::new();
-
-        // Get all project names to check
-        let project_names: Vec<_> = if let Some(ref filter) = self.project_filter {
-            vec![filter.clone()]
-        } else {
-            project_infos.iter().map(|p| p.name.clone()).collect()
-        };
-
-        for project_name in project_names {
-            // Get the StateManager for this project
-            let sm = match StateManager::for_project(&project_name) {
-                Ok(sm) => sm,
-                Err(_) => continue, // Skip projects we can't access
-            };
-
-            // List all sessions for this project
-            let project_sessions = match sm.list_sessions() {
-                Ok(s) => s,
-                Err(_) => continue, // Skip if we can't list sessions
-            };
-
-            // Process each session
-            for metadata in project_sessions {
-                // Skip non-running sessions
-                if !metadata.is_running {
-                    continue;
-                }
-
-                // Check if worktree was deleted (stale session)
-                let is_stale = !metadata.worktree_path.exists();
-
-                // Determine if this is the main session
-                let is_main_session = metadata.session_id == MAIN_SESSION_ID;
-
-                // For stale sessions, set error and skip state loading
-                if is_stale {
-                    sessions.push(SessionData {
-                        project_name: project_name.clone(),
-                        metadata,
-                        run: None,
-                        progress: None,
-                        load_error: Some("Worktree has been deleted".to_string()),
-                        is_main_session,
-                        is_stale: true,
-                        live_output: None,
-                    });
-                    continue;
-                }
-
-                // Load the run state and live output for this session
-                let (run, load_error, live_output) =
-                    if let Some(session_sm) = sm.get_session(&metadata.session_id) {
-                        match session_sm.load_current() {
-                            Ok(run) => {
-                                // Load live output (gracefully returns None if missing/corrupted)
-                                let live = session_sm.load_live();
-                                (run, None, live)
-                            }
-                            Err(e) => (None, Some(format!("Corrupted state: {}", e)), None),
-                        }
-                    } else {
-                        (None, Some("Session not found".to_string()), None)
-                    };
-
-                // Load spec to get progress information
-                let progress = run.as_ref().and_then(|r| {
-                    Spec::load(&r.spec_json_path).ok().map(|spec| RunProgress {
-                        completed: spec.completed_count(),
-                        total: spec.total_count(),
-                    })
-                });
-
-                sessions.push(SessionData {
-                    project_name: project_name.clone(),
-                    metadata,
-                    run,
-                    progress,
-                    load_error,
-                    is_main_session,
-                    is_stale: false,
-                    live_output,
-                });
-            }
-        }
-
-        // Sort sessions by last_active_at descending
-        sessions.sort_by(|a, b| b.metadata.last_active_at.cmp(&a.metadata.last_active_at));
-
-        self.sessions = sessions;
     }
 
     /// Ensure selected_index and quadrant_page stay within bounds when projects/history change.
@@ -533,58 +292,20 @@ impl MonitorApp {
     /// This method handles corrupted run files gracefully by skipping them
     /// rather than failing the entire refresh.
     fn refresh_run_history(&mut self) -> Result<()> {
-        let mut history: Vec<RunHistoryEntry> = Vec::new();
-
-        // Determine which projects to load history from
-        let project_names: Vec<String> = if let Some(ref filter) = self.run_history_filter {
-            // Filtered to a single project
-            vec![filter.clone()]
-        } else if let Some(ref filter) = self.project_filter {
-            // Using the global project filter
-            vec![filter.clone()]
-        } else {
-            // All projects
-            self.projects.iter().map(|p| p.info.name.clone()).collect()
+        // Use run_history_filter if set (from selecting a project in Project List)
+        let options = RunHistoryOptions {
+            project_filter: self.run_history_filter.clone(),
+            max_entries: Some(100), // Limit to last 100 runs for performance
         };
 
-        // Load archived runs from each project
-        // Errors are handled gracefully - corrupted files are simply skipped
-        for project_name in project_names {
-            if let Ok(sm) = StateManager::for_project(&project_name) {
-                // list_archived already skips corrupted files internally
-                if let Ok(archived) = sm.list_archived() {
-                    for run in archived {
-                        // Try to load the spec to get story counts
-                        let (completed, total) = Spec::load(&run.spec_json_path)
-                            .map(|spec| (spec.completed_count(), spec.total_count()))
-                            .unwrap_or_else(|_| {
-                                // Fallback: count from iterations
-                                let completed = run
-                                    .iterations
-                                    .iter()
-                                    .filter(|i| i.status == crate::state::IterationStatus::Success)
-                                    .count();
-                                (completed, run.iterations.len().max(completed))
-                            });
+        // Use shared function to load run history
+        // TUI needs full state for detail view, so request it
+        let history_data = load_run_history(&self.projects, &options, true).unwrap_or_default();
 
-                        history.push(RunHistoryEntry {
-                            project_name: project_name.clone(),
-                            run,
-                            completed_stories: completed,
-                            total_stories: total,
-                        });
-                    }
-                }
-            }
-        }
+        // Update the run state cache with the full states
+        self.run_state_cache = history_data.run_states;
 
-        // Sort by date, most recent first
-        history.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
-
-        // Limit to last 100 runs for performance
-        history.truncate(100);
-
-        self.run_history = history;
+        self.run_history = history_data.entries;
 
         Ok(())
     }
@@ -1427,11 +1148,7 @@ impl MonitorApp {
 
     fn render_project_list(&self, frame: &mut Frame, area: Rect) {
         if self.projects.is_empty() {
-            let message = if self.project_filter.is_some() {
-                "No matching projects found"
-            } else {
-                "No projects found. Run 'autom8' in a project directory to create one."
-            };
+            let message = "No projects found. Run 'autom8' in a project directory to create one.";
             let paragraph = Paragraph::new(message)
                 .style(Style::default().fg(COLOR_DIM))
                 .block(Block::default().borders(Borders::ALL).title(" Projects "));
@@ -1549,7 +1266,7 @@ impl MonitorApp {
                 let is_selected = i == self.selected_index;
 
                 // Status indicator and color
-                let (status_indicator, status_clr) = match entry.run.status {
+                let (status_indicator, status_clr) = match entry.status {
                     crate::state::RunStatus::Completed => ("✓", COLOR_SUCCESS),
                     crate::state::RunStatus::Failed => ("✗", COLOR_ERROR),
                     crate::state::RunStatus::Running => ("●", COLOR_WARNING),
@@ -1557,14 +1274,14 @@ impl MonitorApp {
                 };
 
                 // Format date/time
-                let date_str = entry.run.started_at.format("%Y-%m-%d %H:%M").to_string();
+                let date_str = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
 
                 // Story count
                 let story_str = format!("{}/{}", entry.completed_stories, entry.total_stories);
 
                 // Duration if completed
-                let duration_str = if let Some(finished) = entry.run.finished_at {
-                    let duration = finished.signed_duration_since(entry.run.started_at);
+                let duration_str = if let Some(finished) = entry.finished_at {
+                    let duration = finished.signed_duration_since(entry.started_at);
                     let secs = duration.num_seconds().max(0) as u64;
                     let mins = secs / 60;
                     let hours = secs / 3600;
@@ -1636,6 +1353,9 @@ impl MonitorApp {
             None => return,
         };
 
+        // Get the full run state from cache (needed for iterations)
+        let run_state = self.run_state_cache.get(&entry.run_id);
+
         let title = format!(" Run Details: {} ", entry.project_name);
 
         // Create a centered modal area
@@ -1656,11 +1376,9 @@ impl MonitorApp {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        // Build detail content
-        let run = &entry.run;
-
+        // Build detail content using entry fields
         // Status with color
-        let (status_str, status_clr) = match run.status {
+        let (status_str, status_clr) = match entry.status {
             crate::state::RunStatus::Completed => ("Completed", COLOR_SUCCESS),
             crate::state::RunStatus::Failed => ("Failed", COLOR_ERROR),
             crate::state::RunStatus::Running => ("Running", COLOR_WARNING),
@@ -1668,8 +1386,8 @@ impl MonitorApp {
         };
 
         // Duration
-        let duration_str = if let Some(finished) = run.finished_at {
-            let duration = finished.signed_duration_since(run.started_at);
+        let duration_str = if let Some(finished) = entry.finished_at {
+            let duration = finished.signed_duration_since(entry.started_at);
             let secs = duration.num_seconds().max(0) as u64;
             let mins = secs / 60;
             let hours = secs / 3600;
@@ -1692,7 +1410,7 @@ impl MonitorApp {
             Line::from(vec![
                 Span::styled("Started:    ", Style::default().fg(COLOR_DIM)),
                 Span::styled(
-                    run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    entry.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                     Style::default().fg(Color::White),
                 ),
             ]),
@@ -1702,7 +1420,7 @@ impl MonitorApp {
             ]),
             Line::from(vec![
                 Span::styled("Branch:     ", Style::default().fg(COLOR_DIM)),
-                Span::styled(&run.branch, Style::default().fg(COLOR_PRIMARY)),
+                Span::styled(&entry.branch, Style::default().fg(COLOR_PRIMARY)),
             ]),
             Line::from(vec![
                 Span::styled("Stories:    ", Style::default().fg(COLOR_DIM)),
@@ -1723,36 +1441,43 @@ impl MonitorApp {
             )),
         ];
 
-        // Add iteration details
-        for iter in &run.iterations {
-            let iter_status_clr = match iter.status {
-                crate::state::IterationStatus::Success => COLOR_SUCCESS,
-                crate::state::IterationStatus::Failed => COLOR_ERROR,
-                crate::state::IterationStatus::Running => COLOR_WARNING,
-            };
-            let iter_status_str = match iter.status {
-                crate::state::IterationStatus::Success => "✓",
-                crate::state::IterationStatus::Failed => "✗",
-                crate::state::IterationStatus::Running => "●",
-            };
+        // Add iteration details from cached run state (if available)
+        if let Some(run) = run_state {
+            for iter in &run.iterations {
+                let iter_status_clr = match iter.status {
+                    crate::state::IterationStatus::Success => COLOR_SUCCESS,
+                    crate::state::IterationStatus::Failed => COLOR_ERROR,
+                    crate::state::IterationStatus::Running => COLOR_WARNING,
+                };
+                let iter_status_str = match iter.status {
+                    crate::state::IterationStatus::Success => "✓",
+                    crate::state::IterationStatus::Failed => "✗",
+                    crate::state::IterationStatus::Running => "●",
+                };
 
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("{} ", iter_status_str),
-                    Style::default().fg(iter_status_clr),
-                ),
-                Span::styled(&iter.story_id, Style::default().fg(Color::White)),
-            ]));
-
-            // Show work summary if available
-            if let Some(ref summary) = iter.work_summary {
-                let truncated = truncate_string(summary, 60);
                 lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(truncated, Style::default().fg(COLOR_DIM)),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format!("{} ", iter_status_str),
+                        Style::default().fg(iter_status_clr),
+                    ),
+                    Span::styled(&iter.story_id, Style::default().fg(Color::White)),
                 ]));
+
+                // Show work summary if available
+                if let Some(ref summary) = iter.work_summary {
+                    let truncated = truncate_string(summary, 60);
+                    lines.push(Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(truncated, Style::default().fg(COLOR_DIM)),
+                    ]));
+                }
             }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  (iteration details not available)",
+                Style::default().fg(COLOR_DIM),
+            )));
         }
 
         lines.push(Line::from(""));
@@ -1853,7 +1578,7 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Mo
 /// runs the event loop, and restores the terminal on exit.
 ///
 /// The refresh interval is hardcoded to 100ms for responsive UI updates.
-pub fn run_monitor(project_filter: Option<String>) -> Result<()> {
+pub fn run_monitor() -> Result<()> {
     // Set up panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -1870,7 +1595,7 @@ pub fn run_monitor(project_filter: Option<String>) -> Result<()> {
     })?;
 
     // Create app state
-    let mut app = MonitorApp::new(project_filter);
+    let mut app = MonitorApp::new();
 
     // Initial data load
     app.refresh_data()?;
@@ -1920,6 +1645,11 @@ pub fn run_monitor(project_filter: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectTreeInfo;
+    use crate::state::SessionMetadata;
+    use crate::ui::shared::RunProgress;
+    use crate::worktree::MAIN_SESSION_ID;
+    use std::path::PathBuf;
 
     /// Helper function to create a test SessionData for use in tests
     fn create_test_session(project_name: &str, session_id: &str, branch: &str) -> SessionData {
@@ -1963,21 +1693,14 @@ mod tests {
 
     #[test]
     fn test_monitor_app_new() {
-        let app = MonitorApp::new(None);
-        assert!(app.project_filter.is_none());
+        let app = MonitorApp::new();
         assert!(!app.should_quit);
         assert_eq!(app.selected_index, 0);
     }
 
     #[test]
-    fn test_monitor_app_with_project_filter() {
-        let app = MonitorApp::new(Some("myapp".to_string()));
-        assert_eq!(app.project_filter, Some("myapp".to_string()));
-    }
-
-    #[test]
     fn test_monitor_app_handle_quit() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         assert!(!app.should_quit());
 
         app.handle_key(KeyCode::Char('q'));
@@ -1986,14 +1709,14 @@ mod tests {
 
     #[test]
     fn test_monitor_app_handle_quit_uppercase() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.handle_key(KeyCode::Char('Q'));
         assert!(app.should_quit());
     }
 
     #[test]
     fn test_monitor_app_handle_tab_switches_view() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Start at ProjectList (default when no active runs)
         app.current_view = View::ProjectList;
         app.has_active_runs = false;
@@ -2008,7 +1731,7 @@ mod tests {
 
     #[test]
     fn test_monitor_app_handle_tab_with_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
 
@@ -2024,7 +1747,7 @@ mod tests {
 
     #[test]
     fn test_monitor_app_handle_navigation() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.selected_index = 1;
 
         app.handle_key(KeyCode::Up);
@@ -2037,7 +1760,7 @@ mod tests {
 
     #[test]
     fn test_available_views_with_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.has_active_runs = true;
 
         let views = app.available_views();
@@ -2047,7 +1770,7 @@ mod tests {
 
     #[test]
     fn test_available_views_without_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.has_active_runs = false;
 
         let views = app.available_views();
@@ -2059,7 +1782,7 @@ mod tests {
 
     #[test]
     fn test_next_view_resets_selected_index() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.selected_index = 5;
         app.current_view = View::ProjectList;
         app.has_active_runs = false;
@@ -2078,52 +1801,7 @@ mod tests {
     // ===========================================
     // US-005: Active Runs View Tests
     // ===========================================
-
-    #[test]
-    fn test_run_progress_as_fraction() {
-        let progress = RunProgress {
-            completed: 1,
-            total: 5,
-        };
-        // completed + 1 because we're working on the next story
-        assert_eq!(progress.as_fraction(), "Story 2/5");
-    }
-
-    #[test]
-    fn test_run_progress_as_fraction_first_story() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 3,
-        };
-        assert_eq!(progress.as_fraction(), "Story 1/3");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage() {
-        let progress = RunProgress {
-            completed: 2,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "40%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_zero_total() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 0,
-        };
-        assert_eq!(progress.as_percentage(), "0%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_complete() {
-        let progress = RunProgress {
-            completed: 5,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "100%");
-    }
+    // Note: RunProgress tests are in ui/shared/mod.rs
 
     #[test]
     fn test_format_duration_seconds_only() {
@@ -2188,7 +1866,7 @@ mod tests {
     fn test_get_output_snippet_returns_status_message_when_no_iterations() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
         let snippet = app.get_output_snippet(&run, None);
@@ -2199,7 +1877,7 @@ mod tests {
     fn test_get_output_snippet_returns_last_lines_from_iteration() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.start_iteration("US-001");
         run.iterations.last_mut().unwrap().output_snippet =
@@ -2214,7 +1892,7 @@ mod tests {
     fn test_get_output_snippet_with_reviewing_state() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::Reviewing;
         run.review_iteration = 2;
@@ -2227,7 +1905,7 @@ mod tests {
     fn test_get_output_snippet_prefers_fresh_live_output_when_running_claude() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::RunningClaude;
 
@@ -2246,7 +1924,7 @@ mod tests {
         use chrono::{Duration, Utc};
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::RunningClaude;
         run.start_iteration("US-001");
@@ -2265,7 +1943,7 @@ mod tests {
     fn test_get_output_snippet_falls_back_to_status_when_live_output_empty() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::RunningClaude;
 
@@ -2280,7 +1958,7 @@ mod tests {
     fn test_get_output_snippet_ignores_live_output_for_non_running_claude_states() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::Reviewing;
         run.review_iteration = 1;
@@ -2298,7 +1976,7 @@ mod tests {
     fn test_get_output_snippet_live_output_takes_last_5_lines() {
         use std::path::PathBuf;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.machine_state = MachineState::RunningClaude;
 
@@ -2381,7 +2059,7 @@ mod tests {
 
     #[test]
     fn test_monitor_app_has_run_history_filter() {
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         assert!(app.run_history_filter().is_none());
     }
 
@@ -2389,7 +2067,7 @@ mod tests {
     fn test_handle_enter_on_project_list_sets_filter() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![ProjectData {
             info: ProjectTreeInfo {
@@ -2417,7 +2095,7 @@ mod tests {
 
     #[test]
     fn test_handle_tab_clears_run_history_filter() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = Some("test-project".to_string());
 
@@ -2428,7 +2106,7 @@ mod tests {
 
     #[test]
     fn test_handle_enter_on_empty_project_list_does_nothing() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![]; // Empty
 
@@ -2441,7 +2119,7 @@ mod tests {
 
     #[test]
     fn test_handle_enter_on_active_runs_does_nothing() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
 
@@ -2456,7 +2134,7 @@ mod tests {
     fn test_project_list_navigation_with_arrow_keys() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![
             ProjectData {
@@ -2532,7 +2210,7 @@ mod tests {
     fn test_enter_on_second_project_selects_correct_filter() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![
             ProjectData {
@@ -2582,21 +2260,17 @@ mod tests {
         use std::path::PathBuf;
 
         let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 3,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 3, 5);
 
         assert_eq!(entry.project_name, "test-project");
         assert_eq!(entry.completed_stories, 3);
         assert_eq!(entry.total_stories, 5);
+        assert_eq!(entry.branch, "test-branch");
     }
 
     #[test]
     fn test_monitor_app_new_initializes_run_history_empty() {
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         assert!(app.run_history.is_empty());
         assert_eq!(app.history_scroll_offset, 0);
         assert!(!app.show_run_detail);
@@ -2606,27 +2280,27 @@ mod tests {
     fn test_run_history_navigation_with_arrow_keys() {
         use std::path::PathBuf;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
-            RunHistoryEntry {
-                project_name: "project-c".to_string(),
-                run: RunState::new(PathBuf::from("c.json"), "branch-c".to_string()),
-                completed_stories: 3,
-                total_stories: 4,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
+            RunHistoryEntry::new(
+                "project-c".to_string(),
+                &RunState::new(PathBuf::from("c.json"), "branch-c".to_string()),
+                3,
+                4,
+            ),
         ];
 
         assert_eq!(app.selected_index, 0);
@@ -2656,14 +2330,14 @@ mod tests {
     fn test_enter_on_run_history_shows_detail() {
         use std::path::PathBuf;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
-        app.run_history = vec![RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run: RunState::new(PathBuf::from("test.json"), "test-branch".to_string()),
-            completed_stories: 1,
-            total_stories: 2,
-        }];
+        app.run_history = vec![RunHistoryEntry::new(
+            "test-project".to_string(),
+            &RunState::new(PathBuf::from("test.json"), "test-branch".to_string()),
+            1,
+            2,
+        )];
 
         assert!(!app.show_run_detail);
         assert!(!app.is_showing_run_detail());
@@ -2676,7 +2350,7 @@ mod tests {
 
     #[test]
     fn test_esc_closes_detail_view() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.show_run_detail = true;
 
         app.handle_key(KeyCode::Esc);
@@ -2686,7 +2360,7 @@ mod tests {
 
     #[test]
     fn test_enter_closes_detail_view() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.show_run_detail = true;
 
         app.handle_key(KeyCode::Enter);
@@ -2696,7 +2370,7 @@ mod tests {
 
     #[test]
     fn test_q_quits_immediately_even_from_detail_view() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.show_run_detail = true;
 
         app.handle_key(KeyCode::Char('q'));
@@ -2707,7 +2381,7 @@ mod tests {
 
     #[test]
     fn test_esc_clears_run_history_filter() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = Some("test-project".to_string());
 
@@ -2718,7 +2392,7 @@ mod tests {
 
     #[test]
     fn test_tab_resets_history_scroll_offset() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.history_scroll_offset = 10;
 
@@ -2729,7 +2403,7 @@ mod tests {
 
     #[test]
     fn test_enter_on_empty_run_history_does_not_show_detail() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history = vec![]; // Empty
 
@@ -2760,7 +2434,7 @@ mod tests {
     fn test_enter_from_project_list_resets_scroll_offset() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.history_scroll_offset = 5; // Should be reset
         app.projects = vec![ProjectData {
@@ -2787,7 +2461,7 @@ mod tests {
 
     #[test]
     fn test_navigation_keys_ignored_when_detail_shown() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.show_run_detail = true;
         app.selected_index = 0;
 
@@ -2807,14 +2481,9 @@ mod tests {
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.transition_to(MachineState::Failed);
 
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 2,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 2, 5);
 
-        assert_eq!(entry.run.status, crate::state::RunStatus::Failed);
+        assert_eq!(entry.status, crate::state::RunStatus::Failed);
     }
 
     #[test]
@@ -2824,15 +2493,10 @@ mod tests {
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.transition_to(MachineState::Completed);
 
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 5,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 5, 5);
 
-        assert_eq!(entry.run.status, crate::state::RunStatus::Completed);
-        assert!(entry.run.finished_at.is_some());
+        assert_eq!(entry.status, crate::state::RunStatus::Completed);
+        assert!(entry.finished_at.is_some());
     }
 
     #[test]
@@ -2878,7 +2542,7 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_on_empty_projects() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.selected_index = 5; // Out of bounds
         app.projects = vec![]; // Empty
@@ -2893,7 +2557,7 @@ mod tests {
     fn test_clamp_selection_index_after_project_removal() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.selected_index = 3; // Was valid when we had 4 projects
                                 // Now only 2 projects
@@ -2938,7 +2602,7 @@ mod tests {
 
     #[test]
     fn test_clamp_history_scroll_offset() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.selected_index = 2;
         app.history_scroll_offset = 10; // Out of bounds
@@ -2979,7 +2643,7 @@ mod tests {
     fn test_active_runs_includes_error_projects() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.projects = vec![
@@ -3055,7 +2719,7 @@ mod tests {
 
     #[test]
     fn test_handle_enter_on_project_list_does_not_crash_on_empty() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![]; // Empty
         app.selected_index = 0;
@@ -3071,7 +2735,7 @@ mod tests {
     fn test_active_runs_list_handles_error_state() {
         use crate::config::ProjectTreeInfo;
 
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         let project_with_error = ProjectData {
             info: ProjectTreeInfo {
                 name: "error-project".to_string(),
@@ -3111,13 +2775,13 @@ mod tests {
 
     #[test]
     fn test_monitor_app_new_initializes_quadrant_page_to_zero() {
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         assert_eq!(app.quadrant_page, 0);
     }
 
     #[test]
     fn test_total_quadrant_pages_with_zero_runs() {
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         // With no projects, total_quadrant_pages returns 1 (minimum)
         assert_eq!(app.total_quadrant_pages(), 1);
     }
@@ -3126,7 +2790,7 @@ mod tests {
     fn test_total_quadrant_pages_with_one_to_four_runs() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![ProjectData {
             info: ProjectTreeInfo {
                 name: "project-1".to_string(),
@@ -3175,7 +2839,7 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_with_five_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         add_test_sessions(&mut app, 5);
 
         // 5 sessions = 2 pages (4 on first, 1 on second)
@@ -3184,7 +2848,7 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_with_eight_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         add_test_sessions(&mut app, 8);
 
         // 8 sessions = 2 pages (4 on each)
@@ -3193,7 +2857,7 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_with_nine_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         add_test_sessions(&mut app, 9);
 
         // 9 sessions = 3 pages (4, 4, 1)
@@ -3202,7 +2866,7 @@ mod tests {
 
     #[test]
     fn test_next_quadrant_page_advances() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Add 5 sessions to have 2 pages
         add_test_sessions(&mut app, 5);
 
@@ -3217,7 +2881,7 @@ mod tests {
 
     #[test]
     fn test_prev_quadrant_page_goes_back() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.quadrant_page = 2;
 
         app.prev_quadrant_page();
@@ -3233,7 +2897,7 @@ mod tests {
 
     #[test]
     fn test_next_quadrant_page_does_nothing_with_single_page() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Only 2 sessions = 1 page
         add_test_sessions(&mut app, 2);
 
@@ -3245,7 +2909,7 @@ mod tests {
 
     #[test]
     fn test_handle_n_key_advances_page_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         // Add 5 sessions
@@ -3258,7 +2922,7 @@ mod tests {
 
     #[test]
     fn test_handle_right_bracket_advances_page_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         // Add 5 sessions
@@ -3271,7 +2935,7 @@ mod tests {
 
     #[test]
     fn test_handle_p_key_goes_back_page_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
@@ -3284,7 +2948,7 @@ mod tests {
 
     #[test]
     fn test_handle_left_bracket_goes_back_page_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 1;
@@ -3297,7 +2961,7 @@ mod tests {
 
     #[test]
     fn test_pagination_keys_ignored_in_other_views() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.quadrant_page = 0;
 
@@ -3311,7 +2975,7 @@ mod tests {
 
     #[test]
     fn test_tab_resets_quadrant_page() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.quadrant_page = 2;
@@ -3324,7 +2988,7 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_also_clamps_quadrant_page() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.quadrant_page = 5; // Out of bounds
                                // Only 3 sessions = 1 page (max page index = 0)
@@ -3339,7 +3003,7 @@ mod tests {
     #[test]
     fn test_total_quadrant_pages_only_counts_sessions() {
         // Sessions are always "active" by definition (we only store running sessions)
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Add 3 active sessions
         add_test_sessions(&mut app, 3);
 
@@ -3349,7 +3013,7 @@ mod tests {
 
     #[test]
     fn test_total_quadrant_pages_includes_error_sessions() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Add 3 active sessions
         add_test_sessions(&mut app, 3);
 
@@ -3375,14 +3039,14 @@ mod tests {
 
     #[test]
     fn test_monitor_app_new_initializes_quadrant_row_col_to_zero() {
-        let app = MonitorApp::new(None);
+        let app = MonitorApp::new();
         assert_eq!(app.quadrant_row, 0);
         assert_eq!(app.quadrant_col, 0);
     }
 
     #[test]
     fn test_next_view_resets_quadrant_position() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.quadrant_row = 1;
         app.quadrant_col = 1;
         app.current_view = View::ActiveRuns;
@@ -3398,7 +3062,7 @@ mod tests {
     fn test_j_key_navigates_down_in_project_list() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.projects = vec![
             ProjectData {
@@ -3443,7 +3107,7 @@ mod tests {
     fn test_k_key_navigates_up_in_project_list() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.selected_index = 1;
         app.projects = vec![
@@ -3487,21 +3151,21 @@ mod tests {
     fn test_j_key_navigates_down_in_run_history() {
         use std::path::PathBuf;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
         ];
 
         assert_eq!(app.selected_index, 0);
@@ -3514,22 +3178,22 @@ mod tests {
     fn test_k_key_navigates_up_in_run_history() {
         use std::path::PathBuf;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.selected_index = 1;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
         ];
 
         app.handle_key(KeyCode::Char('k'));
@@ -3550,7 +3214,7 @@ mod tests {
 
     #[test]
     fn test_hjkl_quadrant_navigation_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.sessions = create_four_active_sessions();
@@ -3582,7 +3246,7 @@ mod tests {
 
     #[test]
     fn test_arrow_keys_quadrant_navigation_in_active_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.sessions = create_four_active_sessions();
@@ -3614,7 +3278,7 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_stays_in_bounds() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         app.sessions = create_four_active_sessions();
@@ -3648,7 +3312,7 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_fewer_than_four_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         // Only 2 sessions (positions 0,0 and 0,1)
@@ -3671,7 +3335,7 @@ mod tests {
 
     #[test]
     fn test_quadrant_navigation_with_three_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
         // 3 sessions (positions 0,0, 0,1, and 1,0)
@@ -3708,7 +3372,7 @@ mod tests {
     fn test_h_and_l_ignored_in_project_list() {
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
         app.selected_index = 1;
         app.projects = vec![
@@ -3755,7 +3419,7 @@ mod tests {
 
     #[test]
     fn test_runs_on_current_page_with_full_page() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
@@ -3764,7 +3428,7 @@ mod tests {
 
     #[test]
     fn test_runs_on_current_page_with_partial_page() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // 5 sessions = 4 on page 0, 1 on page 1
         add_test_sessions(&mut app, 5);
 
@@ -3777,7 +3441,7 @@ mod tests {
 
     #[test]
     fn test_is_quadrant_valid() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.sessions = create_four_active_sessions();
         app.quadrant_page = 0;
 
@@ -3790,7 +3454,7 @@ mod tests {
 
     #[test]
     fn test_is_quadrant_valid_with_two_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         // Only 2 sessions
         add_test_sessions(&mut app, 2);
         app.quadrant_page = 0;
@@ -3804,7 +3468,7 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_clamps_quadrant_position() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         // Start at position (1,1) with 4 sessions
         app.quadrant_row = 1;
@@ -3823,7 +3487,7 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_with_one_run() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
@@ -3839,7 +3503,7 @@ mod tests {
 
     #[test]
     fn test_clamp_selection_index_with_zero_runs() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.quadrant_row = 1;
         app.quadrant_col = 1;
@@ -3858,7 +3522,7 @@ mod tests {
 
     #[test]
     fn test_esc_from_active_runs_quits() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
 
         app.handle_key(KeyCode::Esc);
@@ -3868,7 +3532,7 @@ mod tests {
 
     #[test]
     fn test_esc_from_project_list_quits() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ProjectList;
 
         app.handle_key(KeyCode::Esc);
@@ -3878,7 +3542,7 @@ mod tests {
 
     #[test]
     fn test_esc_from_run_history_unfiltered_goes_to_project_list() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = None;
 
@@ -3890,7 +3554,7 @@ mod tests {
 
     #[test]
     fn test_esc_from_run_history_filtered_clears_filter_first() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = Some("my-project".to_string());
         app.selected_index = 5;
@@ -3908,7 +3572,7 @@ mod tests {
 
     #[test]
     fn test_esc_twice_from_filtered_run_history_goes_to_project_list() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = Some("my-project".to_string());
 
@@ -3925,7 +3589,7 @@ mod tests {
 
     #[test]
     fn test_esc_three_times_from_filtered_run_history_quits() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = Some("my-project".to_string());
 
@@ -3942,25 +3606,25 @@ mod tests {
     #[test]
     fn test_q_quits_from_any_view() {
         // Test q quits from ProjectList
-        let mut app1 = MonitorApp::new(None);
+        let mut app1 = MonitorApp::new();
         app1.current_view = View::ProjectList;
         app1.handle_key(KeyCode::Char('q'));
         assert!(app1.should_quit());
 
         // Test q quits from ActiveRuns
-        let mut app2 = MonitorApp::new(None);
+        let mut app2 = MonitorApp::new();
         app2.current_view = View::ActiveRuns;
         app2.handle_key(KeyCode::Char('q'));
         assert!(app2.should_quit());
 
         // Test q quits from RunHistory
-        let mut app3 = MonitorApp::new(None);
+        let mut app3 = MonitorApp::new();
         app3.current_view = View::RunHistory;
         app3.handle_key(KeyCode::Char('q'));
         assert!(app3.should_quit());
 
         // Test Q (uppercase) quits from any view
-        let mut app4 = MonitorApp::new(None);
+        let mut app4 = MonitorApp::new();
         app4.current_view = View::ProjectList;
         app4.handle_key(KeyCode::Char('Q'));
         assert!(app4.should_quit());
@@ -3968,7 +3632,7 @@ mod tests {
 
     #[test]
     fn test_esc_resets_selected_index_when_going_to_project_list() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::RunHistory;
         app.run_history_filter = None;
         app.selected_index = 5;
@@ -3986,7 +3650,7 @@ mod tests {
         // Then Esc back through the hierarchy
         use crate::config::ProjectTreeInfo;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Setup a project
         app.projects = vec![ProjectData {
@@ -4006,15 +3670,15 @@ mod tests {
         }];
 
         // Add a run history entry
-        app.run_history = vec![RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run: RunState::new(
+        app.run_history = vec![RunHistoryEntry::new(
+            "test-project".to_string(),
+            &RunState::new(
                 std::path::PathBuf::from("test.json"),
                 "test-branch".to_string(),
             ),
-            completed_stories: 3,
-            total_stories: 3,
-        }];
+            3,
+            3,
+        )];
 
         // Start at ProjectList
         app.current_view = View::ProjectList;
@@ -4073,7 +3737,7 @@ mod tests {
 
     #[test]
     fn test_multiple_sessions_same_project_in_grid() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Add three sessions for the same project
         app.sessions.push(create_test_session(
@@ -4107,7 +3771,7 @@ mod tests {
 
     #[test]
     fn test_pagination_with_multiple_sessions_same_project() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
 
@@ -4140,7 +3804,7 @@ mod tests {
 
     #[test]
     fn test_sessions_from_different_projects_in_grid() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Add sessions from different projects
         app.sessions.push(create_test_session(
@@ -4286,7 +3950,7 @@ mod tests {
     #[test]
     fn test_us007_main_and_worktree_sessions_both_appear_in_grid() {
         // Simulates: Run in main repo AND run with --worktree for same project
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
 
@@ -4322,7 +3986,7 @@ mod tests {
 
     #[test]
     fn test_us007_each_session_shows_correct_session_id_in_title() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Add sessions with distinct session IDs
         app.sessions
@@ -4340,7 +4004,7 @@ mod tests {
 
     #[test]
     fn test_us007_sessions_have_independent_progress() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Create main session with progress 2/5
         let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
@@ -4376,7 +4040,7 @@ mod tests {
     fn test_us007_sessions_have_independent_state() {
         use crate::state::MachineState;
 
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Main session is in Reviewing state
         let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
@@ -4406,7 +4070,7 @@ mod tests {
 
     #[test]
     fn test_us007_sessions_have_independent_branches() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         app.sessions
             .push(create_test_session("autom8", MAIN_SESSION_ID, "main"));
@@ -4430,7 +4094,7 @@ mod tests {
 
     #[test]
     fn test_us007_quadrant_navigation_with_concurrent_sessions() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
         app.has_active_runs = true;
 
@@ -4460,7 +4124,7 @@ mod tests {
 
     #[test]
     fn test_us007_session_type_indicators_in_concurrent_sessions() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Main session
         let main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
@@ -4494,7 +4158,7 @@ mod tests {
 
     #[test]
     fn test_us007_worktree_path_differs_between_sessions() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
 
         // Main session - path is the main repo
         let mut main_session = create_test_session("autom8", MAIN_SESSION_ID, "main");
@@ -4646,7 +4310,7 @@ mod tests {
 
     #[test]
     fn test_us004_error_and_stale_sessions_appear_in_app() {
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.current_view = View::ActiveRuns;
 
         // Add a normal session
@@ -4727,7 +4391,7 @@ mod tests {
     #[test]
     fn test_us005_single_session_shows_running() {
         // When a project has exactly 1 session running, it should show "Running"
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![create_test_project("autom8")];
         app.sessions = vec![create_test_session("autom8", MAIN_SESSION_ID, "main")];
 
@@ -4745,7 +4409,7 @@ mod tests {
     #[test]
     fn test_us005_multiple_sessions_show_count() {
         // When a project has >1 sessions running, it should show "[N sessions]"
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![create_test_project("autom8")];
 
         // Add 3 sessions for the same project
@@ -4769,7 +4433,7 @@ mod tests {
     #[test]
     fn test_us005_session_count_per_project() {
         // Different projects should have independent session counts
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![
             create_test_project("autom8"),
             create_test_project("other-project"),
@@ -4799,7 +4463,7 @@ mod tests {
     #[test]
     fn test_us005_no_sessions_idle_status() {
         // Projects with no running sessions should show "Idle"
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![create_test_project("autom8")];
         app.sessions = vec![]; // No sessions
 
@@ -4816,7 +4480,7 @@ mod tests {
     #[test]
     fn test_us005_aggregate_state_any_running() {
         // If any session is running, the project status should be "running"
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![create_test_project("autom8")];
 
         // One session running
@@ -4833,7 +4497,7 @@ mod tests {
     #[test]
     fn test_us005_session_count_includes_errors() {
         // Sessions with load_error should also be counted (they're still "active")
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![create_test_project("autom8")];
 
         // One normal session, one error session
@@ -4858,7 +4522,7 @@ mod tests {
     #[test]
     fn test_us005_mixed_projects_correct_counts() {
         // Test a realistic scenario with multiple projects and varying session counts
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         app.projects = vec![
             create_test_project("autom8"),
             create_test_project("web-app"),
@@ -4893,7 +4557,7 @@ mod tests {
     fn test_us005_project_error_takes_precedence() {
         // If a project has a load_error in ProjectData, that should show "Error"
         // even if sessions are running
-        let mut app = MonitorApp::new(None);
+        let mut app = MonitorApp::new();
         let mut project = create_test_project("autom8");
         project.load_error = Some("Config error".to_string());
         app.projects = vec![project];
