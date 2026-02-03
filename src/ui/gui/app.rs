@@ -14,7 +14,7 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
     load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
 };
-use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
@@ -151,6 +151,197 @@ const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
 
 /// Corner rounding for sidebar item backgrounds.
 const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
+
+// ============================================================================
+// Context Menu Constants (Right-Click Context Menu - US-002)
+// ============================================================================
+
+/// Minimum width for the context menu.
+const CONTEXT_MENU_MIN_WIDTH: f32 = 160.0;
+
+/// Height of each menu item.
+const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.0;
+
+/// Horizontal padding for menu items.
+const CONTEXT_MENU_PADDING_H: f32 = 12.0; // spacing::MD
+
+/// Vertical padding for menu items.
+const CONTEXT_MENU_PADDING_V: f32 = 6.0;
+
+/// Size of the submenu arrow indicator.
+const CONTEXT_MENU_ARROW_SIZE: f32 = 8.0;
+
+/// Offset from cursor for menu positioning.
+const CONTEXT_MENU_CURSOR_OFFSET: f32 = 2.0;
+
+// ============================================================================
+// Context Menu Types (Right-Click Context Menu - US-002)
+// ============================================================================
+
+/// Menu item in the context menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuItem {
+    /// A simple action item.
+    Action {
+        /// Display label for the menu item.
+        label: String,
+        /// Unique identifier for the action.
+        action: ContextMenuAction,
+        /// Whether the item is enabled.
+        enabled: bool,
+    },
+    /// A separator line between items.
+    Separator,
+    /// An item that opens a submenu.
+    Submenu {
+        /// Display label for the submenu trigger.
+        label: String,
+        /// Unique identifier for the submenu.
+        id: String,
+        /// Whether the submenu is enabled.
+        enabled: bool,
+        /// Items in the submenu (built lazily when opened).
+        items: Vec<ContextMenuItem>,
+    },
+}
+
+impl ContextMenuItem {
+    /// Create a new action menu item.
+    pub fn action(label: impl Into<String>, action: ContextMenuAction) -> Self {
+        Self::Action {
+            label: label.into(),
+            action,
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled action menu item.
+    pub fn action_disabled(label: impl Into<String>, action: ContextMenuAction) -> Self {
+        Self::Action {
+            label: label.into(),
+            action,
+            enabled: false,
+        }
+    }
+
+    /// Create a separator.
+    pub fn separator() -> Self {
+        Self::Separator
+    }
+
+    /// Create a submenu item.
+    pub fn submenu(
+        label: impl Into<String>,
+        id: impl Into<String>,
+        items: Vec<ContextMenuItem>,
+    ) -> Self {
+        let items_vec = items;
+        Self::Submenu {
+            label: label.into(),
+            id: id.into(),
+            enabled: !items_vec.is_empty(),
+            items: items_vec,
+        }
+    }
+
+    /// Create a disabled submenu item.
+    pub fn submenu_disabled(label: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::Submenu {
+            label: label.into(),
+            id: id.into(),
+            enabled: false,
+            items: Vec::new(),
+        }
+    }
+}
+
+/// Actions that can be triggered from the context menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuAction {
+    /// Run the status command for the project.
+    Status,
+    /// Run the describe command for the project.
+    Describe,
+    /// Resume a specific session (with session ID).
+    Resume(Option<String>),
+    /// Clean worktrees for the project.
+    CleanWorktrees,
+    /// Clean orphaned sessions for the project.
+    CleanOrphaned,
+}
+
+/// State for the context menu overlay.
+#[derive(Debug, Clone)]
+pub struct ContextMenuState {
+    /// Screen position where the menu should appear.
+    pub position: Pos2,
+    /// Name of the project this menu is for.
+    pub project_name: String,
+    /// The menu items to display.
+    pub items: Vec<ContextMenuItem>,
+    /// Currently open submenu ID (if any).
+    pub open_submenu: Option<String>,
+    /// Position of the open submenu (if any).
+    pub submenu_position: Option<Pos2>,
+}
+
+impl ContextMenuState {
+    /// Create a new context menu state.
+    pub fn new(position: Pos2, project_name: String, items: Vec<ContextMenuItem>) -> Self {
+        Self {
+            position,
+            project_name,
+            items,
+            open_submenu: None,
+            submenu_position: None,
+        }
+    }
+
+    /// Open a submenu at the given position.
+    pub fn open_submenu(&mut self, id: String, position: Pos2) {
+        self.open_submenu = Some(id);
+        self.submenu_position = Some(position);
+    }
+
+    /// Close any open submenu.
+    pub fn close_submenu(&mut self) {
+        self.open_submenu = None;
+        self.submenu_position = None;
+    }
+}
+
+/// Result of a project row interaction.
+/// Contains information about both left-click and right-click events.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectRowInteraction {
+    /// True if the row was left-clicked (select project).
+    pub clicked: bool,
+    /// If right-clicked, contains the screen position for context menu.
+    pub right_click_pos: Option<Pos2>,
+}
+
+impl ProjectRowInteraction {
+    /// Create a new interaction with no events.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Create a left-click interaction.
+    pub fn click() -> Self {
+        Self {
+            clicked: true,
+            right_click_pos: None,
+        }
+    }
+
+    /// Create a right-click interaction at the given position.
+    pub fn right_click(pos: Pos2) -> Self {
+        Self {
+            clicked: false,
+            right_click_pos: Some(pos),
+        }
+    }
+}
 
 // ============================================================================
 // GUI-specific Extensions
@@ -347,6 +538,14 @@ pub struct Autom8App {
     /// When collapsed, the sidebar is fully hidden to maximize content area.
     /// State persists during the session (not persisted across restarts).
     sidebar_collapsed: bool,
+
+    // ========================================================================
+    // Context Menu State (Right-Click Context Menu - US-002)
+    // ========================================================================
+    /// State for the right-click context menu overlay.
+    /// When Some, a context menu is displayed at the specified position.
+    /// Only one context menu can be open at a time.
+    context_menu: Option<ContextMenuState>,
 }
 
 impl Default for Autom8App {
@@ -389,6 +588,7 @@ impl Autom8App {
             last_refresh: Instant::now(),
             refresh_interval,
             sidebar_collapsed: false,
+            context_menu: None,
         };
         // Initial data load
         app.refresh_data();
@@ -448,6 +648,50 @@ impl Autom8App {
     /// Toggles the sidebar collapsed state.
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+    }
+
+    // ========================================================================
+    // Context Menu State (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    /// Returns whether the context menu is currently open.
+    pub fn is_context_menu_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    /// Returns a reference to the context menu state, if open.
+    pub fn context_menu(&self) -> Option<&ContextMenuState> {
+        self.context_menu.as_ref()
+    }
+
+    /// Open the context menu for a project at the given position.
+    pub fn open_context_menu(&mut self, position: Pos2, project_name: String) {
+        // Build the menu items for this project
+        let items = self.build_context_menu_items(&project_name);
+
+        self.context_menu = Some(ContextMenuState::new(position, project_name, items));
+    }
+
+    /// Close the context menu.
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    /// Build the context menu items for a project.
+    /// This creates the menu structure with Status, Describe, Resume, and Clean options.
+    fn build_context_menu_items(&self, _project_name: &str) -> Vec<ContextMenuItem> {
+        // For US-002, we create the menu structure.
+        // Actual command execution will be implemented in US-003, US-004, US-005, US-006.
+        vec![
+            ContextMenuItem::action("Status", ContextMenuAction::Status),
+            ContextMenuItem::action("Describe", ContextMenuAction::Describe),
+            ContextMenuItem::Separator,
+            // Resume - placeholder for US-005
+            ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None)),
+            ContextMenuItem::Separator,
+            // Clean - placeholder for US-006
+            ContextMenuItem::submenu_disabled("Clean", "clean"),
+        ]
     }
 
     /// Returns the currently selected project name.
@@ -739,6 +983,17 @@ impl eframe::App for Autom8App {
             .show(ctx, |ui| {
                 self.render_content(ui);
             });
+
+        // Handle global keyboard shortcuts for context menu
+        if self.context_menu.is_some() {
+            // Close context menu on Escape key
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.close_context_menu();
+            }
+        }
+
+        // Render context menu overlay (must be after content to appear on top)
+        self.render_context_menu(ctx);
     }
 }
 
@@ -809,6 +1064,229 @@ impl Autom8App {
                     }
                 });
             });
+    }
+
+    // ========================================================================
+    // Context Menu Rendering (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    /// Render the context menu overlay.
+    ///
+    /// This method renders the context menu as a floating panel at the stored position.
+    /// The menu is rendered on top of all other content using `Order::Foreground`.
+    /// Handles click-outside-to-close and menu item interactions.
+    fn render_context_menu(&mut self, ctx: &egui::Context) {
+        // Early return if no context menu is open
+        let menu_state = match &self.context_menu {
+            Some(state) => state.clone(),
+            None => return,
+        };
+
+        // Get screen rect for bounds checking
+        let screen_rect = ctx.screen_rect();
+
+        // Calculate menu dimensions
+        let menu_width = CONTEXT_MENU_MIN_WIDTH;
+        let item_count = menu_state
+            .items
+            .iter()
+            .filter(|item| !matches!(item, ContextMenuItem::Separator))
+            .count();
+        let separator_count = menu_state
+            .items
+            .iter()
+            .filter(|item| matches!(item, ContextMenuItem::Separator))
+            .count();
+        let menu_height = (item_count as f32 * CONTEXT_MENU_ITEM_HEIGHT)
+            + (separator_count as f32 * (spacing::SM + 1.0))
+            + (CONTEXT_MENU_PADDING_V * 2.0);
+
+        // Constrain menu position within window bounds
+        let mut menu_pos = menu_state.position;
+        menu_pos.x += CONTEXT_MENU_CURSOR_OFFSET;
+        menu_pos.y += CONTEXT_MENU_CURSOR_OFFSET;
+
+        // Ensure menu doesn't go off the right edge
+        if menu_pos.x + menu_width > screen_rect.max.x - spacing::SM {
+            menu_pos.x = screen_rect.max.x - menu_width - spacing::SM;
+        }
+
+        // Ensure menu doesn't go off the bottom edge
+        if menu_pos.y + menu_height > screen_rect.max.y - spacing::SM {
+            menu_pos.y = screen_rect.max.y - menu_height - spacing::SM;
+        }
+
+        // Ensure menu doesn't go off the left or top edge
+        menu_pos.x = menu_pos.x.max(spacing::SM);
+        menu_pos.y = menu_pos.y.max(spacing::SM);
+
+        // Track if we should close the menu
+        let mut should_close = false;
+        let mut selected_action: Option<ContextMenuAction> = None;
+
+        // Check for click outside the menu
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+        let primary_clicked = ctx.input(|i| i.pointer.primary_clicked());
+
+        // Render the menu using an Area overlay
+        egui::Area::new(egui::Id::new("context_menu"))
+            .order(Order::Foreground)
+            .fixed_pos(menu_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(crate::ui::gui::theme::shadow::elevated())
+                    .stroke(Stroke::new(1.0, colors::BORDER))
+                    .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
+                    .show(ui, |ui| {
+                        ui.set_min_width(menu_width);
+
+                        for item in &menu_state.items {
+                            match item {
+                                ContextMenuItem::Action {
+                                    label,
+                                    action,
+                                    enabled,
+                                } => {
+                                    if self.render_context_menu_item(ui, label, *enabled, false) {
+                                        if *enabled {
+                                            selected_action = Some(action.clone());
+                                            should_close = true;
+                                        }
+                                    }
+                                }
+                                ContextMenuItem::Separator => {
+                                    ui.add_space(spacing::XS);
+                                    let rect = ui.available_rect_before_wrap();
+                                    let separator_rect = Rect::from_min_size(
+                                        rect.min,
+                                        Vec2::new(menu_width, 1.0),
+                                    );
+                                    ui.painter().rect_filled(
+                                        separator_rect,
+                                        Rounding::ZERO,
+                                        colors::SEPARATOR,
+                                    );
+                                    ui.allocate_space(Vec2::new(menu_width, 1.0));
+                                    ui.add_space(spacing::XS);
+                                }
+                                ContextMenuItem::Submenu {
+                                    label,
+                                    id: _,
+                                    enabled,
+                                    items: _,
+                                } => {
+                                    // Render submenu trigger with arrow indicator
+                                    if self.render_context_menu_item(ui, label, *enabled, true) {
+                                        // TODO: Open submenu on hover (US-006)
+                                    }
+                                }
+                            }
+                        }
+                    });
+            });
+
+        // Check if click was outside the menu area
+        if primary_clicked {
+            if let Some(pos) = pointer_pos {
+                let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(menu_width, menu_height));
+                if !menu_rect.contains(pos) {
+                    should_close = true;
+                }
+            }
+        }
+
+        // Handle the selected action (placeholder for US-003+)
+        if let Some(action) = selected_action {
+            // TODO: Implement actual command execution in US-003, US-004, US-005, US-006
+            match action {
+                ContextMenuAction::Status => {
+                    // Will be implemented in US-003
+                }
+                ContextMenuAction::Describe => {
+                    // Will be implemented in US-004
+                }
+                ContextMenuAction::Resume(_) => {
+                    // Will be implemented in US-005
+                }
+                ContextMenuAction::CleanWorktrees | ContextMenuAction::CleanOrphaned => {
+                    // Will be implemented in US-006
+                }
+            }
+        }
+
+        // Close the menu if needed
+        if should_close {
+            self.close_context_menu();
+        }
+    }
+
+    /// Render a single context menu item.
+    ///
+    /// Returns true if the item was clicked.
+    fn render_context_menu_item(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        enabled: bool,
+        has_submenu: bool,
+    ) -> bool {
+        let item_size = Vec2::new(ui.available_width(), CONTEXT_MENU_ITEM_HEIGHT);
+        let (rect, response) = ui.allocate_exact_size(item_size, Sense::click());
+
+        let is_hovered = response.hovered() && enabled;
+        let painter = ui.painter();
+
+        // Draw hover background
+        if is_hovered {
+            painter.rect_filled(rect, Rounding::ZERO, colors::SURFACE_HOVER);
+        }
+
+        // Calculate text position with padding
+        let text_x = rect.min.x + CONTEXT_MENU_PADDING_H;
+        let text_color = if enabled {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_DISABLED
+        };
+
+        // Draw label
+        let galley = painter.layout_no_wrap(
+            label.to_string(),
+            typography::font(FontSize::Body, FontWeight::Regular),
+            text_color,
+        );
+        let text_y = rect.center().y - galley.rect.height() / 2.0;
+        painter.galley(Pos2::new(text_x, text_y), galley, Color32::TRANSPARENT);
+
+        // Draw submenu arrow indicator if this item has a submenu
+        if has_submenu {
+            let arrow_x = rect.max.x - CONTEXT_MENU_PADDING_H - CONTEXT_MENU_ARROW_SIZE;
+            let arrow_y = rect.center().y;
+            let arrow_color = if enabled {
+                colors::TEXT_SECONDARY
+            } else {
+                colors::TEXT_DISABLED
+            };
+
+            // Draw a simple right-pointing chevron
+            let arrow_points = [
+                Pos2::new(arrow_x, arrow_y - CONTEXT_MENU_ARROW_SIZE / 2.0),
+                Pos2::new(arrow_x + CONTEXT_MENU_ARROW_SIZE / 2.0, arrow_y),
+                Pos2::new(arrow_x, arrow_y + CONTEXT_MENU_ARROW_SIZE / 2.0),
+            ];
+            painter.line_segment(
+                [arrow_points[0], arrow_points[1]],
+                Stroke::new(1.5, arrow_color),
+            );
+            painter.line_segment(
+                [arrow_points[1], arrow_points[2]],
+                Stroke::new(1.5, arrow_color),
+            );
+        }
+
+        response.clicked() && enabled
     }
 
     /// Render the sidebar toggle button in the title bar.
@@ -2771,6 +3249,9 @@ impl Autom8App {
             self.projects.iter().map(|p| p.info.name.clone()).collect();
         let selected = self.selected_project.clone();
 
+        // Collect interactions to handle after rendering (to avoid borrow issues)
+        let mut interactions: Vec<(String, ProjectRowInteraction)> = Vec::new();
+
         egui::ScrollArea::vertical()
             .id_salt("projects_left_panel")
             .auto_shrink([false, false])
@@ -2779,13 +3260,24 @@ impl Autom8App {
                 for (idx, project_name) in project_names.iter().enumerate() {
                     let project = &self.projects[idx];
                     let is_selected = selected.as_deref() == Some(project_name.as_str());
-                    let clicked = self.render_project_row(ui, project, is_selected);
-                    if clicked {
-                        self.toggle_project_selection(project_name);
+                    let interaction = self.render_project_row(ui, project, is_selected);
+                    if interaction.clicked || interaction.right_click_pos.is_some() {
+                        interactions.push((project_name.clone(), interaction));
                     }
                     ui.add_space(spacing::XS);
                 }
             });
+
+        // Handle interactions after rendering
+        for (project_name, interaction) in interactions {
+            if interaction.clicked {
+                // Left-click: toggle selection and load history
+                self.toggle_project_selection(&project_name);
+            } else if let Some(pos) = interaction.right_click_pos {
+                // Right-click: open context menu
+                self.open_context_menu(pos, project_name);
+            }
+        }
     }
 
     /// Count active sessions for a given project name.
@@ -2838,26 +3330,27 @@ impl Autom8App {
     }
 
     /// Render a single project row.
-    /// Returns true if the row was clicked.
+    /// Returns interaction information (left-click and right-click).
     fn render_project_row(
         &self,
         ui: &mut egui::Ui,
         project: &ProjectData,
         is_selected: bool,
-    ) -> bool {
+    ) -> ProjectRowInteraction {
         let row_size = Vec2::new(ui.available_width(), PROJECT_ROW_HEIGHT);
 
-        // Allocate space for the row with click interaction
+        // Allocate space for the row with click interaction (both primary and secondary)
         let (rect, response) = ui.allocate_exact_size(row_size, Sense::click());
 
         // Skip if not visible (optimization for scrolling)
         if !ui.is_rect_visible(rect) {
-            return false;
+            return ProjectRowInteraction::none();
         }
 
         let painter = ui.painter();
         let is_hovered = response.hovered();
         let was_clicked = response.clicked();
+        let was_secondary_clicked = response.secondary_clicked();
 
         // Draw row background with hover and selected states
         let bg_color = if is_selected {
@@ -2959,7 +3452,20 @@ impl Autom8App {
             );
         }
 
-        was_clicked
+        // Return interaction info
+        if was_secondary_clicked {
+            // Right-click: return position for context menu
+            // Use the pointer position if available, otherwise center of the row
+            let menu_pos = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos())
+                .unwrap_or(rect.center());
+            ProjectRowInteraction::right_click(menu_pos)
+        } else if was_clicked {
+            ProjectRowInteraction::click()
+        } else {
+            ProjectRowInteraction::none()
+        }
     }
 }
 
@@ -3335,5 +3841,237 @@ mod tests {
 
         app.toggle_sidebar();
         assert!(!app.is_sidebar_collapsed());
+    }
+
+    // ========================================================================
+    // Context Menu Tests (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_context_menu_state_creation() {
+        let pos = Pos2::new(100.0, 200.0);
+        let items = vec![
+            ContextMenuItem::action("Status", ContextMenuAction::Status),
+            ContextMenuItem::separator(),
+            ContextMenuItem::action("Describe", ContextMenuAction::Describe),
+        ];
+
+        let state = ContextMenuState::new(pos, "test-project".to_string(), items.clone());
+
+        assert_eq!(state.position, pos);
+        assert_eq!(state.project_name, "test-project");
+        assert_eq!(state.items.len(), 3);
+        assert!(state.open_submenu.is_none());
+        assert!(state.submenu_position.is_none());
+    }
+
+    #[test]
+    fn test_context_menu_submenu_open_close() {
+        let pos = Pos2::new(100.0, 200.0);
+        let items = vec![ContextMenuItem::action("Test", ContextMenuAction::Status)];
+        let mut state = ContextMenuState::new(pos, "test-project".to_string(), items);
+
+        // Open a submenu
+        let submenu_pos = Pos2::new(260.0, 220.0);
+        state.open_submenu("clean".to_string(), submenu_pos);
+        assert_eq!(state.open_submenu, Some("clean".to_string()));
+        assert_eq!(state.submenu_position, Some(submenu_pos));
+
+        // Close submenu
+        state.close_submenu();
+        assert!(state.open_submenu.is_none());
+        assert!(state.submenu_position.is_none());
+    }
+
+    #[test]
+    fn test_context_menu_item_creation() {
+        // Test action item
+        let action = ContextMenuItem::action("Status", ContextMenuAction::Status);
+        match action {
+            ContextMenuItem::Action {
+                label,
+                action: act,
+                enabled,
+            } => {
+                assert_eq!(label, "Status");
+                assert_eq!(act, ContextMenuAction::Status);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Action variant"),
+        }
+
+        // Test disabled action item
+        let disabled = ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None));
+        match disabled {
+            ContextMenuItem::Action { enabled, .. } => {
+                assert!(!enabled);
+            }
+            _ => panic!("Expected Action variant"),
+        }
+
+        // Test separator
+        let sep = ContextMenuItem::separator();
+        assert!(matches!(sep, ContextMenuItem::Separator));
+
+        // Test submenu with items
+        let submenu = ContextMenuItem::submenu(
+            "Clean",
+            "clean",
+            vec![ContextMenuItem::action(
+                "Worktrees",
+                ContextMenuAction::CleanWorktrees,
+            )],
+        );
+        match submenu {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(enabled); // Has items, so enabled
+                assert_eq!(items.len(), 1);
+            }
+            _ => panic!("Expected Submenu variant"),
+        }
+
+        // Test disabled submenu (no items)
+        let disabled_submenu = ContextMenuItem::submenu_disabled("Empty", "empty");
+        match disabled_submenu {
+            ContextMenuItem::Submenu {
+                enabled, items, ..
+            } => {
+                assert!(!enabled);
+                assert!(items.is_empty());
+            }
+            _ => panic!("Expected Submenu variant"),
+        }
+    }
+
+    #[test]
+    fn test_app_context_menu_open_close() {
+        let mut app = Autom8App::new();
+
+        // Initially no context menu
+        assert!(!app.is_context_menu_open());
+        assert!(app.context_menu().is_none());
+
+        // Open context menu
+        let pos = Pos2::new(150.0, 300.0);
+        app.open_context_menu(pos, "my-project".to_string());
+
+        assert!(app.is_context_menu_open());
+        let menu = app.context_menu().unwrap();
+        assert_eq!(menu.position, pos);
+        assert_eq!(menu.project_name, "my-project");
+
+        // Close context menu
+        app.close_context_menu();
+        assert!(!app.is_context_menu_open());
+        assert!(app.context_menu().is_none());
+    }
+
+    #[test]
+    fn test_app_only_one_context_menu_at_a_time() {
+        let mut app = Autom8App::new();
+
+        // Open first context menu
+        app.open_context_menu(Pos2::new(100.0, 100.0), "project-a".to_string());
+        assert_eq!(
+            app.context_menu().unwrap().project_name,
+            "project-a"
+        );
+
+        // Open second context menu - should replace the first
+        app.open_context_menu(Pos2::new(200.0, 200.0), "project-b".to_string());
+        assert_eq!(
+            app.context_menu().unwrap().project_name,
+            "project-b"
+        );
+
+        // Only one context menu should be open
+        assert!(app.is_context_menu_open());
+    }
+
+    #[test]
+    fn test_build_context_menu_items() {
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("test-project");
+
+        // Should have Status, Describe, separator, Resume, separator, Clean
+        assert_eq!(items.len(), 6);
+
+        // Check first item is Status
+        match &items[0] {
+            ContextMenuItem::Action { label, action, enabled } => {
+                assert_eq!(label, "Status");
+                assert_eq!(action, &ContextMenuAction::Status);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Status action"),
+        }
+
+        // Check second item is Describe
+        match &items[1] {
+            ContextMenuItem::Action { label, action, enabled } => {
+                assert_eq!(label, "Describe");
+                assert_eq!(action, &ContextMenuAction::Describe);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Describe action"),
+        }
+
+        // Check separators
+        assert!(matches!(&items[2], ContextMenuItem::Separator));
+        assert!(matches!(&items[4], ContextMenuItem::Separator));
+
+        // Check Resume is disabled (placeholder)
+        match &items[3] {
+            ContextMenuItem::Action { label, enabled, .. } => {
+                assert_eq!(label, "Resume");
+                assert!(!enabled);
+            }
+            _ => panic!("Expected Resume action"),
+        }
+
+        // Check Clean submenu is disabled (placeholder)
+        match &items[5] {
+            ContextMenuItem::Submenu { label, enabled, .. } => {
+                assert_eq!(label, "Clean");
+                assert!(!enabled);
+            }
+            _ => panic!("Expected Clean submenu"),
+        }
+    }
+
+    #[test]
+    fn test_project_row_interaction() {
+        // Test none
+        let none = ProjectRowInteraction::none();
+        assert!(!none.clicked);
+        assert!(none.right_click_pos.is_none());
+
+        // Test click
+        let click = ProjectRowInteraction::click();
+        assert!(click.clicked);
+        assert!(click.right_click_pos.is_none());
+
+        // Test right-click
+        let pos = Pos2::new(100.0, 200.0);
+        let right_click = ProjectRowInteraction::right_click(pos);
+        assert!(!right_click.clicked);
+        assert_eq!(right_click.right_click_pos, Some(pos));
+    }
+
+    #[test]
+    fn test_context_menu_constants() {
+        // Verify constants are reasonable values
+        assert!(CONTEXT_MENU_MIN_WIDTH >= 100.0);
+        assert!(CONTEXT_MENU_ITEM_HEIGHT >= 24.0);
+        assert!(CONTEXT_MENU_PADDING_H > 0.0);
+        assert!(CONTEXT_MENU_PADDING_V >= 0.0);
+        assert!(CONTEXT_MENU_ARROW_SIZE > 0.0);
     }
 }
