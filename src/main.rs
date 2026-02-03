@@ -136,6 +136,7 @@ BEHAVIOR:
     autom8 clean --session abc123     # Remove a specific session
     autom8 clean --orphaned           # Remove orphaned sessions only
     autom8 clean --worktrees --force  # Remove even with uncommitted changes
+    autom8 clean --project myapp      # Clean a specific project by name
 
 WHAT GETS CLEANED:
     By default, cleans completed and failed sessions (preserves in-progress).
@@ -166,6 +167,11 @@ WHAT GETS CLEANED:
         /// Use with caution - uncommitted work will be lost.
         #[arg(short, long)]
         force: bool,
+
+        /// Target project name.
+        /// If not specified, uses the current directory to determine the project.
+        #[arg(short, long)]
+        project: Option<String>,
     },
 
     /// View, modify, or reset configuration values
@@ -343,6 +349,7 @@ fn main() {
                         session,
                         orphaned,
                         force,
+                        project,
                     }),
                 ) => clean_command(CleanOptions {
                     worktrees: *worktrees,
@@ -350,6 +357,7 @@ fn main() {
                     session: session.clone(),
                     orphaned: *orphaned,
                     force: *force,
+                    project: project.clone(),
                 }),
 
                 // Config already handled above (outside Runner block)

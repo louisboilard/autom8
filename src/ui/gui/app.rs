@@ -337,6 +337,55 @@ impl ResumableSessionInfo {
     }
 }
 
+/// Information about cleanable sessions for the Clean context menu.
+/// Contains counts for worktrees and orphaned sessions.
+#[derive(Debug, Clone, Default)]
+pub struct CleanableInfo {
+    /// Number of cleanable worktrees (Completed/Failed/Interrupted sessions with existing worktrees).
+    pub cleanable_worktrees: usize,
+    /// Number of orphaned sessions (worktree deleted but session state remains).
+    pub orphaned_sessions: usize,
+}
+
+impl CleanableInfo {
+    /// Returns true if there's anything to clean.
+    pub fn has_cleanable(&self) -> bool {
+        self.cleanable_worktrees > 0 || self.orphaned_sessions > 0
+    }
+}
+
+/// Check if a session is cleanable (Completed, Failed, or Interrupted).
+///
+/// A session is cleanable if it's NOT running or in-progress.
+/// Running/InProgress sessions should be preserved for safety.
+fn is_cleanable_session(session: &SessionStatus) -> bool {
+    // Can't clean sessions that are actively running
+    if session.metadata.is_running {
+        return false;
+    }
+
+    // Check machine state to determine if cleanable
+    if let Some(state) = &session.machine_state {
+        match state {
+            // Cleanable states: completed work
+            MachineState::Completed | MachineState::Failed | MachineState::Idle => true,
+            // Running states: do not clean
+            MachineState::Initializing
+            | MachineState::LoadingSpec
+            | MachineState::GeneratingSpec
+            | MachineState::PickingStory
+            | MachineState::RunningClaude
+            | MachineState::Reviewing
+            | MachineState::Correcting
+            | MachineState::Committing
+            | MachineState::CreatingPR => false,
+        }
+    } else {
+        // No machine state - treat as cleanable (likely orphaned or corrupted)
+        true
+    }
+}
+
 /// State for the context menu overlay.
 #[derive(Debug, Clone)]
 pub struct ContextMenuState {
@@ -964,6 +1013,42 @@ impl Autom8App {
             .collect()
     }
 
+    /// Get cleanable session information for a project.
+    ///
+    /// Returns counts for:
+    /// - cleanable_worktrees: sessions with Completed/Failed/Interrupted status
+    ///   where the worktree still exists
+    /// - orphaned_sessions: sessions where the worktree was deleted but state remains
+    ///
+    /// Safety: Running/InProgress sessions are NOT counted as cleanable.
+    fn get_cleanable_info(&self, project_name: &str) -> CleanableInfo {
+        // Try to get the state manager for this project
+        let sm = match StateManager::for_project(project_name) {
+            Ok(sm) => sm,
+            Err(_) => return CleanableInfo::default(),
+        };
+
+        // Get all sessions with status
+        let sessions = match sm.list_sessions_with_status() {
+            Ok(sessions) => sessions,
+            Err(_) => return CleanableInfo::default(),
+        };
+
+        let mut info = CleanableInfo::default();
+
+        for session in sessions {
+            if session.is_stale {
+                // Orphaned session: worktree was deleted
+                info.orphaned_sessions += 1;
+            } else if is_cleanable_session(&session) {
+                // Cleanable worktree: not running/in-progress
+                info.cleanable_worktrees += 1;
+            }
+        }
+
+        info
+    }
+
     /// Build the context menu items for a project.
     /// This creates the menu structure with Status, Describe, Resume, and Clean options.
     fn build_context_menu_items(&self, project_name: &str) -> Vec<ContextMenuItem> {
@@ -1000,14 +1085,37 @@ impl Autom8App {
             }
         };
 
+        // Get cleanable info for this project (US-006)
+        let cleanable_info = self.get_cleanable_info(project_name);
+
+        // Build the Clean menu item based on cleanable info
+        let clean_item = if !cleanable_info.has_cleanable() {
+            // Nothing to clean - disabled menu item with tooltip hint
+            ContextMenuItem::submenu_disabled("Clean", "clean")
+        } else {
+            // Build submenu with only applicable options (showing counts)
+            let mut submenu_items = Vec::new();
+
+            if cleanable_info.cleanable_worktrees > 0 {
+                let label = format!("Worktrees ({})", cleanable_info.cleanable_worktrees);
+                submenu_items.push(ContextMenuItem::action(label, ContextMenuAction::CleanWorktrees));
+            }
+
+            if cleanable_info.orphaned_sessions > 0 {
+                let label = format!("Orphaned ({})", cleanable_info.orphaned_sessions);
+                submenu_items.push(ContextMenuItem::action(label, ContextMenuAction::CleanOrphaned));
+            }
+
+            ContextMenuItem::submenu("Clean", "clean", submenu_items)
+        };
+
         vec![
             ContextMenuItem::action("Status", ContextMenuAction::Status),
             ContextMenuItem::action("Describe", ContextMenuAction::Describe),
             ContextMenuItem::Separator,
             resume_item,
             ContextMenuItem::Separator,
-            // Clean - placeholder for US-006
-            ContextMenuItem::submenu_disabled("Clean", "clean"),
+            clean_item,
         ]
     }
 
@@ -1317,6 +1425,184 @@ impl Autom8App {
             // Spawn the autom8 describe command
             let result = Command::new("autom8")
                 .arg("describe")
+                .arg("--project")
+                .arg(&project)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match result {
+                Ok(mut child) => {
+                    // Read stdout in a separate thread
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let tx_stdout = tx.clone();
+                    let tx_stderr = tx.clone();
+                    let cache_key_stdout = cache_key.clone();
+                    let cache_key_stderr = cache_key.clone();
+
+                    let stdout_handle = std::thread::spawn(move || {
+                        if let Some(stdout) = stdout {
+                            let reader = BufReader::new(stdout);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stdout.send(CommandMessage::Stdout {
+                                    cache_key: cache_key_stdout.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    let stderr_handle = std::thread::spawn(move || {
+                        if let Some(stderr) = stderr {
+                            let reader = BufReader::new(stderr);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stderr.send(CommandMessage::Stderr {
+                                    cache_key: cache_key_stderr.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    // Wait for output threads to finish
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+
+                    // Wait for the child process to exit
+                    match child.wait() {
+                        Ok(status) => {
+                            let exit_code = status.code().unwrap_or(-1);
+                            let _ = tx.send(CommandMessage::Completed {
+                                cache_key,
+                                exit_code,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(CommandMessage::Failed {
+                                cache_key,
+                                error: format!("Failed to wait for process: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to spawn autom8: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Spawn the `autom8 clean --worktrees --project <name>` command in a background thread.
+    /// Opens a new command output tab and streams output to it.
+    /// Note: The clean command respects safety filters - only Completed/Failed/Interrupted sessions
+    /// are cleaned, not Running/InProgress ones.
+    pub fn spawn_clean_worktrees_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "clean-worktrees");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
+            // Spawn the autom8 clean --worktrees command
+            let result = Command::new("autom8")
+                .arg("clean")
+                .arg("--worktrees")
+                .arg("--project")
+                .arg(&project)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match result {
+                Ok(mut child) => {
+                    // Read stdout in a separate thread
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let tx_stdout = tx.clone();
+                    let tx_stderr = tx.clone();
+                    let cache_key_stdout = cache_key.clone();
+                    let cache_key_stderr = cache_key.clone();
+
+                    let stdout_handle = std::thread::spawn(move || {
+                        if let Some(stdout) = stdout {
+                            let reader = BufReader::new(stdout);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stdout.send(CommandMessage::Stdout {
+                                    cache_key: cache_key_stdout.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    let stderr_handle = std::thread::spawn(move || {
+                        if let Some(stderr) = stderr {
+                            let reader = BufReader::new(stderr);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stderr.send(CommandMessage::Stderr {
+                                    cache_key: cache_key_stderr.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    // Wait for output threads to finish
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+
+                    // Wait for the child process to exit
+                    match child.wait() {
+                        Ok(status) => {
+                            let exit_code = status.code().unwrap_or(-1);
+                            let _ = tx.send(CommandMessage::Completed {
+                                cache_key,
+                                exit_code,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(CommandMessage::Failed {
+                                cache_key,
+                                error: format!("Failed to wait for process: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to spawn autom8: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Spawn the `autom8 clean --orphaned --project <name>` command in a background thread.
+    /// Opens a new command output tab and streams output to it.
+    pub fn spawn_clean_orphaned_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "clean-orphaned");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
+            // Spawn the autom8 clean --orphaned command
+            let result = Command::new("autom8")
+                .arg("clean")
+                .arg("--orphaned")
                 .arg("--project")
                 .arg(&project)
                 .stdout(Stdio::piped())
@@ -1802,8 +2088,13 @@ impl Autom8App {
                         eprintln!("Resume not implemented yet (project: {})", project_name);
                     }
                 }
-                ContextMenuAction::CleanWorktrees | ContextMenuAction::CleanOrphaned => {
-                    // Will be implemented in US-006
+                ContextMenuAction::CleanWorktrees => {
+                    // Spawn the clean --worktrees command (US-006)
+                    self.spawn_clean_worktrees_command(&project_name);
+                }
+                ContextMenuAction::CleanOrphaned => {
+                    // Spawn the clean --orphaned command (US-006)
+                    self.spawn_clean_orphaned_command(&project_name);
                 }
             }
         }
@@ -5703,5 +5994,308 @@ mod tests {
 
         let action_none = ContextMenuAction::Resume(None);
         assert!(matches!(action_none, ContextMenuAction::Resume(None)));
+    }
+
+    // =========================================================================
+    // US-006 Clean Menu Tests
+    // =========================================================================
+
+    #[test]
+    fn test_us006_cleanable_info_default() {
+        // Default CleanableInfo should have zero counts
+        let info = CleanableInfo::default();
+        assert_eq!(info.cleanable_worktrees, 0);
+        assert_eq!(info.orphaned_sessions, 0);
+        assert!(!info.has_cleanable());
+    }
+
+    #[test]
+    fn test_us006_cleanable_info_has_cleanable() {
+        // Test has_cleanable() with various combinations
+        let mut info = CleanableInfo::default();
+        assert!(!info.has_cleanable(), "Empty should have nothing cleanable");
+
+        info.cleanable_worktrees = 1;
+        assert!(info.has_cleanable(), "Should have cleanable with worktrees");
+
+        info.cleanable_worktrees = 0;
+        info.orphaned_sessions = 1;
+        assert!(info.has_cleanable(), "Should have cleanable with orphaned");
+
+        info.cleanable_worktrees = 2;
+        info.orphaned_sessions = 3;
+        assert!(
+            info.has_cleanable(),
+            "Should have cleanable with both types"
+        );
+    }
+
+    #[test]
+    fn test_us006_get_cleanable_info_nonexistent_project() {
+        // Non-existent project should return empty CleanableInfo
+        let app = Autom8App::new();
+        let info = app.get_cleanable_info("nonexistent-project-xyz123");
+        assert_eq!(info.cleanable_worktrees, 0);
+        assert_eq!(info.orphaned_sessions, 0);
+        assert!(!info.has_cleanable());
+    }
+
+    #[test]
+    fn test_us006_clean_menu_disabled_when_nothing_to_clean() {
+        // Test with a non-existent project (will have no sessions)
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("nonexistent-project-12345");
+
+        // Find the Clean menu item (last item)
+        let clean_item = items.last().expect("Should have Clean item");
+
+        match clean_item {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(!enabled, "Clean should be disabled when nothing to clean");
+                assert!(
+                    items.is_empty(),
+                    "Disabled Clean should have no submenu items"
+                );
+            }
+            _ => panic!("Expected Clean to be a Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_clean_action_variants() {
+        // Verify CleanWorktrees and CleanOrphaned actions exist and are distinct
+        let worktrees = ContextMenuAction::CleanWorktrees;
+        let orphaned = ContextMenuAction::CleanOrphaned;
+
+        assert_ne!(worktrees, orphaned, "Actions should be distinct");
+        assert!(
+            matches!(worktrees, ContextMenuAction::CleanWorktrees),
+            "Should be CleanWorktrees"
+        );
+        assert!(
+            matches!(orphaned, ContextMenuAction::CleanOrphaned),
+            "Should be CleanOrphaned"
+        );
+    }
+
+    #[test]
+    fn test_us006_clean_menu_item_with_worktrees_action() {
+        // Test creating a Clean submenu item with Worktrees action
+        let submenu_items = vec![ContextMenuItem::action(
+            "Worktrees (3)",
+            ContextMenuAction::CleanWorktrees,
+        )];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 1);
+
+                // Verify the submenu item
+                match &items[0] {
+                    ContextMenuItem::Action {
+                        label,
+                        action,
+                        enabled,
+                    } => {
+                        assert_eq!(label, "Worktrees (3)");
+                        assert_eq!(action, &ContextMenuAction::CleanWorktrees);
+                        assert!(*enabled);
+                    }
+                    _ => panic!("Expected Action item"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_clean_menu_item_with_orphaned_action() {
+        // Test creating a Clean submenu item with Orphaned action
+        let submenu_items = vec![ContextMenuItem::action(
+            "Orphaned (5)",
+            ContextMenuAction::CleanOrphaned,
+        )];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu { items, .. } => {
+                assert_eq!(items.len(), 1);
+
+                // Verify the submenu item
+                match &items[0] {
+                    ContextMenuItem::Action { label, action, .. } => {
+                        assert_eq!(label, "Orphaned (5)");
+                        assert_eq!(action, &ContextMenuAction::CleanOrphaned);
+                    }
+                    _ => panic!("Expected Action item"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_clean_menu_with_both_options() {
+        // Test creating a Clean submenu with both Worktrees and Orphaned options
+        let submenu_items = vec![
+            ContextMenuItem::action("Worktrees (2)", ContextMenuAction::CleanWorktrees),
+            ContextMenuItem::action("Orphaned (1)", ContextMenuAction::CleanOrphaned),
+        ];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu {
+                enabled, items, ..
+            } => {
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 2);
+
+                // Verify both items
+                match &items[0] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanWorktrees);
+                    }
+                    _ => panic!("Expected CleanWorktrees action"),
+                }
+
+                match &items[1] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanOrphaned);
+                    }
+                    _ => panic!("Expected CleanOrphaned action"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_spawn_clean_worktrees_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_clean_worktrees_command will actually try to spawn autom8,
+        // but we're just testing that a tab is created
+        let initial_tab_count = app.tab_count();
+
+        app.spawn_clean_worktrees_command("test-project");
+
+        // Should have created a new tab
+        assert_eq!(app.tab_count(), initial_tab_count + 1);
+
+        // Tab should be for clean-worktrees command
+        let tab = app.tabs().last().unwrap();
+        assert!(tab.closable, "Command output tab should be closable");
+        assert!(
+            tab.label.contains("Clean-worktrees"),
+            "Tab label should contain 'Clean-worktrees'"
+        );
+    }
+
+    #[test]
+    fn test_us006_spawn_clean_orphaned_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_clean_orphaned_command will actually try to spawn autom8,
+        // but we're just testing that a tab is created
+        let initial_tab_count = app.tab_count();
+
+        app.spawn_clean_orphaned_command("test-project");
+
+        // Should have created a new tab
+        assert_eq!(app.tab_count(), initial_tab_count + 1);
+
+        // Tab should be for clean-orphaned command
+        let tab = app.tabs().last().unwrap();
+        assert!(tab.closable, "Command output tab should be closable");
+        assert!(
+            tab.label.contains("Clean-orphaned"),
+            "Tab label should contain 'Clean-orphaned'"
+        );
+    }
+
+    #[test]
+    fn test_us006_is_cleanable_session_helper() {
+        use crate::state::{SessionMetadata, SessionStatus};
+        use std::path::PathBuf;
+
+        // Create a test session metadata
+        let metadata = SessionMetadata {
+            session_id: "test123".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        // Test Completed state - should be cleanable
+        let completed_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            is_cleanable_session(&completed_session),
+            "Completed session should be cleanable"
+        );
+
+        // Test Failed state - should be cleanable
+        let failed_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::Failed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            is_cleanable_session(&failed_session),
+            "Failed session should be cleanable"
+        );
+
+        // Test RunningClaude state - should NOT be cleanable (safety)
+        let running_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            !is_cleanable_session(&running_session),
+            "Running session should NOT be cleanable"
+        );
+
+        // Test session with is_running = true - should NOT be cleanable
+        let mut metadata_running = metadata.clone();
+        metadata_running.is_running = true;
+        let is_running_session = SessionStatus {
+            metadata: metadata_running,
+            machine_state: Some(MachineState::Completed), // Even if state says completed
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            !is_cleanable_session(&is_running_session),
+            "Session with is_running=true should NOT be cleanable"
+        );
     }
 }

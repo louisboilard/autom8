@@ -49,6 +49,8 @@ pub struct CleanOptions {
     pub orphaned: bool,
     /// Force removal even if worktrees have uncommitted changes
     pub force: bool,
+    /// Target project name (if not specified, uses current directory)
+    pub project: Option<String>,
 }
 
 impl CleanupSummary {
@@ -167,11 +169,26 @@ pub fn worktree_has_uncommitted_changes(worktree_path: &Path) -> bool {
     }
 }
 
+/// Get the appropriate StateManager based on options.
+///
+/// If `--project` is specified, creates a StateManager for that project.
+/// Otherwise, creates a StateManager for the current directory.
+fn get_state_manager(options: &CleanOptions) -> Result<StateManager> {
+    if let Some(project_name) = &options.project {
+        StateManager::for_project(project_name)
+    } else {
+        StateManager::new()
+    }
+}
+
 /// Clean up sessions based on the provided options.
 ///
 /// This is the main entry point for the clean command.
 pub fn clean_command(options: CleanOptions) -> Result<()> {
-    ensure_project_dir()?;
+    // If --project is specified, use that; otherwise use current directory
+    if options.project.is_none() {
+        ensure_project_dir()?;
+    }
 
     // Dispatch to the appropriate cleanup function based on options
     if let Some(session_id) = &options.session {
@@ -191,7 +208,7 @@ pub fn clean_command(options: CleanOptions) -> Result<()> {
 
 /// Clean a specific session by ID.
 fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()> {
-    let state_manager = StateManager::new()?;
+    let state_manager = get_state_manager(options)?;
     let sessions = state_manager.list_sessions()?;
 
     // Find the session
@@ -294,8 +311,8 @@ fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()
 }
 
 /// Clean only orphaned sessions (worktree deleted but session state remains).
-fn clean_orphaned_sessions(_options: &CleanOptions) -> Result<()> {
-    let state_manager = StateManager::new()?;
+fn clean_orphaned_sessions(options: &CleanOptions) -> Result<()> {
+    let state_manager = get_state_manager(options)?;
     let sessions = state_manager.list_sessions()?;
 
     // Find orphaned sessions
@@ -359,7 +376,7 @@ fn clean_orphaned_sessions(_options: &CleanOptions) -> Result<()> {
 
 /// Clean all sessions (with confirmation).
 fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
-    let state_manager = StateManager::new()?;
+    let state_manager = get_state_manager(options)?;
     let sessions = state_manager.list_sessions()?;
 
     if sessions.is_empty() {
@@ -518,7 +535,7 @@ fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
 
 /// Clean completed/failed sessions (default behavior).
 fn clean_completed_sessions(options: &CleanOptions) -> Result<()> {
-    let state_manager = StateManager::new()?;
+    let state_manager = get_state_manager(options)?;
     let sessions = state_manager.list_sessions()?;
 
     // Find completed or failed sessions
