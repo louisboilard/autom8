@@ -959,10 +959,8 @@ impl Autom8App {
         // Filter to resumable sessions and convert to ResumableSessionInfo
         sessions
             .into_iter()
-            .filter(|s| is_resumable_session(s))
-            .map(|s| {
-                ResumableSessionInfo::new(s.metadata.session_id, s.metadata.branch_name)
-            })
+            .filter(is_resumable_session)
+            .map(|s| ResumableSessionInfo::new(s.metadata.session_id, s.metadata.branch_name))
             .collect()
     }
 
@@ -4870,7 +4868,11 @@ mod tests {
 
         // Check Resume is disabled (no resumable sessions for test-project)
         match &items[3] {
-            ContextMenuItem::Action { label, enabled, action } => {
+            ContextMenuItem::Action {
+                label,
+                enabled,
+                action,
+            } => {
                 assert_eq!(label, "Resume");
                 assert_eq!(action, &ContextMenuAction::Resume(None));
                 assert!(!enabled, "Resume should be disabled when no sessions");
