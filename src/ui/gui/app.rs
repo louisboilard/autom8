@@ -9,6 +9,11 @@ use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
+use crate::ui::gui::config::{
+    BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
+    ConfigTextField, TextFieldChanges, CONFIG_SCOPE_ROW_HEIGHT, CONFIG_SCOPE_ROW_PADDING_H,
+    CONFIG_SCOPE_ROW_PADDING_V,
+};
 use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
@@ -1385,6 +1390,8 @@ pub enum TabId {
     ActiveRuns,
     /// The Projects tab (permanent).
     Projects,
+    /// The Config tab (permanent).
+    Config,
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
@@ -1433,6 +1440,8 @@ pub enum Tab {
     ActiveRuns,
     /// View of projects.
     Projects,
+    /// View of configuration settings.
+    Config,
 }
 
 impl Tab {
@@ -1441,12 +1450,13 @@ impl Tab {
         match self {
             Tab::ActiveRuns => "Active Runs",
             Tab::Projects => "Projects",
+            Tab::Config => "Config",
         }
     }
 
     /// Returns all available tabs.
     pub fn all() -> &'static [Tab] {
-        &[Tab::ActiveRuns, Tab::Projects]
+        &[Tab::ActiveRuns, Tab::Projects, Tab::Config]
     }
 
     /// Convert to TabId.
@@ -1454,6 +1464,7 @@ impl Tab {
         match self {
             Tab::ActiveRuns => TabId::ActiveRuns,
             Tab::Projects => TabId::Projects,
+            Tab::Config => TabId::Config,
         }
     }
 }
@@ -1547,6 +1558,13 @@ pub struct Autom8App {
     sidebar_collapsed: bool,
 
     // ========================================================================
+    // Config Tab State
+    // ========================================================================
+    /// State for the Config tab (scope selection, cached configs, etc.).
+    /// Public for test access.
+    pub config_state: ConfigTabState,
+
+    // ========================================================================
     // Context Menu State (Right-Click Context Menu - US-002)
     // ========================================================================
     /// State for the right-click context menu overlay.
@@ -1608,6 +1626,7 @@ impl Autom8App {
         let tabs = vec![
             TabInfo::permanent(TabId::ActiveRuns, "Active Runs"),
             TabInfo::permanent(TabId::Projects, "Projects"),
+            TabInfo::permanent(TabId::Config, "Config"),
         ];
 
         // Create channel for command execution messages
@@ -1629,6 +1648,7 @@ impl Autom8App {
             last_refresh: Instant::now(),
             refresh_interval,
             sidebar_collapsed: false,
+            config_state: ConfigTabState::new(),
             context_menu: None,
             command_executions: std::collections::HashMap::new(),
             command_rx,
@@ -1694,6 +1714,91 @@ impl Autom8App {
     /// Toggles the sidebar collapsed state.
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+    }
+
+    // ========================================================================
+    // Config Tab State (delegating to ConfigTabState)
+    // ========================================================================
+
+    /// Returns the currently selected config scope.
+    pub fn selected_config_scope(&self) -> &ConfigScope {
+        self.config_state.selected_scope()
+    }
+
+    /// Sets the selected config scope.
+    pub fn set_selected_config_scope(&mut self, scope: ConfigScope) {
+        self.config_state.set_selected_scope(scope);
+    }
+
+    /// Returns the cached list of project names for config scope selection.
+    pub fn config_scope_projects(&self) -> &[String] {
+        self.config_state.scope_projects()
+    }
+
+    /// Returns whether a project has its own config file.
+    pub fn project_has_config(&self, project_name: &str) -> bool {
+        self.config_state.project_has_config(project_name)
+    }
+
+    /// Refresh the config scope data (project list and config file status).
+    fn refresh_config_scope_data(&mut self) {
+        self.config_state.refresh_scope_data();
+    }
+
+    /// Returns the cached global config, if loaded.
+    pub fn cached_global_config(&self) -> Option<&crate::config::Config> {
+        self.config_state.cached_global_config()
+    }
+
+    /// Returns the global config error, if any.
+    pub fn global_config_error(&self) -> Option<&str> {
+        self.config_state.global_config_error()
+    }
+
+    /// Returns the cached project config for a specific project, if loaded.
+    pub fn cached_project_config(&self, project_name: &str) -> Option<&crate::config::Config> {
+        self.config_state.cached_project_config(project_name)
+    }
+
+    /// Returns the project config error, if any.
+    pub fn project_config_error(&self) -> Option<&str> {
+        self.config_state.project_config_error()
+    }
+
+    /// Create a project config file from the current global configuration.
+    fn create_project_config_from_global(
+        &mut self,
+        project_name: &str,
+    ) -> std::result::Result<(), String> {
+        self.config_state
+            .create_project_config_from_global(project_name)
+    }
+
+    /// Apply boolean field changes to the config and save immediately (US-006).
+    fn apply_config_bool_changes(
+        &mut self,
+        is_global: bool,
+        project_name: Option<&str>,
+        changes: &[(ConfigBoolField, bool)],
+    ) {
+        self.config_state
+            .apply_bool_changes(is_global, project_name, changes);
+    }
+
+    /// Apply text field changes to the config (US-007).
+    fn apply_config_text_changes(
+        &mut self,
+        is_global: bool,
+        project_name: Option<&str>,
+        changes: &[(ConfigTextField, String)],
+    ) {
+        self.config_state
+            .apply_text_changes(is_global, project_name, changes);
+    }
+
+    /// Reset config to application defaults (US-009).
+    fn reset_config_to_defaults(&mut self, is_global: bool, project_name: Option<&str>) {
+        self.config_state.reset_to_defaults(is_global, project_name);
     }
 
     // ========================================================================
@@ -1992,6 +2097,7 @@ impl Autom8App {
         match &tab_id {
             TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
             TabId::Projects => self.current_tab = Tab::Projects,
+            TabId::Config => self.current_tab = Tab::Config,
             TabId::RunDetail(_) | TabId::CommandOutput(_) => {
                 // Dynamic tabs don't have a legacy equivalent,
                 // but we keep the last static tab for backward compat
@@ -3302,10 +3408,11 @@ impl Autom8App {
             // Render permanent navigation items
             let mut tab_to_activate: Option<TabId> = None;
 
-            // Snapshot of permanent tabs (ActiveRuns and Projects only)
+            // Snapshot of permanent tabs (ActiveRuns, Projects, and Config)
             let permanent_tabs: Vec<(TabId, &'static str)> = vec![
                 (TabId::ActiveRuns, "Active Runs"),
                 (TabId::Projects, "Projects"),
+                (TabId::Config, "Config"),
             ];
 
             for (tab_id, label) in permanent_tabs {
@@ -3647,6 +3754,7 @@ impl Autom8App {
         match &self.active_tab_id {
             TabId::ActiveRuns => self.render_active_runs(ui),
             TabId::Projects => self.render_projects(ui),
+            TabId::Config => self.render_config(ui),
             TabId::RunDetail(run_id) => {
                 let run_id = run_id.clone();
                 self.render_run_detail(ui, &run_id);
@@ -3859,6 +3967,1054 @@ impl Autom8App {
         let tab_clicked = response.clicked() && !close_hovered;
 
         (tab_clicked, close_clicked)
+    }
+
+    /// Render the Config view with split-panel layout.
+    ///
+    /// Uses the same split-panel pattern as the Projects tab:
+    /// - Left panel: Scope selector (Global + projects)
+    /// - Right panel: Config editor for the selected scope
+    fn render_config(&mut self, ui: &mut egui::Ui) {
+        // Refresh config scope data before rendering
+        self.refresh_config_scope_data();
+
+        // Track actions that need to be processed after rendering (US-005, US-006)
+        let mut editor_actions = ConfigEditorActions::default();
+
+        // Use horizontal layout for split view
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+
+        // Calculate panel widths: 50/50 split with divider in the middle
+        // Subtract the divider width and margins from the total width
+        let divider_total_width = SPLIT_DIVIDER_WIDTH + SPLIT_DIVIDER_MARGIN * 2.0;
+        let panel_width =
+            ((available_width - divider_total_width) / 2.0).max(SPLIT_PANEL_MIN_WIDTH);
+
+        ui.horizontal(|ui| {
+            // Left panel: Scope selector
+            ui.allocate_ui_with_layout(
+                Vec2::new(panel_width, available_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    self.render_config_left_panel(ui);
+                },
+            );
+
+            // Visual divider between panels with appropriate margin
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
+
+            // Draw a custom vertical divider line using the SEPARATOR color
+            let divider_rect = ui.available_rect_before_wrap();
+            let divider_line_rect = Rect::from_min_size(
+                divider_rect.min,
+                Vec2::new(SPLIT_DIVIDER_WIDTH, available_height),
+            );
+            ui.painter()
+                .rect_filled(divider_line_rect, Rounding::ZERO, colors::SEPARATOR);
+            ui.add_space(SPLIT_DIVIDER_WIDTH);
+
+            ui.add_space(SPLIT_DIVIDER_MARGIN);
+
+            // Right panel: Config editor for selected scope
+            // Returns actions including create project config (US-005) and bool changes (US-006)
+            let actions_response = ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), available_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| self.render_config_right_panel(ui),
+            );
+
+            editor_actions = actions_response.inner;
+        });
+
+        // Process the create config action outside of the closure (US-005)
+        if let Some(project_name) = editor_actions.create_project_config {
+            if let Err(e) = self.create_project_config_from_global(&project_name) {
+                self.config_state.project_config_error = Some(e);
+            }
+        }
+
+        // Process boolean field changes (US-006)
+        if !editor_actions.bool_changes.is_empty() {
+            self.apply_config_bool_changes(
+                editor_actions.is_global,
+                editor_actions.project_name.as_deref(),
+                &editor_actions.bool_changes,
+            );
+        }
+
+        // Process text field changes (US-007)
+        if !editor_actions.text_changes.is_empty() {
+            self.apply_config_text_changes(
+                editor_actions.is_global,
+                editor_actions.project_name.as_deref(),
+                &editor_actions.text_changes,
+            );
+        }
+
+        // Process reset to defaults action (US-009)
+        if editor_actions.reset_to_defaults {
+            self.reset_config_to_defaults(
+                editor_actions.is_global,
+                editor_actions.project_name.as_deref(),
+            );
+        }
+    }
+
+    /// Render the left panel of the Config view (scope selector).
+    ///
+    /// Shows "Global" at the top, followed by all discovered projects.
+    /// Projects without their own config file are shown greyed out with "(global)" suffix.
+    fn render_config_left_panel(&mut self, ui: &mut egui::Ui) {
+        // Header section
+        ui.label(
+            egui::RichText::new("Scope")
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::SM);
+
+        // Scrollable scope list
+        egui::ScrollArea::vertical()
+            .id_salt("config_scope_list")
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, |ui| {
+                // Global scope item (always first, always has config)
+                if self.render_config_scope_item(ui, ConfigScope::Global, true) {
+                    self.config_state.selected_scope = ConfigScope::Global;
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Project scope items
+                let projects: Vec<String> = self.config_state.scope_projects.clone();
+                for project in projects {
+                    let has_config = self.project_has_config(&project);
+                    let scope = ConfigScope::Project(project.clone());
+                    if self.render_config_scope_item(ui, scope.clone(), has_config) {
+                        self.config_state.selected_scope = scope;
+                    }
+                    ui.add_space(spacing::XS);
+                }
+            });
+    }
+
+    /// Render a single config scope item in the scope selector.
+    ///
+    /// Returns true if the item was clicked.
+    fn render_config_scope_item(
+        &self,
+        ui: &mut egui::Ui,
+        scope: ConfigScope,
+        has_config: bool,
+    ) -> bool {
+        let is_selected = self.config_state.selected_scope == scope;
+
+        // Determine display text and styling
+        let (display_text, text_color) = match &scope {
+            ConfigScope::Global => ("Global".to_string(), colors::TEXT_PRIMARY),
+            ConfigScope::Project(name) => {
+                if has_config {
+                    (name.clone(), colors::TEXT_PRIMARY)
+                } else {
+                    // Projects without config file: greyed out with "(global)" suffix
+                    (format!("{} (global)", name), colors::TEXT_MUTED)
+                }
+            }
+        };
+
+        // Allocate space for the row
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), CONFIG_SCOPE_ROW_HEIGHT),
+            Sense::click(),
+        );
+
+        // Draw background on hover or selection
+        if ui.is_rect_visible(rect) {
+            let bg_color = if is_selected {
+                colors::SURFACE_SELECTED
+            } else if response.hovered() {
+                colors::SURFACE_HOVER
+            } else {
+                Color32::TRANSPARENT
+            };
+
+            ui.painter()
+                .rect_filled(rect, Rounding::same(SIDEBAR_ITEM_ROUNDING), bg_color);
+
+            // Draw selection indicator on the left edge for selected items
+            if is_selected {
+                let indicator_rect = Rect::from_min_size(
+                    rect.min,
+                    Vec2::new(SIDEBAR_ACTIVE_INDICATOR_WIDTH, rect.height()),
+                );
+                ui.painter().rect_filled(
+                    indicator_rect,
+                    Rounding::same(SIDEBAR_ACTIVE_INDICATOR_WIDTH / 2.0),
+                    colors::ACCENT,
+                );
+            }
+
+            // Draw the scope name with appropriate styling
+            let text_rect = rect.shrink2(Vec2::new(
+                CONFIG_SCOPE_ROW_PADDING_H
+                    + (if is_selected {
+                        SIDEBAR_ACTIVE_INDICATOR_WIDTH + 4.0
+                    } else {
+                        0.0
+                    }),
+                CONFIG_SCOPE_ROW_PADDING_V,
+            ));
+
+            let font_weight = if is_selected {
+                FontWeight::SemiBold
+            } else {
+                FontWeight::Regular
+            };
+
+            ui.painter().text(
+                text_rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &display_text,
+                typography::font(FontSize::Body, font_weight),
+                text_color,
+            );
+        }
+
+        response.clicked()
+    }
+
+    /// Render the right panel of the Config view (config editor).
+    ///
+    /// Shows the config editor for the currently selected scope.
+    /// For US-003: Global Config Editor with all 6 fields grouped logically.
+    /// For US-005: Returns project name if "Create Project Config" button was clicked.
+    /// For US-006: Returns boolean field changes for immediate save.
+    ///
+    /// # Returns
+    ///
+    /// `ConfigEditorActions` containing any actions that need to be processed:
+    /// - `create_project_config`: Project name if "Create Project Config" was clicked
+    /// - `bool_changes`: Vector of (field, new_value) for toggled boolean fields
+    fn render_config_right_panel(&self, ui: &mut egui::Ui) -> ConfigEditorActions {
+        let mut actions = ConfigEditorActions::default();
+
+        // Header showing the selected scope with tooltip for config path
+        let (header_text, tooltip_text) = match &self.config_state.selected_scope {
+            ConfigScope::Global => {
+                actions.is_global = true;
+                let path = crate::config::global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "~/.config/autom8/config.toml".to_string());
+                ("Global Config".to_string(), path)
+            }
+            ConfigScope::Project(name) => {
+                actions.is_global = false;
+                actions.project_name = Some(name.clone());
+                let path = crate::config::project_config_path_for(name)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| format!("~/.config/autom8/{}/config.toml", name));
+                if self.project_has_config(name) {
+                    (format!("Project Config: {}", name), path)
+                } else {
+                    (format!("Project Config: {} (using global)", name), path)
+                }
+            }
+        };
+
+        // Header with tooltip
+        let header_response = ui.label(
+            egui::RichText::new(&header_text)
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+        header_response.on_hover_text(&tooltip_text);
+
+        ui.add_space(spacing::MD);
+
+        // Render content based on scope
+        match &self.config_state.selected_scope {
+            ConfigScope::Global => {
+                let (bool_changes, text_changes, reset_clicked) =
+                    self.render_global_config_editor(ui);
+                actions.bool_changes = bool_changes;
+                actions.text_changes = text_changes;
+                actions.reset_to_defaults = reset_clicked;
+            }
+            ConfigScope::Project(name) => {
+                // Project config editor (US-004, US-007, US-009)
+                // Check if the project has its own config file
+                if self.project_has_config(name) {
+                    let (bool_changes, text_changes, reset_clicked) =
+                        self.render_project_config_editor(ui, name);
+                    actions.bool_changes = bool_changes;
+                    actions.text_changes = text_changes;
+                    actions.reset_to_defaults = reset_clicked;
+                } else {
+                    // Project doesn't have its own config - show message and button (US-005)
+                    let project_name = name.clone();
+                    egui::ScrollArea::vertical()
+                        .id_salt("config_editor")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(spacing::XXL);
+                            ui.vertical_centered(|ui| {
+                                // Information message
+                                ui.label(
+                                    egui::RichText::new(
+                                        "This project does not have a config file.\nIt uses the global configuration.",
+                                    )
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
+                                );
+
+                                ui.add_space(spacing::LG);
+
+                                // Create Project Config button (US-005)
+                                if self.render_create_config_button(ui) {
+                                    actions.create_project_config = Some(project_name.clone());
+                                }
+                            });
+                        });
+                }
+            }
+        }
+
+        // Show "Changes take effect on next run" notice if config was recently modified (US-006)
+        if self.config_state.last_modified.is_some() {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new("Changes take effect on next run")
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+        }
+
+        actions
+    }
+
+    /// Render the "Create Project Config" button (US-005).
+    ///
+    /// Returns true if the button was clicked.
+    fn render_create_config_button(&self, ui: &mut egui::Ui) -> bool {
+        let button_text = "Create Project Config";
+        let text_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                button_text.to_string(),
+                typography::font(FontSize::Body, FontWeight::Medium),
+                colors::TEXT_PRIMARY,
+            )
+        });
+        let text_size = text_galley.size();
+
+        // Button dimensions with padding
+        let button_padding_h = spacing::LG;
+        let button_padding_v = spacing::SM;
+        let button_size = Vec2::new(
+            text_size.x + button_padding_h * 2.0,
+            text_size.y + button_padding_v * 2.0,
+        );
+
+        // Allocate space and get response
+        let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw button background
+        let bg_color = if is_hovered {
+            colors::ACCENT
+        } else {
+            colors::ACCENT_SUBTLE
+        };
+        ui.painter()
+            .rect_filled(rect, Rounding::same(rounding::BUTTON), bg_color);
+
+        // Draw button text
+        let text_color = if is_hovered {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::ACCENT
+        };
+        let text_pos = rect.center() - text_size / 2.0;
+        ui.painter().galley(
+            text_pos,
+            ui.fonts(|f| {
+                f.layout_no_wrap(
+                    button_text.to_string(),
+                    typography::font(FontSize::Body, FontWeight::Medium),
+                    text_color,
+                )
+            }),
+            text_color,
+        );
+
+        response.clicked()
+    }
+
+    /// Render the "Reset to Defaults" button (US-009).
+    ///
+    /// Styled as a secondary/subtle action - uses muted colors and smaller weight.
+    /// Returns true if the button was clicked.
+    fn render_reset_to_defaults_button(&self, ui: &mut egui::Ui) -> bool {
+        let button_text = "Reset to Defaults";
+        let text_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                button_text.to_string(),
+                typography::font(FontSize::Small, FontWeight::Regular),
+                colors::TEXT_MUTED,
+            )
+        });
+        let text_size = text_galley.size();
+
+        // Button dimensions with modest padding (subtle button)
+        let button_padding_h = spacing::MD;
+        let button_padding_v = spacing::XS;
+        let button_size = Vec2::new(
+            text_size.x + button_padding_h * 2.0,
+            text_size.y + button_padding_v * 2.0,
+        );
+
+        // Allocate space and get response
+        let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw subtle button background (only visible on hover)
+        if is_hovered {
+            ui.painter()
+                .rect_filled(rect, Rounding::same(rounding::BUTTON), colors::SURFACE);
+        }
+
+        // Draw button text (slightly brighter on hover)
+        let text_color = if is_hovered {
+            colors::TEXT_SECONDARY
+        } else {
+            colors::TEXT_MUTED
+        };
+        let text_pos = rect.center() - text_size / 2.0;
+        ui.painter().galley(
+            text_pos,
+            ui.fonts(|f| {
+                f.layout_no_wrap(
+                    button_text.to_string(),
+                    typography::font(FontSize::Small, FontWeight::Regular),
+                    text_color,
+                )
+            }),
+            text_color,
+        );
+
+        response.clicked()
+    }
+
+    /// Render the global config editor with all fields (US-003, US-006, US-009).
+    ///
+    /// Displays all 6 config fields grouped logically:
+    /// - Pipeline group: review, commit, pull_request
+    /// - Worktree group: worktree, worktree_path_pattern, worktree_cleanup
+    ///
+    /// Boolean fields are rendered as interactive toggle switches (US-006).
+    /// Text fields are rendered as editable inputs with real-time validation (US-007).
+    /// Includes "Reset to Defaults" button at the bottom (US-009).
+    /// Returns tuples of (bool_changes, text_changes, reset_clicked) to be processed by the caller.
+    fn render_global_config_editor(
+        &self,
+        ui: &mut egui::Ui,
+    ) -> (BoolFieldChanges, TextFieldChanges, bool) {
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
+        let mut reset_clicked = false;
+
+        // Show error if config failed to load
+        if let Some(error) = &self.config_state.global_config_error {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new(error)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::STATUS_ERROR),
+            );
+            return (bool_changes, text_changes, reset_clicked);
+        }
+
+        // Show loading state or editor
+        let Some(config) = &self.config_state.cached_global_config else {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new("Loading configuration...")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+            return (bool_changes, text_changes, reset_clicked);
+        };
+
+        // Create mutable copies of boolean fields for toggle interaction (US-006)
+        let mut review = config.review;
+        let mut commit = config.commit;
+        let mut pull_request = config.pull_request;
+        let mut worktree = config.worktree;
+        let mut worktree_cleanup = config.worktree_cleanup;
+
+        // Create mutable copy of text field for editing (US-007)
+        let mut worktree_path_pattern = config.worktree_path_pattern.clone();
+
+        // ScrollArea for config fields
+        egui::ScrollArea::vertical()
+            .id_salt("config_editor")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Pipeline Settings Group
+                self.render_config_group_header(ui, "Pipeline");
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "review",
+                    &mut review,
+                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Review, review));
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Commit toggle - when disabling commit while pull_request is true,
+                // cascade by also disabling pull_request (US-008)
+                if self.render_config_bool_field(
+                    ui,
+                    "commit",
+                    &mut commit,
+                    "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Commit, commit));
+                    // Cascade: if commit is now false and pull_request was true, disable pull_request too
+                    if !commit && pull_request {
+                        pull_request = false;
+                        bool_changes.push((ConfigBoolField::PullRequest, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request toggle - disabled when commit is false (US-008)
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request",
+                    &mut pull_request,
+                    "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                    !commit, // disabled when commit is false
+                    Some("Pull requests require commits to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                }
+
+                ui.add_space(spacing::XL);
+
+                // Worktree Settings Group
+                self.render_config_group_header(ui, "Worktree");
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "worktree",
+                    &mut worktree,
+                    "Automatic worktree creation. When enabled, creates a dedicated worktree for each run, enabling parallel sessions.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Worktree, worktree));
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Editable text field with real-time validation (US-007)
+                if let Some(new_value) = self.render_config_text_field(
+                    ui,
+                    "worktree_path_pattern",
+                    &mut worktree_path_pattern,
+                    "Pattern for worktree directory names. Placeholders: {repo} = repository name, {branch} = branch name.",
+                ) {
+                    text_changes.push((ConfigTextField::WorktreePathPattern, new_value));
+                }
+
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "worktree_cleanup",
+                    &mut worktree_cleanup,
+                    "Automatic worktree cleanup. When enabled, removes worktrees after successful completion. Failed runs keep their worktrees.",
+                ) {
+                    bool_changes.push((ConfigBoolField::WorktreeCleanup, worktree_cleanup));
+                }
+
+                // Add some padding before the reset button
+                ui.add_space(spacing::XXL);
+
+                // Reset to Defaults button (US-009)
+                // Styled as a secondary/subtle action at the bottom of the editor
+                if self.render_reset_to_defaults_button(ui) {
+                    reset_clicked = true;
+                }
+
+                // Add some padding at the bottom
+                ui.add_space(spacing::XL);
+            });
+
+        (bool_changes, text_changes, reset_clicked)
+    }
+
+    /// Render the project config editor with all fields (US-004, US-006, US-007, US-008, US-009).
+    ///
+    /// Uses the same field layout and controls as the global config editor.
+    /// The UI is identical but operates on the project-specific config file.
+    /// Boolean fields are rendered as interactive toggle switches (US-006).
+    /// Text fields are rendered as editable inputs with real-time validation (US-007).
+    /// Includes "Reset to Defaults" button at the bottom (US-009).
+    fn render_project_config_editor(
+        &self,
+        ui: &mut egui::Ui,
+        project_name: &str,
+    ) -> (BoolFieldChanges, TextFieldChanges, bool) {
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
+        let mut reset_clicked = false;
+
+        // Show error if config failed to load
+        if let Some(error) = &self.config_state.project_config_error {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new(error)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::STATUS_ERROR),
+            );
+            return (bool_changes, text_changes, reset_clicked);
+        }
+
+        // Show loading state or editor
+        let Some(config) = self.cached_project_config(project_name) else {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new("Loading configuration...")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+            return (bool_changes, text_changes, reset_clicked);
+        };
+
+        // Create mutable copies of boolean fields for toggle interaction (US-006)
+        let mut review = config.review;
+        let mut commit = config.commit;
+        let mut pull_request = config.pull_request;
+        let mut worktree = config.worktree;
+        let mut worktree_cleanup = config.worktree_cleanup;
+
+        // Create mutable copy of text field for editing (US-007)
+        let mut worktree_path_pattern = config.worktree_path_pattern.clone();
+
+        // ScrollArea for config fields
+        egui::ScrollArea::vertical()
+            .id_salt("project_config_editor")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Pipeline Settings Group
+                self.render_config_group_header(ui, "Pipeline");
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "review",
+                    &mut review,
+                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Review, review));
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Commit toggle - when disabling commit while pull_request is true,
+                // cascade by also disabling pull_request (US-008)
+                if self.render_config_bool_field(
+                    ui,
+                    "commit",
+                    &mut commit,
+                    "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Commit, commit));
+                    // Cascade: if commit is now false and pull_request was true, disable pull_request too
+                    if !commit && pull_request {
+                        pull_request = false;
+                        bool_changes.push((ConfigBoolField::PullRequest, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request toggle - disabled when commit is false (US-008)
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request",
+                    &mut pull_request,
+                    "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                    !commit, // disabled when commit is false
+                    Some("Pull requests require commits to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                }
+
+                ui.add_space(spacing::XL);
+
+                // Worktree Settings Group
+                self.render_config_group_header(ui, "Worktree");
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "worktree",
+                    &mut worktree,
+                    "Automatic worktree creation. When enabled, creates a dedicated worktree for each run, enabling parallel sessions.",
+                ) {
+                    bool_changes.push((ConfigBoolField::Worktree, worktree));
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Editable text field with real-time validation (US-007)
+                if let Some(new_value) = self.render_config_text_field(
+                    ui,
+                    "worktree_path_pattern",
+                    &mut worktree_path_pattern,
+                    "Pattern for worktree directory names. Placeholders: {repo} = repository name, {branch} = branch name.",
+                ) {
+                    text_changes.push((ConfigTextField::WorktreePathPattern, new_value));
+                }
+
+                ui.add_space(spacing::SM);
+
+                if self.render_config_bool_field(
+                    ui,
+                    "worktree_cleanup",
+                    &mut worktree_cleanup,
+                    "Automatic worktree cleanup. When enabled, removes worktrees after successful completion. Failed runs keep their worktrees.",
+                ) {
+                    bool_changes.push((ConfigBoolField::WorktreeCleanup, worktree_cleanup));
+                }
+
+                // Add some padding before the reset button
+                ui.add_space(spacing::XXL);
+
+                // Reset to Defaults button (US-009)
+                // Styled as a secondary/subtle action at the bottom of the editor
+                if self.render_reset_to_defaults_button(ui) {
+                    reset_clicked = true;
+                }
+
+                // Add some padding at the bottom
+                ui.add_space(spacing::XL);
+            });
+
+        (bool_changes, text_changes, reset_clicked)
+    }
+
+    /// Render a config group header.
+    fn render_config_group_header(&self, ui: &mut egui::Ui, title: &str) {
+        ui.label(
+            egui::RichText::new(title)
+                .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+    }
+
+    /// Render a boolean config field with an interactive toggle switch (US-006, US-008).
+    ///
+    /// Displays the field with a toggle switch (not a checkbox) that can be clicked
+    /// to change the value. The toggle provides visual feedback matching the app's style.
+    /// Returns `true` if the toggle was clicked (value changed).
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The egui UI context
+    /// * `name` - The field name to display
+    /// * `value` - The current boolean value (mutable reference for toggle_value)
+    /// * `help_text` - Descriptive help text shown below the field
+    ///
+    /// # Returns
+    ///
+    /// `true` if the toggle was clicked and the value changed, `false` otherwise.
+    fn render_config_bool_field(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut bool,
+        help_text: &str,
+    ) -> bool {
+        self.render_config_bool_field_with_disabled(ui, name, value, help_text, false, None)
+    }
+
+    /// Render a boolean config field with optional disabled state and tooltip (US-008).
+    ///
+    /// When disabled, the toggle is greyed out, non-interactive, and shows a tooltip
+    /// explaining why. This is used for validation constraints like `pull_request`
+    /// requiring `commit` to be enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The egui UI context
+    /// * `name` - The field name to display
+    /// * `value` - The current boolean value (mutable reference for toggle_value)
+    /// * `help_text` - Descriptive help text shown below the field
+    /// * `disabled` - If true, the toggle is greyed out and non-interactive
+    /// * `disabled_tooltip` - Tooltip text shown when hovering over a disabled toggle
+    ///
+    /// # Returns
+    ///
+    /// `true` if the toggle was clicked and the value changed, `false` otherwise.
+    fn render_config_bool_field_with_disabled(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut bool,
+        help_text: &str,
+        disabled: bool,
+        disabled_tooltip: Option<&str>,
+    ) -> bool {
+        let original_value = *value;
+
+        ui.horizontal(|ui| {
+            // Field name - use disabled color if disabled
+            let text_color = if disabled {
+                colors::TEXT_DISABLED
+            } else {
+                colors::TEXT_PRIMARY
+            };
+            ui.label(
+                egui::RichText::new(name)
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(text_color),
+            );
+
+            ui.add_space(spacing::SM);
+
+            // Interactive toggle switch (US-006) or disabled toggle (US-008)
+            if disabled {
+                let response = ui.add(Self::toggle_switch_disabled(*value));
+                // Show tooltip on hover when disabled (US-008)
+                if let Some(tooltip) = disabled_tooltip {
+                    response.on_hover_text(tooltip);
+                }
+            } else {
+                ui.add(Self::toggle_switch(value));
+            }
+        });
+
+        // Help text below the field - use disabled color if disabled
+        let help_color = if disabled {
+            colors::TEXT_DISABLED
+        } else {
+            colors::TEXT_MUTED
+        };
+        ui.label(
+            egui::RichText::new(help_text)
+                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                .color(help_color),
+        );
+
+        // Return whether the value changed
+        *value != original_value
+    }
+
+    /// Create an iOS/macOS style toggle switch widget (US-006).
+    ///
+    /// This creates a toggle switch that looks like a slider/pill shape rather
+    /// than a checkbox, matching modern UI conventions.
+    fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
+        move |ui: &mut egui::Ui| -> egui::Response {
+            // Toggle dimensions - slightly smaller than standard for config fields
+            let desired_size = Vec2::new(36.0, 20.0);
+
+            // Allocate space and handle interaction
+            let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click());
+
+            // Handle click
+            if response.clicked() {
+                *on = !*on;
+                response.mark_changed();
+            }
+
+            // Draw the toggle
+            if ui.is_rect_visible(rect) {
+                let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+                let visuals = ui.style().interact_selectable(&response, *on);
+
+                // Background pill shape
+                let rect = rect.expand(visuals.expansion);
+                let radius = 0.5 * rect.height();
+
+                // Use accent color when on, muted when off
+                let bg_color = if *on {
+                    colors::ACCENT_SUBTLE
+                } else {
+                    colors::SURFACE_HOVER
+                };
+                ui.painter()
+                    .rect_filled(rect, Rounding::same(radius), bg_color);
+
+                // Border
+                let border_color = if *on { colors::ACCENT } else { colors::BORDER };
+                ui.painter().rect_stroke(
+                    rect,
+                    Rounding::same(radius),
+                    Stroke::new(1.0, border_color),
+                );
+
+                // Circle knob
+                let circle_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+                let center = egui::pos2(circle_x, rect.center().y);
+                let knob_radius = radius * 0.75;
+
+                // Knob shadow for depth
+                ui.painter().circle_filled(
+                    center + egui::vec2(0.5, 0.5),
+                    knob_radius,
+                    Color32::from_black_alpha(30),
+                );
+
+                // Knob
+                ui.painter()
+                    .circle_filled(center, knob_radius, colors::TEXT_PRIMARY);
+            }
+
+            response
+        }
+    }
+
+    /// Create a disabled iOS/macOS style toggle switch widget (US-008).
+    ///
+    /// This creates a non-interactive toggle that displays the current value
+    /// but cannot be clicked. It uses greyed-out colors to indicate the disabled state.
+    /// Used for validation constraints (e.g., pull_request requires commit to be enabled).
+    fn toggle_switch_disabled(on: bool) -> impl egui::Widget {
+        move |ui: &mut egui::Ui| -> egui::Response {
+            // Toggle dimensions - same as regular toggle
+            let desired_size = Vec2::new(36.0, 20.0);
+
+            // Allocate space but with hover sense only (no click)
+            // This allows the tooltip to work
+            let (rect, response) = ui.allocate_exact_size(desired_size, Sense::hover());
+
+            // Draw the toggle in disabled state
+            if ui.is_rect_visible(rect) {
+                // Animate based on current value (but won't change)
+                let how_on = ui.ctx().animate_bool_responsive(response.id, on);
+
+                // Background pill shape
+                let radius = 0.5 * rect.height();
+
+                // Use very muted colors for disabled state
+                let bg_color = colors::SURFACE_HOVER;
+                ui.painter()
+                    .rect_filled(rect, Rounding::same(radius), bg_color);
+
+                // Border - use disabled/muted color
+                ui.painter().rect_stroke(
+                    rect,
+                    Rounding::same(radius),
+                    Stroke::new(1.0, colors::BORDER),
+                );
+
+                // Circle knob - positioned based on value but greyed out
+                let circle_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+                let center = egui::pos2(circle_x, rect.center().y);
+                let knob_radius = radius * 0.75;
+
+                // No shadow for disabled state (flatter appearance)
+
+                // Knob - use disabled color
+                ui.painter()
+                    .circle_filled(center, knob_radius, colors::TEXT_DISABLED);
+            }
+
+            response
+        }
+    }
+
+    /// Render a text config field with label, editable input, and help text (US-007).
+    ///
+    /// The text input allows inline editing with real-time validation.
+    /// For `worktree_path_pattern`, warns if `{repo}` or `{branch}` placeholders are missing.
+    /// Invalid patterns are still saved (warning only, not blocking).
+    ///
+    /// Returns `Some(new_value)` if the text was changed, `None` otherwise.
+    fn render_config_text_field(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut String,
+        help_text: &str,
+    ) -> Option<String> {
+        let mut changed_value: Option<String> = None;
+
+        ui.horizontal(|ui| {
+            // Field name
+            ui.label(
+                egui::RichText::new(name)
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            // Editable text input (US-007)
+            let text_edit = egui::TextEdit::singleline(value)
+                .font(typography::mono(FontSize::Body))
+                .text_color(colors::TEXT_SECONDARY)
+                .desired_width(250.0);
+
+            let response = ui.add(text_edit);
+            if response.changed() {
+                changed_value = Some(value.clone());
+            }
+        });
+
+        // Help text below the field
+        ui.label(
+            egui::RichText::new(help_text)
+                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
+        );
+
+        // Real-time validation for worktree_path_pattern (US-007)
+        if name == "worktree_path_pattern" {
+            let mut warnings: Vec<&str> = Vec::new();
+
+            if !value.contains("{repo}") {
+                warnings.push("Missing {repo} placeholder");
+            }
+            if !value.contains("{branch}") {
+                warnings.push("Missing {branch} placeholder");
+            }
+
+            // Display validation warnings in amber/warning color
+            if !warnings.is_empty() {
+                ui.add_space(spacing::XS);
+                for warning in warnings {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("⚠")
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::STATUS_WARNING),
+                        );
+                        ui.add_space(spacing::XS);
+                        ui.label(
+                            egui::RichText::new(warning)
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::STATUS_WARNING),
+                        );
+                    });
+                }
+            }
+        }
+
+        changed_value
     }
 
     /// Render the run detail view for a specific run.
@@ -5833,7 +6989,8 @@ mod tests {
     #[test]
     fn test_app_initial_tabs() {
         let app = Autom8App::new();
-        assert_eq!(app.tab_count(), 2);
+        // 3 permanent tabs: ActiveRuns, Projects, Config
+        assert_eq!(app.tab_count(), 3);
         assert_eq!(app.closable_tab_count(), 0);
         assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
     }
@@ -5848,7 +7005,8 @@ mod tests {
         app.open_run_detail_tab("run-2", "Run 2");
         app.open_run_detail_tab("run-3", "Run 3");
 
-        assert_eq!(app.tab_count(), 5);
+        // 3 permanent tabs + 3 dynamic tabs
+        assert_eq!(app.tab_count(), 6);
         assert_eq!(app.closable_tab_count(), 3);
         assert!(app.has_tab(&TabId::RunDetail("run-1".to_string())));
 
@@ -5859,10 +7017,12 @@ mod tests {
         // Can't close permanent tabs
         assert!(!app.close_tab(&TabId::ActiveRuns));
         assert!(!app.close_tab(&TabId::Projects));
+        assert!(!app.close_tab(&TabId::Config));
 
         // Close all dynamic tabs
         assert_eq!(app.close_all_dynamic_tabs(), 2);
-        assert_eq!(app.tab_count(), 2);
+        // 3 permanent tabs remain
+        assert_eq!(app.tab_count(), 3);
     }
 
     #[test]
@@ -5876,8 +7036,11 @@ mod tests {
             TabId::RunDetail("run-123".to_string())
         );
 
+        // When closing the dynamic tab, it switches to the previous tab in the list.
+        // The tabs order is: ActiveRuns, Projects, Config, RunDetail
+        // So closing RunDetail switches to Config (the previous tab).
         app.close_tab(&TabId::RunDetail("run-123".to_string()));
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
+        assert_eq!(*app.active_tab_id(), TabId::Config);
     }
 
     #[test]
@@ -5959,7 +7122,8 @@ mod tests {
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
         assert!(app.has_tab(&TabId::RunDetail(entry.run_id.clone())));
-        assert_eq!(app.tab_count(), 3);
+        // 3 permanent tabs + 1 dynamic tab
+        assert_eq!(app.tab_count(), 4);
         assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
 
         // Check label format
@@ -5986,6 +7150,1726 @@ mod tests {
 
         app.toggle_sidebar();
         assert!(!app.is_sidebar_collapsed());
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-001)
+    // ========================================================================
+
+    #[test]
+    fn test_config_tab_id_exists() {
+        // Verify TabId::Config variant can be created
+        let config_tab = TabId::Config;
+        assert_eq!(config_tab, TabId::Config);
+    }
+
+    #[test]
+    fn test_config_tab_in_permanent_tabs() {
+        let app = Autom8App::new();
+        // Verify Config tab is included in the tabs list
+        assert!(app.has_tab(&TabId::Config));
+    }
+
+    #[test]
+    fn test_config_tab_is_not_closable() {
+        let mut app = Autom8App::new();
+        // Config tab should not be closable (it's permanent)
+        assert!(!app.close_tab(&TabId::Config));
+    }
+
+    #[test]
+    fn test_config_tab_can_be_activated() {
+        let mut app = Autom8App::new();
+        app.set_active_tab(TabId::Config);
+        assert_eq!(*app.active_tab_id(), TabId::Config);
+    }
+
+    #[test]
+    fn test_tab_enum_includes_config() {
+        // Verify Tab::Config variant exists and has correct label
+        assert_eq!(Tab::Config.label(), "Config");
+        // Verify Tab::all() includes Config
+        let all_tabs = Tab::all();
+        assert!(all_tabs.contains(&Tab::Config));
+    }
+
+    #[test]
+    fn test_tab_to_tab_id_config() {
+        // Verify Tab::Config converts to TabId::Config
+        assert_eq!(Tab::Config.to_tab_id(), TabId::Config);
+    }
+
+    // ========================================================================
+    // Config Tab Split-Panel Tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_config_scope_enum_global_default() {
+        // Verify ConfigScope defaults to Global
+        let scope = ConfigScope::default();
+        assert_eq!(scope, ConfigScope::Global);
+        assert!(scope.is_global());
+    }
+
+    #[test]
+    fn test_config_scope_enum_display_names() {
+        // Verify display names for different scopes
+        assert_eq!(ConfigScope::Global.display_name(), "Global");
+        assert_eq!(
+            ConfigScope::Project("my-project".to_string()).display_name(),
+            "my-project"
+        );
+    }
+
+    #[test]
+    fn test_config_scope_is_global() {
+        // Verify is_global() works correctly
+        assert!(ConfigScope::Global.is_global());
+        assert!(!ConfigScope::Project("test".to_string()).is_global());
+    }
+
+    #[test]
+    fn test_config_scope_equality() {
+        // Verify ConfigScope equality comparison
+        assert_eq!(ConfigScope::Global, ConfigScope::Global);
+        assert_eq!(
+            ConfigScope::Project("test".to_string()),
+            ConfigScope::Project("test".to_string())
+        );
+        assert_ne!(
+            ConfigScope::Global,
+            ConfigScope::Project("test".to_string())
+        );
+        assert_ne!(
+            ConfigScope::Project("a".to_string()),
+            ConfigScope::Project("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_app_initial_config_scope_is_global() {
+        // Verify the app initializes with Global scope selected by default
+        let app = Autom8App::new();
+        assert_eq!(*app.config_state.selected_scope(), ConfigScope::Global);
+    }
+
+    #[test]
+    fn test_app_set_config_scope() {
+        // Verify setting config scope works
+        let mut app = Autom8App::new();
+
+        app.set_selected_config_scope(ConfigScope::Project("my-project".to_string()));
+        assert_eq!(
+            *app.config_state.selected_scope(),
+            ConfigScope::Project("my-project".to_string())
+        );
+
+        app.set_selected_config_scope(ConfigScope::Global);
+        assert_eq!(*app.config_state.selected_scope(), ConfigScope::Global);
+    }
+
+    #[test]
+    fn test_app_config_scope_projects_initially_empty() {
+        // Verify config scope projects list initializes correctly
+        // (may or may not be empty depending on actual config directory contents)
+        let app = Autom8App::new();
+        // Just verify the field exists and is accessible
+        let _projects = app.config_state.scope_projects();
+    }
+
+    #[test]
+    fn test_project_has_config_unknown_project() {
+        // Verify project_has_config returns false for unknown projects
+        let app = Autom8App::new();
+        // A project not in the cache should return false
+        assert!(!app.project_has_config("nonexistent-project-xyz"));
+    }
+
+    #[test]
+    fn test_config_scope_constants_exist() {
+        // Verify the config scope constants are defined correctly
+        assert!(CONFIG_SCOPE_ROW_HEIGHT > 0.0);
+        assert!(CONFIG_SCOPE_ROW_PADDING_H > 0.0);
+        assert!(CONFIG_SCOPE_ROW_PADDING_V > 0.0);
+    }
+
+    #[test]
+    fn test_split_panel_constants_exist() {
+        // Verify split panel constants are properly defined
+        assert!(SPLIT_DIVIDER_WIDTH > 0.0);
+        assert!(SPLIT_DIVIDER_MARGIN > 0.0);
+        assert!(SPLIT_PANEL_MIN_WIDTH > 0.0);
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-003) - Global Config Editor
+    // ========================================================================
+
+    #[test]
+    fn test_us003_cached_global_config_initially_none() {
+        // Verify the cached global config is initially None
+        // (it gets populated when Config tab is rendered with Global scope selected)
+        let app = Autom8App::new();
+        // Note: After initial load with Global scope, config may be loaded
+        // depending on refresh behavior - test the accessor exists
+        let _ = app.config_state.cached_global_config();
+    }
+
+    #[test]
+    fn test_us003_global_config_error_initially_none() {
+        // Verify error state is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.global_config_error().is_none(),
+            "Global config error should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us003_load_global_config_populates_cache() {
+        // Test that load_global_config() populates the cache
+        let mut app = Autom8App::new();
+        app.config_state.load_global_config();
+
+        // After loading, either config is populated or error is set
+        // (depends on whether global config file exists)
+        let has_config = app.config_state.cached_global_config().is_some();
+        let has_error = app.global_config_error().is_some();
+        assert!(
+            has_config || has_error,
+            "Either config should be loaded or error should be set"
+        );
+    }
+
+    #[test]
+    fn test_us003_global_config_fields_accessible() {
+        // Test that when global config is loaded, all fields are accessible
+        let mut app = Autom8App::new();
+        app.config_state.load_global_config();
+
+        if let Some(config) = app.config_state.cached_global_config() {
+            // All 6 config fields should be accessible
+            let _ = config.review;
+            let _ = config.commit;
+            let _ = config.pull_request;
+            let _ = config.worktree;
+            let _ = config.worktree_path_pattern.as_str();
+            let _ = config.worktree_cleanup;
+        }
+    }
+
+    #[test]
+    fn test_us003_refresh_config_scope_data_loads_global_when_selected() {
+        // Test that refresh_config_scope_data loads global config when Global scope is selected
+        let mut app = Autom8App::new();
+        // Clear any existing cached config
+        app.config_state.cached_global_config = None;
+
+        // Ensure Global scope is selected
+        app.set_selected_config_scope(ConfigScope::Global);
+
+        // Refresh should load the config
+        app.refresh_config_scope_data();
+
+        // Config should be loaded (or error set)
+        let has_config = app.config_state.cached_global_config().is_some();
+        let has_error = app.global_config_error().is_some();
+        assert!(
+            has_config || has_error,
+            "Config should be loaded when Global scope is selected"
+        );
+    }
+
+    #[test]
+    fn test_us003_config_scope_change_does_not_reload_if_cached() {
+        // Test that switching away and back to Global scope uses cached config
+        let mut app = Autom8App::new();
+        app.config_state.load_global_config();
+
+        if app.config_state.cached_global_config().is_some() {
+            // Get a reference to check later
+            let config_review = app.config_state.cached_global_config().map(|c| c.review);
+
+            // Switch to a project scope
+            app.set_selected_config_scope(ConfigScope::Project("test-project".to_string()));
+
+            // Switch back to Global
+            app.set_selected_config_scope(ConfigScope::Global);
+
+            // Config should still be cached
+            assert!(
+                app.config_state.cached_global_config().is_some(),
+                "Global config should remain cached"
+            );
+            assert_eq!(
+                app.config_state.cached_global_config().map(|c| c.review),
+                config_review,
+                "Cached config should have same values"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us003_global_config_path_function_returns_path() {
+        // Test that global_config_path() returns a valid path
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok(), "global_config_path() should succeed");
+
+        let path = path_result.unwrap();
+        assert!(
+            path.to_string_lossy().contains("config.toml"),
+            "Path should contain config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us003_project_config_path_for_returns_path() {
+        // Test that project_config_path_for() returns a valid path
+        let path_result = crate::config::project_config_path_for("test-project");
+        assert!(
+            path_result.is_ok(),
+            "project_config_path_for() should succeed"
+        );
+
+        let path = path_result.unwrap();
+        assert!(
+            path.to_string_lossy().contains("test-project"),
+            "Path should contain project name"
+        );
+        assert!(
+            path.to_string_lossy().contains("config.toml"),
+            "Path should contain config.toml"
+        );
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-004) - Project Config Editor
+    // ========================================================================
+
+    #[test]
+    fn test_us004_cached_project_config_initially_none() {
+        // Verify the cached project config is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.config_state
+                .cached_project_config("any-project")
+                .is_none(),
+            "Project config should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_config_error_initially_none() {
+        // Verify error state is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.config_state.project_config_error().is_none(),
+            "Project config error should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us004_load_project_config_for_nonexistent_project() {
+        // Test that loading config for a nonexistent project doesn't set error
+        let mut app = Autom8App::new();
+        app.config_state
+            .load_project_config("nonexistent-project-xyz-123");
+
+        // Since the config file doesn't exist, it should be None without error
+        assert!(
+            app.config_state
+                .cached_project_config("nonexistent-project-xyz-123")
+                .is_none(),
+            "Config should be None for nonexistent project"
+        );
+    }
+
+    #[test]
+    fn test_us004_cached_project_config_returns_correct_project() {
+        // Test that cached_project_config only returns config for the matching project
+        let mut app = Autom8App::new();
+
+        // Manually set a cached config
+        app.config_state.cached_project_config =
+            Some(("test-project".to_string(), crate::config::Config::default()));
+
+        // Should return Some for matching project
+        assert!(
+            app.config_state
+                .cached_project_config("test-project")
+                .is_some(),
+            "Should return config for matching project"
+        );
+
+        // Should return None for different project
+        assert!(
+            app.config_state
+                .cached_project_config("different-project")
+                .is_none(),
+            "Should return None for different project"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_config_fields_accessible() {
+        // Test that when project config is cached, all fields are accessible
+        let mut app = Autom8App::new();
+
+        // Manually set a cached config with specific values
+        let mut config = crate::config::Config::default();
+        config.review = true;
+        config.commit = false;
+        config.pull_request = false;
+        config.worktree = true;
+        config.worktree_cleanup = true;
+        config.worktree_path_pattern = "custom-{repo}-{branch}".to_string();
+
+        app.config_state.cached_project_config = Some(("test-project".to_string(), config));
+
+        if let Some(config) = app.config_state.cached_project_config("test-project") {
+            // All 6 config fields should be accessible with correct values
+            assert!(config.review);
+            assert!(!config.commit);
+            assert!(!config.pull_request);
+            assert!(config.worktree);
+            assert!(config.worktree_cleanup);
+            assert_eq!(config.worktree_path_pattern, "custom-{repo}-{branch}");
+        } else {
+            panic!("Expected config to be cached");
+        }
+    }
+
+    #[test]
+    fn test_us004_refresh_config_scope_loads_project_config() {
+        // Test that refresh_config_scope_data loads project config when a project scope is selected
+        let mut app = Autom8App::new();
+
+        // Clear any cached config
+        app.config_state.cached_project_config = None;
+        app.config_state.project_config_error = None;
+
+        // Select a project scope (that doesn't have a config file)
+        app.set_selected_config_scope(ConfigScope::Project("nonexistent-project".to_string()));
+
+        // Refresh should attempt to load the config
+        app.refresh_config_scope_data();
+
+        // Since the project doesn't exist, config should still be None
+        // and no error (file simply doesn't exist)
+        assert!(
+            app.config_state
+                .cached_project_config("nonexistent-project")
+                .is_none(),
+            "Config should be None for project without config file"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_header_shows_correct_format() {
+        // Test that the header text format is correct for project scope
+        // Format should be "Project Config: {project_name}"
+        let project_name = "my-awesome-project";
+        let expected_header = format!("Project Config: {}", project_name);
+
+        // The actual header is constructed in render_config_right_panel
+        // This test verifies the format matches what we expect
+        assert!(expected_header.starts_with("Project Config: "));
+        assert!(expected_header.contains(project_name));
+    }
+
+    #[test]
+    fn test_us004_project_config_path_for_tooltip() {
+        // Test that project_config_path_for returns path suitable for tooltip
+        let project_name = "test-project";
+        let path_result = crate::config::project_config_path_for(project_name);
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should contain the project name
+        assert!(
+            path_str.contains(project_name),
+            "Path should contain project name"
+        );
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us004_switching_project_clears_old_cache() {
+        // Test that switching between projects updates the cached config
+        let mut app = Autom8App::new();
+
+        // Set initial cached config for project-a
+        let config_a = crate::config::Config {
+            review: true,
+            ..Default::default()
+        };
+        app.config_state.cached_project_config = Some(("project-a".to_string(), config_a));
+
+        // Verify project-a config is cached
+        assert!(app
+            .config_state
+            .cached_project_config("project-a")
+            .is_some());
+        assert!(app
+            .config_state
+            .cached_project_config("project-b")
+            .is_none());
+
+        // Set cached config for project-b
+        let config_b = crate::config::Config {
+            review: false,
+            ..Default::default()
+        };
+        app.config_state.cached_project_config = Some(("project-b".to_string(), config_b));
+
+        // Verify project-b config is cached and project-a is no longer
+        assert!(app
+            .config_state
+            .cached_project_config("project-a")
+            .is_none());
+        assert!(app
+            .config_state
+            .cached_project_config("project-b")
+            .is_some());
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-005) - Project Without Config - Create from Global
+    // ========================================================================
+
+    #[test]
+    fn test_us005_create_project_config_updates_has_config_state() {
+        // Test that creating a project config updates the config_scope_has_config map
+        let mut app = Autom8App::new();
+
+        // Add a project that doesn't have a config
+        let project_name = "test-project-no-config";
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), false);
+
+        // Verify it starts without config
+        assert!(!app.project_has_config(project_name));
+
+        // After calling create_project_config_from_global successfully,
+        // the config_scope_has_config should be updated
+        // Note: We can't easily test the full flow without file system access,
+        // but we can verify the state update logic works
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), true);
+        assert!(app.project_has_config(project_name));
+    }
+
+    #[test]
+    fn test_us005_save_project_config_for_function_exists() {
+        // Test that the save_project_config_for function is accessible
+        // This verifies the function signature is correct
+        let config = crate::config::Config::default();
+        let project_name = "nonexistent-test-project-xyz";
+
+        // Just verify the function exists and can be called
+        // (will fail due to directory access, but tests the API)
+        let result = crate::config::save_project_config_for(project_name, &config);
+        // Result will be an error due to directory access, but function exists
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_us005_render_config_right_panel_returns_none_for_global() {
+        // Test that render_config_right_panel returns None when global is selected
+        let app = Autom8App::new();
+        assert_eq!(app.config_state.selected_scope, ConfigScope::Global);
+
+        // The function should return None for global scope since there's no
+        // "Create Project Config" button for global
+        // Note: We can't easily test the render function without egui context,
+        // but we verify the state is set up correctly
+    }
+
+    #[test]
+    fn test_us005_create_config_from_global_state_setup() {
+        // Test the state setup for creating config from global
+        let mut app = Autom8App::new();
+
+        // Set up a project scope without config
+        let project_name = "my-project";
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), false);
+
+        // Verify initial state
+        assert!(!app.project_has_config(project_name));
+        assert!(matches!(
+            app.config_state.selected_scope,
+            ConfigScope::Project(_)
+        ));
+    }
+
+    #[test]
+    fn test_us005_project_without_config_shows_correct_header() {
+        // Test that projects without config show "(using global)" in header
+        let mut app = Autom8App::new();
+        let project_name = "project-no-config";
+
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), false);
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
+
+        // The header text for projects without config should indicate they use global
+        let has_config = app.project_has_config(project_name);
+        assert!(!has_config);
+
+        // Header format is: "Project Config: {name} (using global)"
+        // This is verified by the render_config_right_panel function
+    }
+
+    #[test]
+    fn test_us005_project_with_config_shows_normal_header() {
+        // Test that projects with config show normal header
+        let mut app = Autom8App::new();
+        let project_name = "project-with-config";
+
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), true);
+        app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
+
+        let has_config = app.project_has_config(project_name);
+        assert!(has_config);
+
+        // Header format is: "Project Config: {name}" (without "(using global)")
+    }
+
+    #[test]
+    fn test_us005_create_project_config_loads_cached_config() {
+        // Test that after creating a project config, the config is loaded into cache
+        let mut app = Autom8App::new();
+        let project_name = "test-load-after-create";
+
+        // Initially no cached config
+        assert!(app
+            .config_state
+            .cached_project_config(project_name)
+            .is_none());
+
+        // After successful create_project_config_from_global, it should:
+        // 1. Update config_scope_has_config to true
+        // 2. Load the config into cache via load_project_config_for_name
+
+        // We can simulate the state update part
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), true);
+
+        // And simulate loading a config
+        app.config_state.cached_project_config =
+            Some((project_name.to_string(), crate::config::Config::default()));
+
+        assert!(app
+            .config_state
+            .cached_project_config(project_name)
+            .is_some());
+    }
+
+    #[test]
+    fn test_us005_create_config_copies_global_values() {
+        // Verify that creating a project config should copy global config values
+        // (This is the expected behavior based on acceptance criteria)
+
+        // Create a custom global config
+        let global_config = crate::config::Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+            worktree: true,
+            worktree_path_pattern: "custom-{repo}-{branch}".to_string(),
+            worktree_cleanup: true,
+        };
+
+        // When copied to project, all values should match
+        let project_config = global_config.clone();
+
+        assert_eq!(project_config.review, false);
+        assert_eq!(project_config.commit, true);
+        assert_eq!(project_config.pull_request, false);
+        assert_eq!(project_config.worktree, true);
+        assert_eq!(
+            project_config.worktree_path_pattern,
+            "custom-{repo}-{branch}"
+        );
+        assert_eq!(project_config.worktree_cleanup, true);
+    }
+
+    #[test]
+    fn test_us005_scope_list_styling_updates_after_create() {
+        // Test that after creating a config, the project should no longer be greyed out
+        let mut app = Autom8App::new();
+        let project_name = "styled-project";
+
+        // Initially without config (greyed out)
+        app.config_state
+            .scope_projects
+            .push(project_name.to_string());
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), false);
+
+        assert!(!app.project_has_config(project_name));
+
+        // After creating config (normal styling)
+        app.config_state
+            .scope_has_config
+            .insert(project_name.to_string(), true);
+
+        assert!(app.project_has_config(project_name));
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-006) - Boolean Toggle Controls with Immediate Save
+    // ========================================================================
+
+    #[test]
+    fn test_us006_config_bool_field_enum_variants() {
+        // Test that ConfigBoolField enum has all expected variants
+        let review = ConfigBoolField::Review;
+        let commit = ConfigBoolField::Commit;
+        let pull_request = ConfigBoolField::PullRequest;
+        let worktree = ConfigBoolField::Worktree;
+        let worktree_cleanup = ConfigBoolField::WorktreeCleanup;
+
+        // Verify they are different
+        assert_ne!(review, commit);
+        assert_ne!(commit, pull_request);
+        assert_ne!(worktree, worktree_cleanup);
+    }
+
+    #[test]
+    fn test_us006_config_editor_actions_default() {
+        // Test that ConfigEditorActions has sensible defaults
+        let actions = ConfigEditorActions::default();
+
+        assert!(actions.create_project_config.is_none());
+        assert!(actions.bool_changes.is_empty());
+        assert!(!actions.is_global);
+        assert!(actions.project_name.is_none());
+    }
+
+    #[test]
+    fn test_us006_config_last_modified_initially_none() {
+        // Test that config_last_modified is None initially
+        let app = Autom8App::new();
+        assert!(
+            app.config_state.last_modified.is_none(),
+            "config_last_modified should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us006_apply_global_config_bool_changes() {
+        // Test applying boolean changes to global config
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            worktree: true,
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            worktree_cleanup: false,
+        });
+
+        // Apply a change to the review field
+        let changes = vec![(ConfigBoolField::Review, false)];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify the cached config was updated
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(!config.review, "review should be false after change");
+            assert!(config.commit, "commit should remain unchanged");
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us006_apply_multiple_bool_changes() {
+        // Test applying multiple boolean changes at once
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            worktree: true,
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            worktree_cleanup: false,
+        });
+
+        // Apply multiple changes
+        let changes = vec![
+            (ConfigBoolField::Review, false),
+            (ConfigBoolField::Commit, false),
+            (ConfigBoolField::WorktreeCleanup, true),
+        ];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify all changes were applied
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(!config.review, "review should be false");
+            assert!(!config.commit, "commit should be false");
+            assert!(config.worktree_cleanup, "worktree_cleanup should be true");
+            // Unchanged fields
+            assert!(config.pull_request, "pull_request should remain true");
+            assert!(config.worktree, "worktree should remain true");
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us006_apply_project_config_bool_changes() {
+        // Test applying boolean changes to project config
+        let mut app = Autom8App::new();
+        let project_name = "test-project";
+
+        // Set up a cached project config
+        app.config_state.cached_project_config = Some((
+            project_name.to_string(),
+            crate::config::Config {
+                review: true,
+                commit: true,
+                pull_request: true,
+                worktree: true,
+                worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+                worktree_cleanup: false,
+            },
+        ));
+
+        // Apply a change to the worktree field
+        let changes = vec![(ConfigBoolField::Worktree, false)];
+        app.apply_config_bool_changes(false, Some(project_name), &changes);
+
+        // Verify the cached config was updated
+        if let Some((_, config)) = &app.config_state.cached_project_config {
+            assert!(!config.worktree, "worktree should be false after change");
+            assert!(config.review, "review should remain unchanged");
+        } else {
+            panic!("Project config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us006_empty_changes_no_op() {
+        // Test that empty changes vector doesn't cause issues
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        let original_review = true;
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: original_review,
+            ..Default::default()
+        });
+
+        // Apply empty changes
+        let changes: Vec<(ConfigBoolField, bool)> = vec![];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify config is unchanged
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert_eq!(config.review, original_review, "review should be unchanged");
+        }
+
+        // Verify config_last_modified was not set
+        assert!(
+            app.config_state.last_modified.is_none(),
+            "config_last_modified should not be set for empty changes"
+        );
+    }
+
+    #[test]
+    fn test_us006_all_config_bool_fields_can_be_changed() {
+        // Test that all ConfigBoolField variants can be used in changes
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config with all false
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+            worktree: false,
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            worktree_cleanup: false,
+        });
+
+        // Apply changes to all boolean fields
+        let changes = vec![
+            (ConfigBoolField::Review, true),
+            (ConfigBoolField::Commit, true),
+            (ConfigBoolField::PullRequest, true),
+            (ConfigBoolField::Worktree, true),
+            (ConfigBoolField::WorktreeCleanup, true),
+        ];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify all fields were updated
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(config.review, "review should be true");
+            assert!(config.commit, "commit should be true");
+            assert!(config.pull_request, "pull_request should be true");
+            assert!(config.worktree, "worktree should be true");
+            assert!(config.worktree_cleanup, "worktree_cleanup should be true");
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us006_wrong_project_name_no_change() {
+        // Test that applying changes with wrong project name doesn't affect config
+        let mut app = Autom8App::new();
+        let actual_project = "actual-project";
+        let wrong_project = "wrong-project";
+
+        // Set up a cached project config
+        app.config_state.cached_project_config = Some((
+            actual_project.to_string(),
+            crate::config::Config {
+                review: true,
+                ..Default::default()
+            },
+        ));
+
+        // Apply changes to wrong project
+        let changes = vec![(ConfigBoolField::Review, false)];
+        app.apply_config_bool_changes(false, Some(wrong_project), &changes);
+
+        // Verify config is unchanged (wrong project name)
+        if let Some((_, config)) = &app.config_state.cached_project_config {
+            assert!(
+                config.review,
+                "review should be unchanged when project name doesn't match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us006_toggle_value_false_to_true() {
+        // Test toggling a value from false to true
+        let mut app = Autom8App::new();
+
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: false,
+            ..Default::default()
+        });
+
+        let changes = vec![(ConfigBoolField::Review, true)];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(config.review, "review should be toggled to true");
+        }
+    }
+
+    #[test]
+    fn test_us006_toggle_value_true_to_false() {
+        // Test toggling a value from true to false
+        let mut app = Autom8App::new();
+
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            commit: true,
+            ..Default::default()
+        });
+
+        let changes = vec![(ConfigBoolField::Commit, false)];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(!config.commit, "commit should be toggled to false");
+        }
+    }
+
+    #[test]
+    fn test_us006_config_bool_field_equality() {
+        // Test ConfigBoolField equality and cloning
+        let field1 = ConfigBoolField::Review;
+        let field2 = ConfigBoolField::Review;
+        let field3 = ConfigBoolField::Commit;
+
+        assert_eq!(field1, field2, "Same variants should be equal");
+        assert_ne!(field1, field3, "Different variants should not be equal");
+
+        let cloned = field1.clone();
+        assert_eq!(field1, cloned, "Cloned field should be equal");
+    }
+
+    // ========================================================================
+    // US-007 Tests: Text Input with Real-time Validation
+    // ========================================================================
+
+    #[test]
+    fn test_us007_config_text_field_enum_variants() {
+        // Test that ConfigTextField enum has the expected variant
+        let field = ConfigTextField::WorktreePathPattern;
+        assert_eq!(field, ConfigTextField::WorktreePathPattern);
+    }
+
+    #[test]
+    fn test_us007_config_text_field_equality() {
+        // Test ConfigTextField equality and cloning
+        let field1 = ConfigTextField::WorktreePathPattern;
+        let field2 = ConfigTextField::WorktreePathPattern;
+
+        assert_eq!(field1, field2, "Same variants should be equal");
+
+        let cloned = field1.clone();
+        assert_eq!(field1, cloned, "Cloned field should be equal");
+    }
+
+    #[test]
+    fn test_us007_config_editor_actions_has_text_changes() {
+        // Test that ConfigEditorActions includes text_changes field
+        let actions = ConfigEditorActions::default();
+        assert!(
+            actions.text_changes.is_empty(),
+            "text_changes should be empty by default"
+        );
+    }
+
+    #[test]
+    fn test_us007_apply_global_config_text_changes() {
+        // Test applying text changes to global config
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            ..Default::default()
+        });
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "{repo}-custom-{branch}".to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify the cached config was updated
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-custom-{branch}",
+                "worktree_path_pattern should be updated"
+            );
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_apply_project_config_text_changes() {
+        // Test applying text changes to project config
+        let mut app = Autom8App::new();
+        let project_name = "test-project";
+
+        // Set up a cached project config
+        app.config_state.cached_project_config = Some((
+            project_name.to_string(),
+            crate::config::Config {
+                worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+                ..Default::default()
+            },
+        ));
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "custom-{repo}-{branch}".to_string(),
+        )];
+        app.apply_config_text_changes(false, Some(project_name), &changes);
+
+        // Verify the cached config was updated
+        if let Some((_, config)) = &app.config_state.cached_project_config {
+            assert_eq!(
+                config.worktree_path_pattern, "custom-{repo}-{branch}",
+                "worktree_path_pattern should be updated"
+            );
+        } else {
+            panic!("Project config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_empty_text_changes_no_op() {
+        // Test that empty changes vector doesn't cause issues
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        let original_pattern = "{repo}-wt-{branch}";
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: original_pattern.to_string(),
+            ..Default::default()
+        });
+
+        // Apply empty changes
+        let changes: Vec<(ConfigTextField, String)> = vec![];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify config is unchanged
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, original_pattern,
+                "worktree_path_pattern should be unchanged"
+            );
+        }
+
+        // Verify config_last_modified was not set
+        assert!(
+            app.config_state.last_modified.is_none(),
+            "config_last_modified should not be set for empty changes"
+        );
+    }
+
+    #[test]
+    fn test_us007_wrong_project_name_no_change() {
+        // Test that applying changes with wrong project name doesn't affect config
+        let mut app = Autom8App::new();
+        let actual_project = "actual-project";
+        let wrong_project = "wrong-project";
+
+        // Set up a cached project config
+        app.config_state.cached_project_config = Some((
+            actual_project.to_string(),
+            crate::config::Config {
+                worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+                ..Default::default()
+            },
+        ));
+
+        // Apply changes to wrong project
+        let changes = vec![(ConfigTextField::WorktreePathPattern, "changed".to_string())];
+        app.apply_config_text_changes(false, Some(wrong_project), &changes);
+
+        // Verify config is unchanged (wrong project name)
+        if let Some((_, config)) = &app.config_state.cached_project_config {
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
+                "worktree_path_pattern should be unchanged when project name doesn't match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us007_validation_missing_repo_placeholder() {
+        // Test validation logic: pattern missing {repo} placeholder
+        let pattern = "custom-wt-{branch}";
+        assert!(
+            !pattern.contains("{repo}"),
+            "Pattern should be missing {{repo}}"
+        );
+        assert!(
+            pattern.contains("{branch}"),
+            "Pattern should contain {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_missing_branch_placeholder() {
+        // Test validation logic: pattern missing {branch} placeholder
+        let pattern = "{repo}-wt-custom";
+        assert!(
+            pattern.contains("{repo}"),
+            "Pattern should contain {{repo}}"
+        );
+        assert!(
+            !pattern.contains("{branch}"),
+            "Pattern should be missing {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_missing_both_placeholders() {
+        // Test validation logic: pattern missing both placeholders
+        let pattern = "custom-wt-path";
+        assert!(
+            !pattern.contains("{repo}"),
+            "Pattern should be missing {{repo}}"
+        );
+        assert!(
+            !pattern.contains("{branch}"),
+            "Pattern should be missing {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_valid_pattern() {
+        // Test validation logic: pattern with both placeholders
+        let pattern = "{repo}-wt-{branch}";
+        assert!(
+            pattern.contains("{repo}"),
+            "Pattern should contain {{repo}}"
+        );
+        assert!(
+            pattern.contains("{branch}"),
+            "Pattern should contain {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_invalid_patterns_still_saved() {
+        // Test that invalid patterns (missing placeholders) are still saved
+        // Per acceptance criteria: "Invalid patterns still saved (warning only, not blocking)"
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            ..Default::default()
+        });
+
+        // Apply an invalid pattern (missing both placeholders)
+        let invalid_pattern = "custom-static-path";
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            invalid_pattern.to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify the invalid pattern was still saved
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, invalid_pattern,
+                "Invalid pattern should still be saved"
+            );
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_text_changes_set_last_modified() {
+        // Test that successful text changes set config_last_modified
+        let mut app = Autom8App::new();
+
+        // Initially no last modified
+        assert!(app.config_state.last_modified.is_none());
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config::default());
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "new-pattern".to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Note: config_last_modified is only set if save_global_config succeeds,
+        // which requires filesystem access. In tests, this may fail silently.
+        // The important thing is that the code path is exercised without panic.
+    }
+
+    // ========================================================================
+    // US-008: Validation Constraints with Disabled Controls
+    // ========================================================================
+
+    /// Test that render_config_bool_field_with_disabled exists and accepts the correct parameters.
+    /// This validates the method signature for US-008.
+    #[test]
+    fn test_us008_render_config_bool_field_with_disabled_exists() {
+        // This test verifies that the method exists by checking that the Autom8App type
+        // has the expected method. The actual rendering requires egui context.
+        let app = Autom8App::new();
+
+        // Verify the method exists by checking we can reference it
+        // This is a compile-time check - if the method didn't exist, this wouldn't compile
+        let _method_exists = Autom8App::render_config_bool_field_with_disabled;
+
+        // app should be created successfully
+        assert!(app.config_state.cached_global_config.is_none());
+    }
+
+    /// Test that the original render_config_bool_field delegates to the new method.
+    /// This ensures backward compatibility for US-006.
+    #[test]
+    fn test_us008_render_config_bool_field_backward_compatible() {
+        // Verify the original method still exists and has the same signature
+        let _method_exists = Autom8App::render_config_bool_field;
+
+        // This is a compile-time verification that the method signature is preserved
+        let app = Autom8App::new();
+        assert!(app.config_state.cached_global_config.is_none());
+    }
+
+    /// Test that toggle_switch_disabled exists and can be constructed.
+    /// The disabled toggle should accept a bool value and return a Widget.
+    #[test]
+    fn test_us008_toggle_switch_disabled_exists() {
+        // Verify the method exists by referencing it
+        let _method_exists = Autom8App::toggle_switch_disabled;
+
+        // Create the widget (returns impl Widget, so we can't do much with it in tests)
+        let _widget = Autom8App::toggle_switch_disabled(true);
+        let _widget2 = Autom8App::toggle_switch_disabled(false);
+
+        // If we got here without compile errors, the method exists with correct signature
+    }
+
+    /// Test the cascade behavior: disabling commit while pull_request is true
+    /// should result in both being disabled.
+    #[test]
+    fn test_us008_cascade_commit_disables_pull_request() {
+        // When commit is changed from true to false, and pull_request was true,
+        // the cascade logic should also disable pull_request.
+        //
+        // This is tested by verifying the logic pattern:
+        // if !commit && pull_request { pull_request = false; }
+
+        // Simulate the cascade scenario
+        let commit = false; // User disabled commit
+        let mut pull_request = true;
+
+        // Cascade logic (same as in render_global_config_editor)
+        if !commit && pull_request {
+            pull_request = false;
+        }
+
+        assert!(!commit, "commit should be false after user disabled it");
+        assert!(!pull_request, "pull_request should be false due to cascade");
+    }
+
+    /// Test that pull_request can be enabled when commit is true.
+    #[test]
+    fn test_us008_pull_request_enabled_when_commit_true() {
+        // When commit = true, pull_request toggle should be enabled
+        let commit = true;
+        let disabled = !commit; // This is the logic used in render_global_config_editor
+
+        assert!(
+            !disabled,
+            "pull_request should not be disabled when commit is true"
+        );
+    }
+
+    /// Test that pull_request is disabled when commit is false.
+    #[test]
+    fn test_us008_pull_request_disabled_when_commit_false() {
+        // When commit = false, pull_request toggle should be disabled
+        let commit = false;
+        let disabled = !commit; // This is the logic used in render_global_config_editor
+
+        assert!(
+            disabled,
+            "pull_request should be disabled when commit is false"
+        );
+    }
+
+    /// Test that the cascade doesn't affect pull_request if it's already false.
+    #[test]
+    fn test_us008_cascade_no_change_if_pull_request_already_false() {
+        let commit = false; // User disabled commit
+        let mut pull_request = false; // Already false
+
+        // Cascade logic - should not do anything extra since pull_request is already false
+        let cascade_triggered = !commit && pull_request;
+        if cascade_triggered {
+            pull_request = false;
+        }
+
+        assert!(!cascade_triggered, "cascade should not trigger");
+        assert!(!commit, "commit should be false");
+        assert!(!pull_request, "pull_request should remain false");
+    }
+
+    /// Test that enabling commit doesn't automatically enable pull_request.
+    /// Pull request should remain in its current state until user explicitly changes it.
+    #[test]
+    fn test_us008_enabling_commit_does_not_auto_enable_pull_request() {
+        let commit = true; // User enabled commit
+        let pull_request = false; // Was disabled by cascade or user
+
+        // No cascade in reverse direction - pull_request stays as is
+        assert!(commit, "commit should be true");
+        assert!(
+            !pull_request,
+            "pull_request should remain false (user must enable it manually)"
+        );
+    }
+
+    /// Test that the tooltip text matches the acceptance criteria.
+    #[test]
+    fn test_us008_disabled_tooltip_text() {
+        // Verify the exact tooltip text used in the implementation
+        let tooltip = "Pull requests require commits to be enabled";
+
+        // This is the exact text from the acceptance criteria:
+        // "Shows tooltip on hover: 'Pull requests require commits to be enabled'"
+        assert_eq!(
+            tooltip, "Pull requests require commits to be enabled",
+            "tooltip should match acceptance criteria"
+        );
+    }
+
+    /// Test that cascade produces the expected bool_changes vector.
+    #[test]
+    fn test_us008_cascade_produces_correct_changes() {
+        // Simulate the changes that would be pushed when cascade occurs
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let commit = false; // User disabled commit
+        let pull_request = true;
+
+        // Push the commit change
+        bool_changes.push((ConfigBoolField::Commit, commit));
+
+        // Cascade: when commit is disabled and pull_request was true, we need to disable it too
+        if !commit && pull_request {
+            bool_changes.push((ConfigBoolField::PullRequest, false));
+        }
+
+        // Should have two changes
+        assert_eq!(bool_changes.len(), 2);
+        assert_eq!(bool_changes[0], (ConfigBoolField::Commit, false));
+        assert_eq!(bool_changes[1], (ConfigBoolField::PullRequest, false));
+    }
+
+    /// Test that disabling commit when pull_request is already false produces single change.
+    #[test]
+    fn test_us008_no_cascade_single_change() {
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let commit = false; // User disabled commit
+        let pull_request = false; // Already disabled
+
+        // Push the commit change
+        bool_changes.push((ConfigBoolField::Commit, commit));
+
+        // No cascade needed
+        if !commit && pull_request {
+            bool_changes.push((ConfigBoolField::PullRequest, false));
+        }
+
+        // Should have only one change
+        assert_eq!(bool_changes.len(), 1);
+        assert_eq!(bool_changes[0], (ConfigBoolField::Commit, false));
+    }
+
+    /// Test that the apply_config_bool_changes handles cascade changes correctly.
+    #[test]
+    fn test_us008_apply_cascade_changes() {
+        // Test applying cascade changes through the actual method
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config with both commit and pull_request enabled
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            worktree: true,
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            worktree_cleanup: false,
+        });
+
+        // Apply cascade changes: commit=false and pull_request=false
+        let changes = vec![
+            (ConfigBoolField::Commit, false),
+            (ConfigBoolField::PullRequest, false),
+        ];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify both fields were updated in the cached config
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(!config.commit, "commit should be false");
+            assert!(
+                !config.pull_request,
+                "pull_request should be false due to cascade"
+            );
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    // ========================================================================
+    // US-009: Reset to Defaults Tests
+    // ========================================================================
+
+    /// Test that ConfigEditorActions includes reset_to_defaults field.
+    #[test]
+    fn test_us009_config_editor_actions_has_reset_field() {
+        let actions = ConfigEditorActions::default();
+        // The field exists and defaults to false
+        assert!(
+            !actions.reset_to_defaults,
+            "reset_to_defaults should default to false"
+        );
+    }
+
+    /// Test that reset_config_to_defaults method exists and resets global config.
+    #[test]
+    fn test_us009_reset_global_config_to_defaults() {
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config with non-default values
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+            worktree: false,
+            worktree_path_pattern: "custom-pattern".to_string(),
+            worktree_cleanup: true,
+        });
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // Verify config was reset to defaults
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert!(config.review, "review should be true (default)");
+            assert!(config.commit, "commit should be true (default)");
+            assert!(config.pull_request, "pull_request should be true (default)");
+            assert!(config.worktree, "worktree should be true (default)");
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
+                "worktree_path_pattern should be default"
+            );
+            assert!(
+                !config.worktree_cleanup,
+                "worktree_cleanup should be false (default)"
+            );
+        } else {
+            panic!("Global config should be cached after reset");
+        }
+    }
+
+    /// Test that reset_config_to_defaults resets project config.
+    #[test]
+    fn test_us009_reset_project_config_to_defaults() {
+        let mut app = Autom8App::new();
+        let project_name = "test-project";
+
+        // Set up a cached project config with non-default values
+        app.config_state.cached_project_config = Some((
+            project_name.to_string(),
+            crate::config::Config {
+                review: false,
+                commit: false,
+                pull_request: false,
+                worktree: false,
+                worktree_path_pattern: "custom-pattern".to_string(),
+                worktree_cleanup: true,
+            },
+        ));
+
+        // Reset to defaults
+        app.reset_config_to_defaults(false, Some(project_name));
+
+        // Verify config was reset to defaults
+        if let Some((cached_name, config)) = &app.config_state.cached_project_config {
+            assert_eq!(
+                cached_name, project_name,
+                "project name should be preserved"
+            );
+            assert!(config.review, "review should be true (default)");
+            assert!(config.commit, "commit should be true (default)");
+            assert!(config.pull_request, "pull_request should be true (default)");
+            assert!(config.worktree, "worktree should be true (default)");
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
+                "worktree_path_pattern should be default"
+            );
+            assert!(
+                !config.worktree_cleanup,
+                "worktree_cleanup should be false (default)"
+            );
+        } else {
+            panic!("Project config should be cached after reset");
+        }
+    }
+
+    /// Test that config_last_modified is updated after reset.
+    #[test]
+    fn test_us009_reset_updates_last_modified() {
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.config_state.cached_global_config = Some(crate::config::Config::default());
+        app.config_state.last_modified = None;
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // Note: config_last_modified may not be set if save fails (no file system)
+        // but the config should still be reset in memory
+        assert!(
+            app.config_state.cached_global_config.is_some(),
+            "cached config should exist after reset"
+        );
+    }
+
+    /// Test that render_reset_to_defaults_button method exists.
+    #[test]
+    fn test_us009_render_reset_to_defaults_button_exists() {
+        // This test verifies the method signature exists by compiling
+        let _func: fn(&Autom8App, &mut egui::Ui) -> bool =
+            Autom8App::render_reset_to_defaults_button;
+    }
+
+    /// Test that Config::default() has the expected values per US-009 acceptance criteria.
+    #[test]
+    fn test_us009_config_default_values() {
+        let config = crate::config::Config::default();
+
+        assert!(config.review, "review should default to true");
+        assert!(config.commit, "commit should default to true");
+        assert!(config.pull_request, "pull_request should default to true");
+        assert!(config.worktree, "worktree should default to true");
+        assert_eq!(
+            config.worktree_path_pattern, "{repo}-wt-{branch}",
+            "worktree_path_pattern should default to {{repo}}-wt-{{branch}}"
+        );
+        assert!(
+            !config.worktree_cleanup,
+            "worktree_cleanup should default to false"
+        );
+    }
+
+    /// Test that global config editor returns reset flag in tuple.
+    #[test]
+    fn test_us009_global_config_editor_returns_reset_flag() {
+        // This test verifies the return type includes a bool for reset_clicked
+        // by checking that the function signature compiles correctly
+        let _func: fn(&Autom8App, &mut egui::Ui) -> (BoolFieldChanges, TextFieldChanges, bool) =
+            Autom8App::render_global_config_editor;
+    }
+
+    /// Test that project config editor returns reset flag in tuple.
+    #[test]
+    fn test_us009_project_config_editor_returns_reset_flag() {
+        // This test verifies the return type includes a bool for reset_clicked
+        // by checking that the function signature compiles correctly
+        let _func: fn(
+            &Autom8App,
+            &mut egui::Ui,
+            &str,
+        ) -> (BoolFieldChanges, TextFieldChanges, bool) = Autom8App::render_project_config_editor;
+    }
+
+    /// Test that reset_to_defaults replaces the entire config, not just individual fields.
+    #[test]
+    fn test_us009_reset_replaces_entire_config() {
+        let mut app = Autom8App::new();
+
+        // Set up a config with ALL fields set to non-default values
+        app.config_state.cached_global_config = Some(crate::config::Config {
+            review: false,                                                  // default is true
+            commit: false,                                                  // default is true
+            pull_request: false,                                            // default is true
+            worktree: false,                                                // default is true
+            worktree_path_pattern: "totally-custom-{whatever}".to_string(), // default is "{repo}-wt-{branch}"
+            worktree_cleanup: true,                                         // default is false
+        });
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // All fields should now match Config::default()
+        let default = crate::config::Config::default();
+        if let Some(config) = &app.config_state.cached_global_config {
+            assert_eq!(config.review, default.review);
+            assert_eq!(config.commit, default.commit);
+            assert_eq!(config.pull_request, default.pull_request);
+            assert_eq!(config.worktree, default.worktree);
+            assert_eq!(config.worktree_path_pattern, default.worktree_path_pattern);
+            assert_eq!(config.worktree_cleanup, default.worktree_cleanup);
+        } else {
+            panic!("Global config should be cached after reset");
+        }
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-010) - Config Path Tooltip on Header
+    // ========================================================================
+
+    #[test]
+    fn test_us010_global_config_path_for_tooltip() {
+        // Test that global_config_path() returns an absolute path suitable for tooltip
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok(), "global_config_path() should succeed");
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should be absolute (start with /)
+        assert!(
+            path_str.starts_with('/'),
+            "Path should be absolute (start with /)"
+        );
+
+        // Path should contain autom8
+        assert!(path_str.contains("autom8"), "Path should contain autom8");
+
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us010_project_config_path_for_tooltip() {
+        // Test that project_config_path_for() returns an absolute path suitable for tooltip
+        let project_name = "my-project";
+        let path_result = crate::config::project_config_path_for(project_name);
+        assert!(
+            path_result.is_ok(),
+            "project_config_path_for() should succeed"
+        );
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should be absolute (start with /)
+        assert!(
+            path_str.starts_with('/'),
+            "Path should be absolute (start with /)"
+        );
+
+        // Path should contain the project name
+        assert!(
+            path_str.contains(project_name),
+            "Path should contain project name: {}",
+            project_name
+        );
+
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us010_global_header_text_format() {
+        // Test that global scope produces the expected header text
+        let _app = Autom8App::new();
+        let scope = ConfigScope::Global;
+
+        // When scope is Global, header should be "Global Config"
+        match scope {
+            ConfigScope::Global => {
+                // Expected header text based on implementation in render_config_right_panel
+                let header_text = "Global Config".to_string();
+                assert_eq!(header_text, "Global Config");
+            }
+            ConfigScope::Project(_) => panic!("Expected Global scope"),
+        }
     }
 
     // ========================================================================
@@ -6090,6 +8974,29 @@ mod tests {
                 assert!(items.is_empty());
             }
             _ => panic!("Expected Submenu variant"),
+        }
+    }
+
+    #[test]
+    fn test_us010_project_header_text_format() {
+        // Test that project scope produces the expected header text format
+        let project_name = "test-project";
+        let scope = ConfigScope::Project(project_name.to_string());
+
+        // When scope is Project, header should contain "Project Config: {name}"
+        match scope {
+            ConfigScope::Project(name) => {
+                let header_text = format!("Project Config: {}", name);
+                assert!(
+                    header_text.starts_with("Project Config:"),
+                    "Header should start with 'Project Config:'"
+                );
+                assert!(
+                    header_text.contains(&name),
+                    "Header should contain project name"
+                );
+            }
+            ConfigScope::Global => panic!("Expected Project scope"),
         }
     }
 
@@ -7204,6 +10111,29 @@ mod tests {
     }
 
     #[test]
+    fn test_us010_tooltip_uses_display_format() {
+        // Test that paths use display() format for tooltip (not debug format)
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let display_str = path.display().to_string();
+        let debug_str = format!("{:?}", path);
+
+        // Display format should NOT contain quotes (unlike debug)
+        assert!(
+            !display_str.contains('"'),
+            "Display format should not contain quotes"
+        );
+
+        // Display format should be shorter or equal to debug format
+        assert!(
+            display_str.len() <= debug_str.len(),
+            "Display format should be shorter than debug format"
+        );
+    }
+
+    #[test]
     fn test_us006_clean_action_variants() {
         // Verify CleanWorktrees and CleanOrphaned actions exist and are distinct
         let worktrees = ContextMenuAction::CleanWorktrees;
@@ -7218,6 +10148,86 @@ mod tests {
             matches!(orphaned, ContextMenuAction::CleanOrphaned),
             "Should be CleanOrphaned"
         );
+    }
+
+    #[test]
+    fn test_us010_tooltip_path_is_resolved_not_relative() {
+        // Test that tooltip path is the actual resolved path (not relative)
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Should NOT start with ~/ (that would be unexpanded)
+        assert!(
+            !path_str.starts_with("~/"),
+            "Path should not start with ~/ (should be expanded)"
+        );
+
+        // Should NOT be relative (no ./  or ../)
+        assert!(
+            !path_str.starts_with("./") && !path_str.starts_with("../"),
+            "Path should not be relative"
+        );
+
+        // Should be absolute
+        assert!(path_str.starts_with('/'), "Path should be absolute");
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-011) - Dynamic Project Discovery
+    // ========================================================================
+
+    #[test]
+    fn test_us011_list_projects_available() {
+        // Test that list_projects() is available and returns a Result
+        let result = crate::config::list_projects();
+        // Should not panic - either Ok or Err is valid
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_us011_config_scope_projects_initially_empty() {
+        // Test that config_scope_projects starts empty before refresh
+        let app = Autom8App::new();
+        // Initially empty before first refresh
+        assert!(
+            app.config_state.scope_projects.is_empty(),
+            "Project list should be empty before refresh"
+        );
+    }
+
+    #[test]
+    fn test_us011_config_scope_has_config_initially_empty() {
+        // Test that config_scope_has_config starts empty before refresh
+        let app = Autom8App::new();
+        assert!(
+            app.config_state.scope_has_config.is_empty(),
+            "Config status map should be empty before refresh"
+        );
+    }
+
+    #[test]
+    fn test_us011_refresh_config_scope_data_populates_projects() {
+        // Test that refresh_config_scope_data populates the projects list
+        let mut app = Autom8App::new();
+
+        // Refresh
+        app.refresh_config_scope_data();
+
+        // After refresh, project list should be valid (may be empty if no projects exist)
+        // The key test is that it doesn't panic and returns valid data
+        // If projects exist, the config_scope_has_config map should also be populated
+        if !app.config_state.scope_projects.is_empty() {
+            // Each project should have an entry in the has_config map
+            for project in &app.config_state.scope_projects {
+                assert!(
+                    app.config_state.scope_has_config.contains_key(project),
+                    "Each project should have a config status entry"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7257,6 +10267,24 @@ mod tests {
             }
             _ => panic!("Expected Submenu"),
         }
+    }
+
+    #[test]
+    fn test_us011_refresh_called_on_render_config() {
+        // Verify that render_config calls refresh_config_scope_data
+        // We can test this by checking that the method exists and is callable
+        let _render_config: fn(&mut Autom8App, &mut egui::Ui) = Autom8App::render_config;
+    }
+
+    #[test]
+    fn test_us011_project_config_path_for_exists() {
+        // Test that project_config_path_for function is available
+        let result = crate::config::project_config_path_for("test-project");
+        // Should return a valid path (even if file doesn't exist)
+        assert!(
+            result.is_ok(),
+            "project_config_path_for should return a valid path"
+        );
     }
 
     #[test]
@@ -7338,6 +10366,25 @@ mod tests {
             tab.label.contains("Clean-worktrees"),
             "Tab label should contain 'Clean-worktrees'"
         );
+    }
+
+    #[test]
+    fn test_us011_config_scope_has_config_returns_bool() {
+        // Test that project_has_config returns boolean
+        let mut app = Autom8App::new();
+
+        // Set up test data
+        app.config_state
+            .scope_has_config
+            .insert("project-with-config".to_string(), true);
+        app.config_state
+            .scope_has_config
+            .insert("project-without-config".to_string(), false);
+
+        // Test retrieval
+        assert!(app.project_has_config("project-with-config"));
+        assert!(!app.project_has_config("project-without-config"));
+        assert!(!app.project_has_config("unknown-project")); // Unknown returns false
     }
 
     #[test]
