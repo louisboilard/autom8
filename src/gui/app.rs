@@ -124,6 +124,20 @@ const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
 /// Based on Claude desktop reference (~200-220px).
 const SIDEBAR_WIDTH: f32 = 220.0;
 
+/// Width of the sidebar when collapsed (fully hidden).
+/// The sidebar completely hides when collapsed, maximizing content area.
+const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.0;
+
+// ============================================================================
+// Sidebar Toggle Constants (Collapsible Sidebar - US-004)
+// ============================================================================
+
+/// Size of the sidebar toggle button.
+const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
+
+/// Horizontal padding between traffic lights and toggle button.
+const SIDEBAR_TOGGLE_PADDING: f32 = 8.0;
+
 /// Height of each navigation item in the sidebar.
 const SIDEBAR_ITEM_HEIGHT: f32 = 40.0;
 
@@ -477,6 +491,14 @@ pub struct Autom8App {
     last_refresh: Instant,
     /// Refresh interval for data loading.
     refresh_interval: Duration,
+
+    // ========================================================================
+    // Sidebar State (Collapsible Sidebar - US-004)
+    // ========================================================================
+    /// Whether the sidebar is collapsed.
+    /// When collapsed, the sidebar is fully hidden to maximize content area.
+    /// State persists during the session (not persisted across restarts).
+    sidebar_collapsed: bool,
 }
 
 impl Autom8App {
@@ -524,6 +546,7 @@ impl Autom8App {
             initial_load_complete: false,
             last_refresh: Instant::now(),
             refresh_interval,
+            sidebar_collapsed: false,
         };
         // Initial data load
         app.refresh_data();
@@ -564,6 +587,25 @@ impl Autom8App {
     /// Sets the refresh interval.
     pub fn set_refresh_interval(&mut self, interval: Duration) {
         self.refresh_interval = interval;
+    }
+
+    // ========================================================================
+    // Sidebar State (Collapsible Sidebar - US-004)
+    // ========================================================================
+
+    /// Returns whether the sidebar is collapsed.
+    pub fn is_sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed
+    }
+
+    /// Sets the sidebar collapsed state.
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        self.sidebar_collapsed = collapsed;
+    }
+
+    /// Toggles the sidebar collapsed state.
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
     }
 
     /// Returns the currently selected project name.
@@ -976,23 +1018,34 @@ impl eframe::App for Autom8App {
         self.render_title_bar(ctx);
 
         // Sidebar navigation (replaces horizontal tab bar - US-003)
-        egui::SidePanel::left("sidebar")
-            .exact_width(SIDEBAR_WIDTH)
-            .resizable(false)
-            .frame(
-                egui::Frame::none()
-                    .fill(colors::BACKGROUND)
-                    .inner_margin(egui::Margin {
-                        left: spacing::MD,
-                        right: spacing::MD,
-                        top: spacing::LG,
-                        bottom: spacing::LG,
-                    })
-                    .stroke(Stroke::new(1.0, colors::SEPARATOR)),
-            )
-            .show(ctx, |ui| {
-                self.render_sidebar(ui);
-            });
+        // Sidebar can be collapsed via toggle button in title bar (US-004)
+        let sidebar_width = if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        };
+
+        // Only show sidebar panel when not collapsed
+        // When collapsed (width=0), the content area expands to fill the space
+        if !self.sidebar_collapsed {
+            egui::SidePanel::left("sidebar")
+                .exact_width(sidebar_width)
+                .resizable(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(colors::BACKGROUND)
+                        .inner_margin(egui::Margin {
+                            left: spacing::MD,
+                            right: spacing::MD,
+                            top: spacing::LG,
+                            bottom: spacing::LG,
+                        })
+                        .stroke(Stroke::new(1.0, colors::SEPARATOR)),
+                )
+                .show(ctx, |ui| {
+                    self.render_sidebar(ui);
+                });
+        }
 
         // Content area fills remaining space
         egui::CentralPanel::default()
@@ -1059,13 +1112,116 @@ impl Autom8App {
                     // Reserve space for traffic lights (they're rendered by macOS natively)
                     ui.add_space(TITLE_BAR_TRAFFIC_LIGHT_OFFSET);
 
-                    // Future: Add sidebar toggle button here (US-004)
-                    // For now, this space is available for custom UI elements
+                    // Add some padding before the toggle button
+                    ui.add_space(SIDEBAR_TOGGLE_PADDING);
+
+                    // Sidebar toggle button (US-004)
+                    // Uses a hamburger/sidebar icon that indicates current state
+                    let toggle_response =
+                        self.render_sidebar_toggle_button(ui, self.sidebar_collapsed);
+                    if toggle_response.clicked() {
+                        self.sidebar_collapsed = !self.sidebar_collapsed;
+                    }
 
                     // Center area can display app name or breadcrumbs
                     // (currently empty - available for future enhancements)
                 });
             });
+    }
+
+    /// Render the sidebar toggle button in the title bar.
+    ///
+    /// The button uses a hamburger icon (☰) when collapsed (to expand)
+    /// and a sidebar icon (⊏) when expanded (to collapse).
+    /// Supports hover states for visual feedback.
+    ///
+    /// # Arguments
+    /// * `ui` - The UI context
+    /// * `is_collapsed` - Whether the sidebar is currently collapsed
+    ///
+    /// # Returns
+    /// The egui Response for click detection
+    #[cfg(target_os = "macos")]
+    fn render_sidebar_toggle_button(
+        &self,
+        ui: &mut egui::Ui,
+        is_collapsed: bool,
+    ) -> egui::Response {
+        let button_size = egui::vec2(SIDEBAR_TOGGLE_SIZE, SIDEBAR_TOGGLE_SIZE);
+        let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw background on hover
+        if is_hovered {
+            ui.painter()
+                .rect_filled(rect, Rounding::same(rounding::BUTTON), colors::SURFACE_HOVER);
+        }
+
+        // Draw the icon
+        // When collapsed: hamburger icon (three horizontal lines) to indicate "show sidebar"
+        // When expanded: sidebar icon (panel + lines) to indicate "hide sidebar"
+        let icon_color = if is_hovered {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_SECONDARY
+        };
+
+        let painter = ui.painter();
+        let center = rect.center();
+
+        if is_collapsed {
+            // Hamburger icon (three horizontal lines) - indicates "expand/show"
+            let line_width = 12.0;
+            let line_spacing = 4.0;
+            let half_width = line_width / 2.0;
+
+            for i in -1..=1 {
+                let y = center.y + (i as f32) * line_spacing;
+                painter.line_segment(
+                    [
+                        egui::pos2(center.x - half_width, y),
+                        egui::pos2(center.x + half_width, y),
+                    ],
+                    Stroke::new(1.5, icon_color),
+                );
+            }
+        } else {
+            // Sidebar icon (left panel with lines) - indicates "collapse/hide"
+            // Draw a rectangle representing the sidebar
+            let icon_rect = Rect::from_center_size(center, egui::vec2(14.0, 12.0));
+
+            // Outer frame
+            painter.rect_stroke(icon_rect, Rounding::same(1.0), Stroke::new(1.5, icon_color));
+
+            // Vertical divider (sidebar edge)
+            let divider_x = icon_rect.left() + 5.0;
+            painter.line_segment(
+                [
+                    egui::pos2(divider_x, icon_rect.top() + 1.0),
+                    egui::pos2(divider_x, icon_rect.bottom() - 1.0),
+                ],
+                Stroke::new(1.0, icon_color),
+            );
+
+            // Content lines on the right side
+            let line_start_x = divider_x + 2.0;
+            let line_end_x = icon_rect.right() - 2.0;
+            for i in 0..2 {
+                let y = icon_rect.top() + 4.0 + (i as f32) * 4.0;
+                painter.line_segment(
+                    [egui::pos2(line_start_x, y), egui::pos2(line_end_x, y)],
+                    Stroke::new(1.0, icon_color),
+                );
+            }
+        }
+
+        // Add tooltip
+        let tooltip_text = if is_collapsed {
+            "Show sidebar"
+        } else {
+            "Hide sidebar"
+        };
+        response.on_hover_text(tooltip_text)
     }
 
     // ========================================================================
@@ -5174,6 +5330,106 @@ mod tests {
             SIDEBAR_WIDTH,
             min_content_width,
             MIN_WIDTH
+        );
+    }
+
+    // ========================================================================
+    // Collapsible Sidebar Tests (US-004)
+    // ========================================================================
+
+    #[test]
+    fn test_sidebar_collapsed_width_is_zero() {
+        // When collapsed, sidebar should be fully hidden (0 width)
+        assert_eq!(
+            SIDEBAR_COLLAPSED_WIDTH, 0.0,
+            "Collapsed sidebar should have zero width for full content expansion"
+        );
+    }
+
+    #[test]
+    fn test_app_sidebar_starts_expanded() {
+        // Sidebar should start in expanded state by default
+        let app = Autom8App::new(None);
+        assert!(
+            !app.is_sidebar_collapsed(),
+            "Sidebar should start expanded (not collapsed)"
+        );
+    }
+
+    #[test]
+    fn test_app_toggle_sidebar_collapses() {
+        let mut app = Autom8App::new(None);
+        assert!(!app.is_sidebar_collapsed());
+
+        app.toggle_sidebar();
+        assert!(
+            app.is_sidebar_collapsed(),
+            "Sidebar should be collapsed after toggle"
+        );
+    }
+
+    #[test]
+    fn test_app_toggle_sidebar_expands() {
+        let mut app = Autom8App::new(None);
+        app.set_sidebar_collapsed(true);
+        assert!(app.is_sidebar_collapsed());
+
+        app.toggle_sidebar();
+        assert!(
+            !app.is_sidebar_collapsed(),
+            "Sidebar should be expanded after second toggle"
+        );
+    }
+
+    #[test]
+    fn test_app_toggle_sidebar_round_trip() {
+        let mut app = Autom8App::new(None);
+        let initial_state = app.is_sidebar_collapsed();
+
+        app.toggle_sidebar();
+        app.toggle_sidebar();
+
+        assert_eq!(
+            app.is_sidebar_collapsed(),
+            initial_state,
+            "Two toggles should return to initial state"
+        );
+    }
+
+    #[test]
+    fn test_app_set_sidebar_collapsed() {
+        let mut app = Autom8App::new(None);
+
+        app.set_sidebar_collapsed(true);
+        assert!(app.is_sidebar_collapsed());
+
+        app.set_sidebar_collapsed(false);
+        assert!(!app.is_sidebar_collapsed());
+    }
+
+    #[test]
+    fn test_sidebar_toggle_button_size_is_reasonable() {
+        // Toggle button should be visible but not too large
+        assert!(
+            SIDEBAR_TOGGLE_SIZE >= 20.0,
+            "Toggle button should be at least 20px for touch targets"
+        );
+        assert!(
+            SIDEBAR_TOGGLE_SIZE <= TITLE_BAR_HEIGHT,
+            "Toggle button should fit within title bar height"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_toggle_fits_in_title_bar() {
+        // Verify there's room for the toggle button in the title bar
+        let required_space =
+            TITLE_BAR_TRAFFIC_LIGHT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
+        // Should fit within half the minimum window width
+        assert!(
+            required_space < MIN_WIDTH / 2.0,
+            "Toggle button area ({}) should fit within reasonable title bar space",
+            required_space
         );
     }
 }
