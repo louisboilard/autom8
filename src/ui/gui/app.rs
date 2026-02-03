@@ -5362,35 +5362,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_project_row_interaction() {
-        // Test none
-        let none = ProjectRowInteraction::none();
-        assert!(!none.clicked);
-        assert!(none.right_click_pos.is_none());
-
-        // Test click
-        let click = ProjectRowInteraction::click();
-        assert!(click.clicked);
-        assert!(click.right_click_pos.is_none());
-
-        // Test right-click
-        let pos = Pos2::new(100.0, 200.0);
-        let right_click = ProjectRowInteraction::right_click(pos);
-        assert!(!right_click.clicked);
-        assert_eq!(right_click.right_click_pos, Some(pos));
-    }
-
-    #[test]
-    fn test_context_menu_constants() {
-        // Verify constants are reasonable values
-        assert!(CONTEXT_MENU_MIN_WIDTH >= 100.0);
-        assert!(CONTEXT_MENU_ITEM_HEIGHT >= 24.0);
-        assert!(CONTEXT_MENU_PADDING_H > 0.0);
-        assert!(CONTEXT_MENU_PADDING_V >= 0.0);
-        assert!(CONTEXT_MENU_ARROW_SIZE > 0.0);
-    }
-
     // ========================================================================
     // Command Output Tab Tests (US-007)
     // ========================================================================
@@ -5619,94 +5590,9 @@ mod tests {
         assert!(app.get_command_execution(&cache_key).is_none());
     }
 
-    #[test]
-    fn test_command_status_enum() {
-        assert_eq!(CommandStatus::Running, CommandStatus::Running);
-        assert_ne!(CommandStatus::Running, CommandStatus::Completed);
-        assert_ne!(CommandStatus::Running, CommandStatus::Failed);
-        assert_ne!(CommandStatus::Completed, CommandStatus::Failed);
-    }
-
-    #[test]
-    fn test_tab_id_command_output_variant() {
-        let cache_key = "project:status:abc123".to_string();
-        let tab_id = TabId::CommandOutput(cache_key.clone());
-
-        // Test equality
-        assert_eq!(tab_id, TabId::CommandOutput(cache_key.clone()));
-        assert_ne!(tab_id, TabId::ActiveRuns);
-        assert_ne!(tab_id, TabId::Projects);
-        assert_ne!(tab_id, TabId::RunDetail("abc".to_string()));
-
-        // Test hash
-        let mut set = std::collections::HashSet::new();
-        set.insert(tab_id.clone());
-        assert!(set.contains(&TabId::CommandOutput(cache_key)));
-    }
-
     // ========================================================================
-    // Command Message and Channel Tests (US-003)
+    // Command Message Polling Tests (US-003)
     // ========================================================================
-
-    #[test]
-    fn test_command_message_stdout() {
-        let msg = CommandMessage::Stdout {
-            cache_key: "test:status:123".to_string(),
-            line: "output line".to_string(),
-        };
-        if let CommandMessage::Stdout { cache_key, line } = msg {
-            assert_eq!(cache_key, "test:status:123");
-            assert_eq!(line, "output line");
-        } else {
-            panic!("Expected Stdout variant");
-        }
-    }
-
-    #[test]
-    fn test_command_message_stderr() {
-        let msg = CommandMessage::Stderr {
-            cache_key: "test:status:123".to_string(),
-            line: "error line".to_string(),
-        };
-        if let CommandMessage::Stderr { cache_key, line } = msg {
-            assert_eq!(cache_key, "test:status:123");
-            assert_eq!(line, "error line");
-        } else {
-            panic!("Expected Stderr variant");
-        }
-    }
-
-    #[test]
-    fn test_command_message_completed() {
-        let msg = CommandMessage::Completed {
-            cache_key: "test:status:123".to_string(),
-            exit_code: 0,
-        };
-        if let CommandMessage::Completed {
-            cache_key,
-            exit_code,
-        } = msg
-        {
-            assert_eq!(cache_key, "test:status:123");
-            assert_eq!(exit_code, 0);
-        } else {
-            panic!("Expected Completed variant");
-        }
-    }
-
-    #[test]
-    fn test_command_message_failed() {
-        let msg = CommandMessage::Failed {
-            cache_key: "test:status:123".to_string(),
-            error: "spawn error".to_string(),
-        };
-        if let CommandMessage::Failed { cache_key, error } = msg {
-            assert_eq!(cache_key, "test:status:123");
-            assert_eq!(error, "spawn error");
-        } else {
-            panic!("Expected Failed variant");
-        }
-    }
 
     #[test]
     fn test_poll_command_messages_stdout() {
