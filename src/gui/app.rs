@@ -2819,8 +2819,7 @@ impl Autom8App {
         ui.vertical_centered(|ui| {
             // Custom spinner using theme accent color for visual consistency
             let spinner_size = 24.0;
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::splat(spinner_size), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(spinner_size), egui::Sense::hover());
 
             if ui.is_rect_visible(rect) {
                 // Draw a simple animated arc spinner in accent color
@@ -2834,8 +2833,7 @@ impl Autom8App {
                 let n_points = 32;
                 let points: Vec<_> = (0..=n_points)
                     .map(|i| {
-                        let angle =
-                            start_angle + (i as f32 / n_points as f32) * arc_length;
+                        let angle = start_angle + (i as f32 / n_points as f32) * arc_length;
                         egui::pos2(
                             center.x + radius * angle.cos(),
                             center.y + radius * angle.sin(),
@@ -2843,10 +2841,8 @@ impl Autom8App {
                     })
                     .collect();
 
-                ui.painter().add(egui::Shape::line(
-                    points,
-                    Stroke::new(2.5, colors::ACCENT),
-                ));
+                ui.painter()
+                    .add(egui::Shape::line(points, Stroke::new(2.5, colors::ACCENT)));
 
                 // Request repaint for animation
                 ui.ctx().request_repaint();

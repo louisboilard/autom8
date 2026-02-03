@@ -985,10 +985,8 @@ mod tests {
         let error_bg = badge_background_color(colors::STATUS_ERROR);
 
         // Backgrounds should be relatively light (high luminance)
-        let running_lum =
-            running_bg.r() as u32 + running_bg.g() as u32 + running_bg.b() as u32;
-        let success_lum =
-            success_bg.r() as u32 + success_bg.g() as u32 + success_bg.b() as u32;
+        let running_lum = running_bg.r() as u32 + running_bg.g() as u32 + running_bg.b() as u32;
+        let success_lum = success_bg.r() as u32 + success_bg.g() as u32 + success_bg.b() as u32;
         let error_lum = error_bg.r() as u32 + error_bg.g() as u32 + error_bg.b() as u32;
 
         // Badge backgrounds should be light (luminance > 600 out of 765 max)
@@ -1050,8 +1048,14 @@ mod tests {
 
         // Each should be different from the base background
         let bg = colors::BACKGROUND;
-        assert_ne!(running_bg, bg, "Running badge should differ from background");
-        assert_ne!(success_bg, bg, "Success badge should differ from background");
+        assert_ne!(
+            running_bg, bg,
+            "Running badge should differ from background"
+        );
+        assert_ne!(
+            success_bg, bg,
+            "Success badge should differ from background"
+        );
         assert_ne!(error_bg, bg, "Error badge should differ from background");
     }
 }
