@@ -1096,10 +1096,8 @@ impl Autom8App {
 
                     // Vertical separator between window controls and toggle button
                     let separator_height = SIDEBAR_TOGGLE_SIZE;
-                    let (separator_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(1.0, separator_height),
-                        Sense::hover(),
-                    );
+                    let (separator_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(1.0, separator_height), Sense::hover());
                     ui.painter().vline(
                         separator_rect.center().x,
                         separator_rect.y_range(),
@@ -5726,8 +5724,7 @@ mod tests {
     #[test]
     fn test_sidebar_toggle_fits_in_title_bar() {
         // Verify there's room for the toggle button in the title bar
-        let required_space =
-            TITLE_BAR_LEFT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
+        let required_space = TITLE_BAR_LEFT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
         // Should fit within half the minimum window width
         assert!(
             required_space < MIN_WIDTH / 2.0,
