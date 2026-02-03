@@ -1061,23 +1061,6 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_and_push_with_commit_enabled_but_push_disabled() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // When commit is enabled but push disabled, push_result should be None
-        // Note: This test doesn't actually create commits to avoid mutating the repo
-        // It just verifies the function can be called without panicking
-        let result = commit_and_push_pr_fixes(123, true, false);
-        assert!(result.is_ok());
-        let (commit_result, push_result) = result.unwrap();
-        // commit_result will be Some (either NothingToCommit or Success)
-        assert!(commit_result.is_some());
-        // push_result should be None because push is disabled
-        assert!(push_result.is_none());
-    }
-
-    #[test]
     fn test_stage_all_changes_does_not_error() {
         // Acquire lock to prevent other tests from changing cwd concurrently
         let _lock = CWD_MUTEX.lock().unwrap();

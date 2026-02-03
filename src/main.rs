@@ -89,6 +89,7 @@ WORKTREE MODE:
     autom8 status             # Show current session status
     autom8 status --all       # Show all sessions for this project
     autom8 status --global    # Show status across all projects
+    autom8 status --project myapp --all  # Show all sessions for a specific project
 
 SESSION STATUS:
     Sessions are shown with: session ID, worktree path, branch name,
@@ -104,6 +105,11 @@ SESSION STATUS:
         /// Displays a summary of all projects and their active runs.
         #[arg(short = 'g', long = "global")]
         global: bool,
+
+        /// Target project name.
+        /// If not specified, uses the current directory to determine the project.
+        #[arg(short, long)]
+        project: Option<String>,
     },
 
     /// Resume a failed or interrupted run
@@ -136,6 +142,7 @@ BEHAVIOR:
     autom8 clean --session abc123     # Remove a specific session
     autom8 clean --orphaned           # Remove orphaned sessions only
     autom8 clean --worktrees --force  # Remove even with uncommitted changes
+    autom8 clean --project myapp      # Clean a specific project by name
 
 WHAT GETS CLEANED:
     By default, cleans completed and failed sessions (preserves in-progress).
@@ -166,6 +173,11 @@ WHAT GETS CLEANED:
         /// Use with caution - uncommitted work will be lost.
         #[arg(short, long)]
         force: bool,
+
+        /// Target project name.
+        /// If not specified, uses the current directory to determine the project.
+        #[arg(short, long)]
+        project: Option<String>,
     },
 
     /// View, modify, or reset configuration values
@@ -320,12 +332,19 @@ fn main() {
                     }),
                 ) => run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree),
 
-                (None, Some(Commands::Status { all, global })) => {
+                (
+                    None,
+                    Some(Commands::Status {
+                        all,
+                        global,
+                        project,
+                    }),
+                ) => {
                     print_header();
                     if *global {
                         global_status_command()
                     } else if *all {
-                        all_sessions_status_command()
+                        all_sessions_status_command(project.as_deref())
                     } else {
                         status_command(&runner)
                     }
@@ -343,6 +362,7 @@ fn main() {
                         session,
                         orphaned,
                         force,
+                        project,
                     }),
                 ) => clean_command(CleanOptions {
                     worktrees: *worktrees,
@@ -350,6 +370,7 @@ fn main() {
                     session: session.clone(),
                     orphaned: *orphaned,
                     force: *force,
+                    project: project.clone(),
                 }),
 
                 // Config already handled above (outside Runner block)
@@ -1557,9 +1578,15 @@ mod tests {
     fn test_us009_status_all_flag() {
         // Test that --all flag is recognized
         let cli = Cli::try_parse_from(["autom8", "status", "--all"]).unwrap();
-        if let Some(Commands::Status { all, global }) = cli.command {
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
             assert!(all, "--all should be true");
             assert!(!global, "--global should be false");
+            assert!(project.is_none(), "--project should be None");
         } else {
             panic!("Expected Status command");
         }
@@ -1569,9 +1596,15 @@ mod tests {
     fn test_us009_status_short_all_flag() {
         // Test that -a short flag works
         let cli = Cli::try_parse_from(["autom8", "status", "-a"]).unwrap();
-        if let Some(Commands::Status { all, global }) = cli.command {
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
             assert!(all, "-a should set all to true");
             assert!(!global);
+            assert!(project.is_none());
         } else {
             panic!("Expected Status command");
         }
@@ -1581,9 +1614,15 @@ mod tests {
     fn test_us009_status_global_flag_separate() {
         // Test that --global flag is separate from --all
         let cli = Cli::try_parse_from(["autom8", "status", "--global"]).unwrap();
-        if let Some(Commands::Status { all, global }) = cli.command {
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
             assert!(!all, "--all should be false");
             assert!(global, "--global should be true");
+            assert!(project.is_none());
         } else {
             panic!("Expected Status command");
         }
@@ -1593,9 +1632,15 @@ mod tests {
     fn test_us009_status_short_global_flag() {
         // Test that -g short flag works for --global
         let cli = Cli::try_parse_from(["autom8", "status", "-g"]).unwrap();
-        if let Some(Commands::Status { all, global }) = cli.command {
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
             assert!(!all);
             assert!(global, "-g should set global to true");
+            assert!(project.is_none());
         } else {
             panic!("Expected Status command");
         }
@@ -1605,9 +1650,15 @@ mod tests {
     fn test_us009_status_no_flags_defaults() {
         // Test default behavior with no flags
         let cli = Cli::try_parse_from(["autom8", "status"]).unwrap();
-        if let Some(Commands::Status { all, global }) = cli.command {
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
             assert!(!all, "all should default to false");
             assert!(!global, "global should default to false");
+            assert!(project.is_none(), "project should default to None");
         } else {
             panic!("Expected Status command");
         }
@@ -1617,7 +1668,52 @@ mod tests {
     fn test_us009_all_sessions_status_command_importable() {
         // Verify the command function is exported
         use autom8::commands::all_sessions_status_command;
-        let _: fn() -> autom8::error::Result<()> = all_sessions_status_command;
+        let _: fn(Option<&str>) -> autom8::error::Result<()> = all_sessions_status_command;
+    }
+
+    #[test]
+    fn test_us009_status_project_flag() {
+        // Test that --project flag works
+        let cli = Cli::try_parse_from(["autom8", "status", "--project", "myproject"]).unwrap();
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
+            assert!(!all, "--all should be false");
+            assert!(!global, "--global should be false");
+            assert_eq!(
+                project.as_deref(),
+                Some("myproject"),
+                "--project should be set"
+            );
+        } else {
+            panic!("Expected Status command");
+        }
+    }
+
+    #[test]
+    fn test_us009_status_project_with_all_flag() {
+        // Test that --project can be combined with --all
+        let cli =
+            Cli::try_parse_from(["autom8", "status", "--all", "--project", "myproject"]).unwrap();
+        if let Some(Commands::Status {
+            all,
+            global,
+            project,
+        }) = cli.command
+        {
+            assert!(all, "--all should be true");
+            assert!(!global, "--global should be false");
+            assert_eq!(
+                project.as_deref(),
+                Some("myproject"),
+                "--project should be set"
+            );
+        } else {
+            panic!("Expected Status command");
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
-use crate::state::{MachineState, StateManager};
+use crate::state::{MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
@@ -19,7 +19,7 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
     load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
 };
-use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
@@ -63,22 +63,29 @@ pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 500;
 // ============================================================================
 
 /// Minimum width for a card in the grid layout.
-const CARD_MIN_WIDTH: f32 = 280.0;
+/// Cards should take approximately 50% of available width.
+const CARD_MIN_WIDTH: f32 = 400.0;
 
 /// Maximum width for a card in the grid layout.
-const CARD_MAX_WIDTH: f32 = 400.0;
+/// Allows cards to grow larger for better content display.
+const CARD_MAX_WIDTH: f32 = 800.0;
 
-/// Spacing between cards in the grid (uses LG from spacing scale).
-const CARD_SPACING: f32 = 16.0; // spacing::LG
+/// Spacing between cards in the grid (uses XL from spacing scale for larger cards).
+const CARD_SPACING: f32 = 24.0; // spacing::XL
 
-/// Internal padding for cards (uses LG from spacing scale).
-const CARD_PADDING: f32 = 16.0; // spacing::LG
+/// Internal padding for cards (uses XL from spacing scale for larger cards).
+const CARD_PADDING: f32 = 20.0; // Between LG and XL
 
 /// Minimum height for a card.
-const CARD_MIN_HEIGHT: f32 = 240.0;
+/// Cards should take approximately 50% of available height.
+const CARD_MIN_HEIGHT: f32 = 320.0;
 
 /// Number of output lines to display in session cards.
-const OUTPUT_LINES_TO_SHOW: usize = 5;
+/// Increased for better monitoring of streaming output.
+const OUTPUT_LINES_TO_SHOW: usize = 12;
+
+/// Maximum number of columns in the grid layout (2x2 grid for 1/4 screen each).
+const MAX_GRID_COLUMNS: usize = 2;
 
 // MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
@@ -151,6 +158,919 @@ const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
 const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
 
 // ============================================================================
+// Context Menu Constants (Right-Click Context Menu - US-002)
+// ============================================================================
+
+/// Minimum width for the context menu (US-001).
+const CONTEXT_MENU_MIN_WIDTH: f32 = 100.0;
+
+/// Maximum width for the context menu (US-001).
+const CONTEXT_MENU_MAX_WIDTH: f32 = 300.0;
+
+/// Height of each menu item.
+const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.0;
+
+/// Horizontal padding for menu items.
+const CONTEXT_MENU_PADDING_H: f32 = 12.0; // spacing::MD
+
+/// Vertical padding for menu items.
+const CONTEXT_MENU_PADDING_V: f32 = 6.0;
+
+/// Size of the submenu arrow indicator.
+const CONTEXT_MENU_ARROW_SIZE: f32 = 8.0;
+
+/// Offset from cursor for menu positioning.
+const CONTEXT_MENU_CURSOR_OFFSET: f32 = 2.0;
+
+/// Horizontal gap between submenu and parent menu.
+const CONTEXT_MENU_SUBMENU_GAP: f32 = 2.0;
+
+/// Response from rendering a context menu item.
+///
+/// Contains information about user interaction with the item.
+struct ContextMenuItemResponse {
+    /// Whether the item was clicked.
+    clicked: bool,
+    /// Whether the item is currently hovered.
+    hovered: bool,
+    /// The screen-space rect of the item (for positioning submenus).
+    rect: Rect,
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Calculate the final menu width from a measured text width (US-001).
+///
+/// Applies padding and clamping to the max text width to get the final menu width.
+/// This is separated from the text measurement for testability.
+///
+/// # Arguments
+/// * `max_text_width` - The maximum text width among all menu item labels
+/// * `has_submenu` - Whether any items have submenus (adds extra space for arrow)
+fn calculate_menu_width_from_text_width(max_text_width: f32) -> f32 {
+    // Total width = text width + left padding (24px) + right padding (24px)
+    // The padding is ~48px total (CONTEXT_MENU_PADDING_H * 4)
+    let padding = CONTEXT_MENU_PADDING_H * 2.0 + CONTEXT_MENU_PADDING_H * 2.0;
+    let calculated_width = max_text_width + padding;
+
+    // Clamp to min/max bounds
+    calculated_width.clamp(CONTEXT_MENU_MIN_WIDTH, CONTEXT_MENU_MAX_WIDTH)
+}
+
+/// Calculate the dynamic width for a context menu based on its items (US-001).
+///
+/// The width is determined by:
+/// 1. Measuring the text width of each label using the Body font
+/// 2. Adding horizontal padding (24px each side = 48px total)
+/// 3. Adding submenu arrow space for items with submenus (arrow size + padding)
+/// 4. Clamping to min/max bounds (100px-300px)
+fn calculate_context_menu_width(ctx: &egui::Context, items: &[ContextMenuItem]) -> f32 {
+    let font_id = typography::font(FontSize::Body, FontWeight::Regular);
+
+    let max_text_width = items
+        .iter()
+        .filter_map(|item| {
+            match item {
+                ContextMenuItem::Action { label, .. } => {
+                    // Measure text width using egui's font system
+                    let galley = ctx.fonts(|fonts| {
+                        fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                    });
+                    Some(galley.rect.width())
+                }
+                ContextMenuItem::Submenu { label, .. } => {
+                    // Submenu items need extra space for the arrow indicator
+                    let galley = ctx.fonts(|fonts| {
+                        fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                    });
+                    // Add space for the arrow: arrow_size + padding between text and arrow
+                    Some(galley.rect.width() + CONTEXT_MENU_ARROW_SIZE + CONTEXT_MENU_PADDING_H)
+                }
+                ContextMenuItem::Separator => None, // Separators don't contribute to width
+            }
+        })
+        .fold(0.0_f32, |max, width| max.max(width));
+
+    calculate_menu_width_from_text_width(max_text_width)
+}
+
+/// Check if a session is resumable.
+///
+/// A session is resumable if:
+/// - It's not stale (worktree still exists)
+/// - It's marked as running, OR
+/// - It has a machine state that's not Idle or Completed
+fn is_resumable_session(session: &SessionStatus) -> bool {
+    // Can't resume stale sessions (deleted worktrees)
+    if session.is_stale {
+        return false;
+    }
+
+    // Running sessions are resumable
+    if session.metadata.is_running {
+        return true;
+    }
+
+    // Check if the machine state indicates a resumable run
+    if let Some(state) = &session.machine_state {
+        match state {
+            MachineState::Completed | MachineState::Idle => false,
+            _ => true, // Any other state is resumable
+        }
+    } else {
+        false
+    }
+}
+
+/// Format session status data as plain text lines for display.
+///
+/// US-002: This replaces the CLI output formatting from status.rs for GUI display.
+/// Shows: session ID, branch, state, current story, started time.
+fn format_sessions_as_text(sessions: &[SessionStatus]) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if sessions.is_empty() {
+        lines.push("No sessions found for this project.".to_string());
+        return lines;
+    }
+
+    lines.push("Sessions for this project:".to_string());
+    lines.push(String::new());
+
+    for session in sessions {
+        let metadata = &session.metadata;
+
+        // Session indicator based on state
+        let indicator = if session.is_stale {
+            "✗"
+        } else if session.is_current {
+            "→"
+        } else if metadata.is_running {
+            "●"
+        } else {
+            "○"
+        };
+
+        // Build session header line
+        let mut header = format!("{} {}", indicator, metadata.session_id);
+        if session.is_current {
+            header.push_str(" (current)");
+        }
+        if session.is_stale {
+            header.push_str(" [stale]");
+        }
+        lines.push(header);
+
+        // Branch
+        lines.push(format!("  Branch:  {}", metadata.branch_name));
+
+        // State
+        if let Some(state) = &session.machine_state {
+            let state_str = format_machine_state_text(state);
+            lines.push(format!("  State:   {}", state_str));
+        }
+
+        // Current story (if any)
+        if let Some(story) = &session.current_story {
+            lines.push(format!("  Story:   {}", story));
+        }
+
+        // Started time
+        lines.push(format!(
+            "  Started: {}",
+            metadata.created_at.format("%Y-%m-%d %H:%M")
+        ));
+
+        lines.push(String::new());
+    }
+
+    // Summary line
+    let running_count = sessions
+        .iter()
+        .filter(|s| s.metadata.is_running && !s.is_stale)
+        .count();
+    let stale_count = sessions.iter().filter(|s| s.is_stale).count();
+
+    let mut summary = format!(
+        "({} session{}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    if running_count > 0 {
+        summary.push_str(&format!(", {} running", running_count));
+    }
+    if stale_count > 0 {
+        summary.push_str(&format!(", {} stale", stale_count));
+    }
+    summary.push(')');
+    lines.push(summary);
+
+    lines
+}
+
+/// Format machine state for text display.
+fn format_machine_state_text(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
+    }
+}
+
+/// Format resume session information as plain text lines for display.
+///
+/// US-005: Shows session info instead of spawning subprocess.
+/// Info includes: session ID, branch, worktree path, current state.
+/// Shows message with instructions on how to resume in terminal.
+fn format_resume_info_as_text(session: &ResumableSessionInfo) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push("Resume Session Information".to_string());
+    lines.push(String::new());
+    lines.push(format!("Session ID:    {}", session.session_id));
+    lines.push(format!("Branch:        {}", session.branch_name));
+    lines.push(format!(
+        "Worktree Path: {}",
+        session.worktree_path.display()
+    ));
+    lines.push(format!(
+        "Current State: {}",
+        format_machine_state_text(&session.machine_state)
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "To resume, run `autom8 resume --session {}` in terminal",
+        session.session_id
+    ));
+
+    lines
+}
+
+/// Format project description as plain text lines for display.
+///
+/// US-003: This replaces the CLI output formatting from print_project_description() for GUI display.
+/// Shows: project name, path, status, specs with progress, file counts.
+fn format_project_description_as_text(desc: &crate::config::ProjectDescription) -> Vec<String> {
+    use crate::state::RunStatus;
+
+    let mut lines = Vec::new();
+
+    // Project header
+    lines.push(format!("Project: {}", desc.name));
+    lines.push(format!("Path: {}", desc.path.display()));
+    lines.push(String::new());
+
+    // Status
+    let status_text = match desc.run_status {
+        Some(RunStatus::Running) => "[running]",
+        Some(RunStatus::Failed) => "[failed]",
+        Some(RunStatus::Interrupted) => "[interrupted]",
+        Some(RunStatus::Completed) => "[completed]",
+        None => "[idle]",
+    };
+    lines.push(format!("Status: {}", status_text));
+
+    // Branch (if any)
+    if let Some(branch) = &desc.current_branch {
+        lines.push(format!("Branch: {}", branch));
+    }
+
+    // Current story (if any)
+    if let Some(story) = &desc.current_story {
+        lines.push(format!("Current Story: {}", story));
+    }
+    lines.push(String::new());
+
+    // Specs
+    if desc.specs.is_empty() {
+        lines.push("No specs found.".to_string());
+    } else {
+        lines.push(format!("Specs: ({} total)", desc.specs.len()));
+        lines.push(String::new());
+
+        for spec in &desc.specs {
+            lines.extend(format_spec_summary_as_text(spec));
+        }
+    }
+
+    // File counts summary
+    lines.push("─────────────────────────────────────────────────────────".to_string());
+    lines.push(format!(
+        "Files: {} spec md, {} spec json, {} archived runs",
+        desc.spec_md_count,
+        desc.specs.len(),
+        desc.runs_count
+    ));
+
+    lines
+}
+
+/// Format a single spec summary as plain text lines.
+fn format_spec_summary_as_text(spec: &crate::config::SpecSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push(format!("━━━ {}", spec.filename));
+    lines.push(format!("Project: {}", spec.project_name));
+    lines.push(format!("Branch:  {}", spec.branch_name));
+
+    // Description preview (first line, truncated to 100 chars)
+    let desc_preview = if spec.description.len() > 100 {
+        format!("{}...", &spec.description[..100])
+    } else {
+        spec.description.clone()
+    };
+    let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
+    lines.push(format!("Description: {}", first_line));
+    lines.push(String::new());
+
+    // Progress bar (simple text version)
+    let progress_bar = make_progress_bar_text(spec.completed_count, spec.total_count, 12);
+    lines.push(format!(
+        "Progress: [{}] {}/{} stories complete",
+        progress_bar, spec.completed_count, spec.total_count
+    ));
+    lines.push(String::new());
+
+    // User stories
+    lines.push("User Stories:".to_string());
+    for story in &spec.stories {
+        let status_icon = if story.passes { "✓" } else { "○" };
+        lines.push(format!("  {} {}: {}", status_icon, story.id, story.title));
+    }
+    lines.push(String::new());
+
+    lines
+}
+
+/// Create a simple text progress bar.
+fn make_progress_bar_text(completed: usize, total: usize, width: usize) -> String {
+    if total == 0 {
+        return " ".repeat(width);
+    }
+    let filled = (completed * width) / total;
+    let empty = width - filled;
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
+/// Format cleanup summary as plain text lines for display.
+///
+/// US-004: This formats CleanupSummary from direct clean operations for GUI display.
+/// Shows: sessions removed, worktrees removed, bytes freed, skipped sessions, errors.
+fn format_cleanup_summary_as_text(
+    summary: &crate::commands::CleanupSummary,
+    operation: &str,
+) -> Vec<String> {
+    use crate::commands::format_bytes_display;
+
+    let mut lines = Vec::new();
+
+    lines.push(format!("Cleanup Operation: {}", operation));
+    lines.push(String::new());
+
+    // Results section
+    if summary.sessions_removed == 0 && summary.worktrees_removed == 0 {
+        lines.push("No sessions or worktrees were removed.".to_string());
+    } else {
+        let freed_str = format_bytes_display(summary.bytes_freed);
+        lines.push(format!(
+            "Removed {} session{}, {} worktree{}, freed {}",
+            summary.sessions_removed,
+            if summary.sessions_removed == 1 {
+                ""
+            } else {
+                "s"
+            },
+            summary.worktrees_removed,
+            if summary.worktrees_removed == 1 {
+                ""
+            } else {
+                "s"
+            },
+            freed_str
+        ));
+    }
+
+    // Skipped sessions
+    if !summary.sessions_skipped.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "Skipped {} session{}:",
+            summary.sessions_skipped.len(),
+            if summary.sessions_skipped.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+        for skipped in &summary.sessions_skipped {
+            lines.push(format!("  - {}: {}", skipped.session_id, skipped.reason));
+        }
+    }
+
+    // Errors
+    if !summary.errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Errors during cleanup:".to_string());
+        for error in &summary.errors {
+            lines.push(format!("  - {}", error));
+        }
+    }
+
+    lines
+}
+
+// ============================================================================
+// Context Menu Types (Right-Click Context Menu - US-002)
+// ============================================================================
+
+/// Menu item in the context menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuItem {
+    /// A simple action item.
+    Action {
+        /// Display label for the menu item.
+        label: String,
+        /// Unique identifier for the action.
+        action: ContextMenuAction,
+        /// Whether the item is enabled.
+        enabled: bool,
+    },
+    /// A separator line between items.
+    Separator,
+    /// An item that opens a submenu.
+    Submenu {
+        /// Display label for the submenu trigger.
+        label: String,
+        /// Unique identifier for the submenu.
+        id: String,
+        /// Whether the submenu is enabled.
+        enabled: bool,
+        /// Items in the submenu (built lazily when opened).
+        items: Vec<ContextMenuItem>,
+    },
+}
+
+impl ContextMenuItem {
+    /// Create a new action menu item.
+    pub fn action(label: impl Into<String>, action: ContextMenuAction) -> Self {
+        Self::Action {
+            label: label.into(),
+            action,
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled action menu item.
+    pub fn action_disabled(label: impl Into<String>, action: ContextMenuAction) -> Self {
+        Self::Action {
+            label: label.into(),
+            action,
+            enabled: false,
+        }
+    }
+
+    /// Create a separator.
+    pub fn separator() -> Self {
+        Self::Separator
+    }
+
+    /// Create a submenu item.
+    pub fn submenu(
+        label: impl Into<String>,
+        id: impl Into<String>,
+        items: Vec<ContextMenuItem>,
+    ) -> Self {
+        let items_vec = items;
+        Self::Submenu {
+            label: label.into(),
+            id: id.into(),
+            enabled: !items_vec.is_empty(),
+            items: items_vec,
+        }
+    }
+
+    /// Create a disabled submenu item.
+    pub fn submenu_disabled(label: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::Submenu {
+            label: label.into(),
+            id: id.into(),
+            enabled: false,
+            items: Vec::new(),
+        }
+    }
+}
+
+/// Actions that can be triggered from the context menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuAction {
+    /// Run the status command for the project.
+    Status,
+    /// Run the describe command for the project.
+    Describe,
+    /// Resume a specific session (with session ID).
+    Resume(Option<String>),
+    /// Clean worktrees for the project.
+    CleanWorktrees,
+    /// Clean orphaned sessions for the project.
+    CleanOrphaned,
+}
+
+/// Information about a resumable session for display in the context menu.
+/// This is a simplified view of SessionStatus for the GUI.
+#[derive(Debug, Clone)]
+pub struct ResumableSessionInfo {
+    /// The session ID (e.g., "main" or 8-char hash).
+    pub session_id: String,
+    /// The branch name being worked on.
+    pub branch_name: String,
+    /// The worktree path where this session is running.
+    pub worktree_path: std::path::PathBuf,
+    /// The current machine state (e.g., RunningClaude, Reviewing).
+    pub machine_state: MachineState,
+}
+
+impl ResumableSessionInfo {
+    /// Create a new resumable session info.
+    pub fn new(
+        session_id: impl Into<String>,
+        branch_name: impl Into<String>,
+        worktree_path: std::path::PathBuf,
+        machine_state: MachineState,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            branch_name: branch_name.into(),
+            worktree_path,
+            machine_state,
+        }
+    }
+
+    /// Returns a truncated version of the session ID (first 8 chars).
+    pub fn truncated_id(&self) -> &str {
+        if self.session_id.len() > 8 {
+            &self.session_id[..8]
+        } else {
+            &self.session_id
+        }
+    }
+
+    /// Returns the menu label for this session.
+    /// Format: "branch-name (session-id-truncated)"
+    pub fn menu_label(&self) -> String {
+        format!("{} ({})", self.branch_name, self.truncated_id())
+    }
+}
+
+/// Information about cleanable sessions for the Clean context menu.
+/// Contains counts for worktrees and orphaned sessions.
+#[derive(Debug, Clone, Default)]
+pub struct CleanableInfo {
+    /// Number of cleanable worktrees (Completed/Failed/Interrupted sessions with existing worktrees).
+    pub cleanable_worktrees: usize,
+    /// Number of orphaned sessions (worktree deleted but session state remains).
+    pub orphaned_sessions: usize,
+}
+
+impl CleanableInfo {
+    /// Returns true if there's anything to clean.
+    pub fn has_cleanable(&self) -> bool {
+        self.cleanable_worktrees > 0 || self.orphaned_sessions > 0
+    }
+}
+
+/// Check if a session is cleanable (Completed, Failed, or Interrupted).
+///
+/// A session is cleanable if it's NOT running or in-progress.
+/// Running/InProgress sessions should be preserved for safety.
+fn is_cleanable_session(session: &SessionStatus) -> bool {
+    // Can't clean sessions that are actively running
+    if session.metadata.is_running {
+        return false;
+    }
+
+    // Check machine state to determine if cleanable
+    if let Some(state) = &session.machine_state {
+        match state {
+            // Cleanable states: completed work
+            MachineState::Completed | MachineState::Failed | MachineState::Idle => true,
+            // Running states: do not clean
+            MachineState::Initializing
+            | MachineState::LoadingSpec
+            | MachineState::GeneratingSpec
+            | MachineState::PickingStory
+            | MachineState::RunningClaude
+            | MachineState::Reviewing
+            | MachineState::Correcting
+            | MachineState::Committing
+            | MachineState::CreatingPR => false,
+        }
+    } else {
+        // No machine state - treat as cleanable (likely orphaned or corrupted)
+        true
+    }
+}
+
+/// State for the context menu overlay.
+#[derive(Debug, Clone)]
+pub struct ContextMenuState {
+    /// Screen position where the menu should appear.
+    pub position: Pos2,
+    /// Name of the project this menu is for.
+    pub project_name: String,
+    /// The menu items to display.
+    pub items: Vec<ContextMenuItem>,
+    /// Currently open submenu ID (if any).
+    pub open_submenu: Option<String>,
+    /// Position of the open submenu (if any).
+    pub submenu_position: Option<Pos2>,
+}
+
+impl ContextMenuState {
+    /// Create a new context menu state.
+    pub fn new(position: Pos2, project_name: String, items: Vec<ContextMenuItem>) -> Self {
+        Self {
+            position,
+            project_name,
+            items,
+            open_submenu: None,
+            submenu_position: None,
+        }
+    }
+
+    /// Open a submenu at the given position.
+    pub fn open_submenu(&mut self, id: String, position: Pos2) {
+        self.open_submenu = Some(id);
+        self.submenu_position = Some(position);
+    }
+
+    /// Close any open submenu.
+    pub fn close_submenu(&mut self) {
+        self.open_submenu = None;
+        self.submenu_position = None;
+    }
+}
+
+/// Result of a project row interaction.
+/// Contains information about both left-click and right-click events.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectRowInteraction {
+    /// True if the row was left-clicked (select project).
+    pub clicked: bool,
+    /// If right-clicked, contains the screen position for context menu.
+    pub right_click_pos: Option<Pos2>,
+}
+
+impl ProjectRowInteraction {
+    /// Create a new interaction with no events.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Create a left-click interaction.
+    pub fn click() -> Self {
+        Self {
+            clicked: true,
+            right_click_pos: None,
+        }
+    }
+
+    /// Create a right-click interaction at the given position.
+    pub fn right_click(pos: Pos2) -> Self {
+        Self {
+            clicked: false,
+            right_click_pos: Some(pos),
+        }
+    }
+}
+
+// ============================================================================
+// Command Output Types (Command Output Tab - US-007)
+// ============================================================================
+
+/// Status of a command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandStatus {
+    /// Command is currently running.
+    Running,
+    /// Command completed successfully (exit code 0).
+    Completed,
+    /// Command failed (non-zero exit code or error).
+    Failed,
+}
+
+/// Identifier for a command output, used for tab matching and cache lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommandOutputId {
+    /// Name of the project the command was run for.
+    pub project: String,
+    /// Name of the command (e.g., "status", "describe").
+    pub command: String,
+    /// Unique identifier for this command execution (UUID).
+    pub id: String,
+}
+
+impl CommandOutputId {
+    /// Create a new command output ID.
+    pub fn new(project: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            project: project.into(),
+            command: command.into(),
+            id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// Create a command output ID with a specific ID (for testing).
+    #[cfg(test)]
+    pub fn with_id(
+        project: impl Into<String>,
+        command: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Self {
+        Self {
+            project: project.into(),
+            command: command.into(),
+            id: id.into(),
+        }
+    }
+
+    /// Returns the cache key for this command output.
+    pub fn cache_key(&self) -> String {
+        format!("{}:{}:{}", self.project, self.command, self.id)
+    }
+
+    /// Returns the tab label for this command output.
+    pub fn tab_label(&self) -> String {
+        // Capitalize first letter of command
+        let command_display = if self.command.is_empty() {
+            "Command".to_string()
+        } else {
+            let mut chars = self.command.chars();
+            match chars.next() {
+                None => "Command".to_string(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        };
+        format!("{}: {}", command_display, self.project)
+    }
+}
+
+/// State of a command execution for display in a tab.
+#[derive(Debug, Clone)]
+pub struct CommandExecution {
+    /// The command output identifier.
+    pub id: CommandOutputId,
+    /// Current status of the command.
+    pub status: CommandStatus,
+    /// Lines of stdout output.
+    pub stdout: Vec<String>,
+    /// Lines of stderr output.
+    pub stderr: Vec<String>,
+    /// Exit code if the command has finished.
+    pub exit_code: Option<i32>,
+    /// Whether auto-scroll is enabled (scroll to bottom on new output).
+    pub auto_scroll: bool,
+}
+
+impl CommandExecution {
+    /// Create a new command execution in the running state.
+    pub fn new(id: CommandOutputId) -> Self {
+        Self {
+            id,
+            status: CommandStatus::Running,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+            auto_scroll: true,
+        }
+    }
+
+    /// Add a line to stdout.
+    pub fn add_stdout(&mut self, line: String) {
+        self.stdout.push(line);
+    }
+
+    /// Add a line to stderr.
+    pub fn add_stderr(&mut self, line: String) {
+        self.stderr.push(line);
+    }
+
+    /// Mark the command as completed with the given exit code.
+    pub fn complete(&mut self, exit_code: i32) {
+        self.exit_code = Some(exit_code);
+        self.status = if exit_code == 0 {
+            CommandStatus::Completed
+        } else {
+            CommandStatus::Failed
+        };
+    }
+
+    /// Mark the command as failed (e.g., spawn error).
+    pub fn fail(&mut self, error_message: String) {
+        self.stderr.push(error_message);
+        self.status = CommandStatus::Failed;
+    }
+
+    /// Returns true if the command is still running.
+    pub fn is_running(&self) -> bool {
+        self.status == CommandStatus::Running
+    }
+
+    /// Returns true if the command has completed (successfully or not).
+    pub fn is_finished(&self) -> bool {
+        self.status != CommandStatus::Running
+    }
+
+    /// Returns the combined output (stdout + stderr interleaved would require timestamps,
+    /// so we return stdout followed by stderr).
+    pub fn combined_output(&self) -> Vec<&str> {
+        let mut output: Vec<&str> = self.stdout.iter().map(|s| s.as_str()).collect();
+        if !self.stderr.is_empty() {
+            output.extend(self.stderr.iter().map(|s| s.as_str()));
+        }
+        output
+    }
+}
+
+// ============================================================================
+// Command Message Types (for async command execution)
+// ============================================================================
+
+/// Message sent from background command execution threads to the UI.
+#[derive(Debug, Clone)]
+pub enum CommandMessage {
+    /// A line of stdout output.
+    Stdout { cache_key: String, line: String },
+    /// A line of stderr output.
+    Stderr { cache_key: String, line: String },
+    /// Command completed with exit code.
+    Completed { cache_key: String, exit_code: i32 },
+    /// Command failed to spawn or encountered an error.
+    Failed { cache_key: String, error: String },
+}
+
+// ============================================================================
+// Confirmation Dialog Types (US-004)
+// ============================================================================
+
+/// Type of clean operation pending confirmation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingCleanOperation {
+    /// Clean worktrees for a project.
+    Worktrees { project_name: String },
+    /// Clean orphaned sessions for a project.
+    Orphaned { project_name: String },
+}
+
+impl PendingCleanOperation {
+    /// Get the title for the confirmation dialog.
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Worktrees { .. } => "Clean Worktrees",
+            Self::Orphaned { .. } => "Clean Orphaned Sessions",
+        }
+    }
+
+    /// Get the message for the confirmation dialog.
+    fn message(&self) -> String {
+        match self {
+            Self::Worktrees { project_name } => {
+                format!(
+                    "This will remove completed worktrees and their session state for '{}'.\n\n\
+                     Are you sure you want to continue?",
+                    project_name
+                )
+            }
+            Self::Orphaned { project_name } => {
+                format!(
+                    "This will remove session state for orphaned sessions (where the worktree \
+                     has been deleted) for '{}'.\n\n\
+                     Are you sure you want to continue?",
+                    project_name
+                )
+            }
+        }
+    }
+
+    /// Get the project name.
+    fn project_name(&self) -> &str {
+        match self {
+            Self::Worktrees { project_name } | Self::Orphaned { project_name } => project_name,
+        }
+    }
+}
+
+// ============================================================================
 // GUI-specific Extensions
 // ============================================================================
 
@@ -193,6 +1113,9 @@ pub enum TabId {
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
+    /// A dynamic tab for viewing command output.
+    /// Contains the cache key (project:command:id) as identifier.
+    CommandOutput(String),
 }
 
 /// Information about a tab displayed in the tab bar.
@@ -358,6 +1281,38 @@ pub struct Autom8App {
     /// State for the Config tab (scope selection, cached configs, etc.).
     /// Public for test access.
     pub config_state: ConfigTabState,
+
+    // ========================================================================
+    // Context Menu State (Right-Click Context Menu - US-002)
+    // ========================================================================
+    /// State for the right-click context menu overlay.
+    /// When Some, a context menu is displayed at the specified position.
+    /// Only one context menu can be open at a time.
+    context_menu: Option<ContextMenuState>,
+
+    // ========================================================================
+    // Command Execution State (Command Output Tab - US-007)
+    // ========================================================================
+    /// Cached command executions for open command output tabs.
+    /// Maps cache_key (project:command:id) to the command execution state.
+    command_executions: std::collections::HashMap<String, CommandExecution>,
+
+    // ========================================================================
+    // Command Channel (for async command execution - US-003)
+    // ========================================================================
+    /// Receiver for command execution messages from background threads.
+    /// The sender is cloned and moved to each background thread.
+    command_rx: std::sync::mpsc::Receiver<CommandMessage>,
+    /// Sender for command execution messages.
+    /// Cloned for each background command thread.
+    command_tx: std::sync::mpsc::Sender<CommandMessage>,
+
+    // ========================================================================
+    // Confirmation Dialog State (US-004)
+    // ========================================================================
+    /// Pending clean operation awaiting user confirmation.
+    /// When Some, a confirmation dialog is displayed.
+    pending_clean_confirmation: Option<PendingCleanOperation>,
 }
 
 impl Default for Autom8App {
@@ -385,6 +1340,9 @@ impl Autom8App {
             TabInfo::permanent(TabId::Config, "Config"),
         ];
 
+        // Create channel for command execution messages
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+
         let mut app = Self {
             current_tab: Tab::default(),
             tabs,
@@ -402,6 +1360,11 @@ impl Autom8App {
             refresh_interval,
             sidebar_collapsed: false,
             config_state: ConfigTabState::new(),
+            context_menu: None,
+            command_executions: std::collections::HashMap::new(),
+            command_rx,
+            command_tx,
+            pending_clean_confirmation: None,
         };
         // Initial data load
         app.refresh_data();
@@ -548,6 +1511,197 @@ impl Autom8App {
         self.config_state.reset_to_defaults(is_global, project_name);
     }
 
+    // ========================================================================
+    // Context Menu State (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    /// Returns whether the context menu is currently open.
+    pub fn is_context_menu_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    /// Returns a reference to the context menu state, if open.
+    pub fn context_menu(&self) -> Option<&ContextMenuState> {
+        self.context_menu.as_ref()
+    }
+
+    /// Open the context menu for a project at the given position.
+    pub fn open_context_menu(&mut self, position: Pos2, project_name: String) {
+        // Build the menu items for this project
+        let items = self.build_context_menu_items(&project_name);
+
+        self.context_menu = Some(ContextMenuState::new(position, project_name, items));
+    }
+
+    /// Close the context menu.
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    /// Get resumable sessions for a project.
+    ///
+    /// Queries the StateManager for sessions that can be resumed:
+    /// - Session is not stale (worktree still exists)
+    /// - Session is_running, OR
+    /// - Session has a machine state that's not Idle/Completed
+    ///
+    /// Returns sessions sorted by last_active_at descending.
+    fn get_resumable_sessions(&self, project_name: &str) -> Vec<ResumableSessionInfo> {
+        // Try to get the state manager for this project
+        let sm = match StateManager::for_project(project_name) {
+            Ok(sm) => sm,
+            Err(_) => return Vec::new(),
+        };
+
+        // Get all sessions with status
+        let sessions = match sm.list_sessions_with_status() {
+            Ok(sessions) => sessions,
+            Err(_) => return Vec::new(),
+        };
+
+        // Filter to resumable sessions and convert to ResumableSessionInfo
+        sessions
+            .into_iter()
+            .filter(is_resumable_session)
+            .filter_map(|s| {
+                // machine_state is required for ResumableSessionInfo, and is_resumable_session
+                // already ensures it exists and is not Idle/Completed
+                let machine_state = s.machine_state?;
+                Some(ResumableSessionInfo::new(
+                    s.metadata.session_id,
+                    s.metadata.branch_name,
+                    s.metadata.worktree_path,
+                    machine_state,
+                ))
+            })
+            .collect()
+    }
+
+    /// Get a specific resumable session by ID.
+    ///
+    /// US-005: Used to look up session details when user clicks a resume option.
+    fn get_resumable_session_by_id(
+        &self,
+        project_name: &str,
+        session_id: &str,
+    ) -> Option<ResumableSessionInfo> {
+        self.get_resumable_sessions(project_name)
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+    }
+
+    /// Get cleanable session information for a project.
+    ///
+    /// Returns counts for:
+    /// - cleanable_worktrees: sessions with Completed/Failed/Interrupted status
+    ///   where the worktree still exists
+    /// - orphaned_sessions: sessions where the worktree was deleted but state remains
+    ///
+    /// Safety: Running/InProgress sessions are NOT counted as cleanable.
+    fn get_cleanable_info(&self, project_name: &str) -> CleanableInfo {
+        // Try to get the state manager for this project
+        let sm = match StateManager::for_project(project_name) {
+            Ok(sm) => sm,
+            Err(_) => return CleanableInfo::default(),
+        };
+
+        // Get all sessions with status
+        let sessions = match sm.list_sessions_with_status() {
+            Ok(sessions) => sessions,
+            Err(_) => return CleanableInfo::default(),
+        };
+
+        let mut info = CleanableInfo::default();
+
+        for session in sessions {
+            if session.is_stale {
+                // Orphaned session: worktree was deleted
+                info.orphaned_sessions += 1;
+            } else if is_cleanable_session(&session) {
+                // Cleanable worktree: not running/in-progress
+                info.cleanable_worktrees += 1;
+            }
+        }
+
+        info
+    }
+
+    /// Build the context menu items for a project.
+    /// This creates the menu structure with Status, Describe, Resume, and Clean options.
+    fn build_context_menu_items(&self, project_name: &str) -> Vec<ContextMenuItem> {
+        // Get resumable sessions for this project
+        let resumable_sessions = self.get_resumable_sessions(project_name);
+
+        // Build the Resume menu item based on number of sessions
+        let resume_item = match resumable_sessions.len() {
+            0 => {
+                // No resumable sessions - disabled menu item
+                ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None))
+            }
+            1 => {
+                // Single session - direct action with branch name
+                let session = &resumable_sessions[0];
+                let label = format!("Resume ({})", session.branch_name);
+                ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::Resume(Some(session.session_id.clone())),
+                )
+            }
+            _ => {
+                // Multiple sessions - submenu
+                let submenu_items: Vec<ContextMenuItem> = resumable_sessions
+                    .iter()
+                    .map(|session| {
+                        ContextMenuItem::action(
+                            session.menu_label(),
+                            ContextMenuAction::Resume(Some(session.session_id.clone())),
+                        )
+                    })
+                    .collect();
+                ContextMenuItem::submenu("Resume", "resume", submenu_items)
+            }
+        };
+
+        // Get cleanable info for this project (US-006)
+        let cleanable_info = self.get_cleanable_info(project_name);
+
+        // Build the Clean menu item based on cleanable info
+        let clean_item = if !cleanable_info.has_cleanable() {
+            // Nothing to clean - disabled menu item with tooltip hint
+            ContextMenuItem::submenu_disabled("Clean", "clean")
+        } else {
+            // Build submenu with only applicable options (showing counts)
+            let mut submenu_items = Vec::new();
+
+            if cleanable_info.cleanable_worktrees > 0 {
+                let label = format!("Worktrees ({})", cleanable_info.cleanable_worktrees);
+                submenu_items.push(ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::CleanWorktrees,
+                ));
+            }
+
+            if cleanable_info.orphaned_sessions > 0 {
+                let label = format!("Orphaned ({})", cleanable_info.orphaned_sessions);
+                submenu_items.push(ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::CleanOrphaned,
+                ));
+            }
+
+            ContextMenuItem::submenu("Clean", "clean", submenu_items)
+        };
+
+        vec![
+            ContextMenuItem::action("Status", ContextMenuAction::Status),
+            ContextMenuItem::action("Describe", ContextMenuAction::Describe),
+            ContextMenuItem::Separator,
+            resume_item,
+            ContextMenuItem::Separator,
+            clean_item,
+        ]
+    }
+
     /// Returns the currently selected project name.
     pub fn selected_project(&self) -> Option<&str> {
         self.selected_project.as_deref()
@@ -644,7 +1798,7 @@ impl Autom8App {
             TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
             TabId::Projects => self.current_tab = Tab::Projects,
             TabId::Config => self.current_tab = Tab::Config,
-            TabId::RunDetail(_) => {
+            TabId::RunDetail(_) | TabId::CommandOutput(_) => {
                 // Dynamic tabs don't have a legacy equivalent,
                 // but we keep the last static tab for backward compat
             }
@@ -693,6 +1847,317 @@ impl Autom8App {
         self.open_run_detail_tab(&entry.run_id, &label);
     }
 
+    /// Open a new command output tab.
+    /// Creates a new CommandExecution and opens a tab for it.
+    /// Returns the CommandOutputId for the new execution (to be used for updates).
+    pub fn open_command_output_tab(&mut self, project: &str, command: &str) -> CommandOutputId {
+        let id = CommandOutputId::new(project, command);
+        let cache_key = id.cache_key();
+        let tab_id = TabId::CommandOutput(cache_key.clone());
+        let label = id.tab_label();
+
+        // Create the command execution
+        let execution = CommandExecution::new(id.clone());
+        self.command_executions.insert(cache_key, execution);
+
+        // Create and activate the tab
+        let tab = TabInfo::closable(tab_id.clone(), label);
+        self.tabs.push(tab);
+        self.set_active_tab(tab_id);
+
+        id
+    }
+
+    /// Get a command execution by cache key.
+    pub fn get_command_execution(&self, cache_key: &str) -> Option<&CommandExecution> {
+        self.command_executions.get(cache_key)
+    }
+
+    /// Get a mutable command execution by cache key.
+    pub fn get_command_execution_mut(&mut self, cache_key: &str) -> Option<&mut CommandExecution> {
+        self.command_executions.get_mut(cache_key)
+    }
+
+    /// Update a command execution with new stdout output.
+    pub fn add_command_stdout(&mut self, cache_key: &str, line: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.add_stdout(line);
+        }
+    }
+
+    /// Update a command execution with new stderr output.
+    pub fn add_command_stderr(&mut self, cache_key: &str, line: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.add_stderr(line);
+        }
+    }
+
+    /// Mark a command execution as completed.
+    pub fn complete_command(&mut self, cache_key: &str, exit_code: i32) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.complete(exit_code);
+        }
+    }
+
+    /// Mark a command execution as failed.
+    pub fn fail_command(&mut self, cache_key: &str, error_message: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.fail(error_message);
+        }
+    }
+
+    /// Load status for a project by calling the data layer directly.
+    /// Opens a new command output tab and populates it with session data.
+    ///
+    /// US-002: Replaces subprocess spawning with direct StateManager calls.
+    pub fn spawn_status_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "status");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            // Call data layer directly instead of spawning subprocess
+            match StateManager::for_project(&project) {
+                Ok(state_manager) => {
+                    match state_manager.list_sessions_with_status() {
+                        Ok(sessions) => {
+                            // Format session data as plain text
+                            let lines = format_sessions_as_text(&sessions);
+                            for line in lines {
+                                let _ = tx.send(CommandMessage::Stdout {
+                                    cache_key: cache_key.clone(),
+                                    line,
+                                });
+                            }
+                            let _ = tx.send(CommandMessage::Completed {
+                                cache_key,
+                                exit_code: 0,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(CommandMessage::Failed {
+                                cache_key,
+                                error: format!("Failed to list sessions: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to load project: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Get project description and display in a command output tab.
+    ///
+    /// US-003: Calls data layer directly instead of spawning subprocess.
+    /// Opens a new command output tab and formats ProjectDescription as plain text.
+    pub fn spawn_describe_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "describe");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            // Call data layer directly instead of spawning subprocess
+            match crate::config::get_project_description(&project) {
+                Ok(Some(desc)) => {
+                    // Format project description as plain text
+                    let lines = format_project_description_as_text(&desc);
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
+                    }
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code: 0,
+                    });
+                }
+                Ok(None) => {
+                    let _ = tx.send(CommandMessage::Stdout {
+                        cache_key: cache_key.clone(),
+                        line: format!("Project '{}' not found.", project),
+                    });
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code: 1,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to get project description: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Show resume session information in the output tab.
+    ///
+    /// US-005: Shows session info instead of spawning subprocess.
+    /// Info includes: session ID, branch, worktree path, current state.
+    /// Shows message with instructions on how to resume in terminal.
+    pub fn show_resume_info(&mut self, project_name: &str, session_id: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "resume");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+
+        // Look up the session info
+        match self.get_resumable_session_by_id(project_name, session_id) {
+            Some(session) => {
+                // Format session info as plain text
+                let lines = format_resume_info_as_text(&session);
+                for line in lines {
+                    let _ = tx.send(CommandMessage::Stdout {
+                        cache_key: cache_key.clone(),
+                        line,
+                    });
+                }
+                let _ = tx.send(CommandMessage::Completed {
+                    cache_key,
+                    exit_code: 0,
+                });
+            }
+            None => {
+                let _ = tx.send(CommandMessage::Stdout {
+                    cache_key: cache_key.clone(),
+                    line: format!("Session '{}' not found or no longer resumable.", session_id),
+                });
+                let _ = tx.send(CommandMessage::Completed {
+                    cache_key,
+                    exit_code: 1,
+                });
+            }
+        }
+    }
+
+    /// Clean completed/failed sessions with worktrees by calling the data layer directly.
+    /// Opens a new command output tab and populates it with cleanup results.
+    ///
+    /// US-004: Replaces subprocess spawning with direct clean_worktrees_direct() call.
+    /// Note: The clean operation respects safety filters - only Completed/Failed/Interrupted
+    /// sessions are cleaned, not Running/InProgress ones.
+    pub fn spawn_clean_worktrees_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "clean-worktrees");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use crate::commands::{clean_worktrees_direct, DirectCleanOptions};
+
+            // Call data layer directly instead of spawning subprocess
+            let options = DirectCleanOptions {
+                worktrees: true,
+                force: false,
+            };
+
+            match clean_worktrees_direct(&project, options) {
+                Ok(summary) => {
+                    // Format cleanup summary as plain text
+                    let lines = format_cleanup_summary_as_text(&summary, "Clean Worktrees");
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
+                    }
+                    let exit_code = if summary.errors.is_empty() { 0 } else { 1 };
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to clean sessions: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Clean orphaned sessions by calling the data layer directly.
+    /// Orphaned sessions are those where the worktree has been deleted but the
+    /// session state remains.
+    /// Opens a new command output tab and populates it with cleanup results.
+    ///
+    /// US-004: Replaces subprocess spawning with direct clean_orphaned_direct() call.
+    pub fn spawn_clean_orphaned_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "clean-orphaned");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use crate::commands::clean_orphaned_direct;
+
+            // Call data layer directly instead of spawning subprocess
+            match clean_orphaned_direct(&project) {
+                Ok(summary) => {
+                    // Format cleanup summary as plain text
+                    let lines = format_cleanup_summary_as_text(&summary, "Clean Orphaned");
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
+                    }
+                    let exit_code = if summary.errors.is_empty() { 0 } else { 1 };
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to clean orphaned sessions: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Poll for command execution messages and update state.
+    /// This should be called in the update loop to process messages from background threads.
+    fn poll_command_messages(&mut self) {
+        // Process all pending messages (non-blocking)
+        while let Ok(msg) = self.command_rx.try_recv() {
+            match msg {
+                CommandMessage::Stdout { cache_key, line } => {
+                    self.add_command_stdout(&cache_key, line);
+                }
+                CommandMessage::Stderr { cache_key, line } => {
+                    self.add_command_stderr(&cache_key, line);
+                }
+                CommandMessage::Completed {
+                    cache_key,
+                    exit_code,
+                } => {
+                    self.complete_command(&cache_key, exit_code);
+                }
+                CommandMessage::Failed { cache_key, error } => {
+                    self.fail_command(&cache_key, error);
+                }
+            }
+        }
+    }
+
     /// Close a tab by ID.
     /// Returns true if the tab was closed, false if the tab doesn't exist or is not closable.
     /// If the closed tab was active, switches to the previous tab or Projects tab.
@@ -717,6 +2182,11 @@ impl Autom8App {
         // Clean up cached run state if it's a run detail tab
         if let TabId::RunDetail(run_id) = tab_id {
             self.run_detail_cache.remove(run_id);
+        }
+
+        // Clean up command execution state if it's a command output tab
+        if let TabId::CommandOutput(cache_key) = tab_id {
+            self.command_executions.remove(cache_key);
         }
 
         // If the closed tab was active, switch to another tab
@@ -792,6 +2262,9 @@ impl eframe::App for Autom8App {
         // Refresh data from disk if interval has elapsed
         self.maybe_refresh();
 
+        // Poll for command execution messages from background threads
+        self.poll_command_messages();
+
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
 
@@ -838,6 +2311,20 @@ impl eframe::App for Autom8App {
             .show(ctx, |ui| {
                 self.render_content(ui);
             });
+
+        // Handle global keyboard shortcuts for context menu
+        if self.context_menu.is_some() {
+            // Close context menu on Escape key
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.close_context_menu();
+            }
+        }
+
+        // Render context menu overlay (must be after content to appear on top)
+        self.render_context_menu(ctx);
+
+        // Render confirmation dialog if pending (must be after context menu to appear on top)
+        self.render_confirmation_dialog(ctx);
     }
 }
 
@@ -908,6 +2395,566 @@ impl Autom8App {
                     }
                 });
             });
+    }
+
+    // ========================================================================
+    // Context Menu Rendering (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    /// Render the context menu overlay.
+    ///
+    /// This method renders the context menu as a floating panel at the stored position.
+    /// The menu is rendered on top of all other content using `Order::Foreground`.
+    /// Handles click-outside-to-close and menu item interactions.
+    /// Also handles submenu rendering for items like Resume and Clean (US-005, US-006).
+    fn render_context_menu(&mut self, ctx: &egui::Context) {
+        // Early return if no context menu is open
+        let menu_state = match &self.context_menu {
+            Some(state) => state.clone(),
+            None => return,
+        };
+
+        // Get screen rect for bounds checking
+        let screen_rect = ctx.screen_rect();
+
+        // Calculate menu dimensions (US-001: Dynamic width based on content)
+        let menu_width = calculate_context_menu_width(ctx, &menu_state.items);
+        let item_count = menu_state
+            .items
+            .iter()
+            .filter(|item| !matches!(item, ContextMenuItem::Separator))
+            .count();
+        let separator_count = menu_state
+            .items
+            .iter()
+            .filter(|item| matches!(item, ContextMenuItem::Separator))
+            .count();
+        let menu_height = (item_count as f32 * CONTEXT_MENU_ITEM_HEIGHT)
+            + (separator_count as f32 * (spacing::SM + 1.0))
+            + (CONTEXT_MENU_PADDING_V * 2.0);
+
+        // Constrain menu position within window bounds
+        let mut menu_pos = menu_state.position;
+        menu_pos.x += CONTEXT_MENU_CURSOR_OFFSET;
+        menu_pos.y += CONTEXT_MENU_CURSOR_OFFSET;
+
+        // Ensure menu doesn't go off the right edge
+        if menu_pos.x + menu_width > screen_rect.max.x - spacing::SM {
+            menu_pos.x = screen_rect.max.x - menu_width - spacing::SM;
+        }
+
+        // Ensure menu doesn't go off the bottom edge
+        if menu_pos.y + menu_height > screen_rect.max.y - spacing::SM {
+            menu_pos.y = screen_rect.max.y - menu_height - spacing::SM;
+        }
+
+        // Ensure menu doesn't go off the left or top edge
+        menu_pos.x = menu_pos.x.max(spacing::SM);
+        menu_pos.y = menu_pos.y.max(spacing::SM);
+
+        // Track if we should close the menu
+        let mut should_close = false;
+        let mut selected_action: Option<ContextMenuAction> = None;
+
+        // Track submenu hover state: (submenu_id, items, trigger_rect)
+        let mut hovered_submenu: Option<(String, Vec<ContextMenuItem>, Rect)> = None;
+
+        // Check for click outside the menu
+        let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+        let primary_clicked = ctx.input(|i| i.pointer.primary_clicked());
+
+        // Render the main menu using an Area overlay
+        egui::Area::new(egui::Id::new("context_menu"))
+            .order(Order::Foreground)
+            .fixed_pos(menu_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(crate::ui::gui::theme::shadow::elevated())
+                    .stroke(Stroke::new(1.0, colors::BORDER))
+                    .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
+                    .show(ui, |ui| {
+                        ui.set_min_width(menu_width);
+                        ui.set_max_width(menu_width);
+
+                        for item in &menu_state.items {
+                            match item {
+                                ContextMenuItem::Action {
+                                    label,
+                                    action,
+                                    enabled,
+                                } => {
+                                    let response =
+                                        self.render_context_menu_item(ui, label, *enabled, false);
+                                    if response.clicked {
+                                        selected_action = Some(action.clone());
+                                        should_close = true;
+                                    }
+                                }
+                                ContextMenuItem::Separator => {
+                                    ui.add_space(spacing::XS);
+                                    let rect = ui.available_rect_before_wrap();
+                                    let separator_rect =
+                                        Rect::from_min_size(rect.min, Vec2::new(menu_width, 1.0));
+                                    ui.painter().rect_filled(
+                                        separator_rect,
+                                        Rounding::ZERO,
+                                        colors::SEPARATOR,
+                                    );
+                                    ui.allocate_space(Vec2::new(menu_width, 1.0));
+                                    ui.add_space(spacing::XS);
+                                }
+                                ContextMenuItem::Submenu {
+                                    label,
+                                    id,
+                                    enabled,
+                                    items,
+                                } => {
+                                    // Render submenu trigger with arrow indicator
+                                    let response =
+                                        self.render_context_menu_item(ui, label, *enabled, true);
+                                    if response.hovered && *enabled && !items.is_empty() {
+                                        // Track this submenu as hovered for rendering
+                                        hovered_submenu =
+                                            Some((id.clone(), items.clone(), response.rect));
+                                    }
+                                }
+                            }
+                        }
+                    });
+            });
+
+        // Calculate the main menu rect for click-outside detection
+        let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(menu_width, menu_height));
+
+        // Track submenu rect for click-outside detection
+        let mut submenu_rect: Option<Rect> = None;
+
+        // Render submenu if one is hovered or already open
+        // Priority: currently hovered submenu > previously open submenu
+        let submenu_to_render = if let Some((id, items, trigger_rect)) = hovered_submenu {
+            // Update the open_submenu state with the hovered submenu
+            if let Some(menu) = &mut self.context_menu {
+                let submenu_pos = Pos2::new(
+                    menu_pos.x + menu_width + CONTEXT_MENU_SUBMENU_GAP,
+                    trigger_rect.min.y,
+                );
+                menu.open_submenu(id.clone(), submenu_pos);
+            }
+            Some((items, trigger_rect))
+        } else if let (Some(open_id), Some(open_pos)) =
+            (&menu_state.open_submenu, menu_state.submenu_position)
+        {
+            // Find the items for the currently open submenu
+            let items = menu_state.items.iter().find_map(|item| {
+                if let ContextMenuItem::Submenu { id, items, .. } = item {
+                    if id == open_id {
+                        return Some(items.clone());
+                    }
+                }
+                None
+            });
+            // Find the trigger rect (approximate from stored position)
+            let trigger_rect = Rect::from_min_size(
+                Pos2::new(menu_pos.x, open_pos.y),
+                Vec2::new(menu_width, CONTEXT_MENU_ITEM_HEIGHT),
+            );
+            items.map(|i| (i, trigger_rect))
+        } else {
+            // No submenu to render, close any open submenu
+            if let Some(menu) = &mut self.context_menu {
+                menu.close_submenu();
+            }
+            None
+        };
+
+        // Render the submenu if we have one
+        if let Some((submenu_items, trigger_rect)) = submenu_to_render {
+            if !submenu_items.is_empty() {
+                // Calculate submenu dimensions (US-001: Dynamic width for submenus too)
+                let submenu_width = calculate_context_menu_width(ctx, &submenu_items);
+                let submenu_item_count = submenu_items
+                    .iter()
+                    .filter(|item| !matches!(item, ContextMenuItem::Separator))
+                    .count();
+                let submenu_separator_count = submenu_items
+                    .iter()
+                    .filter(|item| matches!(item, ContextMenuItem::Separator))
+                    .count();
+                let submenu_height = (submenu_item_count as f32 * CONTEXT_MENU_ITEM_HEIGHT)
+                    + (submenu_separator_count as f32 * (spacing::SM + 1.0))
+                    + (CONTEXT_MENU_PADDING_V * 2.0);
+
+                // Position submenu to the right of the main menu
+                let mut submenu_pos = Pos2::new(
+                    menu_pos.x + menu_width + CONTEXT_MENU_SUBMENU_GAP,
+                    trigger_rect.min.y - CONTEXT_MENU_PADDING_V,
+                );
+
+                // Ensure submenu doesn't go off the right edge
+                if submenu_pos.x + submenu_width > screen_rect.max.x - spacing::SM {
+                    // Position to the left of the main menu instead
+                    submenu_pos.x = menu_pos.x - submenu_width - CONTEXT_MENU_SUBMENU_GAP;
+                }
+
+                // Ensure submenu doesn't go off the bottom edge
+                if submenu_pos.y + submenu_height > screen_rect.max.y - spacing::SM {
+                    submenu_pos.y = screen_rect.max.y - submenu_height - spacing::SM;
+                }
+
+                // Ensure submenu doesn't go off the top edge
+                submenu_pos.y = submenu_pos.y.max(spacing::SM);
+
+                // Store submenu rect for click-outside detection
+                submenu_rect = Some(Rect::from_min_size(
+                    submenu_pos,
+                    Vec2::new(submenu_width, submenu_height),
+                ));
+
+                // Render the submenu
+                egui::Area::new(egui::Id::new("context_submenu"))
+                    .order(Order::Foreground)
+                    .fixed_pos(submenu_pos)
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(colors::SURFACE)
+                            .rounding(Rounding::same(rounding::CARD))
+                            .shadow(crate::ui::gui::theme::shadow::elevated())
+                            .stroke(Stroke::new(1.0, colors::BORDER))
+                            .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
+                            .show(ui, |ui| {
+                                ui.set_min_width(submenu_width);
+                                ui.set_max_width(submenu_width);
+
+                                for item in &submenu_items {
+                                    match item {
+                                        ContextMenuItem::Action {
+                                            label,
+                                            action,
+                                            enabled,
+                                        } => {
+                                            let response = self.render_context_menu_item(
+                                                ui, label, *enabled, false,
+                                            );
+                                            if response.clicked {
+                                                selected_action = Some(action.clone());
+                                                should_close = true;
+                                            }
+                                        }
+                                        ContextMenuItem::Separator => {
+                                            ui.add_space(spacing::XS);
+                                            let rect = ui.available_rect_before_wrap();
+                                            let separator_rect = Rect::from_min_size(
+                                                rect.min,
+                                                Vec2::new(submenu_width, 1.0),
+                                            );
+                                            ui.painter().rect_filled(
+                                                separator_rect,
+                                                Rounding::ZERO,
+                                                colors::SEPARATOR,
+                                            );
+                                            ui.allocate_space(Vec2::new(submenu_width, 1.0));
+                                            ui.add_space(spacing::XS);
+                                        }
+                                        ContextMenuItem::Submenu { .. } => {
+                                            // Nested submenus not supported (not needed for current use cases)
+                                        }
+                                    }
+                                }
+                            });
+                    });
+            }
+        }
+
+        // Check if click was outside both the menu and submenu areas
+        if primary_clicked {
+            if let Some(pos) = pointer_pos {
+                let in_menu = menu_rect.contains(pos);
+                let in_submenu = submenu_rect.map(|r| r.contains(pos)).unwrap_or(false);
+                if !in_menu && !in_submenu {
+                    should_close = true;
+                }
+            }
+        }
+
+        // Handle the selected action
+        if let Some(action) = selected_action {
+            let project_name = menu_state.project_name.clone();
+            match action {
+                ContextMenuAction::Status => {
+                    // Spawn the status command (US-003)
+                    self.spawn_status_command(&project_name);
+                }
+                ContextMenuAction::Describe => {
+                    // Spawn the describe command (US-004)
+                    self.spawn_describe_command(&project_name);
+                }
+                ContextMenuAction::Resume(session_id) => {
+                    // US-005: Show session info in output tab instead of spawning subprocess
+                    if let Some(id) = session_id {
+                        self.show_resume_info(&project_name, &id);
+                    }
+                    // If session_id is None, the menu item should have been disabled,
+                    // so this case shouldn't happen in normal operation
+                }
+                ContextMenuAction::CleanWorktrees => {
+                    // US-004: Show confirmation dialog before executing clean operation
+                    self.pending_clean_confirmation = Some(PendingCleanOperation::Worktrees {
+                        project_name: project_name.clone(),
+                    });
+                }
+                ContextMenuAction::CleanOrphaned => {
+                    // US-004: Show confirmation dialog before executing clean operation
+                    self.pending_clean_confirmation = Some(PendingCleanOperation::Orphaned {
+                        project_name: project_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // Close the menu if needed
+        if should_close {
+            self.close_context_menu();
+        }
+    }
+
+    /// Render a single context menu item.
+    ///
+    /// Returns a `ContextMenuItemResponse` with click/hover state and item rect.
+    fn render_context_menu_item(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        enabled: bool,
+        has_submenu: bool,
+    ) -> ContextMenuItemResponse {
+        let item_size = Vec2::new(ui.available_width(), CONTEXT_MENU_ITEM_HEIGHT);
+        let (rect, response) = ui.allocate_exact_size(item_size, Sense::click());
+
+        let is_hovered = response.hovered() && enabled;
+        let painter = ui.painter();
+
+        // Draw hover background
+        if is_hovered {
+            painter.rect_filled(rect, Rounding::ZERO, colors::SURFACE_HOVER);
+        }
+
+        // Calculate text position with padding
+        let text_x = rect.min.x + CONTEXT_MENU_PADDING_H;
+        let text_color = if enabled {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_DISABLED
+        };
+
+        // Draw label
+        let galley = painter.layout_no_wrap(
+            label.to_string(),
+            typography::font(FontSize::Body, FontWeight::Regular),
+            text_color,
+        );
+        let text_y = rect.center().y - galley.rect.height() / 2.0;
+        painter.galley(Pos2::new(text_x, text_y), galley, Color32::TRANSPARENT);
+
+        // Draw submenu arrow indicator if this item has a submenu
+        if has_submenu {
+            let arrow_x = rect.max.x - CONTEXT_MENU_PADDING_H - CONTEXT_MENU_ARROW_SIZE;
+            let arrow_y = rect.center().y;
+            let arrow_color = if enabled {
+                colors::TEXT_SECONDARY
+            } else {
+                colors::TEXT_DISABLED
+            };
+
+            // Draw a simple right-pointing chevron
+            let arrow_points = [
+                Pos2::new(arrow_x, arrow_y - CONTEXT_MENU_ARROW_SIZE / 2.0),
+                Pos2::new(arrow_x + CONTEXT_MENU_ARROW_SIZE / 2.0, arrow_y),
+                Pos2::new(arrow_x, arrow_y + CONTEXT_MENU_ARROW_SIZE / 2.0),
+            ];
+            painter.line_segment(
+                [arrow_points[0], arrow_points[1]],
+                Stroke::new(1.5, arrow_color),
+            );
+            painter.line_segment(
+                [arrow_points[1], arrow_points[2]],
+                Stroke::new(1.5, arrow_color),
+            );
+        }
+
+        // Convert local rect to screen rect for submenu positioning
+        let screen_rect = ui.clip_rect();
+        let screen_item_rect = Rect::from_min_max(
+            Pos2::new(screen_rect.min.x, rect.min.y),
+            Pos2::new(screen_rect.min.x + ui.available_width(), rect.max.y),
+        );
+
+        ContextMenuItemResponse {
+            clicked: response.clicked() && enabled,
+            hovered: is_hovered,
+            rect: screen_item_rect,
+        }
+    }
+
+    // ========================================================================
+    // Confirmation Dialog (US-004)
+    // ========================================================================
+
+    /// Render the confirmation dialog overlay for clean operations.
+    ///
+    /// This method renders a modal dialog when `pending_clean_confirmation` is Some.
+    /// The dialog has a semi-transparent backdrop and centered modal with
+    /// Cancel and Confirm buttons.
+    fn render_confirmation_dialog(&mut self, ctx: &egui::Context) {
+        // Early return if no confirmation is pending
+        let pending = match &self.pending_clean_confirmation {
+            Some(op) => op.clone(),
+            None => return,
+        };
+
+        let screen_rect = ctx.screen_rect();
+
+        // Modal dialog dimensions
+        const DIALOG_WIDTH: f32 = 400.0;
+        const DIALOG_PADDING: f32 = 24.0;
+        const BUTTON_HEIGHT: f32 = 36.0;
+        const BUTTON_WIDTH: f32 = 100.0;
+        const BUTTON_GAP: f32 = 12.0;
+
+        // Render semi-transparent backdrop
+        egui::Area::new(egui::Id::new("confirmation_backdrop"))
+            .order(Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let backdrop_rect = screen_rect;
+                ui.painter().rect_filled(
+                    backdrop_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+                );
+                // Capture clicks on backdrop
+                let (_, response) = ui.allocate_exact_size(backdrop_rect.size(), Sense::click());
+                if response.clicked() {
+                    // Close dialog on backdrop click
+                    self.pending_clean_confirmation = None;
+                }
+            });
+
+        // Calculate dialog position (centered)
+        let dialog_x = (screen_rect.width() - DIALOG_WIDTH) / 2.0;
+
+        // We need to measure the text first to calculate height
+        let title = pending.title();
+        let message = pending.message();
+
+        // Estimate dialog height based on content
+        // Title + message + button row + padding
+        let estimated_height = 200.0; // Reasonable estimate
+        let dialog_y = (screen_rect.height() - estimated_height) / 2.0;
+
+        let dialog_pos = Pos2::new(dialog_x, dialog_y);
+
+        // Track user actions
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        // Render dialog
+        egui::Area::new(egui::Id::new("confirmation_dialog"))
+            .order(Order::Foreground)
+            .fixed_pos(dialog_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(crate::ui::gui::theme::shadow::elevated())
+                    .stroke(Stroke::new(1.0, colors::BORDER))
+                    .inner_margin(egui::Margin::same(DIALOG_PADDING))
+                    .show(ui, |ui| {
+                        ui.set_min_width(DIALOG_WIDTH - 2.0 * DIALOG_PADDING);
+                        ui.set_max_width(DIALOG_WIDTH - 2.0 * DIALOG_PADDING);
+
+                        // Title
+                        ui.label(
+                            egui::RichText::new(title)
+                                .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                                .color(colors::TEXT_PRIMARY),
+                        );
+
+                        ui.add_space(spacing::MD);
+
+                        // Message
+                        ui.label(
+                            egui::RichText::new(&message)
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+
+                        ui.add_space(spacing::XL);
+
+                        // Button row (right-aligned)
+                        ui.horizontal(|ui| {
+                            // Add spacer to push buttons to the right
+                            let available = ui.available_width() - 2.0 * BUTTON_WIDTH - BUTTON_GAP;
+                            ui.add_space(available.max(0.0));
+
+                            // Cancel button
+                            let cancel_response = ui.add_sized(
+                                [BUTTON_WIDTH, BUTTON_HEIGHT],
+                                egui::Button::new(
+                                    egui::RichText::new("Cancel")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(colors::TEXT_PRIMARY),
+                                )
+                                .fill(colors::SURFACE_ELEVATED)
+                                .rounding(Rounding::same(rounding::BUTTON))
+                                .stroke(Stroke::new(1.0, colors::BORDER)),
+                            );
+                            if cancel_response.clicked() {
+                                cancelled = true;
+                            }
+
+                            ui.add_space(BUTTON_GAP);
+
+                            // Confirm button (destructive action - red tint)
+                            let confirm_response = ui.add_sized(
+                                [BUTTON_WIDTH, BUTTON_HEIGHT],
+                                egui::Button::new(
+                                    egui::RichText::new("Confirm")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(colors::STATUS_ERROR)
+                                .rounding(Rounding::same(rounding::BUTTON)),
+                            );
+                            if confirm_response.clicked() {
+                                confirmed = true;
+                            }
+                        });
+                    });
+            });
+
+        // Handle Escape key to cancel
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            cancelled = true;
+        }
+
+        // Process user action
+        if cancelled {
+            self.pending_clean_confirmation = None;
+        } else if confirmed {
+            // Execute the clean operation
+            let project_name = pending.project_name().to_string();
+            match pending {
+                PendingCleanOperation::Worktrees { .. } => {
+                    self.spawn_clean_worktrees_command(&project_name);
+                }
+                PendingCleanOperation::Orphaned { .. } => {
+                    self.spawn_clean_orphaned_command(&project_name);
+                }
+            }
+            self.pending_clean_confirmation = None;
+        }
     }
 
     /// Render the sidebar toggle button in the title bar.
@@ -1375,6 +3422,10 @@ impl Autom8App {
             TabId::RunDetail(run_id) => {
                 let run_id = run_id.clone();
                 self.render_run_detail(ui, &run_id);
+            }
+            TabId::CommandOutput(cache_key) => {
+                let cache_key = cache_key.clone();
+                self.render_command_output(ui, &cache_key);
             }
         }
     }
@@ -2672,6 +4723,249 @@ impl Autom8App {
         }
     }
 
+    /// Render the command output view for a specific command execution.
+    fn render_command_output(&self, ui: &mut egui::Ui, cache_key: &str) {
+        // Get the command execution state
+        let execution = match self.command_executions.get(cache_key) {
+            Some(exec) => exec,
+            None => {
+                // No execution found - show placeholder
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(spacing::XXL);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("Command output not available")
+                                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+                return;
+            }
+        };
+
+        // Header with command info
+        self.render_command_output_header(ui, execution);
+
+        ui.add_space(spacing::MD);
+
+        // Output content with auto-scroll
+        self.render_command_output_content(ui, execution, cache_key);
+    }
+
+    /// Render the header for command output (status indicator, project, command).
+    fn render_command_output_header(&self, ui: &mut egui::Ui, execution: &CommandExecution) {
+        ui.horizontal(|ui| {
+            // Status badge
+            let (status_text, status_color) = match execution.status {
+                CommandStatus::Running => ("Running", colors::STATUS_RUNNING),
+                CommandStatus::Completed => ("Completed", colors::STATUS_SUCCESS),
+                CommandStatus::Failed => ("Failed", colors::STATUS_ERROR),
+            };
+
+            let badge_galley = ui.fonts(|f| {
+                f.layout_no_wrap(
+                    status_text.to_string(),
+                    typography::font(FontSize::Body, FontWeight::Medium),
+                    colors::TEXT_PRIMARY,
+                )
+            });
+            let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
+            let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+            let (badge_rect, _) =
+                ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
+
+            ui.painter().rect_filled(
+                badge_rect,
+                Rounding::same(rounding::SMALL),
+                badge_background_color(status_color),
+            );
+
+            let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+            ui.painter().galley(text_pos, badge_galley, status_color);
+
+            ui.add_space(spacing::MD);
+
+            // Spinner for running state
+            if execution.status == CommandStatus::Running {
+                self.render_inline_spinner(ui);
+                ui.add_space(spacing::SM);
+            }
+
+            // Title: "Command: project"
+            ui.label(
+                egui::RichText::new(execution.id.tab_label())
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+        });
+
+        // Show exit code if completed
+        if let Some(exit_code) = execution.exit_code {
+            ui.add_space(spacing::SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Exit code:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                ui.add_space(spacing::XS);
+
+                let exit_color = if exit_code == 0 {
+                    colors::STATUS_SUCCESS
+                } else {
+                    colors::STATUS_ERROR
+                };
+                ui.label(
+                    egui::RichText::new(exit_code.to_string())
+                        .font(typography::mono(FontSize::Body))
+                        .color(exit_color),
+                );
+            });
+        }
+    }
+
+    /// Render an inline spinner for loading states.
+    fn render_inline_spinner(&self, ui: &mut egui::Ui) {
+        let spinner_size = 16.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(spinner_size), Sense::hover());
+
+        if ui.is_rect_visible(rect) {
+            let center = rect.center();
+            let radius = spinner_size / 2.0 - 2.0;
+            let time = ui.input(|i| i.time);
+            let start_angle = (time * 2.0) as f32 % std::f32::consts::TAU;
+            let arc_length = std::f32::consts::PI * 1.5;
+
+            let n_points = 32;
+            let points: Vec<_> = (0..=n_points)
+                .map(|i| {
+                    let angle = start_angle + arc_length * (i as f32 / n_points as f32);
+                    egui::pos2(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    )
+                })
+                .collect();
+
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(2.0, colors::ACCENT)));
+
+            // Request repaint for animation
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Render the command output content in a scrollable area.
+    fn render_command_output_content(
+        &self,
+        ui: &mut egui::Ui,
+        execution: &CommandExecution,
+        _cache_key: &str,
+    ) {
+        // Calculate a unique ID for scroll state
+        let scroll_id = egui::Id::new("command_output_scroll").with(execution.id.cache_key());
+
+        // Build scroll area - auto-scroll to bottom when auto_scroll is enabled
+        let scroll_area = egui::ScrollArea::vertical()
+            .id_salt(scroll_id)
+            .auto_shrink([false, false])
+            .stick_to_bottom(execution.auto_scroll);
+
+        // If running, request repaint to show spinner animation
+        if execution.is_running() {
+            ui.ctx().request_repaint();
+        }
+
+        scroll_area.show(ui, |ui| {
+            // Background for output area
+            let available_rect = ui.available_rect_before_wrap();
+            ui.painter().rect_filled(
+                available_rect,
+                Rounding::same(rounding::BUTTON),
+                colors::SURFACE_HOVER,
+            );
+
+            ui.add_space(spacing::SM);
+
+            egui::Frame::none()
+                .inner_margin(spacing::MD)
+                .show(ui, |ui| {
+                    // Render stdout
+                    if !execution.stdout.is_empty() {
+                        for line in &execution.stdout {
+                            // Use selectable_label for copy/paste support
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(line)
+                                        .font(typography::mono(FontSize::Small))
+                                        .color(colors::TEXT_PRIMARY),
+                                )
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        }
+                    }
+
+                    // Render stderr (in error color)
+                    if !execution.stderr.is_empty() {
+                        if !execution.stdout.is_empty() {
+                            ui.add_space(spacing::SM);
+                            ui.separator();
+                            ui.add_space(spacing::SM);
+                            ui.label(
+                                egui::RichText::new("Errors:")
+                                    .font(typography::font(FontSize::Small, FontWeight::Medium))
+                                    .color(colors::STATUS_ERROR),
+                            );
+                            ui.add_space(spacing::XS);
+                        }
+
+                        for line in &execution.stderr {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(line)
+                                        .font(typography::mono(FontSize::Small))
+                                        .color(colors::STATUS_ERROR),
+                                )
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        }
+                    }
+
+                    // Show "no output yet" if empty and still running
+                    if execution.stdout.is_empty()
+                        && execution.stderr.is_empty()
+                        && execution.is_running()
+                    {
+                        ui.label(
+                            egui::RichText::new("Waiting for output...")
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED)
+                                .italics(),
+                        );
+                    }
+
+                    // Show completion message if no output and completed
+                    if execution.stdout.is_empty()
+                        && execution.stderr.is_empty()
+                        && execution.is_finished()
+                    {
+                        ui.label(
+                            egui::RichText::new("Command completed with no output.")
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED)
+                                .italics(),
+                        );
+                    }
+                });
+        });
+    }
+
     /// Render detailed information about a run state.
     fn render_run_state_details(&self, ui: &mut egui::Ui, run_state: &crate::state::RunState) {
         egui::ScrollArea::vertical()
@@ -3141,19 +5435,22 @@ impl Autom8App {
     }
 
     /// Calculate the number of grid columns based on available width.
+    /// Always returns at most 2 columns for a 2x2 grid layout where each card
+    /// takes approximately 1/4 of the screen.
     fn calculate_grid_columns(available_width: f32) -> usize {
         // Calculate how many cards fit, accounting for spacing
         let card_with_spacing = CARD_MIN_WIDTH + CARD_SPACING;
         let columns = ((available_width + CARD_SPACING) / card_with_spacing).floor() as usize;
 
-        // Clamp to reasonable range: minimum 2, maximum 4
-        columns.clamp(2, 4)
+        // Clamp to range: minimum 1, maximum 2 (for 2x2 grid of 1/4 screen cards)
+        columns.clamp(1, MAX_GRID_COLUMNS)
     }
 
     /// Calculate the card width for the current number of columns.
+    /// Accounts for edge spacing and inter-card spacing.
     fn calculate_card_width(available_width: f32, columns: usize) -> f32 {
-        // Total spacing between cards
-        let total_spacing = CARD_SPACING * (columns as f32 - 1.0);
+        // Total spacing: edges (left + right) + between cards
+        let total_spacing = CARD_SPACING * (columns as f32 + 1.0);
         let card_width = (available_width - total_spacing) / columns as f32;
 
         // Clamp to min/max bounds
@@ -3161,28 +5458,50 @@ impl Autom8App {
     }
 
     /// Render the sessions in a responsive grid layout.
+    /// Cards are sized to approximately 50% width and 50% height, creating a 2x2 visible grid.
+    /// When more than 4 sessions exist, the content scrolls vertically.
     fn render_sessions_grid(&self, ui: &mut egui::Ui) {
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+        let columns = Self::calculate_grid_columns(available_width);
+
+        // Calculate card dimensions based on available space
+        let card_width = Self::calculate_card_width(available_width, columns);
+
+        // Calculate height: 2 rows visible with spacing (edge spacing + inter-row spacing)
+        let total_v_spacing = CARD_SPACING * 3.0; // Top + between rows + bottom
+        let card_height = ((available_height - total_v_spacing) / 2.0).max(CARD_MIN_HEIGHT);
+
+        // Calculate total width of card row for centering
+        let row_width = (card_width * columns as f32) + (CARD_SPACING * (columns as f32 - 1.0));
+        let h_offset = ((available_width - row_width) / 2.0).max(0.0);
+
         // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
-                let available_width = ui.available_width();
-                let columns = Self::calculate_grid_columns(available_width);
-                let card_width = Self::calculate_card_width(available_width, columns);
+                // Add top spacing
+                ui.add_space(CARD_SPACING);
 
-                // Create rows of cards with consistent spacing
+                // Create rows of cards with consistent spacing, centered horizontally
                 let mut session_iter = self.sessions.iter().peekable();
                 while session_iter.peek().is_some() {
                     ui.horizontal(|ui| {
-                        for _ in 0..columns {
+                        // Add horizontal offset for centering
+                        ui.add_space(h_offset);
+
+                        for i in 0..columns {
                             if let Some(session) = session_iter.next() {
-                                self.render_session_card(ui, session, card_width);
-                                ui.add_space(spacing::LG);
+                                self.render_session_card(ui, session, card_width, card_height);
+                                // Add spacing between cards (but not after the last one in row)
+                                if i < columns - 1 {
+                                    ui.add_space(CARD_SPACING);
+                                }
                             }
                         }
                     });
-                    ui.add_space(spacing::LG);
+                    ui.add_space(CARD_SPACING);
                 }
             });
     }
@@ -3194,10 +5513,16 @@ impl Autom8App {
     /// - Status row: Colored indicator dot with state label
     /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
     /// - Duration row: Time elapsed since run started
-    /// - Output section: Last 5 lines of Claude output in monospace font
-    fn render_session_card(&self, ui: &mut egui::Ui, session: &SessionData, card_width: f32) {
+    /// - Output section: Last OUTPUT_LINES_TO_SHOW lines of Claude output in monospace font
+    fn render_session_card(
+        &self,
+        ui: &mut egui::Ui,
+        session: &SessionData,
+        card_width: f32,
+        card_height: f32,
+    ) {
         // Define card dimensions
-        let card_size = Vec2::new(card_width, CARD_MIN_HEIGHT);
+        let card_size = Vec2::new(card_width, card_height);
 
         // Allocate space for the card
         let (rect, _response) = ui.allocate_exact_size(card_size, Sense::hover());
@@ -3889,6 +6214,9 @@ impl Autom8App {
             self.projects.iter().map(|p| p.info.name.clone()).collect();
         let selected = self.selected_project.clone();
 
+        // Collect interactions to handle after rendering (to avoid borrow issues)
+        let mut interactions: Vec<(String, ProjectRowInteraction)> = Vec::new();
+
         egui::ScrollArea::vertical()
             .id_salt("projects_left_panel")
             .auto_shrink([false, false])
@@ -3897,13 +6225,24 @@ impl Autom8App {
                 for (idx, project_name) in project_names.iter().enumerate() {
                     let project = &self.projects[idx];
                     let is_selected = selected.as_deref() == Some(project_name.as_str());
-                    let clicked = self.render_project_row(ui, project, is_selected);
-                    if clicked {
-                        self.toggle_project_selection(project_name);
+                    let interaction = self.render_project_row(ui, project, is_selected);
+                    if interaction.clicked || interaction.right_click_pos.is_some() {
+                        interactions.push((project_name.clone(), interaction));
                     }
                     ui.add_space(spacing::XS);
                 }
             });
+
+        // Handle interactions after rendering
+        for (project_name, interaction) in interactions {
+            if interaction.clicked {
+                // Left-click: toggle selection and load history
+                self.toggle_project_selection(&project_name);
+            } else if let Some(pos) = interaction.right_click_pos {
+                // Right-click: open context menu
+                self.open_context_menu(pos, project_name);
+            }
+        }
     }
 
     /// Count active sessions for a given project name.
@@ -3956,26 +6295,27 @@ impl Autom8App {
     }
 
     /// Render a single project row.
-    /// Returns true if the row was clicked.
+    /// Returns interaction information (left-click and right-click).
     fn render_project_row(
         &self,
         ui: &mut egui::Ui,
         project: &ProjectData,
         is_selected: bool,
-    ) -> bool {
+    ) -> ProjectRowInteraction {
         let row_size = Vec2::new(ui.available_width(), PROJECT_ROW_HEIGHT);
 
-        // Allocate space for the row with click interaction
+        // Allocate space for the row with click interaction (both primary and secondary)
         let (rect, response) = ui.allocate_exact_size(row_size, Sense::click());
 
         // Skip if not visible (optimization for scrolling)
         if !ui.is_rect_visible(rect) {
-            return false;
+            return ProjectRowInteraction::none();
         }
 
         let painter = ui.painter();
         let is_hovered = response.hovered();
         let was_clicked = response.clicked();
+        let was_secondary_clicked = response.secondary_clicked();
 
         // Draw row background with hover and selected states
         let bg_color = if is_selected {
@@ -4077,7 +6417,20 @@ impl Autom8App {
             );
         }
 
-        was_clicked
+        // Return interaction info
+        if was_secondary_clicked {
+            // Right-click: return position for context menu
+            // Use the pointer position if available, otherwise center of the row
+            let menu_pos = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos())
+                .unwrap_or(rect.center());
+            ProjectRowInteraction::right_click(menu_pos)
+        } else if was_clicked {
+            ProjectRowInteraction::click()
+        } else {
+            ProjectRowInteraction::none()
+        }
     }
 }
 
@@ -4155,24 +6508,35 @@ mod tests {
 
     #[test]
     fn test_calculate_grid_columns() {
-        assert_eq!(Autom8App::calculate_grid_columns(300.0), 2); // Very narrow
-        assert_eq!(Autom8App::calculate_grid_columns(500.0), 2); // Narrow
-        assert_eq!(Autom8App::calculate_grid_columns(900.0), 3); // Medium
-        assert_eq!(Autom8App::calculate_grid_columns(1400.0), 4); // Wide
-        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 4); // Very wide (capped)
+        // Cards take ~50% of width, so max 2 columns for 2x2 grid layout
+        assert_eq!(Autom8App::calculate_grid_columns(300.0), 1); // Very narrow - single column
+        assert_eq!(Autom8App::calculate_grid_columns(500.0), 1); // Narrow - single column
+        assert_eq!(Autom8App::calculate_grid_columns(900.0), 2); // Medium - 2 columns
+        assert_eq!(Autom8App::calculate_grid_columns(1400.0), 2); // Wide - capped at 2
+        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 2); // Very wide - capped at 2
     }
 
     #[test]
     fn test_calculate_card_width() {
-        // Normal cases
-        let width_2col = Autom8App::calculate_card_width(600.0, 2);
+        // With new formula: (available - (columns+1)*spacing) / columns
+        // For 2 columns: (width - 3*24) / 2 = (width - 72) / 2
+
+        // Normal cases - cards should be within bounds
+        // 1200 - 72 = 1128 / 2 = 564, within 400-800 range
+        let width_2col = Autom8App::calculate_card_width(1200.0, 2);
         assert!(width_2col >= CARD_MIN_WIDTH && width_2col <= CARD_MAX_WIDTH);
 
-        // Clamps to min
-        assert_eq!(Autom8App::calculate_card_width(400.0, 4), CARD_MIN_WIDTH);
+        // Clamps to min when width is too small
+        // 600 - 72 = 528 / 2 = 264, should clamp to 400
+        assert_eq!(Autom8App::calculate_card_width(600.0, 2), CARD_MIN_WIDTH);
 
-        // Clamps to max
-        assert_eq!(Autom8App::calculate_card_width(1000.0, 2), CARD_MAX_WIDTH);
+        // Clamps to max when width is very large
+        // 2000 - 72 = 1928 / 2 = 964, should clamp to 800
+        assert_eq!(Autom8App::calculate_card_width(2000.0, 2), CARD_MAX_WIDTH);
+
+        // Single column case
+        // 900 - 48 = 852 / 1 = 852, should clamp to 800
+        assert_eq!(Autom8App::calculate_card_width(900.0, 1), CARD_MAX_WIDTH);
     }
 
     // ========================================================================
@@ -6172,6 +8536,111 @@ mod tests {
         }
     }
 
+    // ========================================================================
+    // Context Menu Tests (Right-Click Context Menu - US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_context_menu_state_creation() {
+        let pos = Pos2::new(100.0, 200.0);
+        let items = vec![
+            ContextMenuItem::action("Status", ContextMenuAction::Status),
+            ContextMenuItem::separator(),
+            ContextMenuItem::action("Describe", ContextMenuAction::Describe),
+        ];
+
+        let state = ContextMenuState::new(pos, "test-project".to_string(), items.clone());
+
+        assert_eq!(state.position, pos);
+        assert_eq!(state.project_name, "test-project");
+        assert_eq!(state.items.len(), 3);
+        assert!(state.open_submenu.is_none());
+        assert!(state.submenu_position.is_none());
+    }
+
+    #[test]
+    fn test_context_menu_submenu_open_close() {
+        let pos = Pos2::new(100.0, 200.0);
+        let items = vec![ContextMenuItem::action("Test", ContextMenuAction::Status)];
+        let mut state = ContextMenuState::new(pos, "test-project".to_string(), items);
+
+        // Open a submenu
+        let submenu_pos = Pos2::new(260.0, 220.0);
+        state.open_submenu("clean".to_string(), submenu_pos);
+        assert_eq!(state.open_submenu, Some("clean".to_string()));
+        assert_eq!(state.submenu_position, Some(submenu_pos));
+
+        // Close submenu
+        state.close_submenu();
+        assert!(state.open_submenu.is_none());
+        assert!(state.submenu_position.is_none());
+    }
+
+    #[test]
+    fn test_context_menu_item_creation() {
+        // Test action item
+        let action = ContextMenuItem::action("Status", ContextMenuAction::Status);
+        match action {
+            ContextMenuItem::Action {
+                label,
+                action: act,
+                enabled,
+            } => {
+                assert_eq!(label, "Status");
+                assert_eq!(act, ContextMenuAction::Status);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Action variant"),
+        }
+
+        // Test disabled action item
+        let disabled = ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None));
+        match disabled {
+            ContextMenuItem::Action { enabled, .. } => {
+                assert!(!enabled);
+            }
+            _ => panic!("Expected Action variant"),
+        }
+
+        // Test separator
+        let sep = ContextMenuItem::separator();
+        assert!(matches!(sep, ContextMenuItem::Separator));
+
+        // Test submenu with items
+        let submenu = ContextMenuItem::submenu(
+            "Clean",
+            "clean",
+            vec![ContextMenuItem::action(
+                "Worktrees",
+                ContextMenuAction::CleanWorktrees,
+            )],
+        );
+        match submenu {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(enabled); // Has items, so enabled
+                assert_eq!(items.len(), 1);
+            }
+            _ => panic!("Expected Submenu variant"),
+        }
+
+        // Test disabled submenu (no items)
+        let disabled_submenu = ContextMenuItem::submenu_disabled("Empty", "empty");
+        match disabled_submenu {
+            ContextMenuItem::Submenu { enabled, items, .. } => {
+                assert!(!enabled);
+                assert!(items.is_empty());
+            }
+            _ => panic!("Expected Submenu variant"),
+        }
+    }
+
     #[test]
     fn test_us010_project_header_text_format() {
         // Test that project scope produces the expected header text format
@@ -6196,6 +8665,1087 @@ mod tests {
     }
 
     #[test]
+    fn test_app_context_menu_open_close() {
+        let mut app = Autom8App::new();
+
+        // Initially no context menu
+        assert!(!app.is_context_menu_open());
+        assert!(app.context_menu().is_none());
+
+        // Open context menu
+        let pos = Pos2::new(150.0, 300.0);
+        app.open_context_menu(pos, "my-project".to_string());
+
+        assert!(app.is_context_menu_open());
+        let menu = app.context_menu().unwrap();
+        assert_eq!(menu.position, pos);
+        assert_eq!(menu.project_name, "my-project");
+
+        // Close context menu
+        app.close_context_menu();
+        assert!(!app.is_context_menu_open());
+        assert!(app.context_menu().is_none());
+    }
+
+    #[test]
+    fn test_app_only_one_context_menu_at_a_time() {
+        let mut app = Autom8App::new();
+
+        // Open first context menu
+        app.open_context_menu(Pos2::new(100.0, 100.0), "project-a".to_string());
+        assert_eq!(app.context_menu().unwrap().project_name, "project-a");
+
+        // Open second context menu - should replace the first
+        app.open_context_menu(Pos2::new(200.0, 200.0), "project-b".to_string());
+        assert_eq!(app.context_menu().unwrap().project_name, "project-b");
+
+        // Only one context menu should be open
+        assert!(app.is_context_menu_open());
+    }
+
+    #[test]
+    fn test_build_context_menu_items() {
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("test-project");
+
+        // Should have Status, Describe, separator, Resume, separator, Clean
+        assert_eq!(items.len(), 6);
+
+        // Check first item is Status
+        match &items[0] {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
+                assert_eq!(label, "Status");
+                assert_eq!(action, &ContextMenuAction::Status);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Status action"),
+        }
+
+        // Check second item is Describe
+        match &items[1] {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
+                assert_eq!(label, "Describe");
+                assert_eq!(action, &ContextMenuAction::Describe);
+                assert!(enabled);
+            }
+            _ => panic!("Expected Describe action"),
+        }
+
+        // Check separators
+        assert!(matches!(&items[2], ContextMenuItem::Separator));
+        assert!(matches!(&items[4], ContextMenuItem::Separator));
+
+        // Check Resume is disabled (no resumable sessions for test-project)
+        match &items[3] {
+            ContextMenuItem::Action {
+                label,
+                enabled,
+                action,
+            } => {
+                assert_eq!(label, "Resume");
+                assert_eq!(action, &ContextMenuAction::Resume(None));
+                assert!(!enabled, "Resume should be disabled when no sessions");
+            }
+            _ => panic!("Expected Resume action"),
+        }
+
+        // Check Clean submenu is disabled (placeholder)
+        match &items[5] {
+            ContextMenuItem::Submenu { label, enabled, .. } => {
+                assert_eq!(label, "Clean");
+                assert!(!enabled);
+            }
+            _ => panic!("Expected Clean submenu"),
+        }
+    }
+
+    // ========================================================================
+    // Context Menu Dynamic Width Tests (US-001)
+    // ========================================================================
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_returns_minimum_for_small_text() {
+        // Very small text width should result in minimum menu width
+        let width = calculate_menu_width_from_text_width(10.0);
+        assert_eq!(
+            width, CONTEXT_MENU_MIN_WIDTH,
+            "Small text should result in minimum width (100px)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_returns_maximum_for_large_text() {
+        // Very large text width should be clamped to maximum menu width
+        let width = calculate_menu_width_from_text_width(500.0);
+        assert_eq!(
+            width, CONTEXT_MENU_MAX_WIDTH,
+            "Large text should be clamped to maximum width (300px)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_adds_padding() {
+        // Text width of 100px should get padding added (4 * CONTEXT_MENU_PADDING_H = 48px)
+        // Total = 100 + 48 = 148px (within bounds)
+        let text_width = 100.0;
+        let expected_padding = CONTEXT_MENU_PADDING_H * 4.0; // 48px
+        let expected_width = text_width + expected_padding;
+        let width = calculate_menu_width_from_text_width(text_width);
+        assert_eq!(
+            width, expected_width,
+            "Should add 48px padding (24px each side)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_bounds_enforcement() {
+        // Test that bounds are correctly enforced
+        assert_eq!(CONTEXT_MENU_MIN_WIDTH, 100.0, "Min width should be 100px");
+        assert_eq!(CONTEXT_MENU_MAX_WIDTH, 300.0, "Max width should be 300px");
+
+        // Test various text widths
+        // 0px text + 48px padding = 48px -> clamped to 100px
+        assert_eq!(calculate_menu_width_from_text_width(0.0), 100.0);
+
+        // 52px text + 48px padding = 100px -> exactly at minimum
+        assert_eq!(calculate_menu_width_from_text_width(52.0), 100.0);
+
+        // 53px text + 48px padding = 101px -> just above minimum
+        assert_eq!(calculate_menu_width_from_text_width(53.0), 101.0);
+
+        // 252px text + 48px padding = 300px -> exactly at maximum
+        assert_eq!(calculate_menu_width_from_text_width(252.0), 300.0);
+
+        // 253px text + 48px padding = 301px -> clamped to 300px
+        assert_eq!(calculate_menu_width_from_text_width(253.0), 300.0);
+    }
+
+    #[test]
+    fn test_context_menu_arrow_size_constant() {
+        // Verify the arrow size constant is correctly defined for submenu calculation
+        assert_eq!(CONTEXT_MENU_ARROW_SIZE, 8.0, "Arrow size should be 8px");
+    }
+
+    // ========================================================================
+    // Command Output Tab Tests (US-007)
+    // ========================================================================
+
+    #[test]
+    fn test_command_output_id_creation() {
+        let id = CommandOutputId::new("my-project", "status");
+
+        assert_eq!(id.project, "my-project");
+        assert_eq!(id.command, "status");
+        assert!(!id.id.is_empty()); // UUID should be generated
+    }
+
+    #[test]
+    fn test_command_output_id_with_id() {
+        let id = CommandOutputId::with_id("my-project", "describe", "test-id-123");
+
+        assert_eq!(id.project, "my-project");
+        assert_eq!(id.command, "describe");
+        assert_eq!(id.id, "test-id-123");
+    }
+
+    #[test]
+    fn test_command_output_id_cache_key() {
+        let id = CommandOutputId::with_id("my-project", "status", "abc123");
+        assert_eq!(id.cache_key(), "my-project:status:abc123");
+    }
+
+    #[test]
+    fn test_command_output_id_tab_label() {
+        let id = CommandOutputId::with_id("my-project", "status", "test");
+        assert_eq!(id.tab_label(), "Status: my-project");
+
+        let id2 = CommandOutputId::with_id("another-project", "describe", "test");
+        assert_eq!(id2.tab_label(), "Describe: another-project");
+
+        let id3 = CommandOutputId::with_id("project", "", "test");
+        assert_eq!(id3.tab_label(), "Command: project");
+    }
+
+    #[test]
+    fn test_command_execution_creation() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let exec = CommandExecution::new(id.clone());
+
+        assert_eq!(exec.id, id);
+        assert_eq!(exec.status, CommandStatus::Running);
+        assert!(exec.stdout.is_empty());
+        assert!(exec.stderr.is_empty());
+        assert!(exec.exit_code.is_none());
+        assert!(exec.auto_scroll);
+    }
+
+    #[test]
+    fn test_command_execution_add_output() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.add_stdout("line 1".to_string());
+        exec.add_stdout("line 2".to_string());
+        exec.add_stderr("error 1".to_string());
+
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stdout[0], "line 1");
+        assert_eq!(exec.stderr[0], "error 1");
+    }
+
+    #[test]
+    fn test_command_execution_complete_success() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        assert!(exec.is_running());
+        assert!(!exec.is_finished());
+
+        exec.complete(0);
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_command_execution_complete_failure() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.complete(1);
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_command_execution_fail() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.fail("Command not found".to_string());
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert!(exec.exit_code.is_none());
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "Command not found");
+    }
+
+    #[test]
+    fn test_command_execution_combined_output() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.add_stdout("out1".to_string());
+        exec.add_stdout("out2".to_string());
+        exec.add_stderr("err1".to_string());
+
+        let combined = exec.combined_output();
+        assert_eq!(combined.len(), 3);
+        assert_eq!(combined[0], "out1");
+        assert_eq!(combined[1], "out2");
+        assert_eq!(combined[2], "err1");
+    }
+
+    #[test]
+    fn test_app_open_command_output_tab() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("my-project", "status");
+
+        // Check tab was created
+        let tab_id = TabId::CommandOutput(id.cache_key());
+        assert!(app.has_tab(&tab_id));
+        assert_eq!(*app.active_tab_id(), tab_id);
+
+        // Check execution was created
+        let exec = app.get_command_execution(&id.cache_key());
+        assert!(exec.is_some());
+        assert_eq!(exec.unwrap().status, CommandStatus::Running);
+
+        // Check tab label
+        let tab = app.tabs().iter().find(|t| t.id == tab_id).unwrap();
+        assert!(tab.label.starts_with("Status: "));
+        assert!(tab.closable);
+    }
+
+    #[test]
+    fn test_app_multiple_command_output_tabs() {
+        let mut app = Autom8App::new();
+
+        let id1 = app.open_command_output_tab("project-a", "status");
+        let id2 = app.open_command_output_tab("project-b", "describe");
+        let id3 = app.open_command_output_tab("project-a", "status"); // Same command, new tab
+
+        // Each should create a unique tab
+        assert_eq!(app.closable_tab_count(), 3);
+
+        // All cache keys should be unique
+        assert_ne!(id1.cache_key(), id2.cache_key());
+        assert_ne!(id1.cache_key(), id3.cache_key());
+        assert_ne!(id2.cache_key(), id3.cache_key());
+    }
+
+    #[test]
+    fn test_app_command_output_update_methods() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Add stdout
+        app.add_command_stdout(&cache_key, "output line 1".to_string());
+        app.add_command_stdout(&cache_key, "output line 2".to_string());
+
+        // Add stderr
+        app.add_command_stderr(&cache_key, "warning line".to_string());
+
+        // Verify updates
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+
+        // Complete the command
+        app.complete_command(&cache_key, 0);
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_app_command_output_fail_method() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.fail_command(&cache_key, "spawn error".to_string());
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.stderr.len(), 1);
+    }
+
+    #[test]
+    fn test_app_close_command_output_tab_cleans_up() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+        let tab_id = TabId::CommandOutput(cache_key.clone());
+
+        // Verify tab and execution exist
+        assert!(app.has_tab(&tab_id));
+        assert!(app.get_command_execution(&cache_key).is_some());
+
+        // Close the tab
+        assert!(app.close_tab(&tab_id));
+
+        // Verify cleanup
+        assert!(!app.has_tab(&tab_id));
+        assert!(app.get_command_execution(&cache_key).is_none());
+    }
+
+    // ========================================================================
+    // Command Message Polling Tests (US-003)
+    // ========================================================================
+
+    #[test]
+    fn test_poll_command_messages_stdout() {
+        let mut app = Autom8App::new();
+
+        // Open a command output tab first
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Send a message through the channel
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "test output".to_string(),
+            })
+            .unwrap();
+
+        // Poll for messages
+        app.poll_command_messages();
+
+        // Verify the stdout was added
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 1);
+        assert_eq!(exec.stdout[0], "test output");
+    }
+
+    #[test]
+    fn test_poll_command_messages_stderr() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Stderr {
+                cache_key: cache_key.clone(),
+                line: "error output".to_string(),
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "error output");
+    }
+
+    #[test]
+    fn test_poll_command_messages_completed() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Completed {
+                cache_key: cache_key.clone(),
+                exit_code: 0,
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_poll_command_messages_failed() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Failed {
+                cache_key: cache_key.clone(),
+                error: "spawn error".to_string(),
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "spawn error");
+    }
+
+    #[test]
+    fn test_poll_command_messages_multiple() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Send multiple messages
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "line 1".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "line 2".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Stderr {
+                cache_key: cache_key.clone(),
+                line: "error".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Completed {
+                cache_key: cache_key.clone(),
+                exit_code: 1,
+            })
+            .unwrap();
+
+        // Poll should process all messages
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.status, CommandStatus::Failed); // exit code 1
+        assert_eq!(exec.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_poll_command_messages_ignores_unknown_cache_key() {
+        let mut app = Autom8App::new();
+
+        // Send message for a cache key that doesn't exist
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: "nonexistent:key:123".to_string(),
+                line: "should be ignored".to_string(),
+            })
+            .unwrap();
+
+        // This should not panic
+        app.poll_command_messages();
+
+        // Verify no command execution was created
+        assert!(app.get_command_execution("nonexistent:key:123").is_none());
+    }
+
+    #[test]
+    fn test_spawn_status_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_status_command will actually try to spawn autom8,
+        // which may not be in PATH during tests. We test that the tab
+        // and execution are created correctly. The background thread
+        // will send a Failed message if autom8 isn't found.
+        app.spawn_status_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Status:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_status_tab_label_format() {
+        // Per US-003: Tab title format: "Status: {project-name}"
+        let id = CommandOutputId::new("my-awesome-project", "status");
+        let label = id.tab_label();
+        assert_eq!(label, "Status: my-awesome-project");
+    }
+
+    #[test]
+    fn test_spawn_describe_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_describe_command will actually try to spawn autom8,
+        // which may not be in PATH during tests. We test that the tab
+        // and execution are created correctly. The background thread
+        // will send a Failed message if autom8 isn't found.
+        app.spawn_describe_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Describe:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_describe_tab_label_format() {
+        // Per US-004: Tab title format: "Describe: {project-name}"
+        let id = CommandOutputId::new("my-awesome-project", "describe");
+        let label = id.tab_label();
+        assert_eq!(label, "Describe: my-awesome-project");
+    }
+
+    // ========================================================================
+    // US-005: Resume Menu Tests
+    // ========================================================================
+
+    #[test]
+    fn test_resumable_session_info_new() {
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.session_id, "abc12345");
+        assert_eq!(info.branch_name, "feature/test");
+        assert_eq!(info.worktree_path, std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(info.machine_state, MachineState::RunningClaude);
+    }
+
+    #[test]
+    fn test_resumable_session_info_truncated_id_short() {
+        // Session ID <= 8 chars should not be truncated
+        let info = ResumableSessionInfo::new(
+            "main",
+            "main",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.truncated_id(), "main");
+
+        let info = ResumableSessionInfo::new(
+            "abcd1234",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.truncated_id(), "abcd1234");
+    }
+
+    #[test]
+    fn test_resumable_session_info_truncated_id_long() {
+        // Session ID > 8 chars should be truncated to first 8
+        let info = ResumableSessionInfo::new(
+            "abcd12345678",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.truncated_id(), "abcd1234");
+
+        let info = ResumableSessionInfo::new(
+            "very-long-session-id-here",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.truncated_id(), "very-lon");
+    }
+
+    #[test]
+    fn test_resumable_session_info_menu_label() {
+        // Format: "branch-name (session-id-truncated)"
+        let info = ResumableSessionInfo::new(
+            "main",
+            "main",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.menu_label(), "main (main)");
+
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/login",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.menu_label(), "feature/login (abc12345)");
+
+        // Long session ID should be truncated in label
+        let info = ResumableSessionInfo::new(
+            "abcd12345678",
+            "feature/test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
+        assert_eq!(info.menu_label(), "feature/test (abcd1234)");
+    }
+
+    #[test]
+    fn test_is_resumable_session_stale() {
+        // Stale sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: true, // Stale!
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_running() {
+        // Running sessions are resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true, // Running
+            },
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_idle_not_resumable() {
+        // Idle sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: Some(MachineState::Idle),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_completed_not_resumable() {
+        // Completed sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_other_states_resumable() {
+        // Other states (like Reviewing, Committing) are resumable
+        let states = vec![
+            MachineState::RunningClaude,
+            MachineState::Reviewing,
+            MachineState::Correcting,
+            MachineState::Committing,
+            MachineState::CreatingPR,
+            MachineState::LoadingSpec,
+            MachineState::GeneratingSpec,
+            MachineState::PickingStory,
+            MachineState::Failed,
+            MachineState::Initializing,
+        ];
+
+        for state in states {
+            let session = SessionStatus {
+                metadata: crate::state::SessionMetadata {
+                    session_id: "test".to_string(),
+                    worktree_path: std::path::PathBuf::from("/tmp/test"),
+                    branch_name: "test-branch".to_string(),
+                    created_at: chrono::Utc::now(),
+                    last_active_at: chrono::Utc::now(),
+                    is_running: false,
+                },
+                machine_state: Some(state.clone()),
+                current_story: None,
+                is_current: false,
+                is_stale: false,
+            };
+            assert!(
+                is_resumable_session(&session),
+                "State {:?} should be resumable",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_resumable_session_no_machine_state() {
+        // Sessions with no machine state are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: None, // No machine state
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_build_context_menu_no_resumable_sessions() {
+        // Test with a non-existent project (will have no sessions)
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("nonexistent-project-12345");
+
+        // Should have Status, Describe, separator, Resume (disabled), separator, Clean
+        assert_eq!(items.len(), 6);
+
+        // Resume should be disabled with no session ID
+        match &items[3] {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
+                assert_eq!(label, "Resume");
+                assert_eq!(action, &ContextMenuAction::Resume(None));
+                assert!(!enabled, "Resume should be disabled when no sessions");
+            }
+            _ => panic!("Expected Resume action"),
+        }
+    }
+
+    #[test]
+    fn test_get_resumable_sessions_nonexistent_project() {
+        // Non-existent project should return empty vec
+        let app = Autom8App::new();
+        let sessions = app.get_resumable_sessions("nonexistent-project-xyz123");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_resume_action_contains_session_id() {
+        // Verify that Resume action can hold session ID
+        let action = ContextMenuAction::Resume(Some("abc12345".to_string()));
+        if let ContextMenuAction::Resume(Some(id)) = action {
+            assert_eq!(id, "abc12345");
+        } else {
+            panic!("Expected Resume action with session ID");
+        }
+
+        let action_none = ContextMenuAction::Resume(None);
+        assert!(matches!(action_none, ContextMenuAction::Resume(None)));
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_basic() {
+        // Test basic formatting of resume info
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/login",
+            std::path::PathBuf::from("/home/user/projects/my-project-wt-feature-login"),
+            MachineState::RunningClaude,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        // Should have header, blank line, 4 info lines, blank line, instruction
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[0], "Resume Session Information");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "Session ID:    abc12345");
+        assert_eq!(lines[3], "Branch:        feature/login");
+        assert_eq!(
+            lines[4],
+            "Worktree Path: /home/user/projects/my-project-wt-feature-login"
+        );
+        assert_eq!(lines[5], "Current State: Running Claude");
+        assert_eq!(lines[6], "");
+        assert_eq!(
+            lines[7],
+            "To resume, run `autom8 resume --session abc12345` in terminal"
+        );
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_different_states() {
+        // Test formatting with different machine states
+        let states_and_expected = vec![
+            (MachineState::Reviewing, "Current State: Reviewing"),
+            (MachineState::Correcting, "Current State: Correcting"),
+            (MachineState::Committing, "Current State: Committing"),
+            (MachineState::CreatingPR, "Current State: Creating PR"),
+            (MachineState::PickingStory, "Current State: Picking Story"),
+        ];
+
+        for (state, expected_line) in states_and_expected {
+            let info = ResumableSessionInfo::new(
+                "test123",
+                "test-branch",
+                std::path::PathBuf::from("/tmp/test"),
+                state,
+            );
+
+            let lines = format_resume_info_as_text(&info);
+            assert_eq!(
+                lines[5], expected_line,
+                "State {:?} should format correctly",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_main_session() {
+        // Test formatting for main repo session (session_id = "main")
+        let info = ResumableSessionInfo::new(
+            "main",
+            "feature/api",
+            std::path::PathBuf::from("/home/user/projects/my-project"),
+            MachineState::Reviewing,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        assert_eq!(lines[2], "Session ID:    main");
+        assert_eq!(
+            lines[7],
+            "To resume, run `autom8 resume --session main` in terminal"
+        );
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_long_paths() {
+        // Test formatting with long worktree paths
+        let info = ResumableSessionInfo::new(
+            "abcd1234",
+            "feature/very-long-branch-name",
+            std::path::PathBuf::from(
+                "/home/user/very/deep/nested/directory/structure/projects/my-project-wt-feature",
+            ),
+            MachineState::RunningClaude,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        // Long path should be preserved
+        assert!(lines[4].contains("/home/user/very/deep/nested/"));
+        assert_eq!(lines[3], "Branch:        feature/very-long-branch-name");
+    }
+
+    // =========================================================================
+    // US-006 Clean Menu Tests
+    // =========================================================================
+
+    #[test]
+    fn test_us006_cleanable_info_default() {
+        // Default CleanableInfo should have zero counts
+        let info = CleanableInfo::default();
+        assert_eq!(info.cleanable_worktrees, 0);
+        assert_eq!(info.orphaned_sessions, 0);
+        assert!(!info.has_cleanable());
+    }
+
+    #[test]
+    fn test_us006_cleanable_info_has_cleanable() {
+        // Test has_cleanable() with various combinations
+        let mut info = CleanableInfo::default();
+        assert!(!info.has_cleanable(), "Empty should have nothing cleanable");
+
+        info.cleanable_worktrees = 1;
+        assert!(info.has_cleanable(), "Should have cleanable with worktrees");
+
+        info.cleanable_worktrees = 0;
+        info.orphaned_sessions = 1;
+        assert!(info.has_cleanable(), "Should have cleanable with orphaned");
+
+        info.cleanable_worktrees = 2;
+        info.orphaned_sessions = 3;
+        assert!(
+            info.has_cleanable(),
+            "Should have cleanable with both types"
+        );
+    }
+
+    #[test]
+    fn test_us006_get_cleanable_info_nonexistent_project() {
+        // Non-existent project should return empty CleanableInfo
+        let app = Autom8App::new();
+        let info = app.get_cleanable_info("nonexistent-project-xyz123");
+        assert_eq!(info.cleanable_worktrees, 0);
+        assert_eq!(info.orphaned_sessions, 0);
+        assert!(!info.has_cleanable());
+    }
+
+    #[test]
+    fn test_us006_clean_menu_disabled_when_nothing_to_clean() {
+        // Test with a non-existent project (will have no sessions)
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("nonexistent-project-12345");
+
+        // Find the Clean menu item (last item)
+        let clean_item = items.last().expect("Should have Clean item");
+
+        match clean_item {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(!enabled, "Clean should be disabled when nothing to clean");
+                assert!(
+                    items.is_empty(),
+                    "Disabled Clean should have no submenu items"
+                );
+            }
+            _ => panic!("Expected Clean to be a Submenu"),
+        }
+    }
+
+    #[test]
     fn test_us010_tooltip_uses_display_format() {
         // Test that paths use display() format for tooltip (not debug format)
         let path_result = crate::config::global_config_path();
@@ -6215,6 +9765,23 @@ mod tests {
         assert!(
             display_str.len() <= debug_str.len(),
             "Display format should be shorter than debug format"
+        );
+    }
+
+    #[test]
+    fn test_us006_clean_action_variants() {
+        // Verify CleanWorktrees and CleanOrphaned actions exist and are distinct
+        let worktrees = ContextMenuAction::CleanWorktrees;
+        let orphaned = ContextMenuAction::CleanOrphaned;
+
+        assert_ne!(worktrees, orphaned, "Actions should be distinct");
+        assert!(
+            matches!(worktrees, ContextMenuAction::CleanWorktrees),
+            "Should be CleanWorktrees"
+        );
+        assert!(
+            matches!(orphaned, ContextMenuAction::CleanOrphaned),
+            "Should be CleanOrphaned"
         );
     }
 
@@ -6299,6 +9866,45 @@ mod tests {
     }
 
     #[test]
+    fn test_us006_clean_menu_item_with_worktrees_action() {
+        // Test creating a Clean submenu item with Worktrees action
+        let submenu_items = vec![ContextMenuItem::action(
+            "Worktrees (3)",
+            ContextMenuAction::CleanWorktrees,
+        )];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 1);
+
+                // Verify the submenu item
+                match &items[0] {
+                    ContextMenuItem::Action {
+                        label,
+                        action,
+                        enabled,
+                    } => {
+                        assert_eq!(label, "Worktrees (3)");
+                        assert_eq!(action, &ContextMenuAction::CleanWorktrees);
+                        assert!(*enabled);
+                    }
+                    _ => panic!("Expected Action item"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
     fn test_us011_refresh_called_on_render_config() {
         // Verify that render_config calls refresh_config_scope_data
         // We can test this by checking that the method exists and is callable
@@ -6313,6 +9919,87 @@ mod tests {
         assert!(
             result.is_ok(),
             "project_config_path_for should return a valid path"
+        );
+    }
+
+    #[test]
+    fn test_us006_clean_menu_item_with_orphaned_action() {
+        // Test creating a Clean submenu item with Orphaned action
+        let submenu_items = vec![ContextMenuItem::action(
+            "Orphaned (5)",
+            ContextMenuAction::CleanOrphaned,
+        )];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu { items, .. } => {
+                assert_eq!(items.len(), 1);
+
+                // Verify the submenu item
+                match &items[0] {
+                    ContextMenuItem::Action { label, action, .. } => {
+                        assert_eq!(label, "Orphaned (5)");
+                        assert_eq!(action, &ContextMenuAction::CleanOrphaned);
+                    }
+                    _ => panic!("Expected Action item"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_clean_menu_with_both_options() {
+        // Test creating a Clean submenu with both Worktrees and Orphaned options
+        let submenu_items = vec![
+            ContextMenuItem::action("Worktrees (2)", ContextMenuAction::CleanWorktrees),
+            ContextMenuItem::action("Orphaned (1)", ContextMenuAction::CleanOrphaned),
+        ];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu { enabled, items, .. } => {
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 2);
+
+                // Verify both items
+                match &items[0] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanWorktrees);
+                    }
+                    _ => panic!("Expected CleanWorktrees action"),
+                }
+
+                match &items[1] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanOrphaned);
+                    }
+                    _ => panic!("Expected CleanOrphaned action"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us006_spawn_clean_worktrees_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_clean_worktrees_command will actually try to spawn autom8,
+        // but we're just testing that a tab is created
+        let initial_tab_count = app.tab_count();
+
+        app.spawn_clean_worktrees_command("test-project");
+
+        // Should have created a new tab
+        assert_eq!(app.tab_count(), initial_tab_count + 1);
+
+        // Tab should be for clean-worktrees command
+        let tab = app.tabs().last().unwrap();
+        assert!(tab.closable, "Command output tab should be closable");
+        assert!(
+            tab.label.contains("Clean-worktrees"),
+            "Tab label should contain 'Clean-worktrees'"
         );
     }
 
@@ -6333,5 +10020,824 @@ mod tests {
         assert!(app.project_has_config("project-with-config"));
         assert!(!app.project_has_config("project-without-config"));
         assert!(!app.project_has_config("unknown-project")); // Unknown returns false
+    }
+
+    #[test]
+    fn test_us006_spawn_clean_orphaned_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_clean_orphaned_command will actually try to spawn autom8,
+        // but we're just testing that a tab is created
+        let initial_tab_count = app.tab_count();
+
+        app.spawn_clean_orphaned_command("test-project");
+
+        // Should have created a new tab
+        assert_eq!(app.tab_count(), initial_tab_count + 1);
+
+        // Tab should be for clean-orphaned command
+        let tab = app.tabs().last().unwrap();
+        assert!(tab.closable, "Command output tab should be closable");
+        assert!(
+            tab.label.contains("Clean-orphaned"),
+            "Tab label should contain 'Clean-orphaned'"
+        );
+    }
+
+    #[test]
+    fn test_us006_is_cleanable_session_helper() {
+        use crate::state::{SessionMetadata, SessionStatus};
+        use std::path::PathBuf;
+
+        // Create a test session metadata
+        let metadata = SessionMetadata {
+            session_id: "test123".to_string(),
+            worktree_path: PathBuf::from("/tmp/test"),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        // Test Completed state - should be cleanable
+        let completed_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            is_cleanable_session(&completed_session),
+            "Completed session should be cleanable"
+        );
+
+        // Test Failed state - should be cleanable
+        let failed_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::Failed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            is_cleanable_session(&failed_session),
+            "Failed session should be cleanable"
+        );
+
+        // Test RunningClaude state - should NOT be cleanable (safety)
+        let running_session = SessionStatus {
+            metadata: metadata.clone(),
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            !is_cleanable_session(&running_session),
+            "Running session should NOT be cleanable"
+        );
+
+        // Test session with is_running = true - should NOT be cleanable
+        let mut metadata_running = metadata.clone();
+        metadata_running.is_running = true;
+        let is_running_session = SessionStatus {
+            metadata: metadata_running,
+            machine_state: Some(MachineState::Completed), // Even if state says completed
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(
+            !is_cleanable_session(&is_running_session),
+            "Session with is_running=true should NOT be cleanable"
+        );
+    }
+
+    // ======================================================================
+    // Tests for US-002: Direct Data Layer Status Display
+    // ======================================================================
+
+    #[test]
+    fn test_us002_format_machine_state_text_all_variants() {
+        // Verify all machine states have text representations
+        assert_eq!(format_machine_state_text(&MachineState::Idle), "Idle");
+        assert_eq!(
+            format_machine_state_text(&MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::RunningClaude),
+            "Running Claude"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Reviewing),
+            "Reviewing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Correcting),
+            "Correcting"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Committing),
+            "Committing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::CreatingPR),
+            "Creating PR"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Completed),
+            "Completed"
+        );
+        assert_eq!(format_machine_state_text(&MachineState::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_us002_format_sessions_empty() {
+        // Empty sessions should produce informative message
+        let sessions: Vec<SessionStatus> = vec![];
+        let lines = format_sessions_as_text(&sessions);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("No sessions found"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_single_session() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: "main".to_string(),
+            worktree_path: PathBuf::from("/projects/test"),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: true,
+        };
+
+        let sessions = vec![SessionStatus {
+            metadata,
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: Some("US-001".to_string()),
+            is_current: true,
+            is_stale: false,
+        }];
+
+        let lines = format_sessions_as_text(&sessions);
+
+        // Should have header
+        assert!(lines[0].contains("Sessions for this project"));
+
+        // Should have session ID with current marker
+        let session_line = lines.iter().find(|l| l.contains("main")).unwrap();
+        assert!(session_line.contains("→")); // current indicator
+        assert!(session_line.contains("(current)"));
+
+        // Should have branch
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Branch:") && l.contains("feature/test")));
+
+        // Should have state
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("State:") && l.contains("Running Claude")));
+
+        // Should have story
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Story:") && l.contains("US-001")));
+
+        // Should have started time
+        assert!(lines.iter().any(|l| l.contains("Started:")));
+
+        // Should have summary
+        let summary = lines.last().unwrap();
+        assert!(summary.contains("1 session"));
+        assert!(summary.contains("1 running"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_stale_marker() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: "abc12345".to_string(),
+            worktree_path: PathBuf::from("/projects/deleted"),
+            branch_name: "feature/old".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: true, // Still marked as running but stale
+        };
+
+        let sessions = vec![SessionStatus {
+            metadata,
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: true, // Worktree deleted
+        }];
+
+        let lines = format_sessions_as_text(&sessions);
+
+        // Should have stale indicator and marker
+        let session_line = lines.iter().find(|l| l.contains("abc12345")).unwrap();
+        assert!(session_line.contains("✗")); // stale indicator
+        assert!(session_line.contains("[stale]"));
+
+        // Summary should count stale
+        let summary = lines.last().unwrap();
+        assert!(summary.contains("1 stale"));
+        // Running count should NOT include stale sessions
+        assert!(!summary.contains("1 running"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_indicators() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let make_metadata = |id: &str| SessionMetadata {
+            session_id: id.to_string(),
+            worktree_path: PathBuf::from(format!("/projects/{}", id)),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        // Current session gets →
+        let current = SessionStatus {
+            metadata: make_metadata("current"),
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: true,
+            is_stale: false,
+        };
+
+        // Running (not current) gets ●
+        let mut running_metadata = make_metadata("running");
+        running_metadata.is_running = true;
+        let running = SessionStatus {
+            metadata: running_metadata,
+            machine_state: Some(MachineState::Reviewing),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+
+        // Idle gets ○
+        let idle = SessionStatus {
+            metadata: make_metadata("idle"),
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+
+        // Stale gets ✗
+        let stale = SessionStatus {
+            metadata: make_metadata("stale"),
+            machine_state: None,
+            current_story: None,
+            is_current: false,
+            is_stale: true,
+        };
+
+        let sessions = vec![current, running, idle, stale];
+        let lines = format_sessions_as_text(&sessions);
+
+        // Check indicators
+        let current_line = lines.iter().find(|l| l.contains("current")).unwrap();
+        assert!(current_line.contains("→"));
+
+        let running_line = lines
+            .iter()
+            .find(|l| l.contains("running") && !l.contains("("))
+            .unwrap();
+        assert!(running_line.contains("●"));
+
+        let idle_line = lines.iter().find(|l| l.contains("idle")).unwrap();
+        assert!(idle_line.contains("○"));
+
+        let stale_line = lines
+            .iter()
+            .find(|l| l.contains("stale") && !l.contains("("))
+            .unwrap();
+        assert!(stale_line.contains("✗"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_summary_counts() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let make_session = |id: &str, is_running: bool, is_stale: bool| {
+            let metadata = SessionMetadata {
+                session_id: id.to_string(),
+                worktree_path: PathBuf::from(format!("/projects/{}", id)),
+                branch_name: "feature/test".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running,
+            };
+            SessionStatus {
+                metadata,
+                machine_state: Some(MachineState::RunningClaude),
+                current_story: None,
+                is_current: false,
+                is_stale,
+            }
+        };
+
+        let sessions = vec![
+            make_session("s1", true, false),  // running, not stale
+            make_session("s2", true, false),  // running, not stale
+            make_session("s3", true, true),   // would be running but stale
+            make_session("s4", false, false), // not running
+        ];
+
+        let lines = format_sessions_as_text(&sessions);
+        let summary = lines.last().unwrap();
+
+        assert!(summary.contains("4 sessions"));
+        assert!(summary.contains("2 running")); // s1 and s2 only
+        assert!(summary.contains("1 stale")); // s3
+    }
+
+    #[test]
+    fn test_us002_spawn_status_creates_tab() {
+        // Verify spawn_status_command still creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_status_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Status:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    // ========================================================================
+    // US-003: Project Description Formatting Tests
+    // ========================================================================
+
+    #[test]
+    fn test_us003_format_project_description_basic() {
+        use crate::config::ProjectDescription;
+        use std::path::PathBuf;
+
+        let desc = ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/home/user/.config/autom8/test-project"),
+            has_active_run: false,
+            run_status: None,
+            current_story: None,
+            current_branch: None,
+            specs: vec![],
+            spec_md_count: 0,
+            runs_count: 0,
+        };
+
+        let lines = format_project_description_as_text(&desc);
+
+        // Should have project header
+        assert!(lines.iter().any(|l| l.contains("Project: test-project")));
+
+        // Should have path
+        assert!(lines.iter().any(|l| l.contains("Path:")));
+
+        // Should have status (idle)
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Status:") && l.contains("[idle]")));
+
+        // Should have "No specs found" when empty
+        assert!(lines.iter().any(|l| l.contains("No specs found")));
+
+        // Should have file counts summary
+        assert!(lines.iter().any(|l| l.contains("Files:")));
+    }
+
+    #[test]
+    fn test_us003_format_project_description_with_status() {
+        use crate::config::ProjectDescription;
+        use crate::state::RunStatus;
+        use std::path::PathBuf;
+
+        // Test running status
+        let desc = ProjectDescription {
+            name: "test".to_string(),
+            path: PathBuf::from("/test"),
+            has_active_run: true,
+            run_status: Some(RunStatus::Running),
+            current_story: Some("US-001".to_string()),
+            current_branch: Some("feature/test".to_string()),
+            specs: vec![],
+            spec_md_count: 2,
+            runs_count: 5,
+        };
+
+        let lines = format_project_description_as_text(&desc);
+
+        // Should show running status
+        assert!(lines.iter().any(|l| l.contains("[running]")));
+
+        // Should show branch
+        assert!(lines.iter().any(|l| l.contains("Branch: feature/test")));
+
+        // Should show current story
+        assert!(lines.iter().any(|l| l.contains("Current Story: US-001")));
+
+        // Should show file counts
+        let files_line = lines.iter().find(|l| l.contains("Files:")).unwrap();
+        assert!(files_line.contains("2 spec md"));
+        assert!(files_line.contains("5 archived runs"));
+    }
+
+    #[test]
+    fn test_us003_format_project_description_all_statuses() {
+        use crate::config::ProjectDescription;
+        use crate::state::RunStatus;
+        use std::path::PathBuf;
+
+        let make_desc = |status: Option<RunStatus>| ProjectDescription {
+            name: "test".to_string(),
+            path: PathBuf::from("/test"),
+            has_active_run: status.is_some(),
+            run_status: status,
+            current_story: None,
+            current_branch: None,
+            specs: vec![],
+            spec_md_count: 0,
+            runs_count: 0,
+        };
+
+        // Test each status
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Running)));
+        assert!(lines.iter().any(|l| l.contains("[running]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Failed)));
+        assert!(lines.iter().any(|l| l.contains("[failed]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Interrupted)));
+        assert!(lines.iter().any(|l| l.contains("[interrupted]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Completed)));
+        assert!(lines.iter().any(|l| l.contains("[completed]")));
+
+        let lines = format_project_description_as_text(&make_desc(None));
+        assert!(lines.iter().any(|l| l.contains("[idle]")));
+    }
+
+    #[test]
+    fn test_us003_format_spec_summary() {
+        use crate::config::{SpecSummary, StorySummary};
+        use std::path::PathBuf;
+
+        let spec = SpecSummary {
+            filename: "spec-feature.json".to_string(),
+            path: PathBuf::from("/test/spec-feature.json"),
+            project_name: "my-project".to_string(),
+            branch_name: "feature/new-thing".to_string(),
+            description: "Add a new feature to handle user input".to_string(),
+            stories: vec![
+                StorySummary {
+                    id: "US-001".to_string(),
+                    title: "First story".to_string(),
+                    passes: true,
+                },
+                StorySummary {
+                    id: "US-002".to_string(),
+                    title: "Second story".to_string(),
+                    passes: false,
+                },
+            ],
+            completed_count: 1,
+            total_count: 2,
+        };
+
+        let lines = format_spec_summary_as_text(&spec);
+
+        // Should have filename header
+        assert!(lines.iter().any(|l| l.contains("spec-feature.json")));
+
+        // Should have project name
+        assert!(lines.iter().any(|l| l.contains("Project: my-project")));
+
+        // Should have branch
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Branch:") && l.contains("feature/new-thing")));
+
+        // Should have description
+        assert!(lines.iter().any(|l| l.contains("Description:")));
+
+        // Should have progress
+        let progress_line = lines.iter().find(|l| l.contains("Progress:")).unwrap();
+        assert!(progress_line.contains("1/2 stories complete"));
+
+        // Should have user stories section
+        assert!(lines.iter().any(|l| l.contains("User Stories:")));
+
+        // Should show completed story with checkmark
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("✓") && l.contains("US-001")));
+
+        // Should show incomplete story with empty circle
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("○") && l.contains("US-002")));
+    }
+
+    #[test]
+    fn test_us003_make_progress_bar_text() {
+        // Empty progress
+        let bar = make_progress_bar_text(0, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '░').count(), 10);
+
+        // Full progress
+        let bar = make_progress_bar_text(10, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '█').count(), 10);
+
+        // Half progress
+        let bar = make_progress_bar_text(5, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '█').count(), 5);
+        assert_eq!(bar.chars().filter(|c| *c == '░').count(), 5);
+
+        // Zero total should return empty bar
+        let bar = make_progress_bar_text(0, 0, 10);
+        assert_eq!(bar, "          "); // 10 spaces
+    }
+
+    #[test]
+    fn test_us003_spawn_describe_creates_tab() {
+        // Verify spawn_describe_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_describe_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Describe:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    // =========================================================================
+    // US-004 Tests: Replace Clean with Direct Logic Call
+    // =========================================================================
+
+    #[test]
+    fn test_us004_format_cleanup_summary_empty() {
+        // Test formatting empty summary (no sessions cleaned)
+        let summary = crate::commands::CleanupSummary::default();
+        let lines = format_cleanup_summary_as_text(&summary, "Test Operation");
+
+        assert!(!lines.is_empty());
+        assert!(
+            lines.iter().any(|l| l.contains("Test Operation")),
+            "Should include operation name"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("No sessions or worktrees were removed")),
+            "Should indicate nothing was removed"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_removed_sessions() {
+        // Test formatting summary with removed sessions
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 3,
+            worktrees_removed: 2,
+            bytes_freed: 1048576, // 1 MB
+            sessions_skipped: vec![],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Worktrees");
+
+        assert!(
+            lines.iter().any(|l| l.contains("3 sessions")),
+            "Should show 3 sessions removed"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("2 worktrees")),
+            "Should show 2 worktrees removed"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("1.0 MB")),
+            "Should show freed space"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_single_session() {
+        // Test singular form for 1 session
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 1,
+            worktrees_removed: 1,
+            bytes_freed: 1024,
+            sessions_skipped: vec![],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Orphaned");
+
+        // Should use singular "session" and "worktree" (not "sessions"/"worktrees")
+        let line = lines.iter().find(|l| l.contains("session")).unwrap();
+        assert!(
+            !line.contains("sessions"),
+            "Should use singular 'session' for count of 1"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_skipped() {
+        // Test formatting summary with skipped sessions
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 1,
+            worktrees_removed: 0,
+            bytes_freed: 512,
+            sessions_skipped: vec![
+                crate::commands::SkippedSession {
+                    session_id: "session1".to_string(),
+                    reason: "Current session".to_string(),
+                },
+                crate::commands::SkippedSession {
+                    session_id: "session2".to_string(),
+                    reason: "Uncommitted changes".to_string(),
+                },
+            ],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean All");
+
+        assert!(
+            lines.iter().any(|l| l.contains("Skipped")),
+            "Should have skipped section"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("session1")),
+            "Should list first skipped session"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Current session")),
+            "Should show reason for first skip"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Uncommitted changes")),
+            "Should show reason for second skip"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_errors() {
+        // Test formatting summary with errors
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 2,
+            worktrees_removed: 1,
+            bytes_freed: 2048,
+            sessions_skipped: vec![],
+            errors: vec![
+                "Failed to remove worktree /tmp/test".to_string(),
+                "Permission denied".to_string(),
+            ],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Operation");
+
+        assert!(
+            lines.iter().any(|l| l.contains("Errors")),
+            "Should have errors section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Failed to remove worktree")),
+            "Should list first error"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Permission denied")),
+            "Should list second error"
+        );
+    }
+
+    #[test]
+    fn test_us004_spawn_clean_worktrees_creates_tab() {
+        // Verify spawn_clean_worktrees_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_clean_worktrees_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_us004_spawn_clean_orphaned_creates_tab() {
+        // Verify spawn_clean_orphaned_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_clean_orphaned_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
     }
 }

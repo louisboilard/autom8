@@ -248,6 +248,7 @@ All checks must pass before merging PRs.
 7. **Session identity:** In main repo, session ID is `"main"`; in worktrees, it's a hash of the path
 8. **Stale sessions:** If a worktree is manually deleted, its session becomes "stale" and won't block new runs
 9. **Project identity:** Project name is derived from git repo root, not CWD (ensures all worktrees share config)
+10. **State persistence ordering:** In `run()` and `run_from_spec()`, state must NOT be persisted until after worktree context is determined. Saving state before `effective_state_manager` is known creates phantom sessions. Visual transitions (`print_state_transition()`) are fine; only `save()` calls must be deferred.
 
 ## Worktree Architecture
 

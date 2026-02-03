@@ -676,17 +676,19 @@ pub fn list_projects() -> Result<Vec<String>> {
     Ok(projects)
 }
 
-/// Check if a file is already inside the project's config directory.
+/// Check if a file is already inside the autom8 config directory.
 ///
-/// Returns true if the file path is inside `~/.config/autom8/<project-name>/`.
+/// Returns true if the file path is inside `~/.config/autom8/` (any project).
+/// This prevents moving files that are already in the config area, even if they're
+/// in a different project's directory (e.g., a worktree-named project).
 pub fn is_in_config_dir(file_path: &std::path::Path) -> Result<bool> {
-    let config_dir = project_config_dir()?;
+    let base_config = config_dir()?;
 
     // Canonicalize both paths to handle relative paths and symlinks
     let canonical_file = file_path
         .canonicalize()
         .unwrap_or_else(|_| file_path.to_path_buf());
-    let canonical_config = config_dir.canonicalize().unwrap_or(config_dir);
+    let canonical_config = base_config.canonicalize().unwrap_or(base_config);
 
     Ok(canonical_file.starts_with(&canonical_config))
 }
@@ -1458,6 +1460,26 @@ mod tests {
 
         // Cleanup
         fs::remove_file(&test_file).ok();
+    }
+
+    #[test]
+    fn test_is_in_config_dir_true_for_file_in_different_project() {
+        // Create a file in a different project's directory within the config area
+        // This simulates a file in a worktree-named project directory
+        let base = config_dir().unwrap();
+        let other_project_spec_dir = base.join("some-other-project-wt-feature").join("spec");
+        fs::create_dir_all(&other_project_spec_dir).unwrap();
+        let test_file = other_project_spec_dir.join("test.md");
+        fs::write(&test_file, "# Test").unwrap();
+
+        let result = is_in_config_dir(&test_file).unwrap();
+        assert!(
+            result,
+            "File in different project's config dir should return true"
+        );
+
+        // Cleanup
+        fs::remove_dir_all(base.join("some-other-project-wt-feature")).ok();
     }
 
     #[test]
