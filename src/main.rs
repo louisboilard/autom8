@@ -4,9 +4,10 @@
 
 use autom8::commands::{
     all_sessions_status_command, clean_command, config_display_command, config_reset_command,
-    config_set_command, default_command, describe_command, global_status_command, init_command,
-    list_command, monitor_command, pr_review_command, projects_command, resume_command,
-    run_command, run_with_file, status_command, CleanOptions, ConfigScope, ConfigSubcommand,
+    config_set_command, default_command, describe_command, global_status_command, gui_command,
+    init_command, list_command, monitor_command, pr_review_command, projects_command,
+    resume_command, run_command, run_with_file, status_command, CleanOptions, ConfigScope,
+    ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -236,6 +237,13 @@ Run 'autom8 config <subcommand> --help' for more details on each subcommand.")]
         project: Option<String>,
     },
 
+    /// Launch the native GUI to monitor autom8 activity
+    Gui {
+        /// Filter to a specific project
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+
     /// Output shell completion script to stdout (hidden utility command)
     #[command(hide = true)]
     Completions {
@@ -371,6 +379,8 @@ fn main() {
                 }
 
                 (None, Some(Commands::Monitor { project })) => monitor_command(project.as_deref()),
+
+                (None, Some(Commands::Gui { project })) => gui_command(project.as_deref()),
 
                 // Completions already handled above
                 (None, Some(Commands::Completions { .. })) => unreachable!(),

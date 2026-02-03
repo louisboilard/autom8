@@ -75,6 +75,9 @@ pub enum Autom8Error {
 
     #[error("Interrupted by user")]
     Interrupted,
+
+    #[error("GUI error: {0}")]
+    GuiError(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

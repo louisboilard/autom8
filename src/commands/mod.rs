@@ -16,12 +16,14 @@
 //! - [`describe`] - Show project details
 //! - [`pr_review`] - Analyze and fix PR review comments
 //! - [`monitor`] - TUI dashboard
+//! - [`gui`] - Native GUI application
 //! - [`default`] - Interactive spec creation flow
 
 mod clean;
 mod config;
 mod default;
 mod describe;
+mod gui;
 mod init;
 mod list;
 mod monitor;
@@ -37,6 +39,7 @@ pub use config::{
 };
 pub use default::default_command;
 pub use describe::describe_command;
+pub use gui::gui_command;
 pub use init::init_command;
 pub use list::list_command;
 pub use monitor::monitor_command;

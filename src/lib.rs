@@ -29,6 +29,7 @@ pub mod display;
 pub mod error;
 pub mod gh;
 pub mod git;
+pub mod gui;
 pub mod knowledge;
 pub mod monitor;
 pub mod output;
