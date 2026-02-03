@@ -472,6 +472,37 @@ pub fn save_project_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Save configuration to a specific project's config file by name.
+///
+/// This writes the configuration with explanatory comments to
+/// `~/.config/autom8/<project_name>/config.toml`.
+///
+/// # Arguments
+///
+/// * `project_name` - The name of the project
+/// * `config` - The configuration to save
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The home directory cannot be determined
+/// - The project config directory cannot be created
+/// - The config file cannot be written
+pub fn save_project_config_for(project_name: &str, config: &Config) -> Result<()> {
+    let config_path = project_config_path_for(project_name)?;
+
+    // Ensure the project config directory exists
+    let config_dir = project_config_dir_for(project_name)?;
+    fs::create_dir_all(&config_dir)?;
+
+    // Generate config content with comments
+    let content = generate_config_with_comments(config);
+
+    fs::write(&config_path, content)?;
+
+    Ok(())
+}
+
 /// Get the effective configuration for the current project.
 ///
 /// This function returns the resolved configuration by checking:
