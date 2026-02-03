@@ -344,6 +344,154 @@ impl ProjectRowInteraction {
 }
 
 // ============================================================================
+// Command Output Types (Command Output Tab - US-007)
+// ============================================================================
+
+/// Status of a command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandStatus {
+    /// Command is currently running.
+    Running,
+    /// Command completed successfully (exit code 0).
+    Completed,
+    /// Command failed (non-zero exit code or error).
+    Failed,
+}
+
+/// Identifier for a command output, used for tab matching and cache lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommandOutputId {
+    /// Name of the project the command was run for.
+    pub project: String,
+    /// Name of the command (e.g., "status", "describe").
+    pub command: String,
+    /// Unique identifier for this command execution (UUID).
+    pub id: String,
+}
+
+impl CommandOutputId {
+    /// Create a new command output ID.
+    pub fn new(project: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            project: project.into(),
+            command: command.into(),
+            id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// Create a command output ID with a specific ID (for testing).
+    #[cfg(test)]
+    pub fn with_id(
+        project: impl Into<String>,
+        command: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Self {
+        Self {
+            project: project.into(),
+            command: command.into(),
+            id: id.into(),
+        }
+    }
+
+    /// Returns the cache key for this command output.
+    pub fn cache_key(&self) -> String {
+        format!("{}:{}:{}", self.project, self.command, self.id)
+    }
+
+    /// Returns the tab label for this command output.
+    pub fn tab_label(&self) -> String {
+        // Capitalize first letter of command
+        let command_display = if self.command.is_empty() {
+            "Command".to_string()
+        } else {
+            let mut chars = self.command.chars();
+            match chars.next() {
+                None => "Command".to_string(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        };
+        format!("{}: {}", command_display, self.project)
+    }
+}
+
+/// State of a command execution for display in a tab.
+#[derive(Debug, Clone)]
+pub struct CommandExecution {
+    /// The command output identifier.
+    pub id: CommandOutputId,
+    /// Current status of the command.
+    pub status: CommandStatus,
+    /// Lines of stdout output.
+    pub stdout: Vec<String>,
+    /// Lines of stderr output.
+    pub stderr: Vec<String>,
+    /// Exit code if the command has finished.
+    pub exit_code: Option<i32>,
+    /// Whether auto-scroll is enabled (scroll to bottom on new output).
+    pub auto_scroll: bool,
+}
+
+impl CommandExecution {
+    /// Create a new command execution in the running state.
+    pub fn new(id: CommandOutputId) -> Self {
+        Self {
+            id,
+            status: CommandStatus::Running,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+            auto_scroll: true,
+        }
+    }
+
+    /// Add a line to stdout.
+    pub fn add_stdout(&mut self, line: String) {
+        self.stdout.push(line);
+    }
+
+    /// Add a line to stderr.
+    pub fn add_stderr(&mut self, line: String) {
+        self.stderr.push(line);
+    }
+
+    /// Mark the command as completed with the given exit code.
+    pub fn complete(&mut self, exit_code: i32) {
+        self.exit_code = Some(exit_code);
+        self.status = if exit_code == 0 {
+            CommandStatus::Completed
+        } else {
+            CommandStatus::Failed
+        };
+    }
+
+    /// Mark the command as failed (e.g., spawn error).
+    pub fn fail(&mut self, error_message: String) {
+        self.stderr.push(error_message);
+        self.status = CommandStatus::Failed;
+    }
+
+    /// Returns true if the command is still running.
+    pub fn is_running(&self) -> bool {
+        self.status == CommandStatus::Running
+    }
+
+    /// Returns true if the command has completed (successfully or not).
+    pub fn is_finished(&self) -> bool {
+        self.status != CommandStatus::Running
+    }
+
+    /// Returns the combined output (stdout + stderr interleaved would require timestamps,
+    /// so we return stdout followed by stderr).
+    pub fn combined_output(&self) -> Vec<&str> {
+        let mut output: Vec<&str> = self.stdout.iter().map(|s| s.as_str()).collect();
+        if !self.stderr.is_empty() {
+            output.extend(self.stderr.iter().map(|s| s.as_str()));
+        }
+        output
+    }
+}
+
+// ============================================================================
 // GUI-specific Extensions
 // ============================================================================
 
@@ -384,6 +532,9 @@ pub enum TabId {
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
+    /// A dynamic tab for viewing command output.
+    /// Contains the cache key (project:command:id) as identifier.
+    CommandOutput(String),
 }
 
 /// Information about a tab displayed in the tab bar.
@@ -546,6 +697,13 @@ pub struct Autom8App {
     /// When Some, a context menu is displayed at the specified position.
     /// Only one context menu can be open at a time.
     context_menu: Option<ContextMenuState>,
+
+    // ========================================================================
+    // Command Execution State (Command Output Tab - US-007)
+    // ========================================================================
+    /// Cached command executions for open command output tabs.
+    /// Maps cache_key (project:command:id) to the command execution state.
+    command_executions: std::collections::HashMap<String, CommandExecution>,
 }
 
 impl Default for Autom8App {
@@ -589,6 +747,7 @@ impl Autom8App {
             refresh_interval,
             sidebar_collapsed: false,
             context_menu: None,
+            command_executions: std::collections::HashMap::new(),
         };
         // Initial data load
         app.refresh_data();
@@ -789,7 +948,7 @@ impl Autom8App {
         match &tab_id {
             TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
             TabId::Projects => self.current_tab = Tab::Projects,
-            TabId::RunDetail(_) => {
+            TabId::RunDetail(_) | TabId::CommandOutput(_) => {
                 // Dynamic tabs don't have a legacy equivalent,
                 // but we keep the last static tab for backward compat
             }
@@ -838,6 +997,65 @@ impl Autom8App {
         self.open_run_detail_tab(&entry.run_id, &label);
     }
 
+    /// Open a new command output tab.
+    /// Creates a new CommandExecution and opens a tab for it.
+    /// Returns the CommandOutputId for the new execution (to be used for updates).
+    pub fn open_command_output_tab(&mut self, project: &str, command: &str) -> CommandOutputId {
+        let id = CommandOutputId::new(project, command);
+        let cache_key = id.cache_key();
+        let tab_id = TabId::CommandOutput(cache_key.clone());
+        let label = id.tab_label();
+
+        // Create the command execution
+        let execution = CommandExecution::new(id.clone());
+        self.command_executions.insert(cache_key, execution);
+
+        // Create and activate the tab
+        let tab = TabInfo::closable(tab_id.clone(), label);
+        self.tabs.push(tab);
+        self.set_active_tab(tab_id);
+
+        id
+    }
+
+    /// Get a command execution by cache key.
+    pub fn get_command_execution(&self, cache_key: &str) -> Option<&CommandExecution> {
+        self.command_executions.get(cache_key)
+    }
+
+    /// Get a mutable command execution by cache key.
+    pub fn get_command_execution_mut(&mut self, cache_key: &str) -> Option<&mut CommandExecution> {
+        self.command_executions.get_mut(cache_key)
+    }
+
+    /// Update a command execution with new stdout output.
+    pub fn add_command_stdout(&mut self, cache_key: &str, line: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.add_stdout(line);
+        }
+    }
+
+    /// Update a command execution with new stderr output.
+    pub fn add_command_stderr(&mut self, cache_key: &str, line: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.add_stderr(line);
+        }
+    }
+
+    /// Mark a command execution as completed.
+    pub fn complete_command(&mut self, cache_key: &str, exit_code: i32) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.complete(exit_code);
+        }
+    }
+
+    /// Mark a command execution as failed.
+    pub fn fail_command(&mut self, cache_key: &str, error_message: String) {
+        if let Some(exec) = self.command_executions.get_mut(cache_key) {
+            exec.fail(error_message);
+        }
+    }
+
     /// Close a tab by ID.
     /// Returns true if the tab was closed, false if the tab doesn't exist or is not closable.
     /// If the closed tab was active, switches to the previous tab or Projects tab.
@@ -862,6 +1080,11 @@ impl Autom8App {
         // Clean up cached run state if it's a run detail tab
         if let TabId::RunDetail(run_id) = tab_id {
             self.run_detail_cache.remove(run_id);
+        }
+
+        // Clean up command execution state if it's a command output tab
+        if let TabId::CommandOutput(cache_key) = tab_id {
+            self.command_executions.remove(cache_key);
         }
 
         // If the closed tab was active, switch to another tab
@@ -1751,6 +1974,10 @@ impl Autom8App {
                 let run_id = run_id.clone();
                 self.render_run_detail(ui, &run_id);
             }
+            TabId::CommandOutput(cache_key) => {
+                let cache_key = cache_key.clone();
+                self.render_command_output(ui, &cache_key);
+            }
         }
     }
 
@@ -1997,6 +2224,251 @@ impl Autom8App {
                     });
                 });
         }
+    }
+
+    /// Render the command output view for a specific command execution.
+    fn render_command_output(&self, ui: &mut egui::Ui, cache_key: &str) {
+        // Get the command execution state
+        let execution = match self.command_executions.get(cache_key) {
+            Some(exec) => exec,
+            None => {
+                // No execution found - show placeholder
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(spacing::XXL);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("Command output not available")
+                                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+                return;
+            }
+        };
+
+        // Header with command info
+        self.render_command_output_header(ui, execution);
+
+        ui.add_space(spacing::MD);
+
+        // Output content with auto-scroll
+        self.render_command_output_content(ui, execution, cache_key);
+    }
+
+    /// Render the header for command output (status indicator, project, command).
+    fn render_command_output_header(&self, ui: &mut egui::Ui, execution: &CommandExecution) {
+        ui.horizontal(|ui| {
+            // Status badge
+            let (status_text, status_color) = match execution.status {
+                CommandStatus::Running => ("Running", colors::STATUS_RUNNING),
+                CommandStatus::Completed => ("Completed", colors::STATUS_SUCCESS),
+                CommandStatus::Failed => ("Failed", colors::STATUS_ERROR),
+            };
+
+            let badge_galley = ui.fonts(|f| {
+                f.layout_no_wrap(
+                    status_text.to_string(),
+                    typography::font(FontSize::Body, FontWeight::Medium),
+                    colors::TEXT_PRIMARY,
+                )
+            });
+            let badge_width = badge_galley.rect.width() + spacing::MD * 2.0;
+            let badge_height = badge_galley.rect.height() + spacing::XS * 2.0;
+
+            let (badge_rect, _) =
+                ui.allocate_exact_size(Vec2::new(badge_width, badge_height), Sense::hover());
+
+            ui.painter().rect_filled(
+                badge_rect,
+                Rounding::same(rounding::SMALL),
+                badge_background_color(status_color),
+            );
+
+            let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
+            ui.painter().galley(text_pos, badge_galley, status_color);
+
+            ui.add_space(spacing::MD);
+
+            // Spinner for running state
+            if execution.status == CommandStatus::Running {
+                self.render_inline_spinner(ui);
+                ui.add_space(spacing::SM);
+            }
+
+            // Title: "Command: project"
+            ui.label(
+                egui::RichText::new(execution.id.tab_label())
+                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+        });
+
+        // Show exit code if completed
+        if let Some(exit_code) = execution.exit_code {
+            ui.add_space(spacing::SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Exit code:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                ui.add_space(spacing::XS);
+
+                let exit_color = if exit_code == 0 {
+                    colors::STATUS_SUCCESS
+                } else {
+                    colors::STATUS_ERROR
+                };
+                ui.label(
+                    egui::RichText::new(exit_code.to_string())
+                        .font(typography::mono(FontSize::Body))
+                        .color(exit_color),
+                );
+            });
+        }
+    }
+
+    /// Render an inline spinner for loading states.
+    fn render_inline_spinner(&self, ui: &mut egui::Ui) {
+        let spinner_size = 16.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(spinner_size), Sense::hover());
+
+        if ui.is_rect_visible(rect) {
+            let center = rect.center();
+            let radius = spinner_size / 2.0 - 2.0;
+            let time = ui.input(|i| i.time);
+            let start_angle = (time * 2.0) as f32 % std::f32::consts::TAU;
+            let arc_length = std::f32::consts::PI * 1.5;
+
+            let n_points = 32;
+            let points: Vec<_> = (0..=n_points)
+                .map(|i| {
+                    let angle = start_angle + arc_length * (i as f32 / n_points as f32);
+                    egui::pos2(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    )
+                })
+                .collect();
+
+            ui.painter().add(egui::Shape::line(
+                points,
+                Stroke::new(2.0, colors::ACCENT),
+            ));
+
+            // Request repaint for animation
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Render the command output content in a scrollable area.
+    fn render_command_output_content(
+        &self,
+        ui: &mut egui::Ui,
+        execution: &CommandExecution,
+        _cache_key: &str,
+    ) {
+        // Calculate a unique ID for scroll state
+        let scroll_id = egui::Id::new("command_output_scroll").with(&execution.id.cache_key());
+
+        // Build scroll area - auto-scroll to bottom when auto_scroll is enabled
+        let scroll_area = egui::ScrollArea::vertical()
+            .id_salt(scroll_id)
+            .auto_shrink([false, false])
+            .stick_to_bottom(execution.auto_scroll);
+
+        // If running, request repaint to show spinner animation
+        if execution.is_running() {
+            ui.ctx().request_repaint();
+        }
+
+        scroll_area.show(ui, |ui| {
+            // Background for output area
+            let available_rect = ui.available_rect_before_wrap();
+            ui.painter().rect_filled(
+                available_rect,
+                Rounding::same(rounding::BUTTON),
+                colors::SURFACE_HOVER,
+            );
+
+            ui.add_space(spacing::SM);
+
+            egui::Frame::none()
+                .inner_margin(spacing::MD)
+                .show(ui, |ui| {
+                    // Render stdout
+                    if !execution.stdout.is_empty() {
+                        for line in &execution.stdout {
+                            // Use selectable_label for copy/paste support
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(line)
+                                        .font(typography::mono(FontSize::Small))
+                                        .color(colors::TEXT_PRIMARY),
+                                )
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        }
+                    }
+
+                    // Render stderr (in error color)
+                    if !execution.stderr.is_empty() {
+                        if !execution.stdout.is_empty() {
+                            ui.add_space(spacing::SM);
+                            ui.separator();
+                            ui.add_space(spacing::SM);
+                            ui.label(
+                                egui::RichText::new("Errors:")
+                                    .font(typography::font(FontSize::Small, FontWeight::Medium))
+                                    .color(colors::STATUS_ERROR),
+                            );
+                            ui.add_space(spacing::XS);
+                        }
+
+                        for line in &execution.stderr {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(line)
+                                        .font(typography::mono(FontSize::Small))
+                                        .color(colors::STATUS_ERROR),
+                                )
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        }
+                    }
+
+                    // Show "no output yet" if empty and still running
+                    if execution.stdout.is_empty()
+                        && execution.stderr.is_empty()
+                        && execution.is_running()
+                    {
+                        ui.label(
+                            egui::RichText::new("Waiting for output...")
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED)
+                                .italics(),
+                        );
+                    }
+
+                    // Show completion message if no output and completed
+                    if execution.stdout.is_empty()
+                        && execution.stderr.is_empty()
+                        && execution.is_finished()
+                    {
+                        ui.label(
+                            egui::RichText::new("Command completed with no output.")
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED)
+                                .italics(),
+                        );
+                    }
+                });
+        });
     }
 
     /// Render detailed information about a run state.
@@ -4071,5 +4543,258 @@ mod tests {
         assert!(CONTEXT_MENU_PADDING_H > 0.0);
         assert!(CONTEXT_MENU_PADDING_V >= 0.0);
         assert!(CONTEXT_MENU_ARROW_SIZE > 0.0);
+    }
+
+    // ========================================================================
+    // Command Output Tab Tests (US-007)
+    // ========================================================================
+
+    #[test]
+    fn test_command_output_id_creation() {
+        let id = CommandOutputId::new("my-project", "status");
+
+        assert_eq!(id.project, "my-project");
+        assert_eq!(id.command, "status");
+        assert!(!id.id.is_empty()); // UUID should be generated
+    }
+
+    #[test]
+    fn test_command_output_id_with_id() {
+        let id = CommandOutputId::with_id("my-project", "describe", "test-id-123");
+
+        assert_eq!(id.project, "my-project");
+        assert_eq!(id.command, "describe");
+        assert_eq!(id.id, "test-id-123");
+    }
+
+    #[test]
+    fn test_command_output_id_cache_key() {
+        let id = CommandOutputId::with_id("my-project", "status", "abc123");
+        assert_eq!(id.cache_key(), "my-project:status:abc123");
+    }
+
+    #[test]
+    fn test_command_output_id_tab_label() {
+        let id = CommandOutputId::with_id("my-project", "status", "test");
+        assert_eq!(id.tab_label(), "Status: my-project");
+
+        let id2 = CommandOutputId::with_id("another-project", "describe", "test");
+        assert_eq!(id2.tab_label(), "Describe: another-project");
+
+        let id3 = CommandOutputId::with_id("project", "", "test");
+        assert_eq!(id3.tab_label(), "Command: project");
+    }
+
+    #[test]
+    fn test_command_execution_creation() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let exec = CommandExecution::new(id.clone());
+
+        assert_eq!(exec.id, id);
+        assert_eq!(exec.status, CommandStatus::Running);
+        assert!(exec.stdout.is_empty());
+        assert!(exec.stderr.is_empty());
+        assert!(exec.exit_code.is_none());
+        assert!(exec.auto_scroll);
+    }
+
+    #[test]
+    fn test_command_execution_add_output() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.add_stdout("line 1".to_string());
+        exec.add_stdout("line 2".to_string());
+        exec.add_stderr("error 1".to_string());
+
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stdout[0], "line 1");
+        assert_eq!(exec.stderr[0], "error 1");
+    }
+
+    #[test]
+    fn test_command_execution_complete_success() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        assert!(exec.is_running());
+        assert!(!exec.is_finished());
+
+        exec.complete(0);
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_command_execution_complete_failure() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.complete(1);
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_command_execution_fail() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.fail("Command not found".to_string());
+
+        assert!(!exec.is_running());
+        assert!(exec.is_finished());
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert!(exec.exit_code.is_none());
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "Command not found");
+    }
+
+    #[test]
+    fn test_command_execution_combined_output() {
+        let id = CommandOutputId::with_id("project", "status", "id1");
+        let mut exec = CommandExecution::new(id);
+
+        exec.add_stdout("out1".to_string());
+        exec.add_stdout("out2".to_string());
+        exec.add_stderr("err1".to_string());
+
+        let combined = exec.combined_output();
+        assert_eq!(combined.len(), 3);
+        assert_eq!(combined[0], "out1");
+        assert_eq!(combined[1], "out2");
+        assert_eq!(combined[2], "err1");
+    }
+
+    #[test]
+    fn test_app_open_command_output_tab() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("my-project", "status");
+
+        // Check tab was created
+        let tab_id = TabId::CommandOutput(id.cache_key());
+        assert!(app.has_tab(&tab_id));
+        assert_eq!(*app.active_tab_id(), tab_id);
+
+        // Check execution was created
+        let exec = app.get_command_execution(&id.cache_key());
+        assert!(exec.is_some());
+        assert_eq!(exec.unwrap().status, CommandStatus::Running);
+
+        // Check tab label
+        let tab = app.tabs().iter().find(|t| t.id == tab_id).unwrap();
+        assert!(tab.label.starts_with("Status: "));
+        assert!(tab.closable);
+    }
+
+    #[test]
+    fn test_app_multiple_command_output_tabs() {
+        let mut app = Autom8App::new();
+
+        let id1 = app.open_command_output_tab("project-a", "status");
+        let id2 = app.open_command_output_tab("project-b", "describe");
+        let id3 = app.open_command_output_tab("project-a", "status"); // Same command, new tab
+
+        // Each should create a unique tab
+        assert_eq!(app.closable_tab_count(), 3);
+
+        // All cache keys should be unique
+        assert_ne!(id1.cache_key(), id2.cache_key());
+        assert_ne!(id1.cache_key(), id3.cache_key());
+        assert_ne!(id2.cache_key(), id3.cache_key());
+    }
+
+    #[test]
+    fn test_app_command_output_update_methods() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Add stdout
+        app.add_command_stdout(&cache_key, "output line 1".to_string());
+        app.add_command_stdout(&cache_key, "output line 2".to_string());
+
+        // Add stderr
+        app.add_command_stderr(&cache_key, "warning line".to_string());
+
+        // Verify updates
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+
+        // Complete the command
+        app.complete_command(&cache_key, 0);
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_app_command_output_fail_method() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.fail_command(&cache_key, "spawn error".to_string());
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.stderr.len(), 1);
+    }
+
+    #[test]
+    fn test_app_close_command_output_tab_cleans_up() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+        let tab_id = TabId::CommandOutput(cache_key.clone());
+
+        // Verify tab and execution exist
+        assert!(app.has_tab(&tab_id));
+        assert!(app.get_command_execution(&cache_key).is_some());
+
+        // Close the tab
+        assert!(app.close_tab(&tab_id));
+
+        // Verify cleanup
+        assert!(!app.has_tab(&tab_id));
+        assert!(app.get_command_execution(&cache_key).is_none());
+    }
+
+    #[test]
+    fn test_command_status_enum() {
+        assert_eq!(CommandStatus::Running, CommandStatus::Running);
+        assert_ne!(CommandStatus::Running, CommandStatus::Completed);
+        assert_ne!(CommandStatus::Running, CommandStatus::Failed);
+        assert_ne!(CommandStatus::Completed, CommandStatus::Failed);
+    }
+
+    #[test]
+    fn test_tab_id_command_output_variant() {
+        let cache_key = "project:status:abc123".to_string();
+        let tab_id = TabId::CommandOutput(cache_key.clone());
+
+        // Test equality
+        assert_eq!(tab_id, TabId::CommandOutput(cache_key.clone()));
+        assert_ne!(tab_id, TabId::ActiveRuns);
+        assert_ne!(tab_id, TabId::Projects);
+        assert_ne!(tab_id, TabId::RunDetail("abc".to_string()));
+
+        // Test hash
+        let mut set = std::collections::HashSet::new();
+        set.insert(tab_id.clone());
+        assert!(set.contains(&TabId::CommandOutput(cache_key)));
     }
 }
