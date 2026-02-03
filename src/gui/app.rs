@@ -39,16 +39,11 @@ const HEADER_HEIGHT: f32 = 48.0;
 // Title Bar Constants (Custom Title Bar - US-002)
 // ============================================================================
 
-/// Height of the custom title bar area on macOS.
-/// This provides space for the traffic light buttons and allows custom UI.
-/// Standard macOS traffic lights are positioned at y=12 with 12px diameter,
-/// so 28px gives comfortable padding above and below.
-const TITLE_BAR_HEIGHT: f32 = 28.0;
+/// Height of the title bar area.
+const TITLE_BAR_HEIGHT: f32 = 38.0;
 
-/// Horizontal offset from the left edge to avoid traffic lights on macOS.
-/// Traffic lights start around x=12 and span ~52px (three 12px buttons with gaps).
-/// We add padding to ensure custom content doesn't overlap.
-const TITLE_BAR_TRAFFIC_LIGHT_OFFSET: f32 = 72.0;
+/// Horizontal offset from the left edge for title bar content.
+const TITLE_BAR_LEFT_OFFSET: f32 = 72.0;
 
 /// Tab indicator underline height.
 const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
@@ -131,7 +126,7 @@ const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.0;
 /// Size of the sidebar toggle button.
 const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
 
-/// Horizontal padding between traffic lights and toggle button.
+/// Horizontal padding before the toggle button.
 const SIDEBAR_TOGGLE_PADDING: f32 = 8.0;
 
 /// Height of each navigation item in the sidebar.
@@ -414,7 +409,8 @@ const TAB_CLOSE_BUTTON_SIZE: f32 = 16.0;
 const TAB_CLOSE_PADDING: f32 = 4.0;
 
 /// Height of the content header tab bar (only shown when dynamic tabs exist).
-const CONTENT_TAB_BAR_HEIGHT: f32 = 36.0;
+/// Sized to fit the text tightly without extra vertical gaps.
+const CONTENT_TAB_BAR_HEIGHT: f32 = 32.0;
 
 /// The main GUI application state.
 ///
@@ -1006,8 +1002,7 @@ impl eframe::App for Autom8App {
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
 
-        // Custom title bar area (macOS only, provides draggable area for window)
-        #[cfg(target_os = "macos")]
+        // Custom title bar area (provides draggable area for window)
         self.render_title_bar(ctx);
 
         // Sidebar navigation (replaces horizontal tab bar - US-003)
@@ -1058,18 +1053,12 @@ impl Autom8App {
     // Title Bar (Custom Title Bar - US-002)
     // ========================================================================
 
-    /// Render the custom title bar area on macOS.
+    /// Render the custom title bar area.
     ///
     /// This creates a panel at the top of the window that:
     /// - Uses the app's background color for seamless visual integration
     /// - Provides a draggable area for window movement
-    /// - Reserves space for native traffic light buttons (close/minimize/maximize)
-    /// - Can host custom UI elements (prepared for sidebar toggle in US-004)
-    ///
-    /// The title bar blends with the app content by using the same background color.
-    /// Native window controls remain visible and functional through the fullsize
-    /// content view configuration.
-    #[cfg(target_os = "macos")]
+    /// - Contains the sidebar toggle button
     fn render_title_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("title_bar")
             .exact_height(TITLE_BAR_HEIGHT)
@@ -1092,7 +1081,7 @@ impl Autom8App {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                // Support double-click to maximize/restore (standard macOS behavior)
+                // Support double-click to maximize/restore
                 if response.double_clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
                         !ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false)),
@@ -1100,10 +1089,9 @@ impl Autom8App {
                 }
 
                 // Layout for title bar content
-                // Leave space for traffic lights on the left
                 ui.horizontal_centered(|ui| {
-                    // Reserve space for traffic lights (they're rendered by macOS natively)
-                    ui.add_space(TITLE_BAR_TRAFFIC_LIGHT_OFFSET);
+                    // Left offset for title bar content
+                    ui.add_space(TITLE_BAR_LEFT_OFFSET);
 
                     // Add some padding before the toggle button
                     ui.add_space(SIDEBAR_TOGGLE_PADDING);
@@ -1134,7 +1122,6 @@ impl Autom8App {
     ///
     /// # Returns
     /// The egui Response for click detection
-    #[cfg(target_os = "macos")]
     fn render_sidebar_toggle_button(
         &self,
         ui: &mut egui::Ui,
@@ -3255,28 +3242,15 @@ impl Autom8App {
 
 /// Build the viewport configuration for the native window.
 ///
-/// On macOS, this configures a custom title bar that blends with the app's
-/// background color by using `fullsize_content_view` to extend content behind
-/// the native title bar. The traffic light buttons remain visible and functional.
-///
-/// On other platforms, uses standard window decorations.
+/// Configures a custom title bar that blends with the app's background color.
 fn build_viewport() -> egui::ViewportBuilder {
-    let viewport = egui::ViewportBuilder::default()
+    egui::ViewportBuilder::default()
         .with_title("autom8")
         .with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT])
-        .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT]);
-
-    // Apply macOS-specific title bar customization
-    #[cfg(target_os = "macos")]
-    let viewport = viewport
-        // Extend content to fill the entire window, including behind the title bar
+        .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
         .with_fullsize_content_view(true)
-        // Make the titlebar transparent so our background shows through
         .with_titlebar_shown(false)
-        // Hide the window title text (we can add our own if needed)
-        .with_title_shown(false);
-
-    viewport
+        .with_title_shown(false)
 }
 
 /// Launch the native GUI application.
@@ -5490,23 +5464,19 @@ mod tests {
 
     #[test]
     fn test_title_bar_height_is_reasonable() {
-        // Title bar should be tall enough for traffic lights but not too tall
-        // macOS traffic lights are ~12px tall at y=12, so 28px gives good padding
         assert!(
             TITLE_BAR_HEIGHT >= 24.0 && TITLE_BAR_HEIGHT <= 40.0,
-            "Title bar height should accommodate traffic lights (24-40px), got {}",
+            "Title bar height should be 24-40px, got {}",
             TITLE_BAR_HEIGHT
         );
     }
 
     #[test]
-    fn test_title_bar_traffic_light_offset_is_reasonable() {
-        // Traffic lights span roughly 52px from left edge (12px start + 3 buttons * ~12px + gaps)
-        // We need enough offset to avoid overlapping them
+    fn test_title_bar_left_offset_is_reasonable() {
         assert!(
-            TITLE_BAR_TRAFFIC_LIGHT_OFFSET >= 60.0 && TITLE_BAR_TRAFFIC_LIGHT_OFFSET <= 90.0,
-            "Traffic light offset should be 60-90px to clear buttons, got {}",
-            TITLE_BAR_TRAFFIC_LIGHT_OFFSET
+            TITLE_BAR_LEFT_OFFSET >= 60.0 && TITLE_BAR_LEFT_OFFSET <= 90.0,
+            "Title bar left offset should be 60-90px, got {}",
+            TITLE_BAR_LEFT_OFFSET
         );
     }
 
@@ -5528,7 +5498,6 @@ mod tests {
         // The viewport should be buildable without panicking
         // We can't easily inspect all properties, but we can verify it was created
 
-        // On macOS, the viewport should have fullsize_content_view enabled
         // This test verifies the function runs without errors
         let _ = viewport;
     }
@@ -5769,7 +5738,7 @@ mod tests {
     fn test_sidebar_toggle_fits_in_title_bar() {
         // Verify there's room for the toggle button in the title bar
         let required_space =
-            TITLE_BAR_TRAFFIC_LIGHT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
+            TITLE_BAR_LEFT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
         // Should fit within half the minimum window width
         assert!(
             required_space < MIN_WIDTH / 2.0,
