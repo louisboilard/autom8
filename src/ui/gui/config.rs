@@ -303,10 +303,7 @@ impl ConfigTabState {
     /// config file, then updates the UI state to reflect the new config.
     pub fn create_project_config_from_global(&mut self, project_name: &str) -> Result<(), String> {
         // Get the global config values (or defaults if not loaded)
-        let global_config = self
-            .cached_global_config
-            .clone()
-            .unwrap_or_default();
+        let global_config = self.cached_global_config.clone().unwrap_or_default();
 
         // Save as project config
         if let Err(e) = crate::config::save_project_config_for(project_name, &global_config) {
@@ -314,8 +311,7 @@ impl ConfigTabState {
         }
 
         // Update our state to reflect the new config
-        self.scope_has_config
-            .insert(project_name.to_string(), true);
+        self.scope_has_config.insert(project_name.to_string(), true);
         self.cached_project_config = Some((project_name.to_string(), global_config));
         self.project_config_error = None;
 

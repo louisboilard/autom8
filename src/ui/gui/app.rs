@@ -517,7 +517,8 @@ impl Autom8App {
         &mut self,
         project_name: &str,
     ) -> std::result::Result<(), String> {
-        self.config_state.create_project_config_from_global(project_name)
+        self.config_state
+            .create_project_config_from_global(project_name)
     }
 
     /// Apply boolean field changes to the config and save immediately (US-006).
@@ -527,7 +528,8 @@ impl Autom8App {
         project_name: Option<&str>,
         changes: &[(ConfigBoolField, bool)],
     ) {
-        self.config_state.apply_bool_changes(is_global, project_name, changes);
+        self.config_state
+            .apply_bool_changes(is_global, project_name, changes);
     }
 
     /// Apply text field changes to the config (US-007).
@@ -537,7 +539,8 @@ impl Autom8App {
         project_name: Option<&str>,
         changes: &[(ConfigTextField, String)],
     ) {
-        self.config_state.apply_text_changes(is_global, project_name, changes);
+        self.config_state
+            .apply_text_changes(is_global, project_name, changes);
     }
 
     /// Reset config to application defaults (US-009).
@@ -4748,7 +4751,9 @@ mod tests {
         // Verify the cached project config is initially None
         let app = Autom8App::new();
         assert!(
-            app.config_state.cached_project_config("any-project").is_none(),
+            app.config_state
+                .cached_project_config("any-project")
+                .is_none(),
             "Project config should be None initially"
         );
     }
@@ -4767,11 +4772,13 @@ mod tests {
     fn test_us004_load_project_config_for_nonexistent_project() {
         // Test that loading config for a nonexistent project doesn't set error
         let mut app = Autom8App::new();
-        app.config_state.load_project_config("nonexistent-project-xyz-123");
+        app.config_state
+            .load_project_config("nonexistent-project-xyz-123");
 
         // Since the config file doesn't exist, it should be None without error
         assert!(
-            app.config_state.cached_project_config("nonexistent-project-xyz-123")
+            app.config_state
+                .cached_project_config("nonexistent-project-xyz-123")
                 .is_none(),
             "Config should be None for nonexistent project"
         );
@@ -4788,13 +4795,17 @@ mod tests {
 
         // Should return Some for matching project
         assert!(
-            app.config_state.cached_project_config("test-project").is_some(),
+            app.config_state
+                .cached_project_config("test-project")
+                .is_some(),
             "Should return config for matching project"
         );
 
         // Should return None for different project
         assert!(
-            app.config_state.cached_project_config("different-project").is_none(),
+            app.config_state
+                .cached_project_config("different-project")
+                .is_none(),
             "Should return None for different project"
         );
     }
@@ -4846,7 +4857,9 @@ mod tests {
         // Since the project doesn't exist, config should still be None
         // and no error (file simply doesn't exist)
         assert!(
-            app.config_state.cached_project_config("nonexistent-project").is_none(),
+            app.config_state
+                .cached_project_config("nonexistent-project")
+                .is_none(),
             "Config should be None for project without config file"
         );
     }
@@ -4899,8 +4912,14 @@ mod tests {
         app.config_state.cached_project_config = Some(("project-a".to_string(), config_a));
 
         // Verify project-a config is cached
-        assert!(app.config_state.cached_project_config("project-a").is_some());
-        assert!(app.config_state.cached_project_config("project-b").is_none());
+        assert!(app
+            .config_state
+            .cached_project_config("project-a")
+            .is_some());
+        assert!(app
+            .config_state
+            .cached_project_config("project-b")
+            .is_none());
 
         // Set cached config for project-b
         let config_b = crate::config::Config {
@@ -4910,8 +4929,14 @@ mod tests {
         app.config_state.cached_project_config = Some(("project-b".to_string(), config_b));
 
         // Verify project-b config is cached and project-a is no longer
-        assert!(app.config_state.cached_project_config("project-a").is_none());
-        assert!(app.config_state.cached_project_config("project-b").is_some());
+        assert!(app
+            .config_state
+            .cached_project_config("project-a")
+            .is_none());
+        assert!(app
+            .config_state
+            .cached_project_config("project-b")
+            .is_some());
     }
 
     // ========================================================================
@@ -4925,7 +4950,8 @@ mod tests {
 
         // Add a project that doesn't have a config
         let project_name = "test-project-no-config";
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), false);
 
         // Verify it starts without config
@@ -4935,7 +4961,8 @@ mod tests {
         // the config_scope_has_config should be updated
         // Note: We can't easily test the full flow without file system access,
         // but we can verify the state update logic works
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), true);
         assert!(app.project_has_config(project_name));
     }
@@ -4974,12 +5001,16 @@ mod tests {
         // Set up a project scope without config
         let project_name = "my-project";
         app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), false);
 
         // Verify initial state
         assert!(!app.project_has_config(project_name));
-        assert!(matches!(app.config_state.selected_scope, ConfigScope::Project(_)));
+        assert!(matches!(
+            app.config_state.selected_scope,
+            ConfigScope::Project(_)
+        ));
     }
 
     #[test]
@@ -4988,7 +5019,8 @@ mod tests {
         let mut app = Autom8App::new();
         let project_name = "project-no-config";
 
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), false);
         app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
 
@@ -5006,7 +5038,8 @@ mod tests {
         let mut app = Autom8App::new();
         let project_name = "project-with-config";
 
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), true);
         app.config_state.selected_scope = ConfigScope::Project(project_name.to_string());
 
@@ -5023,21 +5056,28 @@ mod tests {
         let project_name = "test-load-after-create";
 
         // Initially no cached config
-        assert!(app.config_state.cached_project_config(project_name).is_none());
+        assert!(app
+            .config_state
+            .cached_project_config(project_name)
+            .is_none());
 
         // After successful create_project_config_from_global, it should:
         // 1. Update config_scope_has_config to true
         // 2. Load the config into cache via load_project_config_for_name
 
         // We can simulate the state update part
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), true);
 
         // And simulate loading a config
         app.config_state.cached_project_config =
             Some((project_name.to_string(), crate::config::Config::default()));
 
-        assert!(app.config_state.cached_project_config(project_name).is_some());
+        assert!(app
+            .config_state
+            .cached_project_config(project_name)
+            .is_some());
     }
 
     #[test]
@@ -5076,14 +5116,18 @@ mod tests {
         let project_name = "styled-project";
 
         // Initially without config (greyed out)
-        app.config_state.scope_projects.push(project_name.to_string());
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_projects
+            .push(project_name.to_string());
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), false);
 
         assert!(!app.project_has_config(project_name));
 
         // After creating config (normal styling)
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert(project_name.to_string(), true);
 
         assert!(app.project_has_config(project_name));
@@ -6278,9 +6322,11 @@ mod tests {
         let mut app = Autom8App::new();
 
         // Set up test data
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert("project-with-config".to_string(), true);
-        app.config_state.scope_has_config
+        app.config_state
+            .scope_has_config
             .insert("project-without-config".to_string(), false);
 
         // Test retrieval
