@@ -33,6 +33,21 @@ const MIN_HEIGHT: f32 = 300.0;
 /// Height of the header/tab bar area (48px = 3 * LG spacing).
 const HEADER_HEIGHT: f32 = 48.0;
 
+// ============================================================================
+// Title Bar Constants (Custom Title Bar - US-002)
+// ============================================================================
+
+/// Height of the custom title bar area on macOS.
+/// This provides space for the traffic light buttons and allows custom UI.
+/// Standard macOS traffic lights are positioned at y=12 with 12px diameter,
+/// so 28px gives comfortable padding above and below.
+const TITLE_BAR_HEIGHT: f32 = 28.0;
+
+/// Horizontal offset from the left edge to avoid traffic lights on macOS.
+/// Traffic lights start around x=12 and span ~52px (three 12px buttons with gaps).
+/// We add padding to ensure custom content doesn't overlap.
+const TITLE_BAR_TRAFFIC_LIGHT_OFFSET: f32 = 72.0;
+
 /// Tab indicator underline height.
 const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
@@ -919,6 +934,10 @@ impl eframe::App for Autom8App {
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
 
+        // Custom title bar area (macOS only, provides draggable area for window)
+        #[cfg(target_os = "macos")]
+        self.render_title_bar(ctx);
+
         // Header with tab bar
         egui::TopBottomPanel::top("header")
             .exact_height(HEADER_HEIGHT)
@@ -945,6 +964,66 @@ impl eframe::App for Autom8App {
 }
 
 impl Autom8App {
+    // ========================================================================
+    // Title Bar (Custom Title Bar - US-002)
+    // ========================================================================
+
+    /// Render the custom title bar area on macOS.
+    ///
+    /// This creates a panel at the top of the window that:
+    /// - Uses the app's background color for seamless visual integration
+    /// - Provides a draggable area for window movement
+    /// - Reserves space for native traffic light buttons (close/minimize/maximize)
+    /// - Can host custom UI elements (prepared for sidebar toggle in US-004)
+    ///
+    /// The title bar blends with the app content by using the same background color.
+    /// Native window controls remain visible and functional through the fullsize
+    /// content view configuration.
+    #[cfg(target_os = "macos")]
+    fn render_title_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("title_bar")
+            .exact_height(TITLE_BAR_HEIGHT)
+            .frame(
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show(ctx, |ui| {
+                // Make the entire title bar area draggable for window movement
+                let title_bar_rect = ui.max_rect();
+                let response = ui.interact(title_bar_rect, ui.id().with("title_bar_drag"), Sense::click_and_drag());
+
+                // Enable window dragging when the title bar is dragged
+                if response.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Support double-click to maximize/restore (standard macOS behavior)
+                if response.double_clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                        !ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false)),
+                    ));
+                }
+
+                // Layout for title bar content
+                // Leave space for traffic lights on the left
+                ui.horizontal_centered(|ui| {
+                    // Reserve space for traffic lights (they're rendered by macOS natively)
+                    ui.add_space(TITLE_BAR_TRAFFIC_LIGHT_OFFSET);
+
+                    // Future: Add sidebar toggle button here (US-004)
+                    // For now, this space is available for custom UI elements
+
+                    // Center area can display app name or breadcrumbs
+                    // (currently empty - available for future enhancements)
+                });
+            });
+    }
+
+    // ========================================================================
+    // Header / Tab Bar
+    // ========================================================================
+
     /// Render the header area with tab bar.
     fn render_header(&mut self, ui: &mut egui::Ui) {
         // Use horizontal scroll for tab bar if there are many tabs
@@ -2596,6 +2675,36 @@ impl Autom8App {
     }
 }
 
+// ============================================================================
+// Viewport Configuration (Custom Title Bar - US-002)
+// ============================================================================
+
+/// Build the viewport configuration for the native window.
+///
+/// On macOS, this configures a custom title bar that blends with the app's
+/// background color by using `fullsize_content_view` to extend content behind
+/// the native title bar. The traffic light buttons remain visible and functional.
+///
+/// On other platforms, uses standard window decorations.
+fn build_viewport() -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("autom8")
+        .with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT])
+        .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT]);
+
+    // Apply macOS-specific title bar customization
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        // Extend content to fill the entire window, including behind the title bar
+        .with_fullsize_content_view(true)
+        // Make the titlebar transparent so our background shows through
+        .with_titlebar_shown(false)
+        // Hide the window title text (we can add our own if needed)
+        .with_title_shown(false);
+
+    viewport
+}
+
 /// Launch the native GUI application.
 ///
 /// Opens a native window using eframe with the specified configuration.
@@ -2610,10 +2719,7 @@ impl Autom8App {
 /// * `Err(Autom8Error)` if the GUI fails to initialize
 pub fn run_gui(project_filter: Option<String>) -> Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("autom8")
-            .with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT])
-            .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT]),
+        viewport: build_viewport(),
         ..Default::default()
     };
 

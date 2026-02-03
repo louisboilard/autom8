@@ -1,8 +1,9 @@
 //! Theme and color system for the GUI.
 //!
 //! This module provides a cohesive color system and egui Visuals configuration
-//! that achieves a macOS-native aesthetic with proper semantic colors for
-//! status states and UI elements.
+//! that achieves a warm, approachable aesthetic inspired by the Claude desktop
+//! application. Uses a warm beige/cream palette with proper semantic colors
+//! for status states and UI elements.
 
 use eframe::egui::{self, Color32, Rounding, Stroke, Style, Visuals};
 
@@ -83,8 +84,8 @@ pub mod shadow {
 
 /// Semantic color palette for the light theme.
 ///
-/// Colors are inspired by macOS system colors with careful attention
-/// to contrast ratios for accessibility.
+/// Colors use a warm beige/cream palette inspired by the Claude desktop
+/// application, with careful attention to contrast ratios for accessibility.
 pub mod colors {
     use super::Color32;
 
@@ -92,9 +93,9 @@ pub mod colors {
     // Background Colors
     // ==========================================================================
 
-    /// Primary window background - very light gray.
-    /// Similar to macOS window background.
-    pub const BACKGROUND: Color32 = Color32::from_rgb(246, 246, 248);
+    /// Primary window background - warm cream.
+    /// Inspired by Claude's warm, approachable aesthetic (~#FAF9F7).
+    pub const BACKGROUND: Color32 = Color32::from_rgb(250, 249, 247);
 
     /// Surface color for cards and panels - white.
     pub const SURFACE: Color32 = Color32::from_rgb(255, 255, 255);
@@ -102,11 +103,11 @@ pub mod colors {
     /// Elevated surface for modals and popovers.
     pub const SURFACE_ELEVATED: Color32 = Color32::from_rgb(255, 255, 255);
 
-    /// Subtle background for hover states.
-    pub const SURFACE_HOVER: Color32 = Color32::from_rgb(240, 240, 242);
+    /// Subtle background for hover states - warm beige tint.
+    pub const SURFACE_HOVER: Color32 = Color32::from_rgb(245, 243, 239);
 
-    /// Background for selected/active items.
-    pub const SURFACE_SELECTED: Color32 = Color32::from_rgb(232, 232, 237);
+    /// Background for selected/active items - warm beige.
+    pub const SURFACE_SELECTED: Color32 = Color32::from_rgb(238, 235, 229);
 
     // ==========================================================================
     // Text Colors
@@ -129,14 +130,14 @@ pub mod colors {
     // Border and Separator Colors
     // ==========================================================================
 
-    /// Subtle border color for cards and inputs.
-    pub const BORDER: Color32 = Color32::from_rgb(229, 229, 234);
+    /// Subtle border color for cards and inputs - warm gray.
+    pub const BORDER: Color32 = Color32::from_rgb(232, 229, 222);
 
-    /// Stronger border for focused elements.
-    pub const BORDER_FOCUSED: Color32 = Color32::from_rgb(199, 199, 204);
+    /// Stronger border for focused elements - warm gray.
+    pub const BORDER_FOCUSED: Color32 = Color32::from_rgb(205, 200, 190);
 
-    /// Separator line color.
-    pub const SEPARATOR: Color32 = Color32::from_rgb(229, 229, 234);
+    /// Separator line color - warm gray.
+    pub const SEPARATOR: Color32 = Color32::from_rgb(232, 229, 222);
 
     // ==========================================================================
     // Accent Colors
@@ -189,8 +190,8 @@ pub mod colors {
     /// Error state background - light red.
     pub const STATUS_ERROR_BG: Color32 = Color32::from_rgb(255, 235, 234);
 
-    /// Idle state background - light gray.
-    pub const STATUS_IDLE_BG: Color32 = Color32::from_rgb(240, 240, 242);
+    /// Idle state background - warm light beige.
+    pub const STATUS_IDLE_BG: Color32 = Color32::from_rgb(245, 243, 239);
 }
 
 // Note: The Status enum is defined in the components module to avoid duplication.
@@ -208,7 +209,7 @@ pub fn configure_visuals() -> Visuals {
     visuals.panel_fill = colors::BACKGROUND;
     visuals.faint_bg_color = colors::SURFACE_HOVER;
     visuals.extreme_bg_color = colors::SURFACE;
-    visuals.code_bg_color = Color32::from_rgb(245, 245, 247);
+    visuals.code_bg_color = Color32::from_rgb(248, 246, 242);
 
     // Selection colors
     visuals.selection.bg_fill = colors::ACCENT_SUBTLE;
@@ -593,5 +594,135 @@ mod tests {
             colors::ACCENT_SUBTLE,
             "Selection background should use ACCENT_SUBTLE"
         );
+    }
+
+    // ========================================================================
+    // Warm Color Palette Tests (US-001)
+    // ========================================================================
+
+    #[test]
+    fn test_background_is_warm_cream() {
+        // BACKGROUND should be warm cream (~#FAF9F7), not cool gray
+        // Warm colors have R >= G >= B
+        let bg = colors::BACKGROUND;
+        assert!(
+            bg.r() >= bg.g() && bg.g() >= bg.b(),
+            "BACKGROUND should have warm tones (R >= G >= B), got RGB({}, {}, {})",
+            bg.r(),
+            bg.g(),
+            bg.b()
+        );
+        // Should be close to #FAF9F7 (250, 249, 247)
+        assert_eq!(bg, Color32::from_rgb(250, 249, 247));
+    }
+
+    #[test]
+    fn test_surface_hover_is_warm() {
+        // SURFACE_HOVER should use warm tones
+        let hover = colors::SURFACE_HOVER;
+        assert!(
+            hover.r() >= hover.g() && hover.g() >= hover.b(),
+            "SURFACE_HOVER should have warm tones (R >= G >= B), got RGB({}, {}, {})",
+            hover.r(),
+            hover.g(),
+            hover.b()
+        );
+    }
+
+    #[test]
+    fn test_surface_selected_is_warm() {
+        // SURFACE_SELECTED should use warm tones
+        let selected = colors::SURFACE_SELECTED;
+        assert!(
+            selected.r() >= selected.g() && selected.g() >= selected.b(),
+            "SURFACE_SELECTED should have warm tones (R >= G >= B), got RGB({}, {}, {})",
+            selected.r(),
+            selected.g(),
+            selected.b()
+        );
+    }
+
+    #[test]
+    fn test_borders_are_warm_gray() {
+        // BORDER and SEPARATOR should use warm gray tones
+        let border = colors::BORDER;
+        assert!(
+            border.r() >= border.g() && border.g() >= border.b(),
+            "BORDER should have warm tones (R >= G >= B), got RGB({}, {}, {})",
+            border.r(),
+            border.g(),
+            border.b()
+        );
+
+        let separator = colors::SEPARATOR;
+        assert!(
+            separator.r() >= separator.g() && separator.g() >= separator.b(),
+            "SEPARATOR should have warm tones (R >= G >= B), got RGB({}, {}, {})",
+            separator.r(),
+            separator.g(),
+            separator.b()
+        );
+    }
+
+    #[test]
+    fn test_status_colors_unchanged() {
+        // Status colors should remain unchanged for clarity
+        assert_eq!(
+            colors::STATUS_RUNNING,
+            Color32::from_rgb(0, 149, 255),
+            "STATUS_RUNNING should remain blue"
+        );
+        assert_eq!(
+            colors::STATUS_SUCCESS,
+            Color32::from_rgb(52, 199, 89),
+            "STATUS_SUCCESS should remain green"
+        );
+        assert_eq!(
+            colors::STATUS_WARNING,
+            Color32::from_rgb(255, 149, 0),
+            "STATUS_WARNING should remain amber"
+        );
+        assert_eq!(
+            colors::STATUS_ERROR,
+            Color32::from_rgb(255, 59, 48),
+            "STATUS_ERROR should remain red"
+        );
+    }
+
+    #[test]
+    fn test_text_colors_high_contrast() {
+        // Text colors should remain high-contrast for readability
+        // TEXT_PRIMARY should be dark
+        let text = colors::TEXT_PRIMARY;
+        let luminance = (text.r() as u32 + text.g() as u32 + text.b() as u32) / 3;
+        assert!(
+            luminance < 50,
+            "TEXT_PRIMARY should be dark for readability, got luminance {}",
+            luminance
+        );
+    }
+
+    #[test]
+    fn test_warm_palette_harmony() {
+        // Verify the warm colors form a cohesive palette
+        // Darker warm colors should still be warm
+        let colors_to_check = [
+            ("BACKGROUND", colors::BACKGROUND),
+            ("SURFACE_HOVER", colors::SURFACE_HOVER),
+            ("SURFACE_SELECTED", colors::SURFACE_SELECTED),
+            ("BORDER", colors::BORDER),
+            ("BORDER_FOCUSED", colors::BORDER_FOCUSED),
+        ];
+
+        for (name, color) in colors_to_check {
+            // For warm colors, the difference between R and B should be positive
+            let warmth = color.r() as i32 - color.b() as i32;
+            assert!(
+                warmth >= 0,
+                "{} should have warm tones (R >= B), got warmth diff {}",
+                name,
+                warmth
+            );
+        }
     }
 }
