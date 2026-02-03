@@ -1130,6 +1130,11 @@ impl Runner {
 
     /// Run from a spec-<feature>.md markdown file - converts to JSON first, then implements
     pub fn run_from_spec(&self, spec_path: &Path) -> Result<()> {
+        // IMPORTANT: State must NOT be persisted until after worktree context is determined.
+        // Saving state before we know the correct session ID would create phantom sessions
+        // in the main repo when running in worktree mode. Visual state transitions can be
+        // displayed, but save() must not be called until the effective StateManager is known.
+
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -1155,12 +1160,13 @@ impl Runner {
 
         // Initialize state with config snapshot for resume support
         // Clone config since we need it later for worktree setup
+        // Note: State is NOT saved here - we defer persistence until after worktree context
+        // is determined to avoid creating phantom sessions in the main repo
         let mut state = RunState::from_spec_with_config(
             spec_path.clone(),
             spec_json_path.clone(),
             config.clone(),
         );
-        self.state_manager.save(&state)?;
 
         // LoadingSpec state
         print_state_transition(MachineState::Idle, MachineState::LoadingSpec);
@@ -1176,8 +1182,9 @@ impl Runner {
         println!();
 
         // Transition to GeneratingSpec
+        // Note: State is NOT saved here - we defer persistence until after worktree context
+        // is determined. Visual feedback is still shown via print_state_transition.
         state.transition_to(MachineState::GeneratingSpec);
-        self.state_manager.save(&state)?;
         print_state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
 
         print_generating_spec();
@@ -1237,14 +1244,6 @@ impl Runner {
         state.transition_to(MachineState::Initializing);
         effective_state_manager.save(&state)?;
 
-        // Clear the original session's state if we're handing off to a DIFFERENT session.
-        // This prevents the original session from being left in a stale "GeneratingSpec" state.
-        // We compare session IDs to handle the case where a worktree is reused (same session).
-        // Errors are ignored - stale state is confusing but not harmful.
-        if self.state_manager.session_id() != effective_state_manager.session_id() {
-            let _ = self.state_manager.clear_current();
-        }
-
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
@@ -1264,6 +1263,11 @@ impl Runner {
     }
 
     pub fn run(&self, spec_json_path: &Path) -> Result<()> {
+        // IMPORTANT: State must NOT be persisted until after worktree context is determined.
+        // Saving state before we know the correct session ID would create phantom sessions
+        // in the main repo when running in worktree mode. State is first persisted in
+        // run_implementation_loop() after the effective StateManager is known.
+
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
