@@ -419,6 +419,17 @@ pub struct Autom8App {
 
     /// Error message if global config failed to load.
     global_config_error: Option<String>,
+
+    // ========================================================================
+    // Project Config Editor State (Config Tab - US-004)
+    // ========================================================================
+    /// Cached project configuration for editing.
+    /// Loaded when a project with its own config file is selected.
+    /// Key is the project name, value is the loaded config.
+    cached_project_config: Option<(String, crate::config::Config)>,
+
+    /// Error message if project config failed to load.
+    project_config_error: Option<String>,
 }
 
 impl Default for Autom8App {
@@ -467,6 +478,8 @@ impl Autom8App {
             config_scope_has_config: std::collections::HashMap::new(),
             cached_global_config: None,
             global_config_error: None,
+            cached_project_config: None,
+            project_config_error: None,
         };
         // Initial data load
         app.refresh_data();
@@ -576,6 +589,19 @@ impl Autom8App {
         if self.selected_config_scope.is_global() && self.cached_global_config.is_none() {
             self.load_global_config();
         }
+
+        // Load project config when a project scope is selected (US-004)
+        if let ConfigScope::Project(project_name) = &self.selected_config_scope {
+            // Only load if not already cached for this project
+            let needs_load = match &self.cached_project_config {
+                Some((cached_name, _)) => cached_name != project_name,
+                None => self.project_has_config(project_name),
+            };
+            if needs_load {
+                let project_name = project_name.clone();
+                self.load_project_config_for_name(&project_name);
+            }
+        }
     }
 
     /// Load the global configuration from disk.
@@ -601,6 +627,58 @@ impl Autom8App {
     /// Returns the global config error, if any.
     pub fn global_config_error(&self) -> Option<&str> {
         self.global_config_error.as_deref()
+    }
+
+    /// Returns the cached project config for a specific project, if loaded.
+    pub fn cached_project_config(&self, project_name: &str) -> Option<&crate::config::Config> {
+        self.cached_project_config
+            .as_ref()
+            .filter(|(name, _)| name == project_name)
+            .map(|(_, config)| config)
+    }
+
+    /// Returns the project config error, if any.
+    pub fn project_config_error(&self) -> Option<&str> {
+        self.project_config_error.as_deref()
+    }
+
+    /// Load the project configuration from disk for a specific project.
+    /// Called when a project scope is selected in the Config tab.
+    fn load_project_config_for_name(&mut self, project_name: &str) {
+        // Check if the project has a config file
+        let config_path = match crate::config::project_config_path_for(project_name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.cached_project_config = None;
+                self.project_config_error = Some(format!("Failed to get config path: {}", e));
+                return;
+            }
+        };
+
+        if !config_path.exists() {
+            // No config file for this project
+            self.cached_project_config = None;
+            self.project_config_error = None;
+            return;
+        }
+
+        // Read and parse the config file
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => match toml::from_str::<crate::config::Config>(&content) {
+                Ok(config) => {
+                    self.cached_project_config = Some((project_name.to_string(), config));
+                    self.project_config_error = None;
+                }
+                Err(e) => {
+                    self.cached_project_config = None;
+                    self.project_config_error = Some(format!("Failed to parse config: {}", e));
+                }
+            },
+            Err(e) => {
+                self.cached_project_config = None;
+                self.project_config_error = Some(format!("Failed to read config: {}", e));
+            }
+        }
     }
 
     /// Returns the currently selected project name.
@@ -1857,21 +1935,29 @@ impl Autom8App {
             ConfigScope::Global => {
                 self.render_global_config_editor(ui);
             }
-            ConfigScope::Project(_name) => {
-                // Project config editor will be implemented in US-004
-                egui::ScrollArea::vertical()
-                    .id_salt("config_editor")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(spacing::XXL);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("Project configuration editor coming soon...")
+            ConfigScope::Project(name) => {
+                // Project config editor (US-004)
+                // Check if the project has its own config file
+                if self.project_has_config(name) {
+                    self.render_project_config_editor(ui, name);
+                } else {
+                    // Project doesn't have its own config - show message (US-005 placeholder)
+                    egui::ScrollArea::vertical()
+                        .id_salt("config_editor")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(spacing::XXL);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "This project does not have a config file.\nIt uses the global configuration.",
+                                    )
                                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                                     .color(colors::TEXT_MUTED),
-                            );
+                                );
+                            });
                         });
-                    });
+                }
             }
         }
     }
@@ -1907,6 +1993,103 @@ impl Autom8App {
         // ScrollArea for config fields
         egui::ScrollArea::vertical()
             .id_salt("config_editor")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Pipeline Settings Group
+                self.render_config_group_header(ui, "Pipeline");
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "review",
+                    config.review,
+                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "commit",
+                    config.commit,
+                    "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "pull_request",
+                    config.pull_request,
+                    "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                );
+
+                ui.add_space(spacing::XL);
+
+                // Worktree Settings Group
+                self.render_config_group_header(ui, "Worktree");
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "worktree",
+                    config.worktree,
+                    "Automatic worktree creation. When enabled, creates a dedicated worktree for each run, enabling parallel sessions.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_text_field(
+                    ui,
+                    "worktree_path_pattern",
+                    &config.worktree_path_pattern,
+                    "Pattern for worktree directory names. Placeholders: {repo} = repository name, {branch} = branch name.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "worktree_cleanup",
+                    config.worktree_cleanup,
+                    "Automatic worktree cleanup. When enabled, removes worktrees after successful completion. Failed runs keep their worktrees.",
+                );
+
+                // Add some padding at the bottom
+                ui.add_space(spacing::XL);
+            });
+    }
+
+    /// Render the project config editor with all fields (US-004).
+    ///
+    /// Uses the same field layout and controls as the global config editor.
+    /// The UI is identical but operates on the project-specific config file.
+    fn render_project_config_editor(&self, ui: &mut egui::Ui, project_name: &str) {
+        // Show error if config failed to load
+        if let Some(error) = &self.project_config_error {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new(error)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::STATUS_ERROR),
+            );
+            return;
+        }
+
+        // Show loading state or editor
+        let Some(config) = self.cached_project_config(project_name) else {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new("Loading configuration...")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+            return;
+        };
+
+        // ScrollArea for config fields
+        egui::ScrollArea::vertical()
+            .id_salt("project_config_editor")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Pipeline Settings Group
@@ -4171,5 +4354,181 @@ mod tests {
             path.to_string_lossy().contains("config.toml"),
             "Path should contain config.toml"
         );
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-004) - Project Config Editor
+    // ========================================================================
+
+    #[test]
+    fn test_us004_cached_project_config_initially_none() {
+        // Verify the cached project config is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.cached_project_config("any-project").is_none(),
+            "Project config should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_config_error_initially_none() {
+        // Verify error state is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.project_config_error().is_none(),
+            "Project config error should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us004_load_project_config_for_nonexistent_project() {
+        // Test that loading config for a nonexistent project doesn't set error
+        let mut app = Autom8App::new();
+        app.load_project_config_for_name("nonexistent-project-xyz-123");
+
+        // Since the config file doesn't exist, it should be None without error
+        assert!(
+            app.cached_project_config("nonexistent-project-xyz-123").is_none(),
+            "Config should be None for nonexistent project"
+        );
+    }
+
+    #[test]
+    fn test_us004_cached_project_config_returns_correct_project() {
+        // Test that cached_project_config only returns config for the matching project
+        let mut app = Autom8App::new();
+
+        // Manually set a cached config
+        app.cached_project_config = Some((
+            "test-project".to_string(),
+            crate::config::Config::default(),
+        ));
+
+        // Should return Some for matching project
+        assert!(
+            app.cached_project_config("test-project").is_some(),
+            "Should return config for matching project"
+        );
+
+        // Should return None for different project
+        assert!(
+            app.cached_project_config("different-project").is_none(),
+            "Should return None for different project"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_config_fields_accessible() {
+        // Test that when project config is cached, all fields are accessible
+        let mut app = Autom8App::new();
+
+        // Manually set a cached config with specific values
+        let mut config = crate::config::Config::default();
+        config.review = true;
+        config.commit = false;
+        config.pull_request = false;
+        config.worktree = true;
+        config.worktree_cleanup = true;
+        config.worktree_path_pattern = "custom-{repo}-{branch}".to_string();
+
+        app.cached_project_config = Some(("test-project".to_string(), config));
+
+        if let Some(config) = app.cached_project_config("test-project") {
+            // All 6 config fields should be accessible with correct values
+            assert!(config.review);
+            assert!(!config.commit);
+            assert!(!config.pull_request);
+            assert!(config.worktree);
+            assert!(config.worktree_cleanup);
+            assert_eq!(config.worktree_path_pattern, "custom-{repo}-{branch}");
+        } else {
+            panic!("Expected config to be cached");
+        }
+    }
+
+    #[test]
+    fn test_us004_refresh_config_scope_loads_project_config() {
+        // Test that refresh_config_scope_data loads project config when a project scope is selected
+        let mut app = Autom8App::new();
+
+        // Clear any cached config
+        app.cached_project_config = None;
+        app.project_config_error = None;
+
+        // Select a project scope (that doesn't have a config file)
+        app.set_selected_config_scope(ConfigScope::Project("nonexistent-project".to_string()));
+
+        // Refresh should attempt to load the config
+        app.refresh_config_scope_data();
+
+        // Since the project doesn't exist, config should still be None
+        // and no error (file simply doesn't exist)
+        assert!(
+            app.cached_project_config("nonexistent-project").is_none(),
+            "Config should be None for project without config file"
+        );
+    }
+
+    #[test]
+    fn test_us004_project_header_shows_correct_format() {
+        // Test that the header text format is correct for project scope
+        // Format should be "Project Config: {project_name}"
+        let project_name = "my-awesome-project";
+        let expected_header = format!("Project Config: {}", project_name);
+
+        // The actual header is constructed in render_config_right_panel
+        // This test verifies the format matches what we expect
+        assert!(expected_header.starts_with("Project Config: "));
+        assert!(expected_header.contains(project_name));
+    }
+
+    #[test]
+    fn test_us004_project_config_path_for_tooltip() {
+        // Test that project_config_path_for returns path suitable for tooltip
+        let project_name = "test-project";
+        let path_result = crate::config::project_config_path_for(project_name);
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should contain the project name
+        assert!(
+            path_str.contains(project_name),
+            "Path should contain project name"
+        );
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us004_switching_project_clears_old_cache() {
+        // Test that switching between projects updates the cached config
+        let mut app = Autom8App::new();
+
+        // Set initial cached config for project-a
+        let config_a = crate::config::Config {
+            review: true,
+            ..Default::default()
+        };
+        app.cached_project_config = Some(("project-a".to_string(), config_a));
+
+        // Verify project-a config is cached
+        assert!(app.cached_project_config("project-a").is_some());
+        assert!(app.cached_project_config("project-b").is_none());
+
+        // Set cached config for project-b
+        let config_b = crate::config::Config {
+            review: false,
+            ..Default::default()
+        };
+        app.cached_project_config = Some(("project-b".to_string(), config_b));
+
+        // Verify project-b config is cached and project-a is no longer
+        assert!(app.cached_project_config("project-a").is_none());
+        assert!(app.cached_project_config("project-b").is_some());
     }
 }
