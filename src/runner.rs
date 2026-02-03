@@ -1236,6 +1236,15 @@ impl Runner {
         }
         state.transition_to(MachineState::Initializing);
         effective_state_manager.save(&state)?;
+
+        // Clear the original session's state if we're handing off to a DIFFERENT session.
+        // This prevents the original session from being left in a stale "GeneratingSpec" state.
+        // We compare session IDs to handle the case where a worktree is reused (same session).
+        // Errors are ignored - stale state is confusing but not harmful.
+        if self.state_manager.session_id() != effective_state_manager.session_id() {
+            let _ = self.state_manager.clear_current();
+        }
+
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
