@@ -332,7 +332,7 @@ type BoolFieldChanges = Vec<(ConfigBoolField, bool)>;
 /// Type alias for a collection of text field changes (US-007).
 type TextFieldChanges = Vec<(ConfigTextField, String)>;
 
-/// Actions that can be returned from config editor rendering (US-006, US-007).
+/// Actions that can be returned from config editor rendering (US-006, US-007, US-009).
 ///
 /// This struct collects all actions that require mutation, allowing the
 /// render methods to remain `&self` while the parent processes mutations.
@@ -348,6 +348,8 @@ struct ConfigEditorActions {
     is_global: bool,
     /// Project name if editing project config.
     project_name: Option<String>,
+    /// If true, reset the config to defaults (US-009).
+    reset_to_defaults: bool,
 }
 
 // ============================================================================
@@ -903,6 +905,45 @@ impl Autom8App {
                         self.config_last_modified = Some(Instant::now());
                     }
                 }
+            }
+        }
+    }
+
+    /// Reset config to application defaults (US-009).
+    ///
+    /// Replaces the current config with `Config::default()` values:
+    /// - review = true
+    /// - commit = true
+    /// - pull_request = true
+    /// - worktree = true
+    /// - worktree_path_pattern = "{repo}-wt-{branch}"
+    /// - worktree_cleanup = false
+    ///
+    /// The config is saved immediately and the UI updates to reflect the new values.
+    fn reset_config_to_defaults(&mut self, is_global: bool, project_name: Option<&str>) {
+        let default_config = crate::config::Config::default();
+
+        if is_global {
+            // Reset global config
+            self.cached_global_config = Some(default_config.clone());
+
+            // Save to disk
+            if let Err(e) = crate::config::save_global_config(&default_config) {
+                self.global_config_error = Some(format!("Failed to save config: {}", e));
+            } else {
+                // Update modification timestamp to show notice
+                self.config_last_modified = Some(Instant::now());
+            }
+        } else if let Some(project) = project_name {
+            // Reset project config
+            self.cached_project_config = Some((project.to_string(), default_config.clone()));
+
+            // Save to disk
+            if let Err(e) = crate::config::save_project_config_for(project, &default_config) {
+                self.project_config_error = Some(format!("Failed to save config: {}", e));
+            } else {
+                // Update modification timestamp to show notice
+                self.config_last_modified = Some(Instant::now());
             }
         }
     }
@@ -2023,6 +2064,14 @@ impl Autom8App {
                 &editor_actions.text_changes,
             );
         }
+
+        // Process reset to defaults action (US-009)
+        if editor_actions.reset_to_defaults {
+            self.reset_config_to_defaults(
+                editor_actions.is_global,
+                editor_actions.project_name.as_deref(),
+            );
+        }
     }
 
     /// Render the left panel of the Config view (scope selector).
@@ -2201,17 +2250,21 @@ impl Autom8App {
         // Render content based on scope
         match &self.selected_config_scope {
             ConfigScope::Global => {
-                let (bool_changes, text_changes) = self.render_global_config_editor(ui);
+                let (bool_changes, text_changes, reset_clicked) =
+                    self.render_global_config_editor(ui);
                 actions.bool_changes = bool_changes;
                 actions.text_changes = text_changes;
+                actions.reset_to_defaults = reset_clicked;
             }
             ConfigScope::Project(name) => {
-                // Project config editor (US-004, US-007)
+                // Project config editor (US-004, US-007, US-009)
                 // Check if the project has its own config file
                 if self.project_has_config(name) {
-                    let (bool_changes, text_changes) = self.render_project_config_editor(ui, name);
+                    let (bool_changes, text_changes, reset_clicked) =
+                        self.render_project_config_editor(ui, name);
                     actions.bool_changes = bool_changes;
                     actions.text_changes = text_changes;
+                    actions.reset_to_defaults = reset_clicked;
                 } else {
                     // Project doesn't have its own config - show message and button (US-005)
                     let project_name = name.clone();
@@ -2312,7 +2365,62 @@ impl Autom8App {
         response.clicked()
     }
 
-    /// Render the global config editor with all fields (US-003, US-006).
+    /// Render the "Reset to Defaults" button (US-009).
+    ///
+    /// Styled as a secondary/subtle action - uses muted colors and smaller weight.
+    /// Returns true if the button was clicked.
+    fn render_reset_to_defaults_button(&self, ui: &mut egui::Ui) -> bool {
+        let button_text = "Reset to Defaults";
+        let text_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                button_text.to_string(),
+                typography::font(FontSize::Small, FontWeight::Regular),
+                colors::TEXT_MUTED,
+            )
+        });
+        let text_size = text_galley.size();
+
+        // Button dimensions with modest padding (subtle button)
+        let button_padding_h = spacing::MD;
+        let button_padding_v = spacing::XS;
+        let button_size = Vec2::new(
+            text_size.x + button_padding_h * 2.0,
+            text_size.y + button_padding_v * 2.0,
+        );
+
+        // Allocate space and get response
+        let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw subtle button background (only visible on hover)
+        if is_hovered {
+            ui.painter()
+                .rect_filled(rect, Rounding::same(rounding::BUTTON), colors::SURFACE);
+        }
+
+        // Draw button text (slightly brighter on hover)
+        let text_color = if is_hovered {
+            colors::TEXT_SECONDARY
+        } else {
+            colors::TEXT_MUTED
+        };
+        let text_pos = rect.center() - text_size / 2.0;
+        ui.painter().galley(
+            text_pos,
+            ui.fonts(|f| {
+                f.layout_no_wrap(
+                    button_text.to_string(),
+                    typography::font(FontSize::Small, FontWeight::Regular),
+                    text_color,
+                )
+            }),
+            text_color,
+        );
+
+        response.clicked()
+    }
+
+    /// Render the global config editor with all fields (US-003, US-006, US-009).
     ///
     /// Displays all 6 config fields grouped logically:
     /// - Pipeline group: review, commit, pull_request
@@ -2320,13 +2428,15 @@ impl Autom8App {
     ///
     /// Boolean fields are rendered as interactive toggle switches (US-006).
     /// Text fields are rendered as editable inputs with real-time validation (US-007).
-    /// Returns tuples of (bool_changes, text_changes) to be processed by the caller.
+    /// Includes "Reset to Defaults" button at the bottom (US-009).
+    /// Returns tuples of (bool_changes, text_changes, reset_clicked) to be processed by the caller.
     fn render_global_config_editor(
         &self,
         ui: &mut egui::Ui,
-    ) -> (BoolFieldChanges, TextFieldChanges) {
+    ) -> (BoolFieldChanges, TextFieldChanges, bool) {
         let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
         let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
+        let mut reset_clicked = false;
 
         // Show error if config failed to load
         if let Some(error) = &self.global_config_error {
@@ -2336,7 +2446,7 @@ impl Autom8App {
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::STATUS_ERROR),
             );
-            return (bool_changes, text_changes);
+            return (bool_changes, text_changes, reset_clicked);
         }
 
         // Show loading state or editor
@@ -2347,7 +2457,7 @@ impl Autom8App {
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_MUTED),
             );
-            return (bool_changes, text_changes);
+            return (bool_changes, text_changes, reset_clicked);
         };
 
         // Create mutable copies of boolean fields for toggle interaction (US-006)
@@ -2449,26 +2559,37 @@ impl Autom8App {
                     bool_changes.push((ConfigBoolField::WorktreeCleanup, worktree_cleanup));
                 }
 
+                // Add some padding before the reset button
+                ui.add_space(spacing::XXL);
+
+                // Reset to Defaults button (US-009)
+                // Styled as a secondary/subtle action at the bottom of the editor
+                if self.render_reset_to_defaults_button(ui) {
+                    reset_clicked = true;
+                }
+
                 // Add some padding at the bottom
                 ui.add_space(spacing::XL);
             });
 
-        (bool_changes, text_changes)
+        (bool_changes, text_changes, reset_clicked)
     }
 
-    /// Render the project config editor with all fields (US-004, US-006, US-007, US-008).
+    /// Render the project config editor with all fields (US-004, US-006, US-007, US-008, US-009).
     ///
     /// Uses the same field layout and controls as the global config editor.
     /// The UI is identical but operates on the project-specific config file.
     /// Boolean fields are rendered as interactive toggle switches (US-006).
     /// Text fields are rendered as editable inputs with real-time validation (US-007).
+    /// Includes "Reset to Defaults" button at the bottom (US-009).
     fn render_project_config_editor(
         &self,
         ui: &mut egui::Ui,
         project_name: &str,
-    ) -> (BoolFieldChanges, TextFieldChanges) {
+    ) -> (BoolFieldChanges, TextFieldChanges, bool) {
         let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
         let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
+        let mut reset_clicked = false;
 
         // Show error if config failed to load
         if let Some(error) = &self.project_config_error {
@@ -2478,7 +2599,7 @@ impl Autom8App {
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::STATUS_ERROR),
             );
-            return (bool_changes, text_changes);
+            return (bool_changes, text_changes, reset_clicked);
         }
 
         // Show loading state or editor
@@ -2489,7 +2610,7 @@ impl Autom8App {
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_MUTED),
             );
-            return (bool_changes, text_changes);
+            return (bool_changes, text_changes, reset_clicked);
         };
 
         // Create mutable copies of boolean fields for toggle interaction (US-006)
@@ -2591,11 +2712,20 @@ impl Autom8App {
                     bool_changes.push((ConfigBoolField::WorktreeCleanup, worktree_cleanup));
                 }
 
+                // Add some padding before the reset button
+                ui.add_space(spacing::XXL);
+
+                // Reset to Defaults button (US-009)
+                // Styled as a secondary/subtle action at the bottom of the editor
+                if self.render_reset_to_defaults_button(ui) {
+                    reset_clicked = true;
+                }
+
                 // Add some padding at the bottom
                 ui.add_space(spacing::XL);
             });
 
-        (bool_changes, text_changes)
+        (bool_changes, text_changes, reset_clicked)
     }
 
     /// Render a config group header.
@@ -5973,10 +6103,7 @@ mod tests {
         }
 
         assert!(!commit, "commit should be false after user disabled it");
-        assert!(
-            !pull_request,
-            "pull_request should be false due to cascade"
-        );
+        assert!(!pull_request, "pull_request should be false due to cascade");
     }
 
     /// Test that pull_request can be enabled when commit is true.
@@ -6031,7 +6158,10 @@ mod tests {
 
         // No cascade in reverse direction - pull_request stays as is
         assert!(commit, "commit should be true");
-        assert!(!pull_request, "pull_request should remain false (user must enable it manually)");
+        assert!(
+            !pull_request,
+            "pull_request should remain false (user must enable it manually)"
+        );
     }
 
     /// Test that the tooltip text matches the acceptance criteria.
@@ -6117,7 +6247,10 @@ mod tests {
         // Verify both fields were updated in the cached config
         if let Some(config) = &app.cached_global_config {
             assert!(!config.commit, "commit should be false");
-            assert!(!config.pull_request, "pull_request should be false due to cascade");
+            assert!(
+                !config.pull_request,
+                "pull_request should be false due to cascade"
+            );
         } else {
             panic!("Global config should be cached");
         }
