@@ -1149,20 +1149,18 @@ impl Autom8App {
                                     action,
                                     enabled,
                                 } => {
-                                    if self.render_context_menu_item(ui, label, *enabled, false) {
-                                        if *enabled {
-                                            selected_action = Some(action.clone());
-                                            should_close = true;
-                                        }
+                                    if self.render_context_menu_item(ui, label, *enabled, false)
+                                        && *enabled
+                                    {
+                                        selected_action = Some(action.clone());
+                                        should_close = true;
                                     }
                                 }
                                 ContextMenuItem::Separator => {
                                     ui.add_space(spacing::XS);
                                     let rect = ui.available_rect_before_wrap();
-                                    let separator_rect = Rect::from_min_size(
-                                        rect.min,
-                                        Vec2::new(menu_width, 1.0),
-                                    );
+                                    let separator_rect =
+                                        Rect::from_min_size(rect.min, Vec2::new(menu_width, 1.0));
                                     ui.painter().rect_filled(
                                         separator_rect,
                                         Rounding::ZERO,
@@ -3940,9 +3938,7 @@ mod tests {
         // Test disabled submenu (no items)
         let disabled_submenu = ContextMenuItem::submenu_disabled("Empty", "empty");
         match disabled_submenu {
-            ContextMenuItem::Submenu {
-                enabled, items, ..
-            } => {
+            ContextMenuItem::Submenu { enabled, items, .. } => {
                 assert!(!enabled);
                 assert!(items.is_empty());
             }
@@ -3979,17 +3975,11 @@ mod tests {
 
         // Open first context menu
         app.open_context_menu(Pos2::new(100.0, 100.0), "project-a".to_string());
-        assert_eq!(
-            app.context_menu().unwrap().project_name,
-            "project-a"
-        );
+        assert_eq!(app.context_menu().unwrap().project_name, "project-a");
 
         // Open second context menu - should replace the first
         app.open_context_menu(Pos2::new(200.0, 200.0), "project-b".to_string());
-        assert_eq!(
-            app.context_menu().unwrap().project_name,
-            "project-b"
-        );
+        assert_eq!(app.context_menu().unwrap().project_name, "project-b");
 
         // Only one context menu should be open
         assert!(app.is_context_menu_open());
@@ -4005,7 +3995,11 @@ mod tests {
 
         // Check first item is Status
         match &items[0] {
-            ContextMenuItem::Action { label, action, enabled } => {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
                 assert_eq!(label, "Status");
                 assert_eq!(action, &ContextMenuAction::Status);
                 assert!(enabled);
@@ -4015,7 +4009,11 @@ mod tests {
 
         // Check second item is Describe
         match &items[1] {
-            ContextMenuItem::Action { label, action, enabled } => {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
                 assert_eq!(label, "Describe");
                 assert_eq!(action, &ContextMenuAction::Describe);
                 assert!(enabled);
