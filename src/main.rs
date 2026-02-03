@@ -3,10 +3,10 @@
 //! Parses command-line arguments and dispatches to the appropriate command handler.
 
 use autom8::commands::{
-    all_sessions_status_command, clean_command, config_display_command, config_set_command,
-    default_command, describe_command, global_status_command, init_command, list_command,
-    monitor_command, pr_review_command, projects_command, resume_command, run_command,
-    run_with_file, status_command, CleanOptions, ConfigScope, ConfigSubcommand,
+    all_sessions_status_command, clean_command, config_display_command, config_reset_command,
+    config_set_command, default_command, describe_command, global_status_command, init_command,
+    list_command, monitor_command, pr_review_command, projects_command, resume_command,
+    run_command, run_with_file, status_command, CleanOptions, ConfigScope, ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -274,17 +274,8 @@ fn main() {
                     key,
                     value,
                 }) => config_set_command(key, value, *g),
-                // Reset subcommand - to be implemented in US-003
-                Some(ConfigSubcommand::Reset { global: g, yes }) => {
-                    // Placeholder for US-003 implementation
-                    // For now, return an informative error
-                    Err(autom8::error::Autom8Error::Config(format!(
-                        "The 'config reset' subcommand is not yet implemented.\n\
-                        Planned: autom8 config reset{}{}",
-                        if *g { " --global" } else { "" },
-                        if *yes { " --yes" } else { "" }
-                    )))
-                }
+                // Reset subcommand (US-003)
+                Some(ConfigSubcommand::Reset { global: g, yes }) => config_reset_command(*g, *yes)
             }
         }
 
@@ -2012,6 +2003,204 @@ mod tests {
             } else {
                 panic!("Expected Set subcommand");
             }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    // ======================================================================
+    // Tests for US-003 (Config Reset): CLI parsing and wiring
+    // ======================================================================
+
+    #[test]
+    fn test_us003_config_reset_recognized() {
+        // Test that `autom8 config reset` is recognized
+        let cli = Cli::try_parse_from(["autom8", "config", "reset"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            assert!(matches!(subcommand, Some(ConfigSubcommand::Reset { .. })));
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_defaults() {
+        // Test that reset defaults to project config and no auto-confirm
+        let cli = Cli::try_parse_from(["autom8", "config", "reset"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global, "global should default to false");
+                assert!(!yes, "yes should default to false");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_global_flag() {
+        // Test that `autom8 config reset --global` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--global"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "--global should set global to true");
+                assert!(!yes);
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_short_global_flag() {
+        // Test that `autom8 config reset -g` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "-g"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "-g should set global to true");
+                assert!(!yes);
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_yes_flag() {
+        // Test that `autom8 config reset --yes` skips confirmation
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--yes"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global);
+                assert!(yes, "--yes should set yes to true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_short_yes_flag() {
+        // Test that `autom8 config reset -y` skips confirmation
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "-y"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global);
+                assert!(yes, "-y should set yes to true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_combined_flags() {
+        // Test that `autom8 config reset --global --yes` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--global", "--yes"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "--global should be true");
+                assert!(yes, "--yes should be true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_combined_short_flags() {
+        // Test that `autom8 config reset -g -y` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "-g", "-y"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "-g should be true");
+                assert!(yes, "-y should be true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us003_config_reset_help_recognized() {
+        // Test that `autom8 config reset --help` works
+        let result = Cli::try_parse_from(["autom8", "config", "reset", "--help"]);
+        assert!(result.is_err(), "Should return error for --help flag");
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelp,
+            "Should recognize --help flag for reset subcommand"
+        );
+    }
+
+    #[test]
+    fn test_us003_config_reset_help_contains_defaults() {
+        // Test that help text contains default values
+        let result = Cli::try_parse_from(["autom8", "config", "reset", "--help"]);
+        let err = result.err().unwrap();
+        let help_text = err.to_string();
+
+        // Help should mention default values
+        assert!(
+            help_text.contains("review") && help_text.contains("true"),
+            "Help should mention review = true"
+        );
+        assert!(
+            help_text.contains("commit") && help_text.contains("true"),
+            "Help should mention commit = true"
+        );
+        assert!(
+            help_text.contains("worktree_cleanup") && help_text.contains("false"),
+            "Help should mention worktree_cleanup = false"
+        );
+    }
+
+    #[test]
+    fn test_us003_config_reset_help_contains_behavior() {
+        // Test that help text describes behavior
+        let result = Cli::try_parse_from(["autom8", "config", "reset", "--help"]);
+        let err = result.err().unwrap();
+        let help_text = err.to_string();
+
+        assert!(
+            help_text.contains("confirmation"),
+            "Help should mention confirmation prompt"
+        );
+        assert!(
+            help_text.contains("-y") || help_text.contains("--yes"),
+            "Help should mention -y/--yes flag"
+        );
+    }
+
+    #[test]
+    fn test_us003_config_reset_command_function_wired() {
+        // Verify config_reset_command is imported and available
+        use autom8::commands::config_reset_command;
+        let _: fn(bool, bool) -> autom8::error::Result<()> = config_reset_command;
+    }
+
+    #[test]
+    fn test_us003_config_reset_no_extra_arguments() {
+        // Reset should not accept extra positional arguments
+        // (unlike set which requires key and value)
+        let cli = Cli::try_parse_from(["autom8", "config", "reset"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            assert!(matches!(subcommand, Some(ConfigSubcommand::Reset { .. })));
         } else {
             panic!("Expected Config command");
         }

@@ -32,7 +32,9 @@ mod run;
 mod status;
 
 pub use clean::{clean_command, CleanOptions, CleanupSummary, SkippedSession};
-pub use config::{config_display_command, config_set_command, ConfigScope, ConfigSubcommand};
+pub use config::{
+    config_display_command, config_reset_command, config_set_command, ConfigScope, ConfigSubcommand,
+};
 pub use default::default_command;
 pub use describe::describe_command;
 pub use init::init_command;
