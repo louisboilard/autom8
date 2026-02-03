@@ -31,6 +31,8 @@ const MIN_WIDTH: f32 = 400.0;
 const MIN_HEIGHT: f32 = 300.0;
 
 /// Height of the header/tab bar area (48px = 3 * LG spacing).
+/// Note: Used by tests and will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const HEADER_HEIGHT: f32 = 48.0;
 
 // ============================================================================
@@ -49,9 +51,13 @@ const TITLE_BAR_HEIGHT: f32 = 28.0;
 const TITLE_BAR_TRAFFIC_LIGHT_OFFSET: f32 = 72.0;
 
 /// Tab indicator underline height.
+/// Note: Used by tests and will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Tab horizontal padding (uses LG from spacing scale).
+/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const TAB_PADDING_H: f32 = 16.0; // spacing::LG
 
 /// Default refresh interval for data loading (500ms for GUI, less aggressive than TUI).
@@ -125,6 +131,8 @@ const SIDEBAR_ITEM_HEIGHT: f32 = 40.0;
 const SIDEBAR_ITEM_PADDING_H: f32 = 16.0; // spacing::LG
 
 /// Vertical padding for sidebar items.
+/// Note: Used by tests, available for future refinement.
+#[allow(dead_code)]
 const SIDEBAR_ITEM_PADDING_V: f32 = 8.0; // spacing::SM
 
 /// Width of the accent bar indicator for active items.
@@ -387,12 +395,18 @@ impl Tab {
 }
 
 /// Maximum width for the tab bar scroll area.
+/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const TAB_BAR_MAX_SCROLL_WIDTH: f32 = 800.0;
 
 /// Width of the close button area on closable tabs.
+/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const TAB_CLOSE_BUTTON_SIZE: f32 = 16.0;
 
 /// Padding around the close button.
+/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
+#[allow(dead_code)]
 const TAB_CLOSE_PADDING: f32 = 4.0;
 
 /// The main GUI application state.
@@ -1114,11 +1128,8 @@ impl Autom8App {
 
         // Draw background
         if bg_color != Color32::TRANSPARENT {
-            ui.painter().rect_filled(
-                rect,
-                Rounding::same(SIDEBAR_ITEM_ROUNDING),
-                bg_color,
-            );
+            ui.painter()
+                .rect_filled(rect, Rounding::same(SIDEBAR_ITEM_ROUNDING), bg_color);
         }
 
         // Draw active indicator (accent bar on the left)
@@ -1142,17 +1153,12 @@ impl Autom8App {
         // Determine text color based on state
         let text_color = if is_active {
             colors::TEXT_PRIMARY
-        } else if is_hovered {
-            colors::TEXT_SECONDARY
         } else {
             colors::TEXT_SECONDARY
         };
 
         // Draw text label
-        let text_pos = egui::pos2(
-            rect.left() + SIDEBAR_ITEM_PADDING_H,
-            rect.center().y,
-        );
+        let text_pos = egui::pos2(rect.left() + SIDEBAR_ITEM_PADDING_H, rect.center().y);
 
         ui.painter().text(
             text_pos,
@@ -1173,10 +1179,12 @@ impl Autom8App {
     }
 
     // ========================================================================
-    // Header / Tab Bar
+    // Header / Tab Bar (preserved for US-005: Dynamic Tabs in Content Header)
     // ========================================================================
 
     /// Render the header area with tab bar.
+    /// Note: Will be repurposed for US-005 (Dynamic Tabs in Content Header).
+    #[allow(dead_code)]
     fn render_header(&mut self, ui: &mut egui::Ui) {
         // Use horizontal scroll for tab bar if there are many tabs
         let scroll_width = ui.available_width().min(TAB_BAR_MAX_SCROLL_WIDTH);
@@ -1236,6 +1244,8 @@ impl Autom8App {
 
     /// Render a single tab button with optional close button.
     /// Returns (tab_clicked, close_clicked).
+    /// Note: Will be used for US-005 (Dynamic Tabs in Content Header).
+    #[allow(dead_code)]
     fn render_dynamic_tab(
         &self,
         ui: &mut egui::Ui,
@@ -5131,11 +5141,19 @@ mod tests {
     fn test_sidebar_item_states_use_theme_colors() {
         // Active state should use SURFACE_SELECTED
         let selected = colors::SURFACE_SELECTED;
-        assert_ne!(selected, Color32::TRANSPARENT, "Selected state should have a color");
+        assert_ne!(
+            selected,
+            Color32::TRANSPARENT,
+            "Selected state should have a color"
+        );
 
         // Hover state should use SURFACE_HOVER
         let hover = colors::SURFACE_HOVER;
-        assert_ne!(hover, Color32::TRANSPARENT, "Hover state should have a color");
+        assert_ne!(
+            hover,
+            Color32::TRANSPARENT,
+            "Hover state should have a color"
+        );
 
         // Hover should be lighter than selected (in warm theme, higher values = lighter)
         let hover_sum = hover.r() as u32 + hover.g() as u32 + hover.b() as u32;
