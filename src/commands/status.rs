@@ -53,7 +53,7 @@ pub fn global_status_command() -> Result<()> {
     Ok(())
 }
 
-/// Display status for all sessions in the current project.
+/// Display status for all sessions in a project.
 ///
 /// Shows a list of all sessions (worktrees) for the project, including:
 /// - Session ID and worktree path
@@ -64,14 +64,21 @@ pub fn global_status_command() -> Result<()> {
 /// Sessions are sorted with the current session first, then by last active time.
 /// Stale sessions (deleted worktrees) are marked accordingly.
 ///
+/// # Arguments
+///
+/// * `project` - Optional project name. If None, uses the current directory to determine the project.
+///
 /// # Returns
 ///
 /// * `Ok(())` on success
 /// * `Err(Autom8Error)` if reading session data fails
-pub fn all_sessions_status_command() -> Result<()> {
-    ensure_project_dir()?;
-
-    let state_manager = StateManager::new()?;
+pub fn all_sessions_status_command(project: Option<&str>) -> Result<()> {
+    let state_manager = if let Some(project_name) = project {
+        StateManager::for_project(project_name)?
+    } else {
+        ensure_project_dir()?;
+        StateManager::new()?
+    };
     let sessions = state_manager.list_sessions_with_status()?;
 
     if sessions.is_empty() {
