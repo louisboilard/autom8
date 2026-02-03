@@ -6,6 +6,7 @@ use crate::config::{global_config_path, project_config_path, Config};
 use crate::error::{Autom8Error, Result};
 use crate::git::is_git_repo;
 use crate::output::{BOLD, CYAN, GRAY, RESET, YELLOW};
+use clap::Subcommand;
 use std::fs;
 
 /// Scope for config operations.
@@ -17,6 +18,73 @@ pub enum ConfigScope {
     Project,
     /// Both global and project configurations
     Both,
+}
+
+/// Subcommands for the config command.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigSubcommand {
+    /// Set a configuration value
+    #[command(after_help = "EXAMPLES:
+    autom8 config set review false            # Disable review step in project config
+    autom8 config set --global commit true    # Enable auto-commit globally
+    autom8 config set worktree_path_pattern \"{repo}-feature-{branch}\"
+
+VALID KEYS:
+    review              - Enable code review step (true/false)
+    commit              - Enable auto-commit (true/false)
+    pull_request        - Enable auto-PR creation (true/false, requires commit=true)
+    worktree            - Enable worktree mode (true/false)
+    worktree_path_pattern - Pattern for worktree directory names (string)
+    worktree_cleanup    - Auto-cleanup worktrees after completion (true/false)
+
+VALUE FORMATS:
+    Boolean: true, false (case-insensitive)
+    String:  Quoted or unquoted text
+
+VALIDATION:
+    - Setting pull_request=true requires commit=true
+    - Invalid keys or values are rejected with an error message")]
+    Set {
+        /// Set in global config instead of project config
+        #[arg(short, long)]
+        global: bool,
+
+        /// The configuration key to set
+        key: String,
+
+        /// The value to set
+        value: String,
+    },
+
+    /// Reset configuration to default values
+    #[command(after_help = "EXAMPLES:
+    autom8 config reset               # Reset project config (with confirmation)
+    autom8 config reset --global      # Reset global config (with confirmation)
+    autom8 config reset -y            # Reset without confirmation prompt
+    autom8 config reset --global -y   # Reset global config without prompting
+
+DEFAULT VALUES:
+    review              = true
+    commit              = true
+    pull_request        = true
+    worktree            = true
+    worktree_path_pattern = \"{repo}-wt-{branch}\"
+    worktree_cleanup    = false
+
+BEHAVIOR:
+    - Prompts for confirmation before resetting (unless -y/--yes is used)
+    - Overwrites the config file with default values
+    - Displays the new configuration after reset
+    - If config file doesn't exist, informs you defaults are already in use")]
+    Reset {
+        /// Reset global config instead of project config
+        #[arg(short, long)]
+        global: bool,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 /// Display configuration values.

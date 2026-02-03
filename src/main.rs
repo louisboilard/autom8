@@ -6,7 +6,7 @@ use autom8::commands::{
     all_sessions_status_command, clean_command, config_display_command, default_command,
     describe_command, global_status_command, init_command, list_command, monitor_command,
     pr_review_command, projects_command, resume_command, run_command, run_with_file,
-    status_command, CleanOptions, ConfigScope,
+    status_command, CleanOptions, ConfigScope, ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -167,11 +167,15 @@ WHAT GETS CLEANED:
         force: bool,
     },
 
-    /// View configuration values in TOML format
+    /// View, modify, or reset configuration values
     #[command(after_help = "EXAMPLES:
-    autom8 config              # Show both global and project config
-    autom8 config --global     # Show only global config
-    autom8 config --project    # Show only project config
+    autom8 config                              # Show both global and project config
+    autom8 config --global                     # Show only global config
+    autom8 config --project                    # Show only project config
+    autom8 config set review false             # Set a value in project config
+    autom8 config set --global commit true     # Set a value in global config
+    autom8 config reset                        # Reset project config to defaults
+    autom8 config reset --global               # Reset global config to defaults
 
 CONFIG FILES:
     Global:  ~/.config/autom8/config.toml
@@ -186,7 +190,13 @@ VALID KEYS:
     pull_request        - Enable auto-PR creation (true/false)
     worktree            - Enable worktree mode (true/false)
     worktree_path_pattern - Pattern for worktree names (string)
-    worktree_cleanup    - Auto-cleanup worktrees (true/false)")]
+    worktree_cleanup    - Auto-cleanup worktrees (true/false)
+
+SUBCOMMANDS:
+    set    Set a configuration value
+    reset  Reset configuration to default values
+
+Run 'autom8 config <subcommand> --help' for more details on each subcommand.")]
     Config {
         /// Show only the global configuration (~/.config/autom8/config.toml)
         #[arg(short, long, conflicts_with = "project")]
@@ -195,6 +205,10 @@ VALID KEYS:
         /// Show only the project configuration (~/.config/autom8/<project>/config.toml)
         #[arg(short, long, conflicts_with = "global")]
         project: bool,
+
+        /// Subcommand (set or reset)
+        #[command(subcommand)]
+        subcommand: Option<ConfigSubcommand>,
     },
 
     /// Initialize autom8 config directory structure for current project
@@ -235,14 +249,42 @@ fn main() {
 
     // Handle commands that don't require a Runner (can work outside git repos)
     let result = match (&cli.file, &cli.command) {
-        // Config command - handle all scopes to give proper error messages
-        (None, Some(Commands::Config { global, project })) => {
-            let scope = match (global, project) {
-                (true, false) => ConfigScope::Global,
-                (false, true) => ConfigScope::Project,
-                _ => ConfigScope::Both,
-            };
-            config_display_command(scope)
+        // Config command - handle all scopes and subcommands
+        (None, Some(Commands::Config { global, project, subcommand })) => {
+            match subcommand {
+                // Display config (default behavior when no subcommand)
+                None => {
+                    let scope = match (global, project) {
+                        (true, false) => ConfigScope::Global,
+                        (false, true) => ConfigScope::Project,
+                        _ => ConfigScope::Both,
+                    };
+                    config_display_command(scope)
+                }
+                // Set subcommand - to be implemented in US-002
+                Some(ConfigSubcommand::Set { global: g, key, value }) => {
+                    // Placeholder for US-002 implementation
+                    // For now, return an informative error
+                    Err(autom8::error::Autom8Error::Config(format!(
+                        "The 'config set' subcommand is not yet implemented.\n\
+                        Planned: autom8 config set{} {} {}",
+                        if *g { " --global" } else { "" },
+                        key,
+                        value
+                    )))
+                }
+                // Reset subcommand - to be implemented in US-003
+                Some(ConfigSubcommand::Reset { global: g, yes }) => {
+                    // Placeholder for US-003 implementation
+                    // For now, return an informative error
+                    Err(autom8::error::Autom8Error::Config(format!(
+                        "The 'config reset' subcommand is not yet implemented.\n\
+                        Planned: autom8 config reset{}{}",
+                        if *g { " --global" } else { "" },
+                        if *yes { " --yes" } else { "" }
+                    )))
+                }
+            }
         }
 
         // Completions command doesn't need a git repo
@@ -318,7 +360,7 @@ fn main() {
                     force: *force,
                 }),
 
-                // Config already handled above
+                // Config already handled above (outside Runner block)
                 (None, Some(Commands::Config { .. })) => unreachable!(),
 
                 (None, Some(Commands::Init)) => init_command(),
@@ -1704,5 +1746,273 @@ mod tests {
         use autom8::commands::resume_command;
         // Type check: resume_command takes Option<&str> and bool
         let _: fn(Option<&str>, bool) -> autom8::error::Result<()> = resume_command;
+    }
+
+    // ======================================================================
+    // Tests for US-004 (Config Command): Command structure and help
+    // ======================================================================
+
+    #[test]
+    fn test_us004_config_without_flags_is_default_behavior() {
+        // `autom8 config` without flags should parse successfully (default: show both configs)
+        let cli = Cli::try_parse_from(["autom8", "config"]).unwrap();
+        if let Some(Commands::Config {
+            global,
+            project,
+            subcommand,
+        }) = cli.command
+        {
+            assert!(!global, "global should default to false");
+            assert!(!project, "project should default to false");
+            assert!(
+                subcommand.is_none(),
+                "subcommand should be None (displays both configs)"
+            );
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_help_recognized() {
+        // Test that --help flag triggers help output
+        let result = Cli::try_parse_from(["autom8", "config", "--help"]);
+        assert!(result.is_err(), "Should return error for --help flag");
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelp,
+            "Should recognize --help flag"
+        );
+    }
+
+    #[test]
+    fn test_us004_config_set_subcommand_recognized() {
+        // Test that `config set <key> <value>` is recognized
+        let cli = Cli::try_parse_from(["autom8", "config", "set", "review", "false"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Set { global, key, value }) = subcommand {
+                assert!(!global, "global should default to false");
+                assert_eq!(key, "review");
+                assert_eq!(value, "false");
+            } else {
+                panic!("Expected Set subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_set_global_flag() {
+        // Test that `config set --global <key> <value>` works
+        let cli =
+            Cli::try_parse_from(["autom8", "config", "set", "--global", "commit", "true"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Set { global, key, value }) = subcommand {
+                assert!(global, "--global should set global to true");
+                assert_eq!(key, "commit");
+                assert_eq!(value, "true");
+            } else {
+                panic!("Expected Set subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_set_short_global_flag() {
+        // Test that `config set -g <key> <value>` works
+        let cli =
+            Cli::try_parse_from(["autom8", "config", "set", "-g", "worktree", "false"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Set { global, key, value }) = subcommand {
+                assert!(global, "-g should set global to true");
+                assert_eq!(key, "worktree");
+                assert_eq!(value, "false");
+            } else {
+                panic!("Expected Set subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_set_help_recognized() {
+        // Test that `config set --help` works
+        let result = Cli::try_parse_from(["autom8", "config", "set", "--help"]);
+        assert!(result.is_err(), "Should return error for --help flag");
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelp,
+            "Should recognize --help flag for set subcommand"
+        );
+    }
+
+    #[test]
+    fn test_us004_config_reset_subcommand_recognized() {
+        // Test that `config reset` is recognized
+        let cli = Cli::try_parse_from(["autom8", "config", "reset"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global, "global should default to false");
+                assert!(!yes, "yes should default to false");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_reset_global_flag() {
+        // Test that `config reset --global` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--global"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "--global should set global to true");
+                assert!(!yes);
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_reset_yes_flag() {
+        // Test that `config reset --yes` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--yes"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global);
+                assert!(yes, "--yes should set yes to true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_reset_short_yes_flag() {
+        // Test that `config reset -y` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "-y"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(!global);
+                assert!(yes, "-y should set yes to true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_reset_combined_flags() {
+        // Test that `config reset --global -y` works
+        let cli = Cli::try_parse_from(["autom8", "config", "reset", "--global", "-y"]).unwrap();
+        if let Some(Commands::Config { subcommand, .. }) = cli.command {
+            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
+                assert!(global, "--global should set global to true");
+                assert!(yes, "-y should set yes to true");
+            } else {
+                panic!("Expected Reset subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
+    }
+
+    #[test]
+    fn test_us004_config_reset_help_recognized() {
+        // Test that `config reset --help` works
+        let result = Cli::try_parse_from(["autom8", "config", "reset", "--help"]);
+        assert!(result.is_err(), "Should return error for --help flag");
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelp,
+            "Should recognize --help flag for reset subcommand"
+        );
+    }
+
+    #[test]
+    fn test_us004_config_appears_in_main_help() {
+        // Verify config command appears in main help output
+        let result = Cli::try_parse_from(["autom8", "--help"]);
+        assert!(result.is_err(), "Should return error for --help flag");
+        let err = result.err().unwrap();
+        let help_text = err.to_string();
+        assert!(
+            help_text.contains("config"),
+            "config command should appear in main help"
+        );
+    }
+
+    #[test]
+    fn test_us004_config_subcommand_enum_exported() {
+        // Verify ConfigSubcommand is exported and usable
+        use autom8::commands::ConfigSubcommand;
+        let _set = ConfigSubcommand::Set {
+            global: false,
+            key: "test".to_string(),
+            value: "value".to_string(),
+        };
+        let _reset = ConfigSubcommand::Reset {
+            global: false,
+            yes: false,
+        };
+    }
+
+    #[test]
+    fn test_us004_config_set_requires_key_and_value() {
+        // Test that `config set` without arguments fails
+        let result = Cli::try_parse_from(["autom8", "config", "set"]);
+        assert!(
+            result.is_err(),
+            "config set should require key and value arguments"
+        );
+
+        // Test that `config set <key>` without value fails
+        let result = Cli::try_parse_from(["autom8", "config", "set", "review"]);
+        assert!(result.is_err(), "config set should require value argument");
+    }
+
+    #[test]
+    fn test_us004_config_with_subcommand_ignores_display_flags() {
+        // When a subcommand is used, --global and --project flags on the parent are separate
+        // The set subcommand has its own --global flag
+        let cli =
+            Cli::try_parse_from(["autom8", "config", "set", "--global", "key", "value"]).unwrap();
+        if let Some(Commands::Config {
+            global,
+            project,
+            subcommand,
+        }) = cli.command
+        {
+            // Parent flags should be false (not set)
+            assert!(!global, "parent global should be false");
+            assert!(!project, "parent project should be false");
+            // Subcommand's global flag should be true
+            if let Some(ConfigSubcommand::Set {
+                global: sub_global, ..
+            }) = subcommand
+            {
+                assert!(sub_global, "subcommand's global should be true");
+            } else {
+                panic!("Expected Set subcommand");
+            }
+        } else {
+            panic!("Expected Config command");
+        }
     }
 }
