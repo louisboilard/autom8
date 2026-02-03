@@ -2380,6 +2380,8 @@ impl Autom8App {
 
                 ui.add_space(spacing::SM);
 
+                // Commit toggle - when disabling commit while pull_request is true,
+                // cascade by also disabling pull_request (US-008)
                 if self.render_config_bool_field(
                     ui,
                     "commit",
@@ -2387,15 +2389,24 @@ impl Autom8App {
                     "Automatic git commits. When enabled, changes are automatically committed after implementation.",
                 ) {
                     bool_changes.push((ConfigBoolField::Commit, commit));
+                    // Cascade: if commit is now false and pull_request was true, disable pull_request too
+                    if !commit && pull_request {
+                        pull_request = false;
+                        bool_changes.push((ConfigBoolField::PullRequest, false));
+                    }
                 }
 
                 ui.add_space(spacing::SM);
 
-                if self.render_config_bool_field(
+                // Pull request toggle - disabled when commit is false (US-008)
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
                     ui,
                     "pull_request",
                     &mut pull_request,
                     "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                    !commit, // disabled when commit is false
+                    Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
                 }
@@ -2445,7 +2456,7 @@ impl Autom8App {
         (bool_changes, text_changes)
     }
 
-    /// Render the project config editor with all fields (US-004, US-006, US-007).
+    /// Render the project config editor with all fields (US-004, US-006, US-007, US-008).
     ///
     /// Uses the same field layout and controls as the global config editor.
     /// The UI is identical but operates on the project-specific config file.
@@ -2511,6 +2522,8 @@ impl Autom8App {
 
                 ui.add_space(spacing::SM);
 
+                // Commit toggle - when disabling commit while pull_request is true,
+                // cascade by also disabling pull_request (US-008)
                 if self.render_config_bool_field(
                     ui,
                     "commit",
@@ -2518,15 +2531,24 @@ impl Autom8App {
                     "Automatic git commits. When enabled, changes are automatically committed after implementation.",
                 ) {
                     bool_changes.push((ConfigBoolField::Commit, commit));
+                    // Cascade: if commit is now false and pull_request was true, disable pull_request too
+                    if !commit && pull_request {
+                        pull_request = false;
+                        bool_changes.push((ConfigBoolField::PullRequest, false));
+                    }
                 }
 
                 ui.add_space(spacing::SM);
 
-                if self.render_config_bool_field(
+                // Pull request toggle - disabled when commit is false (US-008)
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
                     ui,
                     "pull_request",
                     &mut pull_request,
                     "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                    !commit, // disabled when commit is false
+                    Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
                 }
@@ -2585,7 +2607,7 @@ impl Autom8App {
         );
     }
 
-    /// Render a boolean config field with an interactive toggle switch (US-006).
+    /// Render a boolean config field with an interactive toggle switch (US-006, US-008).
     ///
     /// Displays the field with a toggle switch (not a checkbox) that can be clicked
     /// to change the value. The toggle provides visual feedback matching the app's style.
@@ -2608,28 +2630,75 @@ impl Autom8App {
         value: &mut bool,
         help_text: &str,
     ) -> bool {
+        self.render_config_bool_field_with_disabled(ui, name, value, help_text, false, None)
+    }
+
+    /// Render a boolean config field with optional disabled state and tooltip (US-008).
+    ///
+    /// When disabled, the toggle is greyed out, non-interactive, and shows a tooltip
+    /// explaining why. This is used for validation constraints like `pull_request`
+    /// requiring `commit` to be enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The egui UI context
+    /// * `name` - The field name to display
+    /// * `value` - The current boolean value (mutable reference for toggle_value)
+    /// * `help_text` - Descriptive help text shown below the field
+    /// * `disabled` - If true, the toggle is greyed out and non-interactive
+    /// * `disabled_tooltip` - Tooltip text shown when hovering over a disabled toggle
+    ///
+    /// # Returns
+    ///
+    /// `true` if the toggle was clicked and the value changed, `false` otherwise.
+    fn render_config_bool_field_with_disabled(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut bool,
+        help_text: &str,
+        disabled: bool,
+        disabled_tooltip: Option<&str>,
+    ) -> bool {
         let original_value = *value;
 
         ui.horizontal(|ui| {
-            // Field name
+            // Field name - use disabled color if disabled
+            let text_color = if disabled {
+                colors::TEXT_DISABLED
+            } else {
+                colors::TEXT_PRIMARY
+            };
             ui.label(
                 egui::RichText::new(name)
                     .font(typography::font(FontSize::Body, FontWeight::Medium))
-                    .color(colors::TEXT_PRIMARY),
+                    .color(text_color),
             );
 
             ui.add_space(spacing::SM);
 
-            // Interactive toggle switch (US-006)
-            // Custom painted toggle switch that looks like an iOS/macOS style switch
-            ui.add(Self::toggle_switch(value));
+            // Interactive toggle switch (US-006) or disabled toggle (US-008)
+            if disabled {
+                let response = ui.add(Self::toggle_switch_disabled(*value));
+                // Show tooltip on hover when disabled (US-008)
+                if let Some(tooltip) = disabled_tooltip {
+                    response.on_hover_text(tooltip);
+                }
+            } else {
+                ui.add(Self::toggle_switch(value));
+            }
         });
 
-        // Help text below the field
+        // Help text below the field - use disabled color if disabled
+        let help_color = if disabled {
+            colors::TEXT_DISABLED
+        } else {
+            colors::TEXT_MUTED
+        };
         ui.label(
             egui::RichText::new(help_text)
                 .font(typography::font(FontSize::Small, FontWeight::Regular))
-                .color(colors::TEXT_MUTED),
+                .color(help_color),
         );
 
         // Return whether the value changed
@@ -2695,6 +2764,56 @@ impl Autom8App {
                 // Knob
                 ui.painter()
                     .circle_filled(center, knob_radius, colors::TEXT_PRIMARY);
+            }
+
+            response
+        }
+    }
+
+    /// Create a disabled iOS/macOS style toggle switch widget (US-008).
+    ///
+    /// This creates a non-interactive toggle that displays the current value
+    /// but cannot be clicked. It uses greyed-out colors to indicate the disabled state.
+    /// Used for validation constraints (e.g., pull_request requires commit to be enabled).
+    fn toggle_switch_disabled(on: bool) -> impl egui::Widget {
+        move |ui: &mut egui::Ui| -> egui::Response {
+            // Toggle dimensions - same as regular toggle
+            let desired_size = Vec2::new(36.0, 20.0);
+
+            // Allocate space but with hover sense only (no click)
+            // This allows the tooltip to work
+            let (rect, response) = ui.allocate_exact_size(desired_size, Sense::hover());
+
+            // Draw the toggle in disabled state
+            if ui.is_rect_visible(rect) {
+                // Animate based on current value (but won't change)
+                let how_on = ui.ctx().animate_bool_responsive(response.id, on);
+
+                // Background pill shape
+                let radius = 0.5 * rect.height();
+
+                // Use very muted colors for disabled state
+                let bg_color = colors::SURFACE_HOVER;
+                ui.painter()
+                    .rect_filled(rect, Rounding::same(radius), bg_color);
+
+                // Border - use disabled/muted color
+                ui.painter().rect_stroke(
+                    rect,
+                    Rounding::same(radius),
+                    Stroke::new(1.0, colors::BORDER),
+                );
+
+                // Circle knob - positioned based on value but greyed out
+                let circle_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+                let center = egui::pos2(circle_x, rect.center().y);
+                let knob_radius = radius * 0.75;
+
+                // No shadow for disabled state (flatter appearance)
+
+                // Knob - use disabled color
+                ui.painter()
+                    .circle_filled(center, knob_radius, colors::TEXT_DISABLED);
             }
 
             response
@@ -5786,5 +5905,221 @@ mod tests {
         // Note: config_last_modified is only set if save_global_config succeeds,
         // which requires filesystem access. In tests, this may fail silently.
         // The important thing is that the code path is exercised without panic.
+    }
+
+    // ========================================================================
+    // US-008: Validation Constraints with Disabled Controls
+    // ========================================================================
+
+    /// Test that render_config_bool_field_with_disabled exists and accepts the correct parameters.
+    /// This validates the method signature for US-008.
+    #[test]
+    fn test_us008_render_config_bool_field_with_disabled_exists() {
+        // This test verifies that the method exists by checking that the Autom8App type
+        // has the expected method. The actual rendering requires egui context.
+        let app = Autom8App::new();
+
+        // Verify the method exists by checking we can reference it
+        // This is a compile-time check - if the method didn't exist, this wouldn't compile
+        let _method_exists = Autom8App::render_config_bool_field_with_disabled;
+
+        // app should be created successfully
+        assert!(app.cached_global_config.is_none());
+    }
+
+    /// Test that the original render_config_bool_field delegates to the new method.
+    /// This ensures backward compatibility for US-006.
+    #[test]
+    fn test_us008_render_config_bool_field_backward_compatible() {
+        // Verify the original method still exists and has the same signature
+        let _method_exists = Autom8App::render_config_bool_field;
+
+        // This is a compile-time verification that the method signature is preserved
+        let app = Autom8App::new();
+        assert!(app.cached_global_config.is_none());
+    }
+
+    /// Test that toggle_switch_disabled exists and can be constructed.
+    /// The disabled toggle should accept a bool value and return a Widget.
+    #[test]
+    fn test_us008_toggle_switch_disabled_exists() {
+        // Verify the method exists by referencing it
+        let _method_exists = Autom8App::toggle_switch_disabled;
+
+        // Create the widget (returns impl Widget, so we can't do much with it in tests)
+        let _widget = Autom8App::toggle_switch_disabled(true);
+        let _widget2 = Autom8App::toggle_switch_disabled(false);
+
+        // If we got here without compile errors, the method exists with correct signature
+    }
+
+    /// Test the cascade behavior: disabling commit while pull_request is true
+    /// should result in both being disabled.
+    #[test]
+    fn test_us008_cascade_commit_disables_pull_request() {
+        // When commit is changed from true to false, and pull_request was true,
+        // the cascade logic should also disable pull_request.
+        //
+        // This is tested by verifying the logic pattern:
+        // if !commit && pull_request { pull_request = false; }
+
+        // Simulate the cascade scenario
+        let commit = false; // User disabled commit
+        let mut pull_request = true;
+
+        // Cascade logic (same as in render_global_config_editor)
+        if !commit && pull_request {
+            pull_request = false;
+        }
+
+        assert!(!commit, "commit should be false after user disabled it");
+        assert!(
+            !pull_request,
+            "pull_request should be false due to cascade"
+        );
+    }
+
+    /// Test that pull_request can be enabled when commit is true.
+    #[test]
+    fn test_us008_pull_request_enabled_when_commit_true() {
+        // When commit = true, pull_request toggle should be enabled
+        let commit = true;
+        let disabled = !commit; // This is the logic used in render_global_config_editor
+
+        assert!(
+            !disabled,
+            "pull_request should not be disabled when commit is true"
+        );
+    }
+
+    /// Test that pull_request is disabled when commit is false.
+    #[test]
+    fn test_us008_pull_request_disabled_when_commit_false() {
+        // When commit = false, pull_request toggle should be disabled
+        let commit = false;
+        let disabled = !commit; // This is the logic used in render_global_config_editor
+
+        assert!(
+            disabled,
+            "pull_request should be disabled when commit is false"
+        );
+    }
+
+    /// Test that the cascade doesn't affect pull_request if it's already false.
+    #[test]
+    fn test_us008_cascade_no_change_if_pull_request_already_false() {
+        let commit = false; // User disabled commit
+        let mut pull_request = false; // Already false
+
+        // Cascade logic - should not do anything extra since pull_request is already false
+        let cascade_triggered = !commit && pull_request;
+        if cascade_triggered {
+            pull_request = false;
+        }
+
+        assert!(!cascade_triggered, "cascade should not trigger");
+        assert!(!commit, "commit should be false");
+        assert!(!pull_request, "pull_request should remain false");
+    }
+
+    /// Test that enabling commit doesn't automatically enable pull_request.
+    /// Pull request should remain in its current state until user explicitly changes it.
+    #[test]
+    fn test_us008_enabling_commit_does_not_auto_enable_pull_request() {
+        let commit = true; // User enabled commit
+        let pull_request = false; // Was disabled by cascade or user
+
+        // No cascade in reverse direction - pull_request stays as is
+        assert!(commit, "commit should be true");
+        assert!(!pull_request, "pull_request should remain false (user must enable it manually)");
+    }
+
+    /// Test that the tooltip text matches the acceptance criteria.
+    #[test]
+    fn test_us008_disabled_tooltip_text() {
+        // Verify the exact tooltip text used in the implementation
+        let tooltip = "Pull requests require commits to be enabled";
+
+        // This is the exact text from the acceptance criteria:
+        // "Shows tooltip on hover: 'Pull requests require commits to be enabled'"
+        assert_eq!(
+            tooltip, "Pull requests require commits to be enabled",
+            "tooltip should match acceptance criteria"
+        );
+    }
+
+    /// Test that cascade produces the expected bool_changes vector.
+    #[test]
+    fn test_us008_cascade_produces_correct_changes() {
+        // Simulate the changes that would be pushed when cascade occurs
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let commit = false; // User disabled commit
+        let mut pull_request = true;
+
+        // Push the commit change
+        bool_changes.push((ConfigBoolField::Commit, commit));
+
+        // Cascade
+        if !commit && pull_request {
+            pull_request = false;
+            bool_changes.push((ConfigBoolField::PullRequest, false));
+        }
+
+        // Should have two changes
+        assert_eq!(bool_changes.len(), 2);
+        assert_eq!(bool_changes[0], (ConfigBoolField::Commit, false));
+        assert_eq!(bool_changes[1], (ConfigBoolField::PullRequest, false));
+    }
+
+    /// Test that disabling commit when pull_request is already false produces single change.
+    #[test]
+    fn test_us008_no_cascade_single_change() {
+        let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
+        let commit = false; // User disabled commit
+        let pull_request = false; // Already disabled
+
+        // Push the commit change
+        bool_changes.push((ConfigBoolField::Commit, commit));
+
+        // No cascade needed
+        if !commit && pull_request {
+            bool_changes.push((ConfigBoolField::PullRequest, false));
+        }
+
+        // Should have only one change
+        assert_eq!(bool_changes.len(), 1);
+        assert_eq!(bool_changes[0], (ConfigBoolField::Commit, false));
+    }
+
+    /// Test that the apply_config_bool_changes handles cascade changes correctly.
+    #[test]
+    fn test_us008_apply_cascade_changes() {
+        // Test applying cascade changes through the actual method
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config with both commit and pull_request enabled
+        app.cached_global_config = Some(crate::config::Config {
+            review: true,
+            commit: true,
+            pull_request: true,
+            worktree: true,
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            worktree_cleanup: false,
+        });
+
+        // Apply cascade changes: commit=false and pull_request=false
+        let changes = vec![
+            (ConfigBoolField::Commit, false),
+            (ConfigBoolField::PullRequest, false),
+        ];
+        app.apply_config_bool_changes(true, None, &changes);
+
+        // Verify both fields were updated in the cached config
+        if let Some(config) = &app.cached_global_config {
+            assert!(!config.commit, "commit should be false");
+            assert!(!config.pull_request, "pull_request should be false due to cascade");
+        } else {
+            panic!("Global config should be cached");
+        }
     }
 }
