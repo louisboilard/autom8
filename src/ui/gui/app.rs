@@ -183,6 +183,8 @@ pub enum TabId {
     ActiveRuns,
     /// The Projects tab (permanent).
     Projects,
+    /// The Config tab (permanent).
+    Config,
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
@@ -228,6 +230,8 @@ pub enum Tab {
     ActiveRuns,
     /// View of projects.
     Projects,
+    /// View of configuration settings.
+    Config,
 }
 
 impl Tab {
@@ -236,12 +240,13 @@ impl Tab {
         match self {
             Tab::ActiveRuns => "Active Runs",
             Tab::Projects => "Projects",
+            Tab::Config => "Config",
         }
     }
 
     /// Returns all available tabs.
     pub fn all() -> &'static [Tab] {
-        &[Tab::ActiveRuns, Tab::Projects]
+        &[Tab::ActiveRuns, Tab::Projects, Tab::Config]
     }
 
     /// Convert to TabId.
@@ -249,6 +254,7 @@ impl Tab {
         match self {
             Tab::ActiveRuns => TabId::ActiveRuns,
             Tab::Projects => TabId::Projects,
+            Tab::Config => TabId::Config,
         }
     }
 }
@@ -364,6 +370,7 @@ impl Autom8App {
         let tabs = vec![
             TabInfo::permanent(TabId::ActiveRuns, "Active Runs"),
             TabInfo::permanent(TabId::Projects, "Projects"),
+            TabInfo::permanent(TabId::Config, "Config"),
         ];
 
         let mut app = Self {
@@ -538,6 +545,7 @@ impl Autom8App {
         match &tab_id {
             TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
             TabId::Projects => self.current_tab = Tab::Projects,
+            TabId::Config => self.current_tab = Tab::Config,
             TabId::RunDetail(_) => {
                 // Dynamic tabs don't have a legacy equivalent,
                 // but we keep the last static tab for backward compat
@@ -919,10 +927,11 @@ impl Autom8App {
             // Render permanent navigation items
             let mut tab_to_activate: Option<TabId> = None;
 
-            // Snapshot of permanent tabs (ActiveRuns and Projects only)
+            // Snapshot of permanent tabs (ActiveRuns, Projects, and Config)
             let permanent_tabs: Vec<(TabId, &'static str)> = vec![
                 (TabId::ActiveRuns, "Active Runs"),
                 (TabId::Projects, "Projects"),
+                (TabId::Config, "Config"),
             ];
 
             for (tab_id, label) in permanent_tabs {
@@ -1264,6 +1273,7 @@ impl Autom8App {
         match &self.active_tab_id {
             TabId::ActiveRuns => self.render_active_runs(ui),
             TabId::Projects => self.render_projects(ui),
+            TabId::Config => self.render_config(ui),
             TabId::RunDetail(run_id) => {
                 let run_id = run_id.clone();
                 self.render_run_detail(ui, &run_id);
@@ -1472,6 +1482,35 @@ impl Autom8App {
         let tab_clicked = response.clicked() && !close_hovered;
 
         (tab_clicked, close_clicked)
+    }
+
+    /// Render the Config view.
+    ///
+    /// This is a placeholder that will be expanded in subsequent user stories
+    /// to include the full configuration editing UI with split-panel layout.
+    fn render_config(&mut self, ui: &mut egui::Ui) {
+        // Header
+        ui.label(
+            egui::RichText::new("Config")
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::MD);
+
+        // Placeholder content - will be expanded in US-002 through US-011
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(spacing::XXL);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Configuration settings will appear here")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                });
+            });
     }
 
     /// Render the run detail view for a specific run.
@@ -3133,7 +3172,8 @@ mod tests {
     #[test]
     fn test_app_initial_tabs() {
         let app = Autom8App::new();
-        assert_eq!(app.tab_count(), 2);
+        // 3 permanent tabs: ActiveRuns, Projects, Config
+        assert_eq!(app.tab_count(), 3);
         assert_eq!(app.closable_tab_count(), 0);
         assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
     }
@@ -3148,7 +3188,8 @@ mod tests {
         app.open_run_detail_tab("run-2", "Run 2");
         app.open_run_detail_tab("run-3", "Run 3");
 
-        assert_eq!(app.tab_count(), 5);
+        // 3 permanent tabs + 3 dynamic tabs
+        assert_eq!(app.tab_count(), 6);
         assert_eq!(app.closable_tab_count(), 3);
         assert!(app.has_tab(&TabId::RunDetail("run-1".to_string())));
 
@@ -3159,10 +3200,12 @@ mod tests {
         // Can't close permanent tabs
         assert!(!app.close_tab(&TabId::ActiveRuns));
         assert!(!app.close_tab(&TabId::Projects));
+        assert!(!app.close_tab(&TabId::Config));
 
         // Close all dynamic tabs
         assert_eq!(app.close_all_dynamic_tabs(), 2);
-        assert_eq!(app.tab_count(), 2);
+        // 3 permanent tabs remain
+        assert_eq!(app.tab_count(), 3);
     }
 
     #[test]
@@ -3259,7 +3302,8 @@ mod tests {
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
         assert!(app.has_tab(&TabId::RunDetail(entry.run_id.clone())));
-        assert_eq!(app.tab_count(), 3);
+        // 3 permanent tabs + 1 dynamic tab
+        assert_eq!(app.tab_count(), 4);
         assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
 
         // Check label format
@@ -3286,5 +3330,52 @@ mod tests {
 
         app.toggle_sidebar();
         assert!(!app.is_sidebar_collapsed());
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-001)
+    // ========================================================================
+
+    #[test]
+    fn test_config_tab_id_exists() {
+        // Verify TabId::Config variant can be created
+        let config_tab = TabId::Config;
+        assert_eq!(config_tab, TabId::Config);
+    }
+
+    #[test]
+    fn test_config_tab_in_permanent_tabs() {
+        let app = Autom8App::new();
+        // Verify Config tab is included in the tabs list
+        assert!(app.has_tab(&TabId::Config));
+    }
+
+    #[test]
+    fn test_config_tab_is_not_closable() {
+        let mut app = Autom8App::new();
+        // Config tab should not be closable (it's permanent)
+        assert!(!app.close_tab(&TabId::Config));
+    }
+
+    #[test]
+    fn test_config_tab_can_be_activated() {
+        let mut app = Autom8App::new();
+        app.set_active_tab(TabId::Config);
+        assert_eq!(*app.active_tab_id(), TabId::Config);
+    }
+
+    #[test]
+    fn test_tab_enum_includes_config() {
+        // Verify Tab::Config variant exists and has correct label
+        assert_eq!(Tab::Config.label(), "Config");
+        // Verify Tab::all() includes Config
+        let all_tabs = Tab::all();
+        assert!(all_tabs.contains(&Tab::Config));
+    }
+
+    #[test]
+    fn test_tab_to_tab_id_config() {
+        // Verify Tab::Config converts to TabId::Config
+        assert_eq!(Tab::Config.to_tab_id(), TabId::Config);
     }
 }
