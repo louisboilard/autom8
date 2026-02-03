@@ -270,8 +270,6 @@ const CONTENT_TAB_BAR_HEIGHT: f32 = 32.0;
 /// This struct holds all UI state and loaded data, similar to the TUI's `MonitorApp`.
 /// Data is refreshed at a configurable interval (default 500ms).
 pub struct Autom8App {
-    /// Optional project filter to show only a specific project.
-    project_filter: Option<String>,
     /// Currently selected tab (legacy, for backward compatibility).
     current_tab: Tab,
 
@@ -345,27 +343,16 @@ pub struct Autom8App {
 
 impl Autom8App {
     /// Create a new application instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `project_filter` - Optional project name to filter the view
-    pub fn new(project_filter: Option<String>) -> Self {
-        Self::with_refresh_interval(
-            project_filter,
-            Duration::from_millis(DEFAULT_REFRESH_INTERVAL_MS),
-        )
+    pub fn new() -> Self {
+        Self::with_refresh_interval(Duration::from_millis(DEFAULT_REFRESH_INTERVAL_MS))
     }
 
     /// Create a new application instance with a custom refresh interval.
     ///
     /// # Arguments
     ///
-    /// * `project_filter` - Optional project name to filter the view
     /// * `refresh_interval` - How often to refresh data from disk
-    pub fn with_refresh_interval(
-        project_filter: Option<String>,
-        refresh_interval: Duration,
-    ) -> Self {
+    pub fn with_refresh_interval(refresh_interval: Duration) -> Self {
         // Initialize permanent tabs
         let tabs = vec![
             TabInfo::permanent(TabId::ActiveRuns, "Active Runs"),
@@ -373,7 +360,6 @@ impl Autom8App {
         ];
 
         let mut app = Self {
-            project_filter,
             current_tab: Tab::default(),
             tabs,
             active_tab_id: TabId::default(),
@@ -679,7 +665,8 @@ impl Autom8App {
         self.last_refresh = Instant::now();
 
         // Use shared data loading function (swallow errors, use defaults)
-        let ui_data = load_ui_data(self.project_filter.as_deref()).unwrap_or_default();
+        // No project filter - always show all projects
+        let ui_data = load_ui_data(None).unwrap_or_default();
 
         self.projects = ui_data.projects;
         self.sessions = ui_data.sessions;
@@ -1955,15 +1942,6 @@ impl Autom8App {
 
             ui.add_space(spacing::SM);
 
-            if let Some(ref filter) = self.project_filter {
-                ui.label(
-                    egui::RichText::new(format!("Filtering by project: {}", filter))
-                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                        .color(colors::TEXT_SECONDARY),
-                );
-                ui.add_space(spacing::SM);
-            }
-
             // Empty state or grid layout
             if self.sessions.is_empty() {
                 self.render_empty_active_runs(ui);
@@ -2445,15 +2423,6 @@ impl Autom8App {
         );
 
         ui.add_space(spacing::SM);
-
-        if let Some(ref filter) = self.project_filter {
-            ui.label(
-                egui::RichText::new(format!("Filtering by project: {}", filter))
-                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                    .color(colors::TEXT_SECONDARY),
-            );
-            ui.add_space(spacing::SM);
-        }
 
         // Empty state or list
         if self.projects.is_empty() {
@@ -2968,15 +2937,11 @@ fn build_viewport() -> egui::ViewportBuilder {
 ///
 /// Opens a native window using eframe with the specified configuration.
 ///
-/// # Arguments
-///
-/// * `project_filter` - Optional project name to filter the view
-///
 /// # Returns
 ///
 /// * `Ok(())` when the user closes the window
 /// * `Err(Autom8Error)` if the GUI fails to initialize
-pub fn run_gui(project_filter: Option<String>) -> Result<()> {
+pub fn run_gui() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: build_viewport(),
         ..Default::default()
@@ -2990,7 +2955,7 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
             typography::init(&cc.egui_ctx);
             // Initialize theme (colors, visuals, and style)
             theme::init(&cc.egui_ctx);
-            Ok(Box::new(Autom8App::new(project_filter)))
+            Ok(Box::new(Autom8App::new()))
         }),
     )
     .map_err(|e| Autom8Error::GuiError(e.to_string()))
@@ -3011,20 +2976,14 @@ mod tests {
 
     #[test]
     fn test_autom8_app_new_defaults_to_active_runs() {
-        let app = Autom8App::new(None);
+        let app = Autom8App::new();
         assert_eq!(app.current_tab(), Tab::ActiveRuns);
-    }
-
-    #[test]
-    fn test_autom8_app_new_with_filter() {
-        let app = Autom8App::new(Some("test-project".to_string()));
-        assert_eq!(app.project_filter, Some("test-project".to_string()));
     }
 
     #[test]
     fn test_app_with_custom_refresh_interval() {
         let interval = Duration::from_millis(100);
-        let app = Autom8App::with_refresh_interval(None, interval);
+        let app = Autom8App::with_refresh_interval(interval);
         assert_eq!(app.refresh_interval(), interval);
     }
 
@@ -3165,7 +3124,7 @@ mod tests {
 
     #[test]
     fn test_project_status_color() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
+        let app = Autom8App::new();
 
         let make_project = |has_active_run, run_status, load_error| ProjectData {
             info: ProjectTreeInfo {
@@ -3207,7 +3166,7 @@ mod tests {
 
     #[test]
     fn test_toggle_project_selection() {
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
         assert!(app.selected_project().is_none());
 
         app.toggle_project_selection("my-project");
@@ -3272,7 +3231,7 @@ mod tests {
 
     #[test]
     fn test_app_initial_tabs() {
-        let app = Autom8App::new(None);
+        let app = Autom8App::new();
         assert_eq!(app.tab_count(), 2);
         assert_eq!(app.closable_tab_count(), 0);
         assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
@@ -3280,7 +3239,7 @@ mod tests {
 
     #[test]
     fn test_app_open_and_close_tabs() {
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
 
         // Open tabs
         assert!(app.open_run_detail_tab("run-1", "Run 1"));
@@ -3307,7 +3266,7 @@ mod tests {
 
     #[test]
     fn test_app_close_active_tab_switches_to_previous() {
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
         app.set_active_tab(TabId::Projects);
         app.open_run_detail_tab("run-123", "Run Details");
 
@@ -3324,7 +3283,7 @@ mod tests {
     fn test_run_detail_cache() {
         use crate::state::RunState;
 
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
         assert!(app.get_cached_run_state("run-123").is_none());
 
         let run = RunState::new(
@@ -3388,7 +3347,7 @@ mod tests {
     fn test_run_detail_tab_opens_from_history_entry() {
         use crate::state::{RunState, RunStatus};
 
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
         let mut run = RunState::new(
             std::path::PathBuf::from("test.json"),
             "feature/test".to_string(),
@@ -3418,7 +3377,7 @@ mod tests {
 
     #[test]
     fn test_sidebar_toggle() {
-        let mut app = Autom8App::new(None);
+        let mut app = Autom8App::new();
         assert!(!app.is_sidebar_collapsed());
 
         app.toggle_sidebar();
