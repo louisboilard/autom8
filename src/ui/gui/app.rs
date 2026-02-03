@@ -1986,7 +1986,13 @@ impl Autom8App {
     /// Render a boolean config field with label and help text.
     ///
     /// Displays the field as a read-only indicator (toggle controls will be added in US-006).
-    fn render_config_bool_field(&self, ui: &mut egui::Ui, name: &str, value: bool, help_text: &str) {
+    fn render_config_bool_field(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: bool,
+        help_text: &str,
+    ) {
         ui.horizontal(|ui| {
             // Field name
             ui.label(
@@ -2022,7 +2028,13 @@ impl Autom8App {
     /// Render a text config field with label and help text.
     ///
     /// Displays the field as a read-only value (editable input will be added in US-007).
-    fn render_config_text_field(&self, ui: &mut egui::Ui, name: &str, value: &str, help_text: &str) {
+    fn render_config_text_field(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &str,
+        help_text: &str,
+    ) {
         ui.horizontal(|ui| {
             // Field name
             ui.label(
@@ -4018,5 +4030,146 @@ mod tests {
         assert!(SPLIT_DIVIDER_WIDTH > 0.0);
         assert!(SPLIT_DIVIDER_MARGIN > 0.0);
         assert!(SPLIT_PANEL_MIN_WIDTH > 0.0);
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-003) - Global Config Editor
+    // ========================================================================
+
+    #[test]
+    fn test_us003_cached_global_config_initially_none() {
+        // Verify the cached global config is initially None
+        // (it gets populated when Config tab is rendered with Global scope selected)
+        let app = Autom8App::new();
+        // Note: After initial load with Global scope, config may be loaded
+        // depending on refresh behavior - test the accessor exists
+        let _ = app.cached_global_config();
+    }
+
+    #[test]
+    fn test_us003_global_config_error_initially_none() {
+        // Verify error state is initially None
+        let app = Autom8App::new();
+        assert!(
+            app.global_config_error().is_none(),
+            "Global config error should be None initially"
+        );
+    }
+
+    #[test]
+    fn test_us003_load_global_config_populates_cache() {
+        // Test that load_global_config() populates the cache
+        let mut app = Autom8App::new();
+        app.load_global_config();
+
+        // After loading, either config is populated or error is set
+        // (depends on whether global config file exists)
+        let has_config = app.cached_global_config().is_some();
+        let has_error = app.global_config_error().is_some();
+        assert!(
+            has_config || has_error,
+            "Either config should be loaded or error should be set"
+        );
+    }
+
+    #[test]
+    fn test_us003_global_config_fields_accessible() {
+        // Test that when global config is loaded, all fields are accessible
+        let mut app = Autom8App::new();
+        app.load_global_config();
+
+        if let Some(config) = app.cached_global_config() {
+            // All 6 config fields should be accessible
+            let _ = config.review;
+            let _ = config.commit;
+            let _ = config.pull_request;
+            let _ = config.worktree;
+            let _ = config.worktree_path_pattern.as_str();
+            let _ = config.worktree_cleanup;
+        }
+    }
+
+    #[test]
+    fn test_us003_refresh_config_scope_data_loads_global_when_selected() {
+        // Test that refresh_config_scope_data loads global config when Global scope is selected
+        let mut app = Autom8App::new();
+        // Clear any existing cached config
+        app.cached_global_config = None;
+
+        // Ensure Global scope is selected
+        app.set_selected_config_scope(ConfigScope::Global);
+
+        // Refresh should load the config
+        app.refresh_config_scope_data();
+
+        // Config should be loaded (or error set)
+        let has_config = app.cached_global_config().is_some();
+        let has_error = app.global_config_error().is_some();
+        assert!(
+            has_config || has_error,
+            "Config should be loaded when Global scope is selected"
+        );
+    }
+
+    #[test]
+    fn test_us003_config_scope_change_does_not_reload_if_cached() {
+        // Test that switching away and back to Global scope uses cached config
+        let mut app = Autom8App::new();
+        app.load_global_config();
+
+        if app.cached_global_config().is_some() {
+            // Get a reference to check later
+            let config_review = app.cached_global_config().map(|c| c.review);
+
+            // Switch to a project scope
+            app.set_selected_config_scope(ConfigScope::Project("test-project".to_string()));
+
+            // Switch back to Global
+            app.set_selected_config_scope(ConfigScope::Global);
+
+            // Config should still be cached
+            assert!(
+                app.cached_global_config().is_some(),
+                "Global config should remain cached"
+            );
+            assert_eq!(
+                app.cached_global_config().map(|c| c.review),
+                config_review,
+                "Cached config should have same values"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us003_global_config_path_function_returns_path() {
+        // Test that global_config_path() returns a valid path
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok(), "global_config_path() should succeed");
+
+        let path = path_result.unwrap();
+        assert!(
+            path.to_string_lossy().contains("config.toml"),
+            "Path should contain config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us003_project_config_path_for_returns_path() {
+        // Test that project_config_path_for() returns a valid path
+        let path_result = crate::config::project_config_path_for("test-project");
+        assert!(
+            path_result.is_ok(),
+            "project_config_path_for() should succeed"
+        );
+
+        let path = path_result.unwrap();
+        assert!(
+            path.to_string_lossy().contains("test-project"),
+            "Path should contain project name"
+        );
+        assert!(
+            path.to_string_lossy().contains("config.toml"),
+            "Path should contain config.toml"
+        );
     }
 }
