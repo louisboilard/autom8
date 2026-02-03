@@ -3219,8 +3219,11 @@ mod tests {
             TabId::RunDetail("run-123".to_string())
         );
 
+        // When closing the dynamic tab, it switches to the previous tab in the list.
+        // The tabs order is: ActiveRuns, Projects, Config, RunDetail
+        // So closing RunDetail switches to Config (the previous tab).
         app.close_tab(&TabId::RunDetail("run-123".to_string()));
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
+        assert_eq!(*app.active_tab_id(), TabId::Config);
     }
 
     #[test]
