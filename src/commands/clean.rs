@@ -723,7 +723,10 @@ pub struct DirectCleanOptions {
 /// handles confirmation and output display.
 ///
 /// Returns a `CleanupSummary` with results of the cleanup operation.
-pub fn clean_worktrees_direct(project_name: &str, options: DirectCleanOptions) -> Result<CleanupSummary> {
+pub fn clean_worktrees_direct(
+    project_name: &str,
+    options: DirectCleanOptions,
+) -> Result<CleanupSummary> {
     let state_manager = StateManager::for_project(project_name)?;
     let sessions = state_manager.list_sessions()?;
 

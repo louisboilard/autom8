@@ -512,9 +512,17 @@ fn format_cleanup_summary_as_text(
         lines.push(format!(
             "Removed {} session{}, {} worktree{}, freed {}",
             summary.sessions_removed,
-            if summary.sessions_removed == 1 { "" } else { "s" },
+            if summary.sessions_removed == 1 {
+                ""
+            } else {
+                "s"
+            },
             summary.worktrees_removed,
-            if summary.worktrees_removed == 1 { "" } else { "s" },
+            if summary.worktrees_removed == 1 {
+                ""
+            } else {
+                "s"
+            },
             freed_str
         ));
     }
@@ -525,7 +533,11 @@ fn format_cleanup_summary_as_text(
         lines.push(format!(
             "Skipped {} session{}:",
             summary.sessions_skipped.len(),
-            if summary.sessions_skipped.len() == 1 { "" } else { "s" }
+            if summary.sessions_skipped.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
         for skipped in &summary.sessions_skipped {
             lines.push(format!("  - {}: {}", skipped.session_id, skipped.reason));
