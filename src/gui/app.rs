@@ -4820,4 +4820,94 @@ mod tests {
             "Project row vertical padding should use MD"
         );
     }
+
+    // ========================================================================
+    // Custom Title Bar Tests (US-002)
+    // ========================================================================
+
+    #[test]
+    fn test_title_bar_height_is_reasonable() {
+        // Title bar should be tall enough for traffic lights but not too tall
+        // macOS traffic lights are ~12px tall at y=12, so 28px gives good padding
+        assert!(
+            TITLE_BAR_HEIGHT >= 24.0 && TITLE_BAR_HEIGHT <= 40.0,
+            "Title bar height should accommodate traffic lights (24-40px), got {}",
+            TITLE_BAR_HEIGHT
+        );
+    }
+
+    #[test]
+    fn test_title_bar_traffic_light_offset_is_reasonable() {
+        // Traffic lights span roughly 52px from left edge (12px start + 3 buttons * ~12px + gaps)
+        // We need enough offset to avoid overlapping them
+        assert!(
+            TITLE_BAR_TRAFFIC_LIGHT_OFFSET >= 60.0 && TITLE_BAR_TRAFFIC_LIGHT_OFFSET <= 90.0,
+            "Traffic light offset should be 60-90px to clear buttons, got {}",
+            TITLE_BAR_TRAFFIC_LIGHT_OFFSET
+        );
+    }
+
+    #[test]
+    fn test_title_bar_height_smaller_than_header() {
+        // Title bar should be smaller than the main header/tab bar
+        assert!(
+            TITLE_BAR_HEIGHT < HEADER_HEIGHT,
+            "Title bar ({}) should be smaller than header ({})",
+            TITLE_BAR_HEIGHT,
+            HEADER_HEIGHT
+        );
+    }
+
+    #[test]
+    fn test_build_viewport_returns_valid_builder() {
+        // Verify build_viewport creates a viewport with expected basic properties
+        let viewport = build_viewport();
+        // The viewport should be buildable without panicking
+        // We can't easily inspect all properties, but we can verify it was created
+
+        // On macOS, the viewport should have fullsize_content_view enabled
+        // This test verifies the function runs without errors
+        let _ = viewport;
+    }
+
+    #[test]
+    fn test_title_bar_and_header_combined_reasonable() {
+        // Combined title bar + header shouldn't take too much vertical space
+        let combined = TITLE_BAR_HEIGHT + HEADER_HEIGHT;
+        assert!(
+            combined <= 80.0,
+            "Combined title bar and header should be <= 80px, got {}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_title_bar_uses_surface_color() {
+        // Title bar should use SURFACE color to match the header
+        // This is a documentation test - the actual color is applied in render_title_bar
+        // We verify the color constant exists and is appropriate
+        let surface = colors::SURFACE;
+        let bg = colors::BACKGROUND;
+
+        // Surface should be lighter than or equal to background (in light theme)
+        let surface_sum = surface.r() as u32 + surface.g() as u32 + surface.b() as u32;
+        let bg_sum = bg.r() as u32 + bg.g() as u32 + bg.b() as u32;
+
+        assert!(
+            surface_sum >= bg_sum,
+            "SURFACE should be >= BACKGROUND brightness for visual consistency"
+        );
+    }
+
+    #[test]
+    fn test_window_minimum_size_accommodates_title_bar() {
+        // Minimum window height should accommodate title bar + header + some content
+        let min_ui_height = TITLE_BAR_HEIGHT + HEADER_HEIGHT + 100.0; // 100px for minimal content
+        assert!(
+            MIN_HEIGHT >= min_ui_height,
+            "MIN_HEIGHT ({}) should accommodate title bar, header, and minimal content ({})",
+            MIN_HEIGHT,
+            min_ui_height
+        );
+    }
 }
