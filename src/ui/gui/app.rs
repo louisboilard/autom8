@@ -1015,6 +1015,57 @@ pub enum CommandMessage {
 }
 
 // ============================================================================
+// Confirmation Dialog Types (US-004)
+// ============================================================================
+
+/// Type of clean operation pending confirmation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingCleanOperation {
+    /// Clean worktrees for a project.
+    Worktrees { project_name: String },
+    /// Clean orphaned sessions for a project.
+    Orphaned { project_name: String },
+}
+
+impl PendingCleanOperation {
+    /// Get the title for the confirmation dialog.
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Worktrees { .. } => "Clean Worktrees",
+            Self::Orphaned { .. } => "Clean Orphaned Sessions",
+        }
+    }
+
+    /// Get the message for the confirmation dialog.
+    fn message(&self) -> String {
+        match self {
+            Self::Worktrees { project_name } => {
+                format!(
+                    "This will remove completed worktrees and their session state for '{}'.\n\n\
+                     Are you sure you want to continue?",
+                    project_name
+                )
+            }
+            Self::Orphaned { project_name } => {
+                format!(
+                    "This will remove session state for orphaned sessions (where the worktree \
+                     has been deleted) for '{}'.\n\n\
+                     Are you sure you want to continue?",
+                    project_name
+                )
+            }
+        }
+    }
+
+    /// Get the project name.
+    fn project_name(&self) -> &str {
+        match self {
+            Self::Worktrees { project_name } | Self::Orphaned { project_name } => project_name,
+        }
+    }
+}
+
+// ============================================================================
 // GUI-specific Extensions
 // ============================================================================
 
@@ -1237,6 +1288,13 @@ pub struct Autom8App {
     /// Sender for command execution messages.
     /// Cloned for each background command thread.
     command_tx: std::sync::mpsc::Sender<CommandMessage>,
+
+    // ========================================================================
+    // Confirmation Dialog State (US-004)
+    // ========================================================================
+    /// Pending clean operation awaiting user confirmation.
+    /// When Some, a confirmation dialog is displayed.
+    pending_clean_confirmation: Option<PendingCleanOperation>,
 }
 
 impl Default for Autom8App {
@@ -1286,6 +1344,7 @@ impl Autom8App {
             command_executions: std::collections::HashMap::new(),
             command_rx,
             command_tx,
+            pending_clean_confirmation: None,
         };
         // Initial data load
         app.refresh_data();
@@ -2157,6 +2216,9 @@ impl eframe::App for Autom8App {
 
         // Render context menu overlay (must be after content to appear on top)
         self.render_context_menu(ctx);
+
+        // Render confirmation dialog if pending (must be after context menu to appear on top)
+        self.render_confirmation_dialog(ctx);
     }
 }
 
@@ -2529,12 +2591,16 @@ impl Autom8App {
                     // so this case shouldn't happen in normal operation
                 }
                 ContextMenuAction::CleanWorktrees => {
-                    // Spawn the clean --worktrees command (US-006)
-                    self.spawn_clean_worktrees_command(&project_name);
+                    // US-004: Show confirmation dialog before executing clean operation
+                    self.pending_clean_confirmation = Some(PendingCleanOperation::Worktrees {
+                        project_name: project_name.clone(),
+                    });
                 }
                 ContextMenuAction::CleanOrphaned => {
-                    // Spawn the clean --orphaned command (US-006)
-                    self.spawn_clean_orphaned_command(&project_name);
+                    // US-004: Show confirmation dialog before executing clean operation
+                    self.pending_clean_confirmation = Some(PendingCleanOperation::Orphaned {
+                        project_name: project_name.clone(),
+                    });
                 }
             }
         }
@@ -2620,6 +2686,168 @@ impl Autom8App {
             clicked: response.clicked() && enabled,
             hovered: is_hovered,
             rect: screen_item_rect,
+        }
+    }
+
+    // ========================================================================
+    // Confirmation Dialog (US-004)
+    // ========================================================================
+
+    /// Render the confirmation dialog overlay for clean operations.
+    ///
+    /// This method renders a modal dialog when `pending_clean_confirmation` is Some.
+    /// The dialog has a semi-transparent backdrop and centered modal with
+    /// Cancel and Confirm buttons.
+    fn render_confirmation_dialog(&mut self, ctx: &egui::Context) {
+        // Early return if no confirmation is pending
+        let pending = match &self.pending_clean_confirmation {
+            Some(op) => op.clone(),
+            None => return,
+        };
+
+        let screen_rect = ctx.screen_rect();
+
+        // Modal dialog dimensions
+        const DIALOG_WIDTH: f32 = 400.0;
+        const DIALOG_PADDING: f32 = 24.0;
+        const BUTTON_HEIGHT: f32 = 36.0;
+        const BUTTON_WIDTH: f32 = 100.0;
+        const BUTTON_GAP: f32 = 12.0;
+
+        // Render semi-transparent backdrop
+        egui::Area::new(egui::Id::new("confirmation_backdrop"))
+            .order(Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let backdrop_rect = screen_rect;
+                ui.painter().rect_filled(
+                    backdrop_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+                );
+                // Capture clicks on backdrop
+                let (_, response) = ui.allocate_exact_size(backdrop_rect.size(), Sense::click());
+                if response.clicked() {
+                    // Close dialog on backdrop click
+                    self.pending_clean_confirmation = None;
+                }
+            });
+
+        // Calculate dialog position (centered)
+        let dialog_x = (screen_rect.width() - DIALOG_WIDTH) / 2.0;
+
+        // We need to measure the text first to calculate height
+        let title = pending.title();
+        let message = pending.message();
+
+        // Estimate dialog height based on content
+        // Title + message + button row + padding
+        let estimated_height = 200.0; // Reasonable estimate
+        let dialog_y = (screen_rect.height() - estimated_height) / 2.0;
+
+        let dialog_pos = Pos2::new(dialog_x, dialog_y);
+
+        // Track user actions
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        // Render dialog
+        egui::Area::new(egui::Id::new("confirmation_dialog"))
+            .order(Order::Foreground)
+            .fixed_pos(dialog_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(crate::ui::gui::theme::shadow::elevated())
+                    .stroke(Stroke::new(1.0, colors::BORDER))
+                    .inner_margin(egui::Margin::same(DIALOG_PADDING))
+                    .show(ui, |ui| {
+                        ui.set_min_width(DIALOG_WIDTH - 2.0 * DIALOG_PADDING);
+                        ui.set_max_width(DIALOG_WIDTH - 2.0 * DIALOG_PADDING);
+
+                        // Title
+                        ui.label(
+                            egui::RichText::new(title)
+                                .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                                .color(colors::TEXT_PRIMARY),
+                        );
+
+                        ui.add_space(spacing::MD);
+
+                        // Message
+                        ui.label(
+                            egui::RichText::new(&message)
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+
+                        ui.add_space(spacing::XL);
+
+                        // Button row (right-aligned)
+                        ui.horizontal(|ui| {
+                            // Add spacer to push buttons to the right
+                            let available = ui.available_width()
+                                - 2.0 * BUTTON_WIDTH
+                                - BUTTON_GAP;
+                            ui.add_space(available.max(0.0));
+
+                            // Cancel button
+                            let cancel_response = ui.add_sized(
+                                [BUTTON_WIDTH, BUTTON_HEIGHT],
+                                egui::Button::new(
+                                    egui::RichText::new("Cancel")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(colors::TEXT_PRIMARY),
+                                )
+                                .fill(colors::SURFACE_ELEVATED)
+                                .rounding(Rounding::same(rounding::BUTTON))
+                                .stroke(Stroke::new(1.0, colors::BORDER)),
+                            );
+                            if cancel_response.clicked() {
+                                cancelled = true;
+                            }
+
+                            ui.add_space(BUTTON_GAP);
+
+                            // Confirm button (destructive action - red tint)
+                            let confirm_response = ui.add_sized(
+                                [BUTTON_WIDTH, BUTTON_HEIGHT],
+                                egui::Button::new(
+                                    egui::RichText::new("Confirm")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(colors::STATUS_ERROR)
+                                .rounding(Rounding::same(rounding::BUTTON)),
+                            );
+                            if confirm_response.clicked() {
+                                confirmed = true;
+                            }
+                        });
+                    });
+            });
+
+        // Handle Escape key to cancel
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            cancelled = true;
+        }
+
+        // Process user action
+        if cancelled {
+            self.pending_clean_confirmation = None;
+        } else if confirmed {
+            // Execute the clean operation
+            let project_name = pending.project_name().to_string();
+            match pending {
+                PendingCleanOperation::Worktrees { .. } => {
+                    self.spawn_clean_worktrees_command(&project_name);
+                }
+                PendingCleanOperation::Orphaned { .. } => {
+                    self.spawn_clean_orphaned_command(&project_name);
+                }
+            }
+            self.pending_clean_confirmation = None;
         }
     }
 
