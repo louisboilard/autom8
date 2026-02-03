@@ -31,7 +31,6 @@ pub mod gh;
 pub mod git;
 pub mod knowledge;
 pub mod output;
-pub mod ui;
 pub mod progress;
 pub mod prompt;
 pub mod prompts;
@@ -42,6 +41,7 @@ pub mod spec;
 pub mod state;
 #[cfg(test)]
 pub mod test_utils;
+pub mod ui;
 pub mod worktree;
 
 pub use display::{BannerColor, StoryResult};

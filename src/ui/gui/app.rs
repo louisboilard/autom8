@@ -3,18 +3,17 @@
 //! This module contains the eframe application setup and main window
 //! configuration for the autom8 GUI.
 
-use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::{Autom8Error, Result};
+use crate::state::{MachineState, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
-use crate::ui::shared::{ProjectData, RunHistoryEntry, RunProgress, SessionData};
-use crate::spec::Spec;
-use crate::state::{MachineState, StateManager};
-use crate::worktree::MAIN_SESSION_ID;
+use crate::ui::shared::{
+    load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
+};
 use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
 
@@ -482,31 +481,15 @@ impl Autom8App {
         self.run_history_error = None;
         self.run_history_loading = true;
 
-        // Get the StateManager for this project
-        let sm = match StateManager::for_project(project_name) {
-            Ok(sm) => sm,
-            Err(e) => {
-                self.run_history_loading = false;
-                self.run_history_error = Some(format!("Failed to access project: {}", e));
-                return;
+        // Use shared function to load run history
+        match load_project_run_history(project_name) {
+            Ok(history) => {
+                self.run_history = history;
             }
-        };
-
-        // Load archived runs
-        let archived = match sm.list_archived() {
-            Ok(runs) => runs,
             Err(e) => {
-                self.run_history_loading = false;
                 self.run_history_error = Some(format!("Failed to load run history: {}", e));
-                return;
             }
-        };
-
-        // Convert to RunHistoryEntry and store (already sorted newest first by list_archived)
-        self.run_history = archived
-            .iter()
-            .map(|run| RunHistoryEntry::from_run_state(project_name.to_string(), run))
-            .collect();
+        }
 
         self.run_history_loading = false;
     }
@@ -695,156 +678,12 @@ impl Autom8App {
     pub fn refresh_data(&mut self) {
         self.last_refresh = Instant::now();
 
-        // Load projects (handles errors gracefully)
-        let tree_infos = list_projects_tree().unwrap_or_default();
+        // Use shared data loading function (swallow errors, use defaults)
+        let ui_data = load_ui_data(self.project_filter.as_deref()).unwrap_or_default();
 
-        // Filter by project if specified
-        let filtered: Vec<_> = if let Some(ref filter) = self.project_filter {
-            tree_infos
-                .into_iter()
-                .filter(|p| p.name == *filter)
-                .collect()
-        } else {
-            tree_infos
-        };
-
-        // Collect project data including active runs and progress
-        self.projects = filtered
-            .iter()
-            .map(|info| {
-                let (active_run, load_error) = if info.has_active_run {
-                    match StateManager::for_project(&info.name) {
-                        Ok(sm) => match sm.load_current() {
-                            Ok(run) => (run, None),
-                            Err(e) => (None, Some(format!("Corrupted state: {}", e))),
-                        },
-                        Err(e) => (None, Some(format!("State error: {}", e))),
-                    }
-                } else {
-                    (None, None)
-                };
-
-                // Load spec to get progress information
-                let progress = active_run.as_ref().and_then(|run| {
-                    Spec::load(&run.spec_json_path)
-                        .ok()
-                        .map(|spec| RunProgress {
-                            completed: spec.completed_count(),
-                            total: spec.total_count(),
-                        })
-                });
-
-                ProjectData {
-                    info: info.clone(),
-                    active_run,
-                    progress,
-                    load_error,
-                }
-            })
-            .collect();
-
-        // Refresh sessions for Active Runs view
-        self.refresh_sessions(&filtered);
-
-        // Update active runs status based on sessions
-        self.has_active_runs = !self.sessions.is_empty();
-    }
-
-    /// Refresh sessions for the Active Runs view.
-    ///
-    /// Collects all running sessions across all projects, filtering out
-    /// stale sessions (where the worktree no longer exists).
-    fn refresh_sessions(&mut self, project_infos: &[ProjectTreeInfo]) {
-        let mut sessions: Vec<SessionData> = Vec::new();
-
-        // Get all project names to check
-        let project_names: Vec<_> = if let Some(ref filter) = self.project_filter {
-            vec![filter.clone()]
-        } else {
-            project_infos.iter().map(|p| p.name.clone()).collect()
-        };
-
-        for project_name in project_names {
-            // Get the StateManager for this project
-            let sm = match StateManager::for_project(&project_name) {
-                Ok(sm) => sm,
-                Err(_) => continue, // Skip projects we can't access
-            };
-
-            // List all sessions for this project
-            let project_sessions = match sm.list_sessions() {
-                Ok(s) => s,
-                Err(_) => continue, // Skip if we can't list sessions
-            };
-
-            // Process each session
-            for metadata in project_sessions {
-                // Skip non-running sessions
-                if !metadata.is_running {
-                    continue;
-                }
-
-                // Check if worktree was deleted (stale session)
-                let is_stale = !metadata.worktree_path.exists();
-
-                // Determine if this is the main session
-                let is_main_session = metadata.session_id == MAIN_SESSION_ID;
-
-                // For stale sessions, set error and skip state loading
-                if is_stale {
-                    sessions.push(SessionData {
-                        project_name: project_name.clone(),
-                        metadata,
-                        run: None,
-                        progress: None,
-                        load_error: Some("Worktree has been deleted".to_string()),
-                        is_main_session,
-                        is_stale: true,
-                        live_output: None,
-                    });
-                    continue;
-                }
-
-                // Load the run state and live output for this session
-                let (run, load_error, live_output) =
-                    if let Some(session_sm) = sm.get_session(&metadata.session_id) {
-                        match session_sm.load_current() {
-                            Ok(run) => {
-                                // Load live output (gracefully returns None if missing/corrupted)
-                                let live = session_sm.load_live();
-                                (run, None, live)
-                            }
-                            Err(e) => (None, Some(format!("Corrupted state: {}", e)), None),
-                        }
-                    } else {
-                        (None, Some("Session not found".to_string()), None)
-                    };
-
-                // Load spec to get progress information
-                let progress = run.as_ref().and_then(|r| {
-                    Spec::load(&r.spec_json_path).ok().map(|spec| RunProgress {
-                        completed: spec.completed_count(),
-                        total: spec.total_count(),
-                    })
-                });
-
-                sessions.push(SessionData {
-                    project_name: project_name.clone(),
-                    metadata,
-                    run,
-                    progress,
-                    load_error,
-                    is_main_session,
-                    is_stale: false,
-                    live_output,
-                });
-            }
-        }
-
-        // Sort sessions by last_active_at descending
-        sessions.sort_by(|a, b| b.metadata.last_active_at.cmp(&a.metadata.last_active_at));
-
-        self.sessions = sessions;
+        self.projects = ui_data.projects;
+        self.sessions = ui_data.sessions;
+        self.has_active_runs = ui_data.has_active_runs;
     }
 }
 
@@ -3160,7 +2999,9 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectTreeInfo;
     use crate::state::SessionMetadata;
+    use crate::ui::shared::RunProgress;
     use chrono::Utc;
     use std::path::PathBuf;
 

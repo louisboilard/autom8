@@ -4,9 +4,9 @@
 //! status visualization across the application, including status dots, progress
 //! indicators, and time formatting utilities.
 
+use crate::state::MachineState;
 use crate::ui::gui::theme::colors;
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
-use crate::state::MachineState;
 use chrono::{DateTime, Utc};
 use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Vec2};
 
