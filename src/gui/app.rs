@@ -19,10 +19,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
-const DEFAULT_WIDTH: f32 = 700.0;
+const DEFAULT_WIDTH: f32 = 840.0;
 
 /// Default window height in pixels.
-const DEFAULT_HEIGHT: f32 = 500.0;
+const DEFAULT_HEIGHT: f32 = 600.0;
 
 /// Minimum window width in pixels.
 const MIN_WIDTH: f32 = 400.0;
@@ -40,7 +40,7 @@ const HEADER_HEIGHT: f32 = 48.0;
 // ============================================================================
 
 /// Height of the title bar area.
-const TITLE_BAR_HEIGHT: f32 = 38.0;
+const TITLE_BAR_HEIGHT: f32 = 48.0;
 
 /// Horizontal offset from the left edge for title bar content.
 const TITLE_BAR_LEFT_OFFSET: f32 = 72.0;
@@ -124,7 +124,7 @@ const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.0;
 // ============================================================================
 
 /// Size of the sidebar toggle button.
-const SIDEBAR_TOGGLE_SIZE: f32 = 24.0;
+const SIDEBAR_TOGGLE_SIZE: f32 = 34.0;
 
 /// Horizontal padding before the toggle button.
 const SIDEBAR_TOGGLE_PADDING: f32 = 8.0;
@@ -1088,24 +1088,33 @@ impl Autom8App {
                     ));
                 }
 
-                // Layout for title bar content
-                ui.horizontal_centered(|ui| {
+                // Position content to align with window control buttons (fixed offset from top)
+                ui.add_space(5.0);
+                ui.horizontal(|ui| {
                     // Left offset for title bar content
                     ui.add_space(TITLE_BAR_LEFT_OFFSET);
+
+                    // Vertical separator between window controls and toggle button
+                    let separator_height = SIDEBAR_TOGGLE_SIZE;
+                    let (separator_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(1.0, separator_height),
+                        Sense::hover(),
+                    );
+                    ui.painter().vline(
+                        separator_rect.center().x,
+                        separator_rect.y_range(),
+                        Stroke::new(1.0, colors::SEPARATOR),
+                    );
 
                     // Add some padding before the toggle button
                     ui.add_space(SIDEBAR_TOGGLE_PADDING);
 
-                    // Sidebar toggle button (US-004)
-                    // Uses a hamburger/sidebar icon that indicates current state
+                    // Sidebar toggle button
                     let toggle_response =
                         self.render_sidebar_toggle_button(ui, self.sidebar_collapsed);
                     if toggle_response.clicked() {
                         self.sidebar_collapsed = !self.sidebar_collapsed;
                     }
-
-                    // Center area can display app name or breadcrumbs
-                    // (currently empty - available for future enhancements)
                 });
             });
     }
