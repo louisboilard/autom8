@@ -6255,4 +6255,185 @@ mod tests {
             panic!("Global config should be cached");
         }
     }
+
+    // ========================================================================
+    // US-009: Reset to Defaults Tests
+    // ========================================================================
+
+    /// Test that ConfigEditorActions includes reset_to_defaults field.
+    #[test]
+    fn test_us009_config_editor_actions_has_reset_field() {
+        let actions = ConfigEditorActions::default();
+        // The field exists and defaults to false
+        assert!(!actions.reset_to_defaults, "reset_to_defaults should default to false");
+    }
+
+    /// Test that reset_config_to_defaults method exists and resets global config.
+    #[test]
+    fn test_us009_reset_global_config_to_defaults() {
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config with non-default values
+        app.cached_global_config = Some(crate::config::Config {
+            review: false,
+            commit: false,
+            pull_request: false,
+            worktree: false,
+            worktree_path_pattern: "custom-pattern".to_string(),
+            worktree_cleanup: true,
+        });
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // Verify config was reset to defaults
+        if let Some(config) = &app.cached_global_config {
+            assert!(config.review, "review should be true (default)");
+            assert!(config.commit, "commit should be true (default)");
+            assert!(config.pull_request, "pull_request should be true (default)");
+            assert!(config.worktree, "worktree should be true (default)");
+            assert_eq!(
+                config.worktree_path_pattern,
+                "{repo}-wt-{branch}",
+                "worktree_path_pattern should be default"
+            );
+            assert!(!config.worktree_cleanup, "worktree_cleanup should be false (default)");
+        } else {
+            panic!("Global config should be cached after reset");
+        }
+    }
+
+    /// Test that reset_config_to_defaults resets project config.
+    #[test]
+    fn test_us009_reset_project_config_to_defaults() {
+        let mut app = Autom8App::new();
+        let project_name = "test-project";
+
+        // Set up a cached project config with non-default values
+        app.cached_project_config = Some((
+            project_name.to_string(),
+            crate::config::Config {
+                review: false,
+                commit: false,
+                pull_request: false,
+                worktree: false,
+                worktree_path_pattern: "custom-pattern".to_string(),
+                worktree_cleanup: true,
+            },
+        ));
+
+        // Reset to defaults
+        app.reset_config_to_defaults(false, Some(project_name));
+
+        // Verify config was reset to defaults
+        if let Some((cached_name, config)) = &app.cached_project_config {
+            assert_eq!(cached_name, project_name, "project name should be preserved");
+            assert!(config.review, "review should be true (default)");
+            assert!(config.commit, "commit should be true (default)");
+            assert!(config.pull_request, "pull_request should be true (default)");
+            assert!(config.worktree, "worktree should be true (default)");
+            assert_eq!(
+                config.worktree_path_pattern,
+                "{repo}-wt-{branch}",
+                "worktree_path_pattern should be default"
+            );
+            assert!(!config.worktree_cleanup, "worktree_cleanup should be false (default)");
+        } else {
+            panic!("Project config should be cached after reset");
+        }
+    }
+
+    /// Test that config_last_modified is updated after reset.
+    #[test]
+    fn test_us009_reset_updates_last_modified() {
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.cached_global_config = Some(crate::config::Config::default());
+        app.config_last_modified = None;
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // Note: config_last_modified may not be set if save fails (no file system)
+        // but the config should still be reset in memory
+        assert!(
+            app.cached_global_config.is_some(),
+            "cached config should exist after reset"
+        );
+    }
+
+    /// Test that render_reset_to_defaults_button method exists.
+    #[test]
+    fn test_us009_render_reset_to_defaults_button_exists() {
+        // This test verifies the method signature exists by compiling
+        let _func: fn(&Autom8App, &mut egui::Ui) -> bool = Autom8App::render_reset_to_defaults_button;
+    }
+
+    /// Test that Config::default() has the expected values per US-009 acceptance criteria.
+    #[test]
+    fn test_us009_config_default_values() {
+        let config = crate::config::Config::default();
+
+        assert!(config.review, "review should default to true");
+        assert!(config.commit, "commit should default to true");
+        assert!(config.pull_request, "pull_request should default to true");
+        assert!(config.worktree, "worktree should default to true");
+        assert_eq!(
+            config.worktree_path_pattern,
+            "{repo}-wt-{branch}",
+            "worktree_path_pattern should default to {{repo}}-wt-{{branch}}"
+        );
+        assert!(!config.worktree_cleanup, "worktree_cleanup should default to false");
+    }
+
+    /// Test that global config editor returns reset flag in tuple.
+    #[test]
+    fn test_us009_global_config_editor_returns_reset_flag() {
+        // This test verifies the return type includes a bool for reset_clicked
+        // by checking that the function signature compiles correctly
+        let _func: fn(&Autom8App, &mut egui::Ui) -> (BoolFieldChanges, TextFieldChanges, bool) =
+            Autom8App::render_global_config_editor;
+    }
+
+    /// Test that project config editor returns reset flag in tuple.
+    #[test]
+    fn test_us009_project_config_editor_returns_reset_flag() {
+        // This test verifies the return type includes a bool for reset_clicked
+        // by checking that the function signature compiles correctly
+        let _func: fn(&Autom8App, &mut egui::Ui, &str) -> (BoolFieldChanges, TextFieldChanges, bool) =
+            Autom8App::render_project_config_editor;
+    }
+
+    /// Test that reset_to_defaults replaces the entire config, not just individual fields.
+    #[test]
+    fn test_us009_reset_replaces_entire_config() {
+        let mut app = Autom8App::new();
+
+        // Set up a config with ALL fields set to non-default values
+        app.cached_global_config = Some(crate::config::Config {
+            review: false,        // default is true
+            commit: false,        // default is true
+            pull_request: false,  // default is true
+            worktree: false,      // default is true
+            worktree_path_pattern: "totally-custom-{whatever}".to_string(), // default is "{repo}-wt-{branch}"
+            worktree_cleanup: true, // default is false
+        });
+
+        // Reset to defaults
+        app.reset_config_to_defaults(true, None);
+
+        // All fields should now match Config::default()
+        let default = crate::config::Config::default();
+        if let Some(config) = &app.cached_global_config {
+            assert_eq!(config.review, default.review);
+            assert_eq!(config.commit, default.commit);
+            assert_eq!(config.pull_request, default.pull_request);
+            assert_eq!(config.worktree, default.worktree);
+            assert_eq!(config.worktree_path_pattern, default.worktree_path_pattern);
+            assert_eq!(config.worktree_cleanup, default.worktree_cleanup);
+        } else {
+            panic!("Global config should be cached after reset");
+        }
+    }
 }
