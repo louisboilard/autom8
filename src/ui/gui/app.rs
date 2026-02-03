@@ -326,6 +326,12 @@ pub enum ConfigTextField {
     WorktreePathPattern,
 }
 
+/// Type alias for a collection of boolean field changes (US-006).
+type BoolFieldChanges = Vec<(ConfigBoolField, bool)>;
+
+/// Type alias for a collection of text field changes (US-007).
+type TextFieldChanges = Vec<(ConfigTextField, String)>;
+
 /// Actions that can be returned from config editor rendering (US-006, US-007).
 ///
 /// This struct collects all actions that require mutation, allowing the
@@ -2318,10 +2324,7 @@ impl Autom8App {
     fn render_global_config_editor(
         &self,
         ui: &mut egui::Ui,
-    ) -> (
-        Vec<(ConfigBoolField, bool)>,
-        Vec<(ConfigTextField, String)>,
-    ) {
+    ) -> (BoolFieldChanges, TextFieldChanges) {
         let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
         let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
 
@@ -2452,10 +2455,7 @@ impl Autom8App {
         &self,
         ui: &mut egui::Ui,
         project_name: &str,
-    ) -> (
-        Vec<(ConfigBoolField, bool)>,
-        Vec<(ConfigTextField, String)>,
-    ) {
+    ) -> (BoolFieldChanges, TextFieldChanges) {
         let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
         let mut text_changes: Vec<(ConfigTextField, String)> = Vec::new();
 
