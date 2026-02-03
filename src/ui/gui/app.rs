@@ -230,12 +230,16 @@ fn calculate_context_menu_width(ctx: &egui::Context, items: &[ContextMenuItem]) 
             match item {
                 ContextMenuItem::Action { label, .. } => {
                     // Measure text width using egui's font system
-                    let galley = ctx.fonts(|fonts| fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE));
+                    let galley = ctx.fonts(|fonts| {
+                        fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                    });
                     Some(galley.rect.width())
                 }
                 ContextMenuItem::Submenu { label, .. } => {
                     // Submenu items need extra space for the arrow indicator
-                    let galley = ctx.fonts(|fonts| fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE));
+                    let galley = ctx.fonts(|fonts| {
+                        fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE)
+                    });
                     // Add space for the arrow: arrow_size + padding between text and arrow
                     Some(galley.rect.width() + CONTEXT_MENU_ARROW_SIZE + CONTEXT_MENU_PADDING_H)
                 }
@@ -272,6 +276,110 @@ fn is_resumable_session(session: &SessionStatus) -> bool {
         }
     } else {
         false
+    }
+}
+
+/// Format session status data as plain text lines for display.
+///
+/// US-002: This replaces the CLI output formatting from status.rs for GUI display.
+/// Shows: session ID, branch, state, current story, started time.
+fn format_sessions_as_text(sessions: &[SessionStatus]) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if sessions.is_empty() {
+        lines.push("No sessions found for this project.".to_string());
+        return lines;
+    }
+
+    lines.push("Sessions for this project:".to_string());
+    lines.push(String::new());
+
+    for session in sessions {
+        let metadata = &session.metadata;
+
+        // Session indicator based on state
+        let indicator = if session.is_stale {
+            "✗"
+        } else if session.is_current {
+            "→"
+        } else if metadata.is_running {
+            "●"
+        } else {
+            "○"
+        };
+
+        // Build session header line
+        let mut header = format!("{} {}", indicator, metadata.session_id);
+        if session.is_current {
+            header.push_str(" (current)");
+        }
+        if session.is_stale {
+            header.push_str(" [stale]");
+        }
+        lines.push(header);
+
+        // Branch
+        lines.push(format!("  Branch:  {}", metadata.branch_name));
+
+        // State
+        if let Some(state) = &session.machine_state {
+            let state_str = format_machine_state_text(state);
+            lines.push(format!("  State:   {}", state_str));
+        }
+
+        // Current story (if any)
+        if let Some(story) = &session.current_story {
+            lines.push(format!("  Story:   {}", story));
+        }
+
+        // Started time
+        lines.push(format!(
+            "  Started: {}",
+            metadata.created_at.format("%Y-%m-%d %H:%M")
+        ));
+
+        lines.push(String::new());
+    }
+
+    // Summary line
+    let running_count = sessions
+        .iter()
+        .filter(|s| s.metadata.is_running && !s.is_stale)
+        .count();
+    let stale_count = sessions.iter().filter(|s| s.is_stale).count();
+
+    let mut summary = format!(
+        "({} session{}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    if running_count > 0 {
+        summary.push_str(&format!(", {} running", running_count));
+    }
+    if stale_count > 0 {
+        summary.push_str(&format!(", {} stale", stale_count));
+    }
+    summary.push(')');
+    lines.push(summary);
+
+    lines
+}
+
+/// Format machine state for text display.
+fn format_machine_state_text(state: &MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
     }
 }
 
@@ -1397,8 +1505,10 @@ impl Autom8App {
         }
     }
 
-    /// Spawn the `autom8 status --project <name>` command in a background thread.
-    /// Opens a new command output tab and streams output to it.
+    /// Load status for a project by calling the data layer directly.
+    /// Opens a new command output tab and populates it with session data.
+    ///
+    /// US-002: Replaces subprocess spawning with direct StateManager calls.
     pub fn spawn_status_command(&mut self, project_name: &str) {
         // Open the tab first to get the cache key
         let id = self.open_command_output_tab(project_name, "status");
@@ -1407,70 +1517,28 @@ impl Autom8App {
         let project = project_name.to_string();
 
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            use std::process::{Command, Stdio};
-
-            // Spawn the autom8 status command (--all shows all sessions for the project)
-            let result = Command::new("autom8")
-                .arg("status")
-                .arg("--all")
-                .arg("--project")
-                .arg(&project)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-
-            match result {
-                Ok(mut child) => {
-                    // Read stdout in a separate thread
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let tx_stdout = tx.clone();
-                    let tx_stderr = tx.clone();
-                    let cache_key_stdout = cache_key.clone();
-                    let cache_key_stderr = cache_key.clone();
-
-                    let stdout_handle = std::thread::spawn(move || {
-                        if let Some(stdout) = stdout {
-                            let reader = BufReader::new(stdout);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stdout.send(CommandMessage::Stdout {
-                                    cache_key: cache_key_stdout.clone(),
+            // Call data layer directly instead of spawning subprocess
+            match StateManager::for_project(&project) {
+                Ok(state_manager) => {
+                    match state_manager.list_sessions_with_status() {
+                        Ok(sessions) => {
+                            // Format session data as plain text
+                            let lines = format_sessions_as_text(&sessions);
+                            for line in lines {
+                                let _ = tx.send(CommandMessage::Stdout {
+                                    cache_key: cache_key.clone(),
                                     line,
                                 });
                             }
-                        }
-                    });
-
-                    let stderr_handle = std::thread::spawn(move || {
-                        if let Some(stderr) = stderr {
-                            let reader = BufReader::new(stderr);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stderr.send(CommandMessage::Stderr {
-                                    cache_key: cache_key_stderr.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    // Wait for output threads to finish
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-
-                    // Wait for the child process to exit
-                    match child.wait() {
-                        Ok(status) => {
-                            let exit_code = status.code().unwrap_or(-1);
                             let _ = tx.send(CommandMessage::Completed {
                                 cache_key,
-                                exit_code,
+                                exit_code: 0,
                             });
                         }
                         Err(e) => {
                             let _ = tx.send(CommandMessage::Failed {
                                 cache_key,
-                                error: format!("Failed to wait for process: {}", e),
+                                error: format!("Failed to list sessions: {}", e),
                             });
                         }
                     }
@@ -1478,7 +1546,7 @@ impl Autom8App {
                 Err(e) => {
                     let _ = tx.send(CommandMessage::Failed {
                         cache_key,
-                        error: format!("Failed to spawn autom8: {}", e),
+                        error: format!("Failed to load project: {}", e),
                     });
                 }
             }
@@ -5481,10 +5549,7 @@ mod tests {
     #[test]
     fn test_context_menu_arrow_size_constant() {
         // Verify the arrow size constant is correctly defined for submenu calculation
-        assert_eq!(
-            CONTEXT_MENU_ARROW_SIZE, 8.0,
-            "Arrow size should be 8px"
-        );
+        assert_eq!(CONTEXT_MENU_ARROW_SIZE, 8.0, "Arrow size should be 8px");
     }
 
     // ========================================================================
@@ -6487,5 +6552,291 @@ mod tests {
             !is_cleanable_session(&is_running_session),
             "Session with is_running=true should NOT be cleanable"
         );
+    }
+
+    // ======================================================================
+    // Tests for US-002: Direct Data Layer Status Display
+    // ======================================================================
+
+    #[test]
+    fn test_us002_format_machine_state_text_all_variants() {
+        // Verify all machine states have text representations
+        assert_eq!(format_machine_state_text(&MachineState::Idle), "Idle");
+        assert_eq!(
+            format_machine_state_text(&MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::RunningClaude),
+            "Running Claude"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Reviewing),
+            "Reviewing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Correcting),
+            "Correcting"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Committing),
+            "Committing"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::CreatingPR),
+            "Creating PR"
+        );
+        assert_eq!(
+            format_machine_state_text(&MachineState::Completed),
+            "Completed"
+        );
+        assert_eq!(format_machine_state_text(&MachineState::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_us002_format_sessions_empty() {
+        // Empty sessions should produce informative message
+        let sessions: Vec<SessionStatus> = vec![];
+        let lines = format_sessions_as_text(&sessions);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("No sessions found"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_single_session() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: "main".to_string(),
+            worktree_path: PathBuf::from("/projects/test"),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: true,
+        };
+
+        let sessions = vec![SessionStatus {
+            metadata,
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: Some("US-001".to_string()),
+            is_current: true,
+            is_stale: false,
+        }];
+
+        let lines = format_sessions_as_text(&sessions);
+
+        // Should have header
+        assert!(lines[0].contains("Sessions for this project"));
+
+        // Should have session ID with current marker
+        let session_line = lines.iter().find(|l| l.contains("main")).unwrap();
+        assert!(session_line.contains("→")); // current indicator
+        assert!(session_line.contains("(current)"));
+
+        // Should have branch
+        assert!(lines.iter().any(|l| l.contains("Branch:") && l.contains("feature/test")));
+
+        // Should have state
+        assert!(lines.iter().any(|l| l.contains("State:") && l.contains("Running Claude")));
+
+        // Should have story
+        assert!(lines.iter().any(|l| l.contains("Story:") && l.contains("US-001")));
+
+        // Should have started time
+        assert!(lines.iter().any(|l| l.contains("Started:")));
+
+        // Should have summary
+        let summary = lines.last().unwrap();
+        assert!(summary.contains("1 session"));
+        assert!(summary.contains("1 running"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_stale_marker() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: "abc12345".to_string(),
+            worktree_path: PathBuf::from("/projects/deleted"),
+            branch_name: "feature/old".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: true, // Still marked as running but stale
+        };
+
+        let sessions = vec![SessionStatus {
+            metadata,
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: true, // Worktree deleted
+        }];
+
+        let lines = format_sessions_as_text(&sessions);
+
+        // Should have stale indicator and marker
+        let session_line = lines.iter().find(|l| l.contains("abc12345")).unwrap();
+        assert!(session_line.contains("✗")); // stale indicator
+        assert!(session_line.contains("[stale]"));
+
+        // Summary should count stale
+        let summary = lines.last().unwrap();
+        assert!(summary.contains("1 stale"));
+        // Running count should NOT include stale sessions
+        assert!(!summary.contains("1 running"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_indicators() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let make_metadata = |id: &str| SessionMetadata {
+            session_id: id.to_string(),
+            worktree_path: PathBuf::from(format!("/projects/{}", id)),
+            branch_name: "feature/test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            is_running: false,
+        };
+
+        // Current session gets →
+        let current = SessionStatus {
+            metadata: make_metadata("current"),
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: true,
+            is_stale: false,
+        };
+
+        // Running (not current) gets ●
+        let mut running_metadata = make_metadata("running");
+        running_metadata.is_running = true;
+        let running = SessionStatus {
+            metadata: running_metadata,
+            machine_state: Some(MachineState::Reviewing),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+
+        // Idle gets ○
+        let idle = SessionStatus {
+            metadata: make_metadata("idle"),
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+
+        // Stale gets ✗
+        let stale = SessionStatus {
+            metadata: make_metadata("stale"),
+            machine_state: None,
+            current_story: None,
+            is_current: false,
+            is_stale: true,
+        };
+
+        let sessions = vec![current, running, idle, stale];
+        let lines = format_sessions_as_text(&sessions);
+
+        // Check indicators
+        let current_line = lines.iter().find(|l| l.contains("current")).unwrap();
+        assert!(current_line.contains("→"));
+
+        let running_line = lines.iter().find(|l| l.contains("running") && !l.contains("(")).unwrap();
+        assert!(running_line.contains("●"));
+
+        let idle_line = lines.iter().find(|l| l.contains("idle")).unwrap();
+        assert!(idle_line.contains("○"));
+
+        let stale_line = lines.iter().find(|l| l.contains("stale") && !l.contains("(")).unwrap();
+        assert!(stale_line.contains("✗"));
+    }
+
+    #[test]
+    fn test_us002_format_sessions_summary_counts() {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        let make_session = |id: &str, is_running: bool, is_stale: bool| {
+            let metadata = SessionMetadata {
+                session_id: id.to_string(),
+                worktree_path: PathBuf::from(format!("/projects/{}", id)),
+                branch_name: "feature/test".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running,
+            };
+            SessionStatus {
+                metadata,
+                machine_state: Some(MachineState::RunningClaude),
+                current_story: None,
+                is_current: false,
+                is_stale,
+            }
+        };
+
+        let sessions = vec![
+            make_session("s1", true, false),  // running, not stale
+            make_session("s2", true, false),  // running, not stale
+            make_session("s3", true, true),   // would be running but stale
+            make_session("s4", false, false), // not running
+        ];
+
+        let lines = format_sessions_as_text(&sessions);
+        let summary = lines.last().unwrap();
+
+        assert!(summary.contains("4 sessions"));
+        assert!(summary.contains("2 running")); // s1 and s2 only
+        assert!(summary.contains("1 stale"));   // s3
+    }
+
+    #[test]
+    fn test_us002_spawn_status_creates_tab() {
+        // Verify spawn_status_command still creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_status_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Status:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
     }
 }
