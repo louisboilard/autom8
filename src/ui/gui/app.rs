@@ -2787,9 +2787,7 @@ impl Autom8App {
                         // Button row (right-aligned)
                         ui.horizontal(|ui| {
                             // Add spacer to push buttons to the right
-                            let available = ui.available_width()
-                                - 2.0 * BUTTON_WIDTH
-                                - BUTTON_GAP;
+                            let available = ui.available_width() - 2.0 * BUTTON_WIDTH - BUTTON_GAP;
                             ui.add_space(available.max(0.0));
 
                             // Cancel button
