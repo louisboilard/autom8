@@ -1123,13 +1123,11 @@ impl Autom8App {
                     let stdout_handle = std::thread::spawn(move || {
                         if let Some(stdout) = stdout {
                             let reader = BufReader::new(stdout);
-                            for line in reader.lines() {
-                                if let Ok(line) = line {
-                                    let _ = tx_stdout.send(CommandMessage::Stdout {
-                                        cache_key: cache_key_stdout.clone(),
-                                        line,
-                                    });
-                                }
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stdout.send(CommandMessage::Stdout {
+                                    cache_key: cache_key_stdout.clone(),
+                                    line,
+                                });
                             }
                         }
                     });
@@ -1137,13 +1135,11 @@ impl Autom8App {
                     let stderr_handle = std::thread::spawn(move || {
                         if let Some(stderr) = stderr {
                             let reader = BufReader::new(stderr);
-                            for line in reader.lines() {
-                                if let Ok(line) = line {
-                                    let _ = tx_stderr.send(CommandMessage::Stderr {
-                                        cache_key: cache_key_stderr.clone(),
-                                        line,
-                                    });
-                                }
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stderr.send(CommandMessage::Stderr {
+                                    cache_key: cache_key_stderr.clone(),
+                                    line,
+                                });
                             }
                         }
                     });
@@ -1156,7 +1152,10 @@ impl Autom8App {
                     match child.wait() {
                         Ok(status) => {
                             let exit_code = status.code().unwrap_or(-1);
-                            let _ = tx.send(CommandMessage::Completed { cache_key, exit_code });
+                            let _ = tx.send(CommandMessage::Completed {
+                                cache_key,
+                                exit_code,
+                            });
                         }
                         Err(e) => {
                             let _ = tx.send(CommandMessage::Failed {
@@ -1188,7 +1187,10 @@ impl Autom8App {
                 CommandMessage::Stderr { cache_key, line } => {
                     self.add_command_stderr(&cache_key, line);
                 }
-                CommandMessage::Completed { cache_key, exit_code } => {
+                CommandMessage::Completed {
+                    cache_key,
+                    exit_code,
+                } => {
                     self.complete_command(&cache_key, exit_code);
                 }
                 CommandMessage::Failed { cache_key, error } => {
@@ -4980,7 +4982,11 @@ mod tests {
             cache_key: "test:status:123".to_string(),
             exit_code: 0,
         };
-        if let CommandMessage::Completed { cache_key, exit_code } = msg {
+        if let CommandMessage::Completed {
+            cache_key,
+            exit_code,
+        } = msg
+        {
             assert_eq!(cache_key, "test:status:123");
             assert_eq!(exit_code, 0);
         } else {
