@@ -1175,6 +1175,93 @@ impl Autom8App {
         });
     }
 
+    /// Spawn the `autom8 describe --project <name>` command in a background thread.
+    /// Opens a new command output tab and streams output to it.
+    pub fn spawn_describe_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "describe");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
+            // Spawn the autom8 describe command
+            let result = Command::new("autom8")
+                .arg("describe")
+                .arg("--project")
+                .arg(&project)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match result {
+                Ok(mut child) => {
+                    // Read stdout in a separate thread
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let tx_stdout = tx.clone();
+                    let tx_stderr = tx.clone();
+                    let cache_key_stdout = cache_key.clone();
+                    let cache_key_stderr = cache_key.clone();
+
+                    let stdout_handle = std::thread::spawn(move || {
+                        if let Some(stdout) = stdout {
+                            let reader = BufReader::new(stdout);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stdout.send(CommandMessage::Stdout {
+                                    cache_key: cache_key_stdout.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    let stderr_handle = std::thread::spawn(move || {
+                        if let Some(stderr) = stderr {
+                            let reader = BufReader::new(stderr);
+                            for line in reader.lines().map_while(|r| r.ok()) {
+                                let _ = tx_stderr.send(CommandMessage::Stderr {
+                                    cache_key: cache_key_stderr.clone(),
+                                    line,
+                                });
+                            }
+                        }
+                    });
+
+                    // Wait for output threads to finish
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+
+                    // Wait for the child process to exit
+                    match child.wait() {
+                        Ok(status) => {
+                            let exit_code = status.code().unwrap_or(-1);
+                            let _ = tx.send(CommandMessage::Completed {
+                                cache_key,
+                                exit_code,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(CommandMessage::Failed {
+                                cache_key,
+                                error: format!("Failed to wait for process: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to spawn autom8: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
     /// Poll for command execution messages and update state.
     /// This should be called in the update loop to process messages from background threads.
     fn poll_command_messages(&mut self) {
@@ -1574,7 +1661,8 @@ impl Autom8App {
                     self.spawn_status_command(&project_name);
                 }
                 ContextMenuAction::Describe => {
-                    // Will be implemented in US-004
+                    // Spawn the describe command (US-004)
+                    self.spawn_describe_command(&project_name);
                 }
                 ContextMenuAction::Resume(_) => {
                     // Will be implemented in US-005
@@ -5201,5 +5289,49 @@ mod tests {
         let id = CommandOutputId::new("my-awesome-project", "status");
         let label = id.tab_label();
         assert_eq!(label, "Status: my-awesome-project");
+    }
+
+    #[test]
+    fn test_spawn_describe_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_describe_command will actually try to spawn autom8,
+        // which may not be in PATH during tests. We test that the tab
+        // and execution are created correctly. The background thread
+        // will send a Failed message if autom8 isn't found.
+        app.spawn_describe_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Describe:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_describe_tab_label_format() {
+        // Per US-004: Tab title format: "Describe: {project-name}"
+        let id = CommandOutputId::new("my-awesome-project", "describe");
+        let label = id.tab_label();
+        assert_eq!(label, "Describe: my-awesome-project");
     }
 }
