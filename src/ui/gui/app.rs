@@ -1098,12 +1098,18 @@ impl Autom8App {
 
             if cleanable_info.cleanable_worktrees > 0 {
                 let label = format!("Worktrees ({})", cleanable_info.cleanable_worktrees);
-                submenu_items.push(ContextMenuItem::action(label, ContextMenuAction::CleanWorktrees));
+                submenu_items.push(ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::CleanWorktrees,
+                ));
             }
 
             if cleanable_info.orphaned_sessions > 0 {
                 let label = format!("Orphaned ({})", cleanable_info.orphaned_sessions);
-                submenu_items.push(ContextMenuItem::action(label, ContextMenuAction::CleanOrphaned));
+                submenu_items.push(ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::CleanOrphaned,
+                ));
             }
 
             ContextMenuItem::submenu("Clean", "clean", submenu_items)
@@ -6160,9 +6166,7 @@ mod tests {
         let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
 
         match clean_submenu {
-            ContextMenuItem::Submenu {
-                enabled, items, ..
-            } => {
+            ContextMenuItem::Submenu { enabled, items, .. } => {
                 assert!(enabled, "Clean should be enabled with items");
                 assert_eq!(items.len(), 2);
 
