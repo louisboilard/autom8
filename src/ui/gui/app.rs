@@ -3461,6 +3461,9 @@ impl Autom8App {
             // Uses full sidebar width, particles rise from bottom
             let sidebar_width = ui.available_width();
             super::animation::render_rising_particles(ui, sidebar_width, animation_height);
+
+            // Schedule next animation frame (handles all animations)
+            super::animation::schedule_frame(ui.ctx());
         });
     }
 
@@ -5898,11 +5901,14 @@ impl Autom8App {
         let painter = ui.painter();
 
         // Determine state-specific colors for the card
-        let state_color = if let Some(ref run) = session.run {
-            state_to_color(run.machine_state)
-        } else {
-            colors::STATUS_IDLE
-        };
+        let (state, state_color) = session
+            .run
+            .as_ref()
+            .map(|r| (r.machine_state, state_to_color(r.machine_state)))
+            .unwrap_or((MachineState::Idle, colors::STATUS_IDLE));
+
+        // Show progress bar and infinity animation for non-idle states with progress data
+        let has_progress_bar = !matches!(state, MachineState::Idle) && session.progress.is_some();
 
         // Shadow for subtle elevation
         let shadow = theme::shadow::subtle();
@@ -6064,6 +6070,40 @@ impl Autom8App {
             state_galley.clone(),
             Color32::TRANSPARENT,
         );
+
+        // Horizontal progress bar centered in the available space after status text
+        if has_progress_bar {
+            if let Some(ref progress) = session.progress {
+                let bar_width = 100.0;
+                let bar_height = 8.0;
+                let progress_value = if progress.total > 0 {
+                    progress.completed as f32 / progress.total as f32
+                } else {
+                    0.0
+                };
+                // Calculate available space after status text and center the bar
+                let status_end_x = content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
+                let available_width = content_rect.max.x - status_end_x;
+                let bar_x = status_end_x + (available_width - bar_width) / 2.0;
+                let bar_rect = Rect::from_min_size(
+                    Pos2::new(
+                        bar_x,
+                        cursor_y + (state_galley.rect.height() - bar_height) / 2.0,
+                    ),
+                    egui::vec2(bar_width, bar_height),
+                );
+                let time = ui.ctx().input(|i| i.time) as f32;
+                super::animation::render_progress_bar(
+                    painter,
+                    time,
+                    bar_rect,
+                    progress_value,
+                    colors::SURFACE_HOVER,
+                    state_color,
+                );
+            }
+        }
+
         cursor_y += state_galley.rect.height() + spacing::XS;
 
         // ====================================================================
@@ -6119,6 +6159,7 @@ impl Autom8App {
                     );
                 }
             }
+
             cursor_y += progress_galley.rect.height() + spacing::XS;
         }
 
@@ -6143,13 +6184,46 @@ impl Autom8App {
         // ====================================================================
         // OUTPUT SECTION: Last 5 lines of Claude output in monospace
         // ====================================================================
-        // Draw a subtle separator line
+        // Draw a subtle separator line with infinity animation on the right
         let separator_y = cursor_y;
-        painter.hline(
-            content_rect.x_range(),
-            separator_y,
+
+        // Infinity animation dimensions
+        let infinity_width = 28.0;
+        let infinity_height = 12.0;
+        let infinity_spacing = spacing::SM;
+
+        // Calculate where the separator line should end
+        let line_end_x = if has_progress_bar {
+            content_rect.max.x - infinity_width - infinity_spacing
+        } else {
+            content_rect.max.x
+        };
+        painter.line_segment(
+            [
+                Pos2::new(content_rect.min.x, separator_y),
+                Pos2::new(line_end_x, separator_y),
+            ],
             Stroke::new(1.0, colors::BORDER),
         );
+
+        // Draw infinity animation (back to original position)
+        if has_progress_bar {
+            let infinity_rect = Rect::from_min_size(
+                Pos2::new(
+                    content_rect.max.x - infinity_width,
+                    separator_y - infinity_height / 2.0,
+                ),
+                egui::vec2(infinity_width, infinity_height),
+            );
+            let time = ui.ctx().input(|i| i.time) as f32;
+            super::animation::render_infinity(
+                painter,
+                time,
+                infinity_rect,
+                state_color,
+                1.0,
+            );
+        }
         cursor_y += spacing::SM;
 
         // Output section background
