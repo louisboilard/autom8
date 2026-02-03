@@ -9,6 +9,7 @@
 //! - [`status`] - Check current run status
 //! - [`resume`] - Resume an interrupted run
 //! - [`clean`] - Clean up spec files
+//! - [`config`] - View and modify configuration
 //! - [`init`] - Initialize project config
 //! - [`projects`] - List known projects
 //! - [`list`] - Tree view of projects
@@ -18,6 +19,7 @@
 //! - [`default`] - Interactive spec creation flow
 
 mod clean;
+mod config;
 mod default;
 mod describe;
 mod init;
@@ -30,6 +32,7 @@ mod run;
 mod status;
 
 pub use clean::{clean_command, CleanOptions, CleanupSummary, SkippedSession};
+pub use config::{config_display_command, ConfigScope};
 pub use default::default_command;
 pub use describe::describe_command;
 pub use init::init_command;

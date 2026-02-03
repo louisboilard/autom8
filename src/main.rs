@@ -3,9 +3,10 @@
 //! Parses command-line arguments and dispatches to the appropriate command handler.
 
 use autom8::commands::{
-    all_sessions_status_command, clean_command, default_command, describe_command,
-    global_status_command, init_command, list_command, monitor_command, pr_review_command,
-    projects_command, resume_command, run_command, run_with_file, status_command, CleanOptions,
+    all_sessions_status_command, clean_command, config_display_command, default_command,
+    describe_command, global_status_command, init_command, list_command, monitor_command,
+    pr_review_command, projects_command, resume_command, run_command, run_with_file,
+    status_command, CleanOptions, ConfigScope,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -166,6 +167,36 @@ WHAT GETS CLEANED:
         force: bool,
     },
 
+    /// View configuration values in TOML format
+    #[command(after_help = "EXAMPLES:
+    autom8 config              # Show both global and project config
+    autom8 config --global     # Show only global config
+    autom8 config --project    # Show only project config
+
+CONFIG FILES:
+    Global:  ~/.config/autom8/config.toml
+    Project: ~/.config/autom8/<project>/config.toml
+
+    The project config takes precedence over global config when both exist.
+    If a config file doesn't exist, defaults are shown with a note.
+
+VALID KEYS:
+    review              - Enable code review step (true/false)
+    commit              - Enable auto-commit (true/false)
+    pull_request        - Enable auto-PR creation (true/false)
+    worktree            - Enable worktree mode (true/false)
+    worktree_path_pattern - Pattern for worktree names (string)
+    worktree_cleanup    - Auto-cleanup worktrees (true/false)")]
+    Config {
+        /// Show only the global configuration (~/.config/autom8/config.toml)
+        #[arg(short, long, conflicts_with = "project")]
+        global: bool,
+
+        /// Show only the project configuration (~/.config/autom8/<project>/config.toml)
+        #[arg(short, long, conflicts_with = "global")]
+        project: bool,
+    },
+
     /// Initialize autom8 config directory structure for current project
     Init,
 
@@ -256,6 +287,15 @@ fn main() {
             orphaned: *orphaned,
             force: *force,
         }),
+
+        (None, Some(Commands::Config { global, project })) => {
+            let scope = match (global, project) {
+                (true, false) => ConfigScope::Global,
+                (false, true) => ConfigScope::Project,
+                _ => ConfigScope::Both,
+            };
+            config_display_command(scope)
+        }
 
         (None, Some(Commands::Init)) => init_command(),
 
