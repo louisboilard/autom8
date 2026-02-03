@@ -332,11 +332,22 @@ impl ConfigTabState {
         project_name: Option<&str>,
         changes: &[(ConfigBoolField, bool)],
     ) {
+        // Early return if no changes
+        if changes.is_empty() {
+            return;
+        }
+
         // Get mutable reference to the appropriate config
         let config = if is_global {
             self.cached_global_config.as_mut()
         } else {
-            self.cached_project_config.as_mut().map(|(_, c)| c)
+            // For project config, check that the project name matches
+            match (&mut self.cached_project_config, project_name) {
+                (Some((cached_name, config)), Some(project)) if cached_name == project => {
+                    Some(config)
+                }
+                _ => None,
+            }
         };
 
         let Some(config) = config else {
@@ -382,11 +393,22 @@ impl ConfigTabState {
         project_name: Option<&str>,
         changes: &[(ConfigTextField, String)],
     ) {
+        // Early return if no changes
+        if changes.is_empty() {
+            return;
+        }
+
         // Get mutable reference to the appropriate config
         let config = if is_global {
             self.cached_global_config.as_mut()
         } else {
-            self.cached_project_config.as_mut().map(|(_, c)| c)
+            // For project config, check that the project name matches
+            match (&mut self.cached_project_config, project_name) {
+                (Some((cached_name, config)), Some(project)) if cached_name == project => {
+                    Some(config)
+                }
+                _ => None,
+            }
         };
 
         let Some(config) = config else {
