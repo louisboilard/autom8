@@ -525,20 +525,36 @@ mod tests {
 
     #[test]
     fn test_run_progress_as_fraction() {
+        // Normal case: working on story 2 of 5
         let progress = RunProgress {
             completed: 1,
             total: 5,
         };
         assert_eq!(progress.as_fraction(), "Story 2/5");
+
+        // First story case
+        let first = RunProgress {
+            completed: 0,
+            total: 3,
+        };
+        assert_eq!(first.as_fraction(), "Story 1/3");
     }
 
     #[test]
     fn test_run_progress_as_percentage() {
+        // Normal case
         let progress = RunProgress {
             completed: 2,
             total: 5,
         };
         assert_eq!(progress.as_percentage(), "40%");
+
+        // Complete case
+        let complete = RunProgress {
+            completed: 5,
+            total: 5,
+        };
+        assert_eq!(complete.as_percentage(), "100%");
     }
 
     #[test]

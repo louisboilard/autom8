@@ -2974,10 +2974,7 @@ pub fn run_gui() -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::ProjectTreeInfo;
-    use crate::state::SessionMetadata;
-    use crate::ui::shared::RunProgress;
     use chrono::Utc;
-    use std::path::PathBuf;
 
     // ========================================================================
     // App Initialization Tests
@@ -2994,111 +2991,6 @@ mod tests {
         let interval = Duration::from_millis(100);
         let app = Autom8App::with_refresh_interval(interval);
         assert_eq!(app.refresh_interval(), interval);
-    }
-
-    // ========================================================================
-    // Run Progress Tests
-    // ========================================================================
-
-    #[test]
-    fn test_run_progress_as_fraction() {
-        let progress = RunProgress {
-            completed: 1,
-            total: 5,
-        };
-        assert_eq!(progress.as_fraction(), "Story 2/5");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage() {
-        assert_eq!(
-            RunProgress {
-                completed: 2,
-                total: 4
-            }
-            .as_percentage(),
-            "50%"
-        );
-        assert_eq!(
-            RunProgress {
-                completed: 0,
-                total: 0
-            }
-            .as_percentage(),
-            "0%"
-        );
-        assert_eq!(
-            RunProgress {
-                completed: 5,
-                total: 5
-            }
-            .as_percentage(),
-            "100%"
-        );
-    }
-
-    // ========================================================================
-    // Session Data Tests
-    // ========================================================================
-
-    #[test]
-    fn test_session_data_display_title() {
-        let main_session = SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "main".to_string(),
-                worktree_path: PathBuf::from("/path/to/project"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(main_session.display_title(), "my-project (main)");
-
-        let worktree_session = SessionData {
-            is_main_session: false,
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                ..main_session.metadata.clone()
-            },
-            ..main_session
-        };
-        assert_eq!(worktree_session.display_title(), "my-project (abc12345)");
-    }
-
-    #[test]
-    fn test_session_data_truncated_worktree_path() {
-        let make_session = |path: &str| SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from(path),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-
-        assert_eq!(make_session("project").truncated_worktree_path(), "project");
-
-        let long_path = make_session("/Users/dev/projects/my-project-wt-feature");
-        let truncated = long_path.truncated_worktree_path();
-        assert!(truncated.starts_with("..."));
-        assert!(truncated.contains("my-project-wt-feature"));
     }
 
     // ========================================================================

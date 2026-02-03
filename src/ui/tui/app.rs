@@ -1801,52 +1801,7 @@ mod tests {
     // ===========================================
     // US-005: Active Runs View Tests
     // ===========================================
-
-    #[test]
-    fn test_run_progress_as_fraction() {
-        let progress = RunProgress {
-            completed: 1,
-            total: 5,
-        };
-        // completed + 1 because we're working on the next story
-        assert_eq!(progress.as_fraction(), "Story 2/5");
-    }
-
-    #[test]
-    fn test_run_progress_as_fraction_first_story() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 3,
-        };
-        assert_eq!(progress.as_fraction(), "Story 1/3");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage() {
-        let progress = RunProgress {
-            completed: 2,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "40%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_zero_total() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 0,
-        };
-        assert_eq!(progress.as_percentage(), "0%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_complete() {
-        let progress = RunProgress {
-            completed: 5,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "100%");
-    }
+    // Note: RunProgress tests are in ui/shared/mod.rs
 
     #[test]
     fn test_format_duration_seconds_only() {
