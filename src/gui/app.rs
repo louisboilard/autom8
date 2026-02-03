@@ -31,7 +31,7 @@ const MIN_WIDTH: f32 = 400.0;
 const MIN_HEIGHT: f32 = 300.0;
 
 /// Height of the header/tab bar area (48px = 3 * LG spacing).
-/// Note: Used by tests and will be needed for US-005 (Dynamic Tabs in Content Header).
+/// Note: Used by tests. The content header uses CONTENT_TAB_BAR_HEIGHT (36px).
 #[allow(dead_code)]
 const HEADER_HEIGHT: f32 = 48.0;
 
@@ -51,13 +51,9 @@ const TITLE_BAR_HEIGHT: f32 = 28.0;
 const TITLE_BAR_TRAFFIC_LIGHT_OFFSET: f32 = 72.0;
 
 /// Tab indicator underline height.
-/// Note: Used by tests and will be needed for US-005 (Dynamic Tabs in Content Header).
-#[allow(dead_code)]
 const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Tab horizontal padding (uses LG from spacing scale).
-/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
-#[allow(dead_code)]
 const TAB_PADDING_H: f32 = 16.0; // spacing::LG
 
 /// Default refresh interval for data loading (500ms for GUI, less aggressive than TUI).
@@ -409,19 +405,16 @@ impl Tab {
 }
 
 /// Maximum width for the tab bar scroll area.
-/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
-#[allow(dead_code)]
 const TAB_BAR_MAX_SCROLL_WIDTH: f32 = 800.0;
 
 /// Width of the close button area on closable tabs.
-/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
-#[allow(dead_code)]
 const TAB_CLOSE_BUTTON_SIZE: f32 = 16.0;
 
 /// Padding around the close button.
-/// Note: Will be needed for US-005 (Dynamic Tabs in Content Header).
-#[allow(dead_code)]
 const TAB_CLOSE_PADDING: f32 = 4.0;
+
+/// Height of the content header tab bar (only shown when dynamic tabs exist).
+const CONTENT_TAB_BAR_HEIGHT: f32 = 36.0;
 
 /// The main GUI application state.
 ///
@@ -1153,8 +1146,11 @@ impl Autom8App {
 
         // Draw background on hover
         if is_hovered {
-            ui.painter()
-                .rect_filled(rect, Rounding::same(rounding::BUTTON), colors::SURFACE_HOVER);
+            ui.painter().rect_filled(
+                rect,
+                Rounding::same(rounding::BUTTON),
+                colors::SURFACE_HOVER,
+            );
         }
 
         // Draw the icon
@@ -1549,7 +1545,30 @@ impl Autom8App {
     }
 
     /// Render the content area based on the current tab.
+    ///
+    /// When dynamic tabs are open, a tab bar header appears at the top of the
+    /// content area showing the closable tabs. Clicking a tab switches to it,
+    /// and closing the last dynamic tab returns to the permanent view.
     fn render_content(&mut self, ui: &mut egui::Ui) {
+        // Check if there are dynamic tabs to show the content header tab bar
+        let has_dynamic_tabs = self.closable_tab_count() > 0;
+
+        if has_dynamic_tabs {
+            // Render the content header with dynamic tabs
+            self.render_content_tab_bar(ui);
+
+            // Add a subtle separator line
+            let separator_rect = ui.available_rect_before_wrap();
+            ui.painter().hline(
+                separator_rect.x_range(),
+                separator_rect.top(),
+                Stroke::new(1.0, colors::SEPARATOR),
+            );
+
+            ui.add_space(spacing::SM);
+        }
+
+        // Render the main content based on the active tab
         match &self.active_tab_id {
             TabId::ActiveRuns => self.render_active_runs(ui),
             TabId::Projects => self.render_projects(ui),
@@ -1558,6 +1577,209 @@ impl Autom8App {
                 self.render_run_detail(ui, &run_id);
             }
         }
+    }
+
+    /// Render the content header tab bar with dynamic tabs only.
+    ///
+    /// This tab bar appears in the content area header when dynamic tabs (like
+    /// Run Detail views) are open. The permanent tabs (Active Runs, Projects)
+    /// are handled by the sidebar navigation, not shown here.
+    ///
+    /// Features:
+    /// - Each tab has a close button (X)
+    /// - Clicking a tab switches to that content
+    /// - Closing the last dynamic tab returns to the last permanent view
+    /// - Tab bar uses horizontal scrolling if many tabs are open
+    fn render_content_tab_bar(&mut self, ui: &mut egui::Ui) {
+        // Allocate fixed height for the tab bar
+        let available_width = ui.available_width();
+        let scroll_width = available_width.min(TAB_BAR_MAX_SCROLL_WIDTH);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(available_width, CONTENT_TAB_BAR_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                // Collect tab actions to process after render loop
+                let mut tab_to_activate: Option<TabId> = None;
+                let mut tab_to_close: Option<TabId> = None;
+
+                egui::ScrollArea::horizontal()
+                    .max_width(scroll_width)
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            ui.add_space(spacing::XS);
+
+                            // Only show closable (dynamic) tabs in the content header
+                            let dynamic_tabs: Vec<(TabId, String)> = self
+                                .tabs
+                                .iter()
+                                .filter(|t| t.closable)
+                                .map(|t| (t.id.clone(), t.label.clone()))
+                                .collect();
+
+                            for (tab_id, label) in &dynamic_tabs {
+                                let is_active = self.active_tab_id == *tab_id;
+                                let (clicked, close_clicked) =
+                                    self.render_content_tab(ui, label, is_active);
+
+                                if clicked {
+                                    tab_to_activate = Some(tab_id.clone());
+                                }
+                                if close_clicked {
+                                    tab_to_close = Some(tab_id.clone());
+                                }
+                                ui.add_space(spacing::XS);
+                            }
+                        });
+                    });
+
+                // Process actions after render loop
+                if let Some(tab_id) = tab_to_close {
+                    self.close_tab(&tab_id);
+                } else if let Some(tab_id) = tab_to_activate {
+                    self.set_active_tab(tab_id);
+                }
+            },
+        );
+    }
+
+    /// Render a single tab in the content header tab bar.
+    ///
+    /// Each tab displays its label and a close button (X).
+    /// Returns (tab_clicked, close_clicked).
+    fn render_content_tab(&self, ui: &mut egui::Ui, label: &str, is_active: bool) -> (bool, bool) {
+        // Calculate text size
+        let text_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                label.to_string(),
+                typography::font(FontSize::Body, FontWeight::Medium),
+                colors::TEXT_PRIMARY,
+            )
+        });
+        let text_size = text_galley.size();
+
+        // Calculate tab width including close button
+        let close_button_space = TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING;
+        let tab_width = text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
+        let tab_height = CONTENT_TAB_BAR_HEIGHT - TAB_UNDERLINE_HEIGHT - spacing::XS;
+        let tab_size = egui::vec2(tab_width, tab_height);
+
+        // Allocate space for the entire tab
+        let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw tab background
+        let bg_color = if is_active {
+            colors::SURFACE_SELECTED
+        } else if is_hovered {
+            colors::SURFACE_HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        if bg_color != Color32::TRANSPARENT {
+            ui.painter()
+                .rect_filled(rect, Rounding::same(rounding::BUTTON), bg_color);
+        }
+
+        // Draw text
+        let text_color = if is_active {
+            colors::TEXT_PRIMARY
+        } else if is_hovered {
+            colors::TEXT_SECONDARY
+        } else {
+            colors::TEXT_MUTED
+        };
+
+        let text_x = rect.left() + TAB_PADDING_H;
+        let text_pos = egui::pos2(text_x, rect.center().y - text_size.y / 2.0);
+
+        ui.painter().galley(
+            text_pos,
+            ui.fonts(|f| {
+                f.layout_no_wrap(
+                    label.to_string(),
+                    typography::font(
+                        FontSize::Body,
+                        if is_active {
+                            FontWeight::SemiBold
+                        } else {
+                            FontWeight::Medium
+                        },
+                    ),
+                    text_color,
+                )
+            }),
+            Color32::TRANSPARENT,
+        );
+
+        // Draw close button
+        let close_rect = Rect::from_min_size(
+            egui::pos2(
+                rect.right() - TAB_PADDING_H - TAB_CLOSE_BUTTON_SIZE,
+                rect.center().y - TAB_CLOSE_BUTTON_SIZE / 2.0,
+            ),
+            egui::vec2(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE),
+        );
+
+        // Check if mouse is over the close button
+        let close_hovered = ui
+            .ctx()
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pos| close_rect.contains(pos));
+
+        // Draw close button background on hover
+        if close_hovered {
+            ui.painter().rect_filled(
+                close_rect,
+                Rounding::same(rounding::SMALL),
+                colors::SURFACE_HOVER,
+            );
+        }
+
+        // Draw X icon
+        let x_color = if close_hovered {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_MUTED
+        };
+        let x_center = close_rect.center();
+        let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3;
+
+        ui.painter().line_segment(
+            [
+                egui::pos2(x_center.x - x_size, x_center.y - x_size),
+                egui::pos2(x_center.x + x_size, x_center.y + x_size),
+            ],
+            Stroke::new(1.5, x_color),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(x_center.x + x_size, x_center.y - x_size),
+                egui::pos2(x_center.x - x_size, x_center.y + x_size),
+            ],
+            Stroke::new(1.5, x_color),
+        );
+
+        // Draw underline indicator for active tab
+        if is_active {
+            let underline_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.bottom()),
+                egui::vec2(rect.width(), TAB_UNDERLINE_HEIGHT),
+            );
+            ui.painter()
+                .rect_filled(underline_rect, Rounding::ZERO, colors::ACCENT);
+        }
+
+        // Close button click takes precedence over tab click
+        let close_clicked = response.clicked() && close_hovered;
+        let tab_clicked = response.clicked() && !close_hovered;
+
+        (tab_clicked, close_clicked)
     }
 
     /// Render the run detail view for a specific run.
@@ -5430,6 +5652,216 @@ mod tests {
             required_space < MIN_WIDTH / 2.0,
             "Toggle button area ({}) should fit within reasonable title bar space",
             required_space
+        );
+    }
+
+    // ========================================================================
+    // Content Header Dynamic Tabs Tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn test_content_tab_bar_height_is_reasonable() {
+        // Content tab bar should be compact but visible
+        assert!(
+            CONTENT_TAB_BAR_HEIGHT >= 28.0,
+            "Content tab bar should be at least 28px for readability"
+        );
+        assert!(
+            CONTENT_TAB_BAR_HEIGHT <= 48.0,
+            "Content tab bar should not be too tall"
+        );
+    }
+
+    #[test]
+    fn test_content_tab_bar_only_shows_with_dynamic_tabs() {
+        let app = Autom8App::new(None);
+        // Initially no dynamic tabs
+        assert_eq!(
+            app.closable_tab_count(),
+            0,
+            "Should start with no dynamic tabs"
+        );
+        // Tab bar visibility is determined by closable_tab_count() > 0
+        // (UI rendering tested visually, but logic verified here)
+    }
+
+    #[test]
+    fn test_opening_run_detail_creates_dynamic_tab() {
+        let mut app = Autom8App::new(None);
+        assert_eq!(app.closable_tab_count(), 0);
+
+        app.open_run_detail_tab("run-abc", "Run - 2024-01-15");
+
+        assert_eq!(
+            app.closable_tab_count(),
+            1,
+            "Opening run detail should create one dynamic tab"
+        );
+        assert!(app.has_tab(&TabId::RunDetail("run-abc".to_string())));
+    }
+
+    #[test]
+    fn test_multiple_run_detail_tabs_can_be_open() {
+        let mut app = Autom8App::new(None);
+
+        app.open_run_detail_tab("run-1", "Run 1");
+        app.open_run_detail_tab("run-2", "Run 2");
+        app.open_run_detail_tab("run-3", "Run 3");
+
+        assert_eq!(
+            app.closable_tab_count(),
+            3,
+            "Multiple run detail tabs should be supported"
+        );
+        assert_eq!(app.tab_count(), 5, "Total tabs = 2 permanent + 3 dynamic");
+    }
+
+    #[test]
+    fn test_dynamic_tab_has_close_button() {
+        let tab = TabInfo::closable(TabId::RunDetail("run-123".to_string()), "Test Run");
+        assert!(tab.closable, "Dynamic tabs should be marked as closable");
+    }
+
+    #[test]
+    fn test_permanent_tabs_not_closable() {
+        let active_runs = TabInfo::permanent(TabId::ActiveRuns, "Active Runs");
+        let projects = TabInfo::permanent(TabId::Projects, "Projects");
+
+        assert!(
+            !active_runs.closable,
+            "Active Runs tab should not be closable"
+        );
+        assert!(!projects.closable, "Projects tab should not be closable");
+    }
+
+    #[test]
+    fn test_clicking_tab_switches_content() {
+        let mut app = Autom8App::new(None);
+
+        // Start on ActiveRuns
+        assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
+
+        // Open a run detail tab
+        app.open_run_detail_tab("run-123", "Test Run");
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-123".to_string())
+        );
+
+        // Switch back to Projects
+        app.set_active_tab(TabId::Projects);
+        assert_eq!(*app.active_tab_id(), TabId::Projects);
+
+        // Switch back to the run detail
+        app.set_active_tab(TabId::RunDetail("run-123".to_string()));
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_closing_last_dynamic_tab_returns_to_permanent_view() {
+        let mut app = Autom8App::new(None);
+
+        // Start on Projects
+        app.set_active_tab(TabId::Projects);
+
+        // Open a run detail tab (which becomes active)
+        app.open_run_detail_tab("run-123", "Test Run");
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-123".to_string())
+        );
+
+        // Close the tab - should return to Projects (the previous permanent tab)
+        app.close_tab(&TabId::RunDetail("run-123".to_string()));
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::Projects,
+            "Closing last dynamic tab should return to previous permanent view"
+        );
+        assert_eq!(app.closable_tab_count(), 0, "No dynamic tabs should remain");
+    }
+
+    #[test]
+    fn test_closing_one_dynamic_tab_keeps_others() {
+        let mut app = Autom8App::new(None);
+
+        app.open_run_detail_tab("run-1", "Run 1");
+        app.open_run_detail_tab("run-2", "Run 2");
+        app.open_run_detail_tab("run-3", "Run 3");
+
+        // Close run-2
+        app.close_tab(&TabId::RunDetail("run-2".to_string()));
+
+        assert_eq!(
+            app.closable_tab_count(),
+            2,
+            "Should have 2 dynamic tabs after closing one"
+        );
+        assert!(app.has_tab(&TabId::RunDetail("run-1".to_string())));
+        assert!(!app.has_tab(&TabId::RunDetail("run-2".to_string())));
+        assert!(app.has_tab(&TabId::RunDetail("run-3".to_string())));
+    }
+
+    #[test]
+    fn test_tab_bar_shows_only_dynamic_tabs() {
+        let app = Autom8App::new(None);
+
+        // Verify permanent tabs are not closable (and would be filtered out of content header)
+        let dynamic_tabs: Vec<_> = app.tabs().iter().filter(|t| t.closable).collect();
+        assert_eq!(
+            dynamic_tabs.len(),
+            0,
+            "Initially no tabs should appear in content header"
+        );
+    }
+
+    #[test]
+    fn test_tab_close_button_size_is_usable() {
+        // Close button should be large enough to click
+        assert!(
+            TAB_CLOSE_BUTTON_SIZE >= 12.0,
+            "Close button should be at least 12px for usability"
+        );
+        assert!(
+            TAB_CLOSE_BUTTON_SIZE <= 20.0,
+            "Close button should not be too large"
+        );
+    }
+
+    #[test]
+    fn test_tab_underline_height_is_subtle() {
+        // Underline indicator should be subtle
+        assert!(
+            TAB_UNDERLINE_HEIGHT >= 1.0,
+            "Underline should be at least 1px visible"
+        );
+        assert!(
+            TAB_UNDERLINE_HEIGHT <= 3.0,
+            "Underline should be subtle, not chunky"
+        );
+    }
+
+    #[test]
+    fn test_closing_active_tab_switches_to_adjacent() {
+        let mut app = Autom8App::new(None);
+
+        // Open multiple tabs
+        app.open_run_detail_tab("run-1", "Run 1");
+        app.open_run_detail_tab("run-2", "Run 2"); // This becomes active
+
+        // Active is now run-2
+        assert_eq!(*app.active_tab_id(), TabId::RunDetail("run-2".to_string()));
+
+        // Close run-2, should switch to run-1 (the previous tab)
+        app.close_tab(&TabId::RunDetail("run-2".to_string()));
+
+        assert_eq!(
+            *app.active_tab_id(),
+            TabId::RunDetail("run-1".to_string()),
+            "Should switch to previous tab after closing active"
         );
     }
 }
