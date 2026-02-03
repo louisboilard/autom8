@@ -409,6 +409,16 @@ pub struct Autom8App {
     /// Cached information about which projects have their own config file.
     /// Maps project name to whether it has a `config.toml` file.
     config_scope_has_config: std::collections::HashMap<String, bool>,
+
+    // ========================================================================
+    // Config Editor State (Config Tab - US-003)
+    // ========================================================================
+    /// Cached global configuration for editing.
+    /// Loaded via `config::load_global_config()` when Global scope is selected.
+    cached_global_config: Option<crate::config::Config>,
+
+    /// Error message if global config failed to load.
+    global_config_error: Option<String>,
 }
 
 impl Default for Autom8App {
@@ -455,6 +465,8 @@ impl Autom8App {
             selected_config_scope: ConfigScope::default(),
             config_scope_projects: Vec::new(),
             config_scope_has_config: std::collections::HashMap::new(),
+            cached_global_config: None,
+            global_config_error: None,
         };
         // Initial data load
         app.refresh_data();
@@ -559,6 +571,36 @@ impl Autom8App {
                 }
             }
         }
+
+        // Load global config when Global scope is selected
+        if self.selected_config_scope.is_global() && self.cached_global_config.is_none() {
+            self.load_global_config();
+        }
+    }
+
+    /// Load the global configuration from disk.
+    /// Called when Global scope is selected in the Config tab.
+    fn load_global_config(&mut self) {
+        match crate::config::load_global_config() {
+            Ok(config) => {
+                self.cached_global_config = Some(config);
+                self.global_config_error = None;
+            }
+            Err(e) => {
+                self.cached_global_config = None;
+                self.global_config_error = Some(format!("Failed to load config: {}", e));
+            }
+        }
+    }
+
+    /// Returns the cached global config, if loaded.
+    pub fn cached_global_config(&self) -> Option<&crate::config::Config> {
+        self.cached_global_config.as_ref()
+    }
+
+    /// Returns the global config error, if any.
+    pub fn global_config_error(&self) -> Option<&str> {
+        self.global_config_error.as_deref()
     }
 
     /// Returns the currently selected project name.
@@ -1730,11 +1772,8 @@ impl Autom8App {
                 Color32::TRANSPARENT
             };
 
-            ui.painter().rect_filled(
-                rect,
-                Rounding::same(SIDEBAR_ITEM_ROUNDING),
-                bg_color,
-            );
+            ui.painter()
+                .rect_filled(rect, Rounding::same(SIDEBAR_ITEM_ROUNDING), bg_color);
 
             // Draw selection indicator on the left edge for selected items
             if is_selected {
@@ -1751,7 +1790,12 @@ impl Autom8App {
 
             // Draw the scope name with appropriate styling
             let text_rect = rect.shrink2(Vec2::new(
-                CONFIG_SCOPE_ROW_PADDING_H + (if is_selected { SIDEBAR_ACTIVE_INDICATOR_WIDTH + 4.0 } else { 0.0 }),
+                CONFIG_SCOPE_ROW_PADDING_H
+                    + (if is_selected {
+                        SIDEBAR_ACTIVE_INDICATOR_WIDTH + 4.0
+                    } else {
+                        0.0
+                    }),
                 CONFIG_SCOPE_ROW_PADDING_V,
             ));
 
@@ -1776,42 +1820,233 @@ impl Autom8App {
     /// Render the right panel of the Config view (config editor).
     ///
     /// Shows the config editor for the currently selected scope.
-    /// This is a placeholder that will be expanded in subsequent user stories.
+    /// For US-003: Global Config Editor with all 6 fields grouped logically.
     fn render_config_right_panel(&self, ui: &mut egui::Ui) {
-        // Header showing the selected scope
-        let header_text = match &self.selected_config_scope {
-            ConfigScope::Global => "Global Configuration".to_string(),
+        // Header showing the selected scope with tooltip for config path
+        let (header_text, tooltip_text) = match &self.selected_config_scope {
+            ConfigScope::Global => {
+                let path = crate::config::global_config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "~/.config/autom8/config.toml".to_string());
+                ("Global Config".to_string(), path)
+            }
             ConfigScope::Project(name) => {
+                let path = crate::config::project_config_path_for(name)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| format!("~/.config/autom8/{}/config.toml", name));
                 if self.project_has_config(name) {
-                    format!("Project Configuration: {}", name)
+                    (format!("Project Config: {}", name), path)
                 } else {
-                    format!("Project Configuration: {} (using global)", name)
+                    (format!("Project Config: {} (using global)", name), path)
                 }
             }
         };
 
-        ui.label(
-            egui::RichText::new(header_text)
+        // Header with tooltip
+        let header_response = ui.label(
+            egui::RichText::new(&header_text)
                 .font(typography::font(FontSize::Title, FontWeight::SemiBold))
                 .color(colors::TEXT_PRIMARY),
         );
+        header_response.on_hover_text(&tooltip_text);
 
         ui.add_space(spacing::MD);
 
-        // Placeholder content - will be expanded in US-003 through US-011
+        // Render content based on scope
+        match &self.selected_config_scope {
+            ConfigScope::Global => {
+                self.render_global_config_editor(ui);
+            }
+            ConfigScope::Project(_name) => {
+                // Project config editor will be implemented in US-004
+                egui::ScrollArea::vertical()
+                    .id_salt("config_editor")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(spacing::XXL);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("Project configuration editor coming soon...")
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+            }
+        }
+    }
+
+    /// Render the global config editor with all fields.
+    ///
+    /// Displays all 6 config fields grouped logically:
+    /// - Pipeline group: review, commit, pull_request
+    /// - Worktree group: worktree, worktree_path_pattern, worktree_cleanup
+    fn render_global_config_editor(&self, ui: &mut egui::Ui) {
+        // Show error if config failed to load
+        if let Some(error) = &self.global_config_error {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new(error)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::STATUS_ERROR),
+            );
+            return;
+        }
+
+        // Show loading state or editor
+        let Some(config) = &self.cached_global_config else {
+            ui.add_space(spacing::MD);
+            ui.label(
+                egui::RichText::new("Loading configuration...")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+            return;
+        };
+
+        // ScrollArea for config fields
         egui::ScrollArea::vertical()
             .id_salt("config_editor")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(spacing::XXL);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Configuration settings will appear here")
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_MUTED),
-                    );
-                });
+                // Pipeline Settings Group
+                self.render_config_group_header(ui, "Pipeline");
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "review",
+                    config.review,
+                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "commit",
+                    config.commit,
+                    "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "pull_request",
+                    config.pull_request,
+                    "Automatic PR creation. When enabled, a pull request is created after committing. Requires commit to be enabled.",
+                );
+
+                ui.add_space(spacing::XL);
+
+                // Worktree Settings Group
+                self.render_config_group_header(ui, "Worktree");
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "worktree",
+                    config.worktree,
+                    "Automatic worktree creation. When enabled, creates a dedicated worktree for each run, enabling parallel sessions.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_text_field(
+                    ui,
+                    "worktree_path_pattern",
+                    &config.worktree_path_pattern,
+                    "Pattern for worktree directory names. Placeholders: {repo} = repository name, {branch} = branch name.",
+                );
+
+                ui.add_space(spacing::SM);
+
+                self.render_config_bool_field(
+                    ui,
+                    "worktree_cleanup",
+                    config.worktree_cleanup,
+                    "Automatic worktree cleanup. When enabled, removes worktrees after successful completion. Failed runs keep their worktrees.",
+                );
+
+                // Add some padding at the bottom
+                ui.add_space(spacing::XL);
             });
+    }
+
+    /// Render a config group header.
+    fn render_config_group_header(&self, ui: &mut egui::Ui, title: &str) {
+        ui.label(
+            egui::RichText::new(title)
+                .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+    }
+
+    /// Render a boolean config field with label and help text.
+    ///
+    /// Displays the field as a read-only indicator (toggle controls will be added in US-006).
+    fn render_config_bool_field(&self, ui: &mut egui::Ui, name: &str, value: bool, help_text: &str) {
+        ui.horizontal(|ui| {
+            // Field name
+            ui.label(
+                egui::RichText::new(name)
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            // Value indicator (will become a toggle in US-006)
+            let value_text = if value { "enabled" } else { "disabled" };
+            let value_color = if value {
+                colors::STATUS_SUCCESS
+            } else {
+                colors::TEXT_MUTED
+            };
+            ui.label(
+                egui::RichText::new(value_text)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(value_color),
+            );
+        });
+
+        // Help text below the field
+        ui.label(
+            egui::RichText::new(help_text)
+                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
+        );
+    }
+
+    /// Render a text config field with label and help text.
+    ///
+    /// Displays the field as a read-only value (editable input will be added in US-007).
+    fn render_config_text_field(&self, ui: &mut egui::Ui, name: &str, value: &str, help_text: &str) {
+        ui.horizontal(|ui| {
+            // Field name
+            ui.label(
+                egui::RichText::new(name)
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            // Value (will become editable in US-007)
+            ui.label(
+                egui::RichText::new(format!("\"{}\"", value))
+                    .font(typography::mono(FontSize::Body))
+                    .color(colors::TEXT_SECONDARY),
+            );
+        });
+
+        // Help text below the field
+        ui.label(
+            egui::RichText::new(help_text)
+                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
+        );
     }
 
     /// Render the run detail view for a specific run.
@@ -3720,7 +3955,10 @@ mod tests {
             ConfigScope::Project("test".to_string()),
             ConfigScope::Project("test".to_string())
         );
-        assert_ne!(ConfigScope::Global, ConfigScope::Project("test".to_string()));
+        assert_ne!(
+            ConfigScope::Global,
+            ConfigScope::Project("test".to_string())
+        );
         assert_ne!(
             ConfigScope::Project("a".to_string()),
             ConfigScope::Project("b".to_string())
