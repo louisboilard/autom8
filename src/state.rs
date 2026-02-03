@@ -66,24 +66,39 @@ pub struct SessionStatus {
 /// This struct holds the most recent output lines and current state, enabling
 /// the monitor command to display real-time output without reading the full state.
 /// Written atomically to prevent partial reads.
+///
+/// The `last_heartbeat` field is the authoritative indicator of whether a run is
+/// still active. GUI/TUI should consider a run "active" if heartbeat is recent
+/// (< 10 seconds old).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveState {
     /// Recent output lines from Claude (max 50 lines, newest last)
     pub output_lines: Vec<String>,
-    /// When this live state was last updated
+    /// When this live state was last updated (by output or state change)
     pub updated_at: DateTime<Utc>,
     /// Current machine state
     pub machine_state: MachineState,
+    /// Heartbeat timestamp - updated every 2-3 seconds while run is active.
+    /// This is the authoritative indicator of whether the run is still alive.
+    /// GUI/TUI should consider a run "active" if this is < 10 seconds old.
+    #[serde(default = "Utc::now")]
+    pub last_heartbeat: DateTime<Utc>,
 }
+
+/// Threshold for considering a heartbeat "stale" (run likely dead).
+/// GUI/TUI should consider a run inactive if heartbeat is older than this.
+pub const HEARTBEAT_STALE_THRESHOLD_SECS: i64 = 10;
 
 impl LiveState {
     /// Create a new LiveState with the given machine state.
     pub fn new(machine_state: MachineState) -> Self {
+        let now = Utc::now();
         Self {
             output_lines: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: now,
             machine_state,
+            last_heartbeat: now,
         }
     }
 
@@ -97,6 +112,30 @@ impl LiveState {
             self.output_lines.drain(0..excess);
         }
         self.updated_at = Utc::now();
+    }
+
+    /// Update the heartbeat timestamp to indicate the run is still active.
+    /// This should be called every 2-3 seconds during an active run.
+    pub fn update_heartbeat(&mut self) {
+        self.last_heartbeat = Utc::now();
+    }
+
+    /// Update the machine state and refresh timestamps.
+    /// Called when the state machine transitions to a new state.
+    pub fn update_state(&mut self, new_state: MachineState) {
+        self.machine_state = new_state;
+        let now = Utc::now();
+        self.updated_at = now;
+        self.last_heartbeat = now;
+    }
+
+    /// Check if the heartbeat is recent enough to consider the run active.
+    /// Returns true if the heartbeat is less than HEARTBEAT_STALE_THRESHOLD_SECS old.
+    pub fn is_heartbeat_fresh(&self) -> bool {
+        let age = Utc::now()
+            .signed_duration_since(self.last_heartbeat)
+            .num_seconds();
+        age < HEARTBEAT_STALE_THRESHOLD_SECS
     }
 }
 
@@ -4266,5 +4305,144 @@ src/lib.rs | Library module | [Config]
             let parsed: LiveState = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.machine_state, state);
         }
+    }
+
+    // ========================================================================
+    // US-002: Heartbeat Mechanism Tests
+    // ========================================================================
+
+    #[test]
+    fn test_live_state_new_has_heartbeat() {
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        // Should have last_heartbeat set to a recent time
+        assert!(live.is_heartbeat_fresh());
+
+        // Heartbeat should be close to now
+        let age = Utc::now()
+            .signed_duration_since(live.last_heartbeat)
+            .num_seconds();
+        assert!(age < 1, "Heartbeat should be very recent");
+    }
+
+    #[test]
+    fn test_live_state_update_heartbeat() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        let original_heartbeat = live.last_heartbeat;
+
+        // Small delay to ensure time difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        live.update_heartbeat();
+
+        // Heartbeat should be updated
+        assert!(
+            live.last_heartbeat > original_heartbeat,
+            "Heartbeat should be updated to a newer time"
+        );
+        assert!(live.is_heartbeat_fresh());
+    }
+
+    #[test]
+    fn test_live_state_update_state() {
+        let mut live = LiveState::new(MachineState::PickingStory);
+        let original_time = live.updated_at;
+
+        // Small delay to ensure time difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        live.update_state(MachineState::RunningClaude);
+
+        // State should be updated
+        assert_eq!(live.machine_state, MachineState::RunningClaude);
+
+        // Timestamps should be updated
+        assert!(
+            live.updated_at > original_time,
+            "updated_at should be refreshed"
+        );
+        assert!(live.is_heartbeat_fresh());
+    }
+
+    #[test]
+    fn test_live_state_is_heartbeat_fresh() {
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        // Fresh heartbeat should return true
+        assert!(live.is_heartbeat_fresh());
+    }
+
+    #[test]
+    fn test_live_state_stale_heartbeat() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Set heartbeat to be older than the threshold (10 seconds)
+        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(15);
+
+        // Stale heartbeat should return false
+        assert!(
+            !live.is_heartbeat_fresh(),
+            "Heartbeat older than 10 seconds should be stale"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_stale_threshold_constant() {
+        // Verify the threshold constant is 10 seconds
+        assert_eq!(
+            HEARTBEAT_STALE_THRESHOLD_SECS, 10,
+            "Heartbeat threshold should be 10 seconds"
+        );
+    }
+
+    #[test]
+    fn test_live_state_heartbeat_serialization() {
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&live).unwrap();
+
+        // Parse back
+        let parsed: LiveState = serde_json::from_str(&json).unwrap();
+
+        // Heartbeat should be preserved
+        assert_eq!(parsed.last_heartbeat, live.last_heartbeat);
+        assert!(parsed.is_heartbeat_fresh());
+    }
+
+    #[test]
+    fn test_live_state_heartbeat_default_on_deserialize() {
+        // Test that old live.json without lastHeartbeat field gets a default
+        let json = r#"{
+            "outputLines": [],
+            "updatedAt": "2024-01-01T00:00:00Z",
+            "machineState": "running-claude"
+        }"#;
+
+        // This should deserialize successfully with default heartbeat
+        let live: LiveState = serde_json::from_str(json).unwrap();
+
+        // The default is Utc::now(), so it should be fresh
+        assert!(
+            live.is_heartbeat_fresh(),
+            "Default heartbeat should be fresh (set to now)"
+        );
+    }
+
+    #[test]
+    fn test_live_state_append_line_preserves_heartbeat() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        let original_heartbeat = live.last_heartbeat;
+
+        // Append a line
+        live.append_line("test output".to_string());
+
+        // Heartbeat should NOT be automatically updated by append_line
+        // (heartbeat is only updated by explicit update_heartbeat() or update_state() calls)
+        // However, append_line DOES update updated_at
+        assert!(live.updated_at >= original_heartbeat);
+
+        // The heartbeat itself should still be fresh (since the state was just created)
+        assert!(live.is_heartbeat_fresh());
     }
 }
