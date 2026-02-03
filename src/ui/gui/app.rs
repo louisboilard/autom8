@@ -4,7 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
-use crate::state::{MachineState, StateManager};
+use crate::state::{MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
     truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
@@ -175,6 +175,38 @@ const CONTEXT_MENU_ARROW_SIZE: f32 = 8.0;
 const CONTEXT_MENU_CURSOR_OFFSET: f32 = 2.0;
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Check if a session is resumable.
+///
+/// A session is resumable if:
+/// - It's not stale (worktree still exists)
+/// - It's marked as running, OR
+/// - It has a machine state that's not Idle or Completed
+fn is_resumable_session(session: &SessionStatus) -> bool {
+    // Can't resume stale sessions (deleted worktrees)
+    if session.is_stale {
+        return false;
+    }
+
+    // Running sessions are resumable
+    if session.metadata.is_running {
+        return true;
+    }
+
+    // Check if the machine state indicates a resumable run
+    if let Some(state) = &session.machine_state {
+        match state {
+            MachineState::Completed | MachineState::Idle => false,
+            _ => true, // Any other state is resumable
+        }
+    } else {
+        false
+    }
+}
+
+// ============================================================================
 // Context Menu Types (Right-Click Context Menu - US-002)
 // ============================================================================
 
@@ -268,6 +300,41 @@ pub enum ContextMenuAction {
     CleanWorktrees,
     /// Clean orphaned sessions for the project.
     CleanOrphaned,
+}
+
+/// Information about a resumable session for display in the context menu.
+/// This is a simplified view of SessionStatus for the GUI.
+#[derive(Debug, Clone)]
+pub struct ResumableSessionInfo {
+    /// The session ID (e.g., "main" or 8-char hash).
+    pub session_id: String,
+    /// The branch name being worked on.
+    pub branch_name: String,
+}
+
+impl ResumableSessionInfo {
+    /// Create a new resumable session info.
+    pub fn new(session_id: impl Into<String>, branch_name: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            branch_name: branch_name.into(),
+        }
+    }
+
+    /// Returns a truncated version of the session ID (first 8 chars).
+    pub fn truncated_id(&self) -> &str {
+        if self.session_id.len() > 8 {
+            &self.session_id[..8]
+        } else {
+            &self.session_id
+        }
+    }
+
+    /// Returns the menu label for this session.
+    /// Format: "branch-name (session-id-truncated)"
+    pub fn menu_label(&self) -> String {
+        format!("{} ({})", self.branch_name, self.truncated_id())
+    }
 }
 
 /// State for the context menu overlay.
@@ -868,17 +935,78 @@ impl Autom8App {
         self.context_menu = None;
     }
 
+    /// Get resumable sessions for a project.
+    ///
+    /// Queries the StateManager for sessions that can be resumed:
+    /// - Session is not stale (worktree still exists)
+    /// - Session is_running, OR
+    /// - Session has a machine state that's not Idle/Completed
+    ///
+    /// Returns sessions sorted by last_active_at descending.
+    fn get_resumable_sessions(&self, project_name: &str) -> Vec<ResumableSessionInfo> {
+        // Try to get the state manager for this project
+        let sm = match StateManager::for_project(project_name) {
+            Ok(sm) => sm,
+            Err(_) => return Vec::new(),
+        };
+
+        // Get all sessions with status
+        let sessions = match sm.list_sessions_with_status() {
+            Ok(sessions) => sessions,
+            Err(_) => return Vec::new(),
+        };
+
+        // Filter to resumable sessions and convert to ResumableSessionInfo
+        sessions
+            .into_iter()
+            .filter(|s| is_resumable_session(s))
+            .map(|s| {
+                ResumableSessionInfo::new(s.metadata.session_id, s.metadata.branch_name)
+            })
+            .collect()
+    }
+
     /// Build the context menu items for a project.
     /// This creates the menu structure with Status, Describe, Resume, and Clean options.
-    fn build_context_menu_items(&self, _project_name: &str) -> Vec<ContextMenuItem> {
-        // For US-002, we create the menu structure.
-        // Actual command execution will be implemented in US-003, US-004, US-005, US-006.
+    fn build_context_menu_items(&self, project_name: &str) -> Vec<ContextMenuItem> {
+        // Get resumable sessions for this project
+        let resumable_sessions = self.get_resumable_sessions(project_name);
+
+        // Build the Resume menu item based on number of sessions
+        let resume_item = match resumable_sessions.len() {
+            0 => {
+                // No resumable sessions - disabled menu item
+                ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None))
+            }
+            1 => {
+                // Single session - direct action with branch name
+                let session = &resumable_sessions[0];
+                let label = format!("Resume ({})", session.branch_name);
+                ContextMenuItem::action(
+                    label,
+                    ContextMenuAction::Resume(Some(session.session_id.clone())),
+                )
+            }
+            _ => {
+                // Multiple sessions - submenu
+                let submenu_items: Vec<ContextMenuItem> = resumable_sessions
+                    .iter()
+                    .map(|session| {
+                        ContextMenuItem::action(
+                            session.menu_label(),
+                            ContextMenuAction::Resume(Some(session.session_id.clone())),
+                        )
+                    })
+                    .collect();
+                ContextMenuItem::submenu("Resume", "resume", submenu_items)
+            }
+        };
+
         vec![
             ContextMenuItem::action("Status", ContextMenuAction::Status),
             ContextMenuItem::action("Describe", ContextMenuAction::Describe),
             ContextMenuItem::Separator,
-            // Resume - placeholder for US-005
-            ContextMenuItem::action_disabled("Resume", ContextMenuAction::Resume(None)),
+            resume_item,
             ContextMenuItem::Separator,
             // Clean - placeholder for US-006
             ContextMenuItem::submenu_disabled("Clean", "clean"),
@@ -1664,8 +1792,17 @@ impl Autom8App {
                     // Spawn the describe command (US-004)
                     self.spawn_describe_command(&project_name);
                 }
-                ContextMenuAction::Resume(_) => {
-                    // Will be implemented in US-005
+                ContextMenuAction::Resume(session_id) => {
+                    // TODO: Implement resume integration
+                    // For now, log to console as a placeholder
+                    if let Some(id) = session_id {
+                        eprintln!(
+                            "Resume not implemented yet (project: {}, session: {})",
+                            project_name, id
+                        );
+                    } else {
+                        eprintln!("Resume not implemented yet (project: {})", project_name);
+                    }
                 }
                 ContextMenuAction::CleanWorktrees | ContextMenuAction::CleanOrphaned => {
                     // Will be implemented in US-006
@@ -4731,11 +4868,12 @@ mod tests {
         assert!(matches!(&items[2], ContextMenuItem::Separator));
         assert!(matches!(&items[4], ContextMenuItem::Separator));
 
-        // Check Resume is disabled (placeholder)
+        // Check Resume is disabled (no resumable sessions for test-project)
         match &items[3] {
-            ContextMenuItem::Action { label, enabled, .. } => {
+            ContextMenuItem::Action { label, enabled, action } => {
                 assert_eq!(label, "Resume");
-                assert!(!enabled);
+                assert_eq!(action, &ContextMenuAction::Resume(None));
+                assert!(!enabled, "Resume should be disabled when no sessions");
             }
             _ => panic!("Expected Resume action"),
         }
@@ -5333,5 +5471,235 @@ mod tests {
         let id = CommandOutputId::new("my-awesome-project", "describe");
         let label = id.tab_label();
         assert_eq!(label, "Describe: my-awesome-project");
+    }
+
+    // ========================================================================
+    // US-005: Resume Menu Tests
+    // ========================================================================
+
+    #[test]
+    fn test_resumable_session_info_new() {
+        let info = ResumableSessionInfo::new("abc12345", "feature/test");
+        assert_eq!(info.session_id, "abc12345");
+        assert_eq!(info.branch_name, "feature/test");
+    }
+
+    #[test]
+    fn test_resumable_session_info_truncated_id_short() {
+        // Session ID <= 8 chars should not be truncated
+        let info = ResumableSessionInfo::new("main", "main");
+        assert_eq!(info.truncated_id(), "main");
+
+        let info = ResumableSessionInfo::new("abcd1234", "test");
+        assert_eq!(info.truncated_id(), "abcd1234");
+    }
+
+    #[test]
+    fn test_resumable_session_info_truncated_id_long() {
+        // Session ID > 8 chars should be truncated to first 8
+        let info = ResumableSessionInfo::new("abcd12345678", "test");
+        assert_eq!(info.truncated_id(), "abcd1234");
+
+        let info = ResumableSessionInfo::new("very-long-session-id-here", "test");
+        assert_eq!(info.truncated_id(), "very-lon");
+    }
+
+    #[test]
+    fn test_resumable_session_info_menu_label() {
+        // Format: "branch-name (session-id-truncated)"
+        let info = ResumableSessionInfo::new("main", "main");
+        assert_eq!(info.menu_label(), "main (main)");
+
+        let info = ResumableSessionInfo::new("abc12345", "feature/login");
+        assert_eq!(info.menu_label(), "feature/login (abc12345)");
+
+        // Long session ID should be truncated in label
+        let info = ResumableSessionInfo::new("abcd12345678", "feature/test");
+        assert_eq!(info.menu_label(), "feature/test (abcd1234)");
+    }
+
+    #[test]
+    fn test_is_resumable_session_stale() {
+        // Stale sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: true, // Stale!
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_running() {
+        // Running sessions are resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true, // Running
+            },
+            machine_state: Some(MachineState::RunningClaude),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_idle_not_resumable() {
+        // Idle sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: Some(MachineState::Idle),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_completed_not_resumable() {
+        // Completed sessions are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: Some(MachineState::Completed),
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_is_resumable_session_other_states_resumable() {
+        // Other states (like Reviewing, Committing) are resumable
+        let states = vec![
+            MachineState::RunningClaude,
+            MachineState::Reviewing,
+            MachineState::Correcting,
+            MachineState::Committing,
+            MachineState::CreatingPR,
+            MachineState::LoadingSpec,
+            MachineState::GeneratingSpec,
+            MachineState::PickingStory,
+            MachineState::Failed,
+            MachineState::Initializing,
+        ];
+
+        for state in states {
+            let session = SessionStatus {
+                metadata: crate::state::SessionMetadata {
+                    session_id: "test".to_string(),
+                    worktree_path: std::path::PathBuf::from("/tmp/test"),
+                    branch_name: "test-branch".to_string(),
+                    created_at: chrono::Utc::now(),
+                    last_active_at: chrono::Utc::now(),
+                    is_running: false,
+                },
+                machine_state: Some(state.clone()),
+                current_story: None,
+                is_current: false,
+                is_stale: false,
+            };
+            assert!(
+                is_resumable_session(&session),
+                "State {:?} should be resumable",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_resumable_session_no_machine_state() {
+        // Sessions with no machine state are not resumable
+        let session = SessionStatus {
+            metadata: crate::state::SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/test"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: false,
+            },
+            machine_state: None, // No machine state
+            current_story: None,
+            is_current: false,
+            is_stale: false,
+        };
+        assert!(!is_resumable_session(&session));
+    }
+
+    #[test]
+    fn test_build_context_menu_no_resumable_sessions() {
+        // Test with a non-existent project (will have no sessions)
+        let app = Autom8App::new();
+        let items = app.build_context_menu_items("nonexistent-project-12345");
+
+        // Should have Status, Describe, separator, Resume (disabled), separator, Clean
+        assert_eq!(items.len(), 6);
+
+        // Resume should be disabled with no session ID
+        match &items[3] {
+            ContextMenuItem::Action {
+                label,
+                action,
+                enabled,
+            } => {
+                assert_eq!(label, "Resume");
+                assert_eq!(action, &ContextMenuAction::Resume(None));
+                assert!(!enabled, "Resume should be disabled when no sessions");
+            }
+            _ => panic!("Expected Resume action"),
+        }
+    }
+
+    #[test]
+    fn test_get_resumable_sessions_nonexistent_project() {
+        // Non-existent project should return empty vec
+        let app = Autom8App::new();
+        let sessions = app.get_resumable_sessions("nonexistent-project-xyz123");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_resume_action_contains_session_id() {
+        // Verify that Resume action can hold session ID
+        let action = ContextMenuAction::Resume(Some("abc12345".to_string()));
+        if let ContextMenuAction::Resume(Some(id)) = action {
+            assert_eq!(id, "abc12345");
+        } else {
+            panic!("Expected Resume action with session ID");
+        }
+
+        let action_none = ContextMenuAction::Resume(None);
+        assert!(matches!(action_none, ContextMenuAction::Resume(None)));
     }
 }
