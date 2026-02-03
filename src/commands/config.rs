@@ -367,10 +367,7 @@ pub fn config_reset_command(global: bool, yes: bool) -> Result<()> {
 
     // Prompt for confirmation unless --yes is set
     if !yes {
-        print!(
-            "Reset {} config to defaults? [y/N] ",
-            config_type
-        );
+        print!("Reset {} config to defaults? [y/N] ", config_type);
         std::io::Write::flush(&mut std::io::stdout())?;
 
         let mut input = String::new();
@@ -860,7 +857,10 @@ mod tests {
 
         assert_ne!(modified.review, default.review);
         assert_ne!(modified.commit, default.commit);
-        assert_ne!(modified.worktree_path_pattern, default.worktree_path_pattern);
+        assert_ne!(
+            modified.worktree_path_pattern,
+            default.worktree_path_pattern
+        );
     }
 
     #[test]
@@ -886,7 +886,7 @@ mod tests {
         // Just verify the function exists and accepts the right type
         // We don't call it in tests to avoid side effects
         let _ = &config; // Suppress unused warning
-        // The actual function call would be: save_global_config(&config)
+                         // The actual function call would be: save_global_config(&config)
     }
 
     #[test]

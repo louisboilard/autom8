@@ -275,7 +275,7 @@ fn main() {
                     value,
                 }) => config_set_command(key, value, *g),
                 // Reset subcommand (US-003)
-                Some(ConfigSubcommand::Reset { global: g, yes }) => config_reset_command(*g, *yes)
+                Some(ConfigSubcommand::Reset { global: g, yes }) => config_reset_command(*g, *yes),
             }
         }
 
