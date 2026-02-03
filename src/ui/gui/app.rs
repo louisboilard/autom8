@@ -2370,6 +2370,7 @@ impl Autom8App {
                     .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
                     .show(ui, |ui| {
                         ui.set_min_width(menu_width);
+                        ui.set_max_width(menu_width);
 
                         for item in &menu_state.items {
                             match item {
@@ -2518,6 +2519,7 @@ impl Autom8App {
                             .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
                             .show(ui, |ui| {
                                 ui.set_min_width(submenu_width);
+                                ui.set_max_width(submenu_width);
 
                                 for item in &submenu_items {
                                     match item {
