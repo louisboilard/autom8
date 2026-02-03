@@ -156,8 +156,11 @@ const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
 // Context Menu Constants (Right-Click Context Menu - US-002)
 // ============================================================================
 
-/// Minimum width for the context menu.
-const CONTEXT_MENU_MIN_WIDTH: f32 = 160.0;
+/// Minimum width for the context menu (US-001).
+const CONTEXT_MENU_MIN_WIDTH: f32 = 100.0;
+
+/// Maximum width for the context menu (US-001).
+const CONTEXT_MENU_MAX_WIDTH: f32 = 300.0;
 
 /// Height of each menu item.
 const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.0;
@@ -192,6 +195,57 @@ struct ContextMenuItemResponse {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Calculate the final menu width from a measured text width (US-001).
+///
+/// Applies padding and clamping to the max text width to get the final menu width.
+/// This is separated from the text measurement for testability.
+///
+/// # Arguments
+/// * `max_text_width` - The maximum text width among all menu item labels
+/// * `has_submenu` - Whether any items have submenus (adds extra space for arrow)
+fn calculate_menu_width_from_text_width(max_text_width: f32) -> f32 {
+    // Total width = text width + left padding (24px) + right padding (24px)
+    // The padding is ~48px total (CONTEXT_MENU_PADDING_H * 4)
+    let padding = CONTEXT_MENU_PADDING_H * 2.0 + CONTEXT_MENU_PADDING_H * 2.0;
+    let calculated_width = max_text_width + padding;
+
+    // Clamp to min/max bounds
+    calculated_width.clamp(CONTEXT_MENU_MIN_WIDTH, CONTEXT_MENU_MAX_WIDTH)
+}
+
+/// Calculate the dynamic width for a context menu based on its items (US-001).
+///
+/// The width is determined by:
+/// 1. Measuring the text width of each label using the Body font
+/// 2. Adding horizontal padding (24px each side = 48px total)
+/// 3. Adding submenu arrow space for items with submenus (arrow size + padding)
+/// 4. Clamping to min/max bounds (100px-300px)
+fn calculate_context_menu_width(ctx: &egui::Context, items: &[ContextMenuItem]) -> f32 {
+    let font_id = typography::font(FontSize::Body, FontWeight::Regular);
+
+    let max_text_width = items
+        .iter()
+        .filter_map(|item| {
+            match item {
+                ContextMenuItem::Action { label, .. } => {
+                    // Measure text width using egui's font system
+                    let galley = ctx.fonts(|fonts| fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE));
+                    Some(galley.rect.width())
+                }
+                ContextMenuItem::Submenu { label, .. } => {
+                    // Submenu items need extra space for the arrow indicator
+                    let galley = ctx.fonts(|fonts| fonts.layout_no_wrap(label.clone(), font_id.clone(), Color32::WHITE));
+                    // Add space for the arrow: arrow_size + padding between text and arrow
+                    Some(galley.rect.width() + CONTEXT_MENU_ARROW_SIZE + CONTEXT_MENU_PADDING_H)
+                }
+                ContextMenuItem::Separator => None, // Separators don't contribute to width
+            }
+        })
+        .fold(0.0_f32, |max, width| max.max(width));
+
+    calculate_menu_width_from_text_width(max_text_width)
+}
 
 /// Check if a session is resumable.
 ///
@@ -1976,8 +2030,8 @@ impl Autom8App {
         // Get screen rect for bounds checking
         let screen_rect = ctx.screen_rect();
 
-        // Calculate menu dimensions
-        let menu_width = CONTEXT_MENU_MIN_WIDTH;
+        // Calculate menu dimensions (US-001: Dynamic width based on content)
+        let menu_width = calculate_context_menu_width(ctx, &menu_state.items);
         let item_count = menu_state
             .items
             .iter()
@@ -2130,7 +2184,8 @@ impl Autom8App {
         // Render the submenu if we have one
         if let Some((submenu_items, trigger_rect)) = submenu_to_render {
             if !submenu_items.is_empty() {
-                // Calculate submenu dimensions
+                // Calculate submenu dimensions (US-001: Dynamic width for submenus too)
+                let submenu_width = calculate_context_menu_width(ctx, &submenu_items);
                 let submenu_item_count = submenu_items
                     .iter()
                     .filter(|item| !matches!(item, ContextMenuItem::Separator))
@@ -2150,9 +2205,9 @@ impl Autom8App {
                 );
 
                 // Ensure submenu doesn't go off the right edge
-                if submenu_pos.x + menu_width > screen_rect.max.x - spacing::SM {
+                if submenu_pos.x + submenu_width > screen_rect.max.x - spacing::SM {
                     // Position to the left of the main menu instead
-                    submenu_pos.x = menu_pos.x - menu_width - CONTEXT_MENU_SUBMENU_GAP;
+                    submenu_pos.x = menu_pos.x - submenu_width - CONTEXT_MENU_SUBMENU_GAP;
                 }
 
                 // Ensure submenu doesn't go off the bottom edge
@@ -2166,7 +2221,7 @@ impl Autom8App {
                 // Store submenu rect for click-outside detection
                 submenu_rect = Some(Rect::from_min_size(
                     submenu_pos,
-                    Vec2::new(menu_width, submenu_height),
+                    Vec2::new(submenu_width, submenu_height),
                 ));
 
                 // Render the submenu
@@ -2181,7 +2236,7 @@ impl Autom8App {
                             .stroke(Stroke::new(1.0, colors::BORDER))
                             .inner_margin(egui::Margin::symmetric(0.0, CONTEXT_MENU_PADDING_V))
                             .show(ui, |ui| {
-                                ui.set_min_width(menu_width);
+                                ui.set_min_width(submenu_width);
 
                                 for item in &submenu_items {
                                     match item {
@@ -2203,14 +2258,14 @@ impl Autom8App {
                                             let rect = ui.available_rect_before_wrap();
                                             let separator_rect = Rect::from_min_size(
                                                 rect.min,
-                                                Vec2::new(menu_width, 1.0),
+                                                Vec2::new(submenu_width, 1.0),
                                             );
                                             ui.painter().rect_filled(
                                                 separator_rect,
                                                 Rounding::ZERO,
                                                 colors::SEPARATOR,
                                             );
-                                            ui.allocate_space(Vec2::new(menu_width, 1.0));
+                                            ui.allocate_space(Vec2::new(submenu_width, 1.0));
                                             ui.add_space(spacing::XS);
                                         }
                                         ContextMenuItem::Submenu { .. } => {
@@ -5360,6 +5415,76 @@ mod tests {
             }
             _ => panic!("Expected Clean submenu"),
         }
+    }
+
+    // ========================================================================
+    // Context Menu Dynamic Width Tests (US-001)
+    // ========================================================================
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_returns_minimum_for_small_text() {
+        // Very small text width should result in minimum menu width
+        let width = calculate_menu_width_from_text_width(10.0);
+        assert_eq!(
+            width, CONTEXT_MENU_MIN_WIDTH,
+            "Small text should result in minimum width (100px)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_returns_maximum_for_large_text() {
+        // Very large text width should be clamped to maximum menu width
+        let width = calculate_menu_width_from_text_width(500.0);
+        assert_eq!(
+            width, CONTEXT_MENU_MAX_WIDTH,
+            "Large text should be clamped to maximum width (300px)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_from_text_width_adds_padding() {
+        // Text width of 100px should get padding added (4 * CONTEXT_MENU_PADDING_H = 48px)
+        // Total = 100 + 48 = 148px (within bounds)
+        let text_width = 100.0;
+        let expected_padding = CONTEXT_MENU_PADDING_H * 4.0; // 48px
+        let expected_width = text_width + expected_padding;
+        let width = calculate_menu_width_from_text_width(text_width);
+        assert_eq!(
+            width, expected_width,
+            "Should add 48px padding (24px each side)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_menu_width_bounds_enforcement() {
+        // Test that bounds are correctly enforced
+        assert_eq!(CONTEXT_MENU_MIN_WIDTH, 100.0, "Min width should be 100px");
+        assert_eq!(CONTEXT_MENU_MAX_WIDTH, 300.0, "Max width should be 300px");
+
+        // Test various text widths
+        // 0px text + 48px padding = 48px -> clamped to 100px
+        assert_eq!(calculate_menu_width_from_text_width(0.0), 100.0);
+
+        // 52px text + 48px padding = 100px -> exactly at minimum
+        assert_eq!(calculate_menu_width_from_text_width(52.0), 100.0);
+
+        // 53px text + 48px padding = 101px -> just above minimum
+        assert_eq!(calculate_menu_width_from_text_width(53.0), 101.0);
+
+        // 252px text + 48px padding = 300px -> exactly at maximum
+        assert_eq!(calculate_menu_width_from_text_width(252.0), 300.0);
+
+        // 253px text + 48px padding = 301px -> clamped to 300px
+        assert_eq!(calculate_menu_width_from_text_width(253.0), 300.0);
+    }
+
+    #[test]
+    fn test_context_menu_arrow_size_constant() {
+        // Verify the arrow size constant is correctly defined for submenu calculation
+        assert_eq!(
+            CONTEXT_MENU_ARROW_SIZE, 8.0,
+            "Arrow size should be 8px"
+        );
     }
 
     // ========================================================================
