@@ -383,6 +383,29 @@ fn format_machine_state_text(state: &MachineState) -> &'static str {
     }
 }
 
+/// Format resume session information as plain text lines for display.
+///
+/// US-005: Shows session info instead of spawning subprocess.
+/// Info includes: session ID, branch, worktree path, current state.
+/// Shows message with instructions on how to resume in terminal.
+fn format_resume_info_as_text(session: &ResumableSessionInfo) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push("Resume Session Information".to_string());
+    lines.push(String::new());
+    lines.push(format!("Session ID:    {}", session.session_id));
+    lines.push(format!("Branch:        {}", session.branch_name));
+    lines.push(format!("Worktree Path: {}", session.worktree_path.display()));
+    lines.push(format!("Current State: {}", format_machine_state_text(&session.machine_state)));
+    lines.push(String::new());
+    lines.push(format!(
+        "To resume, run `autom8 resume --session {}` in terminal",
+        session.session_id
+    ));
+
+    lines
+}
+
 /// Format project description as plain text lines for display.
 ///
 /// US-003: This replaces the CLI output formatting from print_project_description() for GUI display.
@@ -660,14 +683,25 @@ pub struct ResumableSessionInfo {
     pub session_id: String,
     /// The branch name being worked on.
     pub branch_name: String,
+    /// The worktree path where this session is running.
+    pub worktree_path: std::path::PathBuf,
+    /// The current machine state (e.g., RunningClaude, Reviewing).
+    pub machine_state: MachineState,
 }
 
 impl ResumableSessionInfo {
     /// Create a new resumable session info.
-    pub fn new(session_id: impl Into<String>, branch_name: impl Into<String>) -> Self {
+    pub fn new(
+        session_id: impl Into<String>,
+        branch_name: impl Into<String>,
+        worktree_path: std::path::PathBuf,
+        machine_state: MachineState,
+    ) -> Self {
         Self {
             session_id: session_id.into(),
             branch_name: branch_name.into(),
+            worktree_path,
+            machine_state,
         }
     }
 
@@ -1359,8 +1393,31 @@ impl Autom8App {
         sessions
             .into_iter()
             .filter(is_resumable_session)
-            .map(|s| ResumableSessionInfo::new(s.metadata.session_id, s.metadata.branch_name))
+            .filter_map(|s| {
+                // machine_state is required for ResumableSessionInfo, and is_resumable_session
+                // already ensures it exists and is not Idle/Completed
+                let machine_state = s.machine_state?;
+                Some(ResumableSessionInfo::new(
+                    s.metadata.session_id,
+                    s.metadata.branch_name,
+                    s.metadata.worktree_path,
+                    machine_state,
+                ))
+            })
             .collect()
+    }
+
+    /// Get a specific resumable session by ID.
+    ///
+    /// US-005: Used to look up session details when user clicks a resume option.
+    fn get_resumable_session_by_id(
+        &self,
+        project_name: &str,
+        session_id: &str,
+    ) -> Option<ResumableSessionInfo> {
+        self.get_resumable_sessions(project_name)
+            .into_iter()
+            .find(|s| s.session_id == session_id)
     }
 
     /// Get cleanable session information for a project.
@@ -1772,6 +1829,46 @@ impl Autom8App {
                 }
             }
         });
+    }
+
+    /// Show resume session information in the output tab.
+    ///
+    /// US-005: Shows session info instead of spawning subprocess.
+    /// Info includes: session ID, branch, worktree path, current state.
+    /// Shows message with instructions on how to resume in terminal.
+    pub fn show_resume_info(&mut self, project_name: &str, session_id: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "resume");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+
+        // Look up the session info
+        match self.get_resumable_session_by_id(project_name, session_id) {
+            Some(session) => {
+                // Format session info as plain text
+                let lines = format_resume_info_as_text(&session);
+                for line in lines {
+                    let _ = tx.send(CommandMessage::Stdout {
+                        cache_key: cache_key.clone(),
+                        line,
+                    });
+                }
+                let _ = tx.send(CommandMessage::Completed {
+                    cache_key,
+                    exit_code: 0,
+                });
+            }
+            None => {
+                let _ = tx.send(CommandMessage::Stdout {
+                    cache_key: cache_key.clone(),
+                    line: format!("Session '{}' not found or no longer resumable.", session_id),
+                });
+                let _ = tx.send(CommandMessage::Completed {
+                    cache_key,
+                    exit_code: 1,
+                });
+            }
+        }
     }
 
     /// Clean completed/failed sessions with worktrees by calling the data layer directly.
@@ -2418,16 +2515,12 @@ impl Autom8App {
                     self.spawn_describe_command(&project_name);
                 }
                 ContextMenuAction::Resume(session_id) => {
-                    // TODO: Implement resume integration
-                    // For now, log to console as a placeholder
+                    // US-005: Show session info in output tab instead of spawning subprocess
                     if let Some(id) = session_id {
-                        eprintln!(
-                            "Resume not implemented yet (project: {}, session: {})",
-                            project_name, id
-                        );
-                    } else {
-                        eprintln!("Resume not implemented yet (project: {})", project_name);
+                        self.show_resume_info(&project_name, &id);
                     }
+                    // If session_id is None, the menu item should have been disabled,
+                    // so this case shouldn't happen in normal operation
                 }
                 ContextMenuAction::CleanWorktrees => {
                     // Spawn the clean --worktrees command (US-006)
@@ -6077,42 +6170,84 @@ mod tests {
 
     #[test]
     fn test_resumable_session_info_new() {
-        let info = ResumableSessionInfo::new("abc12345", "feature/test");
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.session_id, "abc12345");
         assert_eq!(info.branch_name, "feature/test");
+        assert_eq!(info.worktree_path, std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(info.machine_state, MachineState::RunningClaude);
     }
 
     #[test]
     fn test_resumable_session_info_truncated_id_short() {
         // Session ID <= 8 chars should not be truncated
-        let info = ResumableSessionInfo::new("main", "main");
+        let info = ResumableSessionInfo::new(
+            "main",
+            "main",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.truncated_id(), "main");
 
-        let info = ResumableSessionInfo::new("abcd1234", "test");
+        let info = ResumableSessionInfo::new(
+            "abcd1234",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.truncated_id(), "abcd1234");
     }
 
     #[test]
     fn test_resumable_session_info_truncated_id_long() {
         // Session ID > 8 chars should be truncated to first 8
-        let info = ResumableSessionInfo::new("abcd12345678", "test");
+        let info = ResumableSessionInfo::new(
+            "abcd12345678",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.truncated_id(), "abcd1234");
 
-        let info = ResumableSessionInfo::new("very-long-session-id-here", "test");
+        let info = ResumableSessionInfo::new(
+            "very-long-session-id-here",
+            "test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.truncated_id(), "very-lon");
     }
 
     #[test]
     fn test_resumable_session_info_menu_label() {
         // Format: "branch-name (session-id-truncated)"
-        let info = ResumableSessionInfo::new("main", "main");
+        let info = ResumableSessionInfo::new(
+            "main",
+            "main",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.menu_label(), "main (main)");
 
-        let info = ResumableSessionInfo::new("abc12345", "feature/login");
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/login",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.menu_label(), "feature/login (abc12345)");
 
         // Long session ID should be truncated in label
-        let info = ResumableSessionInfo::new("abcd12345678", "feature/test");
+        let info = ResumableSessionInfo::new(
+            "abcd12345678",
+            "feature/test",
+            std::path::PathBuf::from("/tmp/test"),
+            MachineState::RunningClaude,
+        );
         assert_eq!(info.menu_label(), "feature/test (abcd1234)");
     }
 
@@ -6299,6 +6434,95 @@ mod tests {
 
         let action_none = ContextMenuAction::Resume(None);
         assert!(matches!(action_none, ContextMenuAction::Resume(None)));
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_basic() {
+        // Test basic formatting of resume info
+        let info = ResumableSessionInfo::new(
+            "abc12345",
+            "feature/login",
+            std::path::PathBuf::from("/home/user/projects/my-project-wt-feature-login"),
+            MachineState::RunningClaude,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        // Should have header, blank line, 4 info lines, blank line, instruction
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[0], "Resume Session Information");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "Session ID:    abc12345");
+        assert_eq!(lines[3], "Branch:        feature/login");
+        assert_eq!(
+            lines[4],
+            "Worktree Path: /home/user/projects/my-project-wt-feature-login"
+        );
+        assert_eq!(lines[5], "Current State: Running Claude");
+        assert_eq!(lines[6], "");
+        assert_eq!(
+            lines[7],
+            "To resume, run `autom8 resume --session abc12345` in terminal"
+        );
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_different_states() {
+        // Test formatting with different machine states
+        let states_and_expected = vec![
+            (MachineState::Reviewing, "Current State: Reviewing"),
+            (MachineState::Correcting, "Current State: Correcting"),
+            (MachineState::Committing, "Current State: Committing"),
+            (MachineState::CreatingPR, "Current State: Creating PR"),
+            (MachineState::PickingStory, "Current State: Picking Story"),
+        ];
+
+        for (state, expected_line) in states_and_expected {
+            let info = ResumableSessionInfo::new(
+                "test123",
+                "test-branch",
+                std::path::PathBuf::from("/tmp/test"),
+                state,
+            );
+
+            let lines = format_resume_info_as_text(&info);
+            assert_eq!(lines[5], expected_line, "State {:?} should format correctly", state);
+        }
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_main_session() {
+        // Test formatting for main repo session (session_id = "main")
+        let info = ResumableSessionInfo::new(
+            "main",
+            "feature/api",
+            std::path::PathBuf::from("/home/user/projects/my-project"),
+            MachineState::Reviewing,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        assert_eq!(lines[2], "Session ID:    main");
+        assert_eq!(lines[7], "To resume, run `autom8 resume --session main` in terminal");
+    }
+
+    #[test]
+    fn test_format_resume_info_as_text_long_paths() {
+        // Test formatting with long worktree paths
+        let info = ResumableSessionInfo::new(
+            "abcd1234",
+            "feature/very-long-branch-name",
+            std::path::PathBuf::from(
+                "/home/user/very/deep/nested/directory/structure/projects/my-project-wt-feature"
+            ),
+            MachineState::RunningClaude,
+        );
+
+        let lines = format_resume_info_as_text(&info);
+
+        // Long path should be preserved
+        assert!(lines[4].contains("/home/user/very/deep/nested/"));
+        assert_eq!(lines[3], "Branch:        feature/very-long-branch-name");
     }
 
     // =========================================================================
