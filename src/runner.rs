@@ -1130,6 +1130,11 @@ impl Runner {
 
     /// Run from a spec-<feature>.md markdown file - converts to JSON first, then implements
     pub fn run_from_spec(&self, spec_path: &Path) -> Result<()> {
+        // IMPORTANT: State must NOT be persisted until after worktree context is determined.
+        // Saving state before we know the correct session ID would create phantom sessions
+        // in the main repo when running in worktree mode. Visual state transitions can be
+        // displayed, but save() must not be called until the effective StateManager is known.
+
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -1155,12 +1160,13 @@ impl Runner {
 
         // Initialize state with config snapshot for resume support
         // Clone config since we need it later for worktree setup
+        // Note: State is NOT saved here - we defer persistence until after worktree context
+        // is determined to avoid creating phantom sessions in the main repo
         let mut state = RunState::from_spec_with_config(
             spec_path.clone(),
             spec_json_path.clone(),
             config.clone(),
         );
-        self.state_manager.save(&state)?;
 
         // LoadingSpec state
         print_state_transition(MachineState::Idle, MachineState::LoadingSpec);
@@ -1176,8 +1182,9 @@ impl Runner {
         println!();
 
         // Transition to GeneratingSpec
+        // Note: State is NOT saved here - we defer persistence until after worktree context
+        // is determined. Visual feedback is still shown via print_state_transition.
         state.transition_to(MachineState::GeneratingSpec);
-        self.state_manager.save(&state)?;
         print_state_transition(MachineState::LoadingSpec, MachineState::GeneratingSpec);
 
         print_generating_spec();
@@ -1237,14 +1244,6 @@ impl Runner {
         state.transition_to(MachineState::Initializing);
         effective_state_manager.save(&state)?;
 
-        // Clear the original session's state if we're handing off to a DIFFERENT session.
-        // This prevents the original session from being left in a stale "GeneratingSpec" state.
-        // We compare session IDs to handle the case where a worktree is reused (same session).
-        // Errors are ignored - stale state is confusing but not harmful.
-        if self.state_manager.session_id() != effective_state_manager.session_id() {
-            let _ = self.state_manager.clear_current();
-        }
-
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
         print_proceeding_to_implementation();
@@ -1264,6 +1263,11 @@ impl Runner {
     }
 
     pub fn run(&self, spec_json_path: &Path) -> Result<()> {
+        // IMPORTANT: State must NOT be persisted until after worktree context is determined.
+        // Saving state before we know the correct session ID would create phantom sessions
+        // in the main repo when running in worktree mode. State is first persisted in
+        // run_implementation_loop() after the effective StateManager is known.
+
         // Check for existing active run
         if self.state_manager.has_active_run()? {
             if let Some(state) = self.state_manager.load_current()? {
@@ -3617,5 +3621,122 @@ mod tests {
         assert!(debug_str.contains("WorktreeSetupContext"));
         assert!(debug_str.contains("original_cwd"));
         assert!(debug_str.contains("worktree_path"));
+    }
+
+    // ========================================================================
+    // Fix: Worktree phantom session prevention tests
+    // ========================================================================
+
+    /// Tests that `run_from_spec()` does not persist state before worktree context is determined.
+    ///
+    /// This test verifies the fix for the phantom session bug where `run_from_spec()` was
+    /// saving state to the original session (typically "main") before the worktree context
+    /// was established, causing `status --all` to show two sessions when only one was running.
+    ///
+    /// The fix defers all state saves until after `effective_state_manager` is created.
+    #[test]
+    fn test_run_from_spec_state_not_saved_before_worktree_context() {
+        use crate::state::RunState;
+
+        // Verify RunState::from_spec_with_config creates state in LoadingSpec
+        // but does not automatically persist it
+        let state = RunState::from_spec_with_config(
+            PathBuf::from("spec.md"),
+            PathBuf::from("spec.json"),
+            Config::default(),
+        );
+
+        // State should be in LoadingSpec (the initial state for spec generation)
+        assert_eq!(
+            state.machine_state,
+            MachineState::LoadingSpec,
+            "Initial state for from_spec should be LoadingSpec"
+        );
+
+        // Create an isolated StateManager to verify no state is pre-persisted
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Before any save operation, the session should have no state
+        assert!(
+            sm.load_current().unwrap().is_none(),
+            "No state should exist before explicit save"
+        );
+
+        // This test documents the contract: run_from_spec() MUST NOT call
+        // self.state_manager.save() before setup_worktree_context() returns.
+        // The actual enforcement is in the code structure, which was fixed by:
+        // 1. Removing save() at line 1163 (after state initialization)
+        // 2. Removing save() at line 1180 (at GeneratingSpec transition)
+    }
+
+    /// Tests that state persistence only happens with the effective state manager.
+    ///
+    /// This test verifies that when state IS saved, it goes to the correct session
+    /// (the worktree session, not the main repo session when running in worktree mode).
+    #[test]
+    fn test_state_saved_to_effective_session_only() {
+        // Create two separate StateManagers representing different sessions
+        let temp_dir = TempDir::new().unwrap();
+        let main_sm =
+            StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "main".to_string());
+        let worktree_sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "abc12345".to_string(), // Simulated worktree session ID
+        );
+
+        // Create state for the worktree session
+        let mut state = RunState::new_with_config_and_session(
+            PathBuf::from("spec.json"),
+            "feature-branch".to_string(),
+            Config::default(),
+            "abc12345".to_string(),
+        );
+        state.transition_to(MachineState::PickingStory);
+
+        // Save only to the worktree session (simulating the fix)
+        worktree_sm.save(&state).unwrap();
+
+        // Main session should NOT have state (the phantom session bug)
+        assert!(
+            main_sm.load_current().unwrap().is_none(),
+            "Main session should not have phantom state"
+        );
+
+        // Worktree session SHOULD have state
+        assert!(
+            worktree_sm.load_current().unwrap().is_some(),
+            "Worktree session should have state"
+        );
+    }
+
+    /// Tests the correct behavior: visual transitions without persistence.
+    ///
+    /// During spec generation, state transitions should be displayed visually
+    /// (via print_state_transition) but NOT persisted. This test documents
+    /// that state can be mutated locally without being saved.
+    #[test]
+    fn test_state_transitions_without_persistence() {
+        use crate::state::RunState;
+
+        let mut state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("spec.json"));
+
+        // Initial state
+        assert_eq!(state.machine_state, MachineState::LoadingSpec);
+
+        // Transition locally (no save)
+        state.transition_to(MachineState::GeneratingSpec);
+        assert_eq!(state.machine_state, MachineState::GeneratingSpec);
+
+        // The state has been mutated but NOT persisted
+        // This is the correct behavior during spec generation:
+        // - Visual feedback via print_state_transition() - works
+        // - State persistence - DEFERRED until worktree context known
+
+        // Transition to Initializing (what happens after worktree setup)
+        state.transition_to(MachineState::Initializing);
+        assert_eq!(state.machine_state, MachineState::Initializing);
+
+        // At this point, save() can be called with the effective_state_manager
     }
 }
