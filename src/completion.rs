@@ -306,6 +306,73 @@ fn build_cli() -> Command {
                         .default_value("1"),
                 ),
         )
+        .subcommand(
+            Command::new("config")
+                .about("View, modify, or reset configuration")
+                .arg(
+                    clap::Arg::new("global")
+                        .short('g')
+                        .long("global")
+                        .help("Show only the global configuration")
+                        .action(clap::ArgAction::SetTrue)
+                        .conflicts_with("project"),
+                )
+                .arg(
+                    clap::Arg::new("project")
+                        .short('p')
+                        .long("project")
+                        .help("Show only the project configuration")
+                        .action(clap::ArgAction::SetTrue)
+                        .conflicts_with("global"),
+                )
+                .subcommand(
+                    Command::new("set")
+                        .about("Set a configuration value")
+                        .arg(
+                            clap::Arg::new("global")
+                                .short('g')
+                                .long("global")
+                                .help("Set in global config instead of project config")
+                                .action(clap::ArgAction::SetTrue),
+                        )
+                        .arg(
+                            clap::Arg::new("key")
+                                .help("The configuration key to set")
+                                .required(true)
+                                .value_parser([
+                                    "review",
+                                    "commit",
+                                    "pull_request",
+                                    "worktree",
+                                    "worktree_path_pattern",
+                                    "worktree_cleanup",
+                                ]),
+                        )
+                        .arg(
+                            clap::Arg::new("value")
+                                .help("The value to set (true/false for boolean keys)")
+                                .required(true),
+                        ),
+                )
+                .subcommand(
+                    Command::new("reset")
+                        .about("Reset configuration to default values")
+                        .arg(
+                            clap::Arg::new("global")
+                                .short('g')
+                                .long("global")
+                                .help("Reset global config instead of project config")
+                                .action(clap::ArgAction::SetTrue),
+                        )
+                        .arg(
+                            clap::Arg::new("yes")
+                                .short('y')
+                                .long("yes")
+                                .help("Skip confirmation prompt")
+                                .action(clap::ArgAction::SetTrue),
+                        ),
+                ),
+        )
 }
 
 /// Generate a completion script for the specified shell.
@@ -388,11 +455,24 @@ _autom8_complete() {
     # Check if completing first positional arg (not a subcommand)
     if [[ $cword -eq 1 && "$cur" != -* ]]; then
         # Get subcommands
-        local subcommands="run status resume clean init projects list describe pr-review monitor"
+        local subcommands="run status resume clean config init projects list describe pr-review monitor"
         # Get spec files
         local specs=$(_autom8_spec_files)
         COMPREPLY=($(compgen -W "$subcommands $specs" -- "$cur"))
         return
+    fi
+
+    # Config key completion
+    if [[ "${words[1]}" == "config" && "${words[2]}" == "set" ]]; then
+        if [[ $cword -eq 3 ]]; then
+            # Complete config keys
+            COMPREPLY=($(compgen -W "review commit pull_request worktree worktree_path_pattern worktree_cleanup" -- "$cur"))
+            return
+        elif [[ $cword -eq 4 && "${words[3]}" != "worktree_path_pattern" ]]; then
+            # Complete boolean values for non-string keys
+            COMPREPLY=($(compgen -W "true false" -- "$cur"))
+            return
+        fi
     fi
 
     # Fall back to default autom8 completion
@@ -463,6 +543,7 @@ else
                 'status:Check the current run status'
                 'resume:Resume a failed or interrupted run'
                 'clean:Clean up spec files from config directory'
+                'config:View, modify, or reset configuration'
                 'init:Initialize autom8 config directory structure'
                 'projects:List all known projects'
                 'list:Show a tree view of all projects with status'
@@ -475,6 +556,28 @@ else
             done
             _describe 'command or spec' completions
             return
+        fi
+
+        # Config set key/value completion
+        if [[ "${words[2]}" == "config" && "${words[3]}" == "set" ]]; then
+            if [[ $CURRENT -eq 4 ]]; then
+                local -a config_keys
+                config_keys=(
+                    'review:Enable code review step'
+                    'commit:Enable auto-commit'
+                    'pull_request:Enable auto-PR creation'
+                    'worktree:Enable worktree mode'
+                    'worktree_path_pattern:Pattern for worktree names'
+                    'worktree_cleanup:Auto-cleanup worktrees'
+                )
+                _describe 'config key' config_keys
+                return
+            elif [[ $CURRENT -eq 5 && "${words[4]}" != "worktree_path_pattern" ]]; then
+                local -a bool_values
+                bool_values=('true' 'false')
+                _describe 'value' bool_values
+                return
+            fi
         fi
 
         # Fall back to original completion if it exists
@@ -530,7 +633,13 @@ end
 complete -c autom8 -l spec -xa '(__autom8_spec_files)'
 
 # Add spec file completions for positional argument (first arg that's not a flag)
-complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean init projects list describe pr-review monitor' -xa '(__autom8_spec_files)'
+complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor' -xa '(__autom8_spec_files)'
+
+# Config set key completion
+complete -c autom8 -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set; and test (count (commandline -opc)) -eq 3' -xa 'review commit pull_request worktree worktree_path_pattern worktree_cleanup'
+
+# Config set value completion (true/false for boolean keys)
+complete -c autom8 -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set; and test (count (commandline -opc)) -eq 4; and not string match -q worktree_path_pattern (commandline -opc)[-1]' -xa 'true false'
 "#
 }
 
@@ -1380,5 +1489,346 @@ mod tests {
     fn test_print_completion_script_exists() {
         // Verify the function exists and is callable
         let _: fn(ShellType) = print_completion_script;
+    }
+
+    // ======================================================================
+    // Tests for config subcommand completion
+    // ======================================================================
+
+    #[test]
+    fn test_bash_completion_includes_config_subcommand() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should include config subcommand
+        assert!(
+            script.contains("autom8__config"),
+            "Bash script should include config subcommand"
+        );
+
+        // Should include config in subcommands list
+        assert!(
+            script.contains("run status resume clean config init"),
+            "Bash script should include config in dynamic subcommands list"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_config_subcommand() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include config subcommand with description
+        assert!(
+            script.contains("'config:View, modify, or reset configuration'"),
+            "Zsh script should include config subcommand with description"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_includes_config_subcommand() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should include config subcommand
+        assert!(
+            script.contains("-a \"config\"") || script.contains("config"),
+            "Fish script should include config subcommand"
+        );
+
+        // Should include config in the exclusion list for spec file completion
+        assert!(
+            script.contains("run status resume clean config init"),
+            "Fish script should include config in dynamic subcommands list"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_includes_config_set_subcommand() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should include config set subcommand
+        assert!(
+            script.contains("autom8__config__set"),
+            "Bash script should include config set subcommand"
+        );
+
+        // Should include config reset subcommand
+        assert!(
+            script.contains("autom8__config__reset"),
+            "Bash script should include config reset subcommand"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_config_set_subcommand() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include config set subcommand
+        assert!(
+            script.contains("'set:Set a configuration value'"),
+            "Zsh script should include config set subcommand"
+        );
+
+        // Should include config reset subcommand
+        assert!(
+            script.contains("'reset:Reset configuration to default values'"),
+            "Zsh script should include config reset subcommand"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_includes_config_set_subcommand() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should include config set subcommand
+        assert!(
+            script.contains("\"set\"") && script.contains("Set a configuration value"),
+            "Fish script should include config set subcommand"
+        );
+
+        // Should include config reset subcommand
+        assert!(
+            script.contains("\"reset\"")
+                && script.contains("Reset configuration to default values"),
+            "Fish script should include config reset subcommand"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_includes_config_keys() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should include all config keys
+        let config_keys = [
+            "review",
+            "commit",
+            "pull_request",
+            "worktree",
+            "worktree_path_pattern",
+            "worktree_cleanup",
+        ];
+
+        for key in config_keys {
+            assert!(
+                script.contains(key),
+                "Bash script should include config key: {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_config_keys() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include all config keys in the dynamic completion
+        let config_keys = [
+            "review",
+            "commit",
+            "pull_request",
+            "worktree",
+            "worktree_path_pattern",
+            "worktree_cleanup",
+        ];
+
+        for key in config_keys {
+            assert!(
+                script.contains(key),
+                "Zsh script should include config key: {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_fish_completion_includes_config_keys() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should include all config keys
+        let config_keys = [
+            "review",
+            "commit",
+            "pull_request",
+            "worktree",
+            "worktree_path_pattern",
+            "worktree_cleanup",
+        ];
+
+        for key in config_keys {
+            assert!(
+                script.contains(key),
+                "Fish script should include config key: {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_bash_completion_includes_config_boolean_values() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should include true/false completion for boolean config values
+        assert!(
+            script.contains("\"true false\""),
+            "Bash script should include true/false for boolean config values"
+        );
+
+        // Should exclude worktree_path_pattern from boolean completion
+        assert!(
+            script.contains("worktree_path_pattern"),
+            "Bash script should handle worktree_path_pattern specially"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_includes_config_boolean_values() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include true/false completion for boolean config values
+        assert!(
+            script.contains("'true' 'false'"),
+            "Zsh script should include true/false for boolean config values"
+        );
+
+        // Should exclude worktree_path_pattern from boolean completion
+        assert!(
+            script.contains("worktree_path_pattern"),
+            "Zsh script should handle worktree_path_pattern specially"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_includes_config_boolean_values() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should include true/false completion for boolean config values
+        assert!(
+            script.contains("'true false'"),
+            "Fish script should include true/false for boolean config values"
+        );
+
+        // Should exclude worktree_path_pattern from boolean completion
+        assert!(
+            script.contains("worktree_path_pattern"),
+            "Fish script should handle worktree_path_pattern specially"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_config_set_dynamic_completion() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Should have dynamic completion for config set
+        assert!(
+            script.contains(r#"[[ "${words[1]}" == "config" && "${words[2]}" == "set" ]]"#),
+            "Bash script should have dynamic completion for config set"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_config_set_dynamic_completion() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should have dynamic completion for config set
+        assert!(
+            script.contains(r#"[[ "${words[2]}" == "config" && "${words[3]}" == "set" ]]"#),
+            "Zsh script should have dynamic completion for config set"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_config_set_dynamic_completion() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Should have dynamic completion for config set
+        assert!(
+            script.contains("__fish_seen_subcommand_from config")
+                && script.contains("__fish_seen_subcommand_from set"),
+            "Fish script should have dynamic completion for config set"
+        );
+    }
+
+    #[test]
+    fn test_bash_completion_config_flags() {
+        let script = generate_completion_script(ShellType::Bash);
+
+        // Config command should have --global and --project flags
+        assert!(
+            script.contains("--global") && script.contains("--project"),
+            "Bash script should include config --global and --project flags"
+        );
+
+        // Config reset should have --yes flag
+        assert!(
+            script.contains("--yes"),
+            "Bash script should include config reset --yes flag"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_config_flags() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Config command should have --global and --project flags
+        assert!(
+            script.contains("--global[Show only the global configuration]"),
+            "Zsh script should include config --global flag"
+        );
+        assert!(
+            script.contains("--project[Show only the project configuration]"),
+            "Zsh script should include config --project flag"
+        );
+
+        // Config reset should have --yes flag
+        assert!(
+            script.contains("--yes[Skip confirmation prompt]"),
+            "Zsh script should include config reset --yes flag"
+        );
+    }
+
+    #[test]
+    fn test_fish_completion_config_flags() {
+        let script = generate_completion_script(ShellType::Fish);
+
+        // Config command should have --global and --project flags
+        assert!(
+            script.contains("-l global") && script.contains("-l project"),
+            "Fish script should include config --global and --project flags"
+        );
+
+        // Config reset should have --yes flag
+        assert!(
+            script.contains("-l yes"),
+            "Fish script should include config reset --yes flag"
+        );
+    }
+
+    #[test]
+    fn test_zsh_completion_config_key_descriptions() {
+        let script = generate_completion_script(ShellType::Zsh);
+
+        // Should include descriptive completions for config keys
+        assert!(
+            script.contains("'review:Enable code review step'"),
+            "Zsh script should include review key with description"
+        );
+        assert!(
+            script.contains("'commit:Enable auto-commit'"),
+            "Zsh script should include commit key with description"
+        );
+        assert!(
+            script.contains("'pull_request:Enable auto-PR creation'"),
+            "Zsh script should include pull_request key with description"
+        );
+        assert!(
+            script.contains("'worktree:Enable worktree mode'"),
+            "Zsh script should include worktree key with description"
+        );
+        assert!(
+            script.contains("'worktree_path_pattern:Pattern for worktree names'"),
+            "Zsh script should include worktree_path_pattern key with description"
+        );
+        assert!(
+            script.contains("'worktree_cleanup:Auto-cleanup worktrees'"),
+            "Zsh script should include worktree_cleanup key with description"
+        );
     }
 }
