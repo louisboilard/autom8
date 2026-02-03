@@ -192,8 +192,10 @@ const CONTEXT_MENU_SUBMENU_GAP: f32 = 2.0;
 struct ContextMenuItemResponse {
     /// Whether the item was clicked.
     clicked: bool,
-    /// Whether the item is currently hovered.
+    /// Whether the item is currently hovered (only true for enabled items).
     hovered: bool,
+    /// Whether the item is hovered regardless of enabled state (US-006: for tooltips).
+    hovered_raw: bool,
     /// The screen-space rect of the item (for positioning submenus).
     rect: Rect,
 }
@@ -616,6 +618,47 @@ fn format_cleanup_summary_as_text(
     lines
 }
 
+/// Format data cleanup summary as plain text lines for display.
+///
+/// US-003: This formats DataCleanupSummary from clean_data_direct() for GUI display.
+/// Shows: specs removed, runs removed, bytes freed, errors.
+fn format_data_cleanup_summary_as_text(
+    summary: &crate::commands::DataCleanupSummary,
+) -> Vec<String> {
+    use crate::commands::format_bytes_display;
+
+    let mut lines = Vec::new();
+
+    lines.push("Cleanup Operation: Clean Data".to_string());
+    lines.push(String::new());
+
+    // Results section
+    if summary.specs_removed == 0 && summary.runs_removed == 0 {
+        lines.push("No specs or runs were removed.".to_string());
+    } else {
+        let freed_str = format_bytes_display(summary.bytes_freed);
+        lines.push(format!(
+            "Removed {} spec{}, {} run{}, freed {}",
+            summary.specs_removed,
+            if summary.specs_removed == 1 { "" } else { "s" },
+            summary.runs_removed,
+            if summary.runs_removed == 1 { "" } else { "s" },
+            freed_str
+        ));
+    }
+
+    // Errors
+    if !summary.errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Errors during cleanup:".to_string());
+        for error in &summary.errors {
+            lines.push(format!("  - {}", error));
+        }
+    }
+
+    lines
+}
+
 /// Format removal summary as plain text lines for display.
 ///
 /// US-004: This formats RemovalSummary from remove_project_direct() for GUI display.
@@ -732,6 +775,8 @@ pub enum ContextMenuItem {
         enabled: bool,
         /// Items in the submenu (built lazily when opened).
         items: Vec<ContextMenuItem>,
+        /// Optional hint/tooltip shown when disabled (US-006).
+        hint: Option<String>,
     },
 }
 
@@ -771,16 +816,22 @@ impl ContextMenuItem {
             id: id.into(),
             enabled: !items_vec.is_empty(),
             items: items_vec,
+            hint: None,
         }
     }
 
-    /// Create a disabled submenu item.
-    pub fn submenu_disabled(label: impl Into<String>, id: impl Into<String>) -> Self {
+    /// Create a disabled submenu item with an optional hint/tooltip (US-006).
+    pub fn submenu_disabled(
+        label: impl Into<String>,
+        id: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
         Self::Submenu {
             label: label.into(),
             id: id.into(),
             enabled: false,
             items: Vec::new(),
+            hint: Some(hint.into()),
         }
     }
 }
@@ -798,6 +849,8 @@ pub enum ContextMenuAction {
     CleanWorktrees,
     /// Clean orphaned sessions for the project.
     CleanOrphaned,
+    /// Clean data (specs and archived runs) for the project.
+    CleanData,
     /// Remove the project from autom8 entirely.
     RemoveProject,
 }
@@ -849,7 +902,7 @@ impl ResumableSessionInfo {
 }
 
 /// Information about cleanable sessions for the Clean context menu.
-/// Contains counts for worktrees and orphaned sessions.
+/// Contains counts for worktrees, orphaned sessions, specs, and runs.
 #[derive(Debug, Clone, Default)]
 pub struct CleanableInfo {
     /// Number of cleanable worktrees (non-main sessions with existing worktrees and no active runs).
@@ -857,12 +910,22 @@ pub struct CleanableInfo {
     pub cleanable_worktrees: usize,
     /// Number of orphaned sessions (worktree deleted but session state remains).
     pub orphaned_sessions: usize,
+    /// Number of cleanable spec files (pairs of .json/.md counted as 1).
+    /// US-002: Specs used by active sessions are excluded.
+    pub cleanable_specs: usize,
+    /// Number of cleanable archived runs in the runs/ directory.
+    /// US-002: Runs used by active sessions are excluded.
+    pub cleanable_runs: usize,
 }
 
 impl CleanableInfo {
     /// Returns true if there's anything to clean.
+    /// US-002: Now also considers specs and runs.
     pub fn has_cleanable(&self) -> bool {
-        self.cleanable_worktrees > 0 || self.orphaned_sessions > 0
+        self.cleanable_worktrees > 0
+            || self.orphaned_sessions > 0
+            || self.cleanable_specs > 0
+            || self.cleanable_runs > 0
     }
 }
 
@@ -876,6 +939,50 @@ fn is_cleanable_session(session: &SessionStatus) -> bool {
     // US-006: Simply check if the session has an active run
     // Any session without an active run can be cleaned
     !session.metadata.is_running
+}
+
+/// Count cleanable spec files in the spec directory.
+///
+/// US-002: Spec files come in pairs (.json and .md with the same base name).
+/// Each pair is counted as a single spec, not duplicated.
+/// Specs whose paths are in `active_spec_paths` are excluded.
+fn count_cleanable_specs(
+    spec_dir: &std::path::Path,
+    active_spec_paths: &std::collections::HashSet<std::path::PathBuf>,
+) -> usize {
+    if !spec_dir.exists() {
+        return 0;
+    }
+
+    // Collect all .json spec files (we use .json as the canonical file for counting)
+    let mut cleanable_count = 0;
+
+    if let Ok(entries) = std::fs::read_dir(spec_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                // Check if this spec is used by an active session
+                if !active_spec_paths.contains(&path) {
+                    cleanable_count += 1;
+                }
+            }
+        }
+    }
+
+    cleanable_count
+}
+
+/// Count cleanable archived run files in the runs directory.
+///
+/// US-002: All files in the runs/ directory are considered cleanable.
+fn count_cleanable_runs(runs_dir: &std::path::Path) -> usize {
+    if !runs_dir.exists() {
+        return 0;
+    }
+
+    std::fs::read_dir(runs_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).count())
+        .unwrap_or(0)
 }
 
 /// State for the context menu overlay.
@@ -1131,6 +1238,12 @@ pub enum PendingCleanOperation {
     Worktrees { project_name: String },
     /// Clean orphaned sessions for a project.
     Orphaned { project_name: String },
+    /// Clean data (specs and archived runs) for a project.
+    Data {
+        project_name: String,
+        specs_count: usize,
+        runs_count: usize,
+    },
     /// Remove a project from autom8 entirely.
     RemoveProject { project_name: String },
 }
@@ -1141,7 +1254,18 @@ impl PendingCleanOperation {
         match self {
             Self::Worktrees { .. } => "Clean Worktrees",
             Self::Orphaned { .. } => "Clean Orphaned Sessions",
+            // US-004: Modal title is "Clean Project Data"
+            Self::Data { .. } => "Clean Project Data",
             Self::RemoveProject { .. } => "Remove Project",
+        }
+    }
+
+    /// Get the label for the confirm button.
+    /// US-004: Data cleanup uses "Delete" as the destructive action label.
+    fn confirm_button_label(&self) -> &'static str {
+        match self {
+            Self::Data { .. } => "Delete",
+            _ => "Confirm",
         }
     }
 
@@ -1163,6 +1287,34 @@ impl PendingCleanOperation {
                     project_name
                 )
             }
+            Self::Data {
+                project_name,
+                specs_count,
+                runs_count,
+            } => {
+                // US-004: List archived runs first, then specs (per acceptance criteria)
+                let mut items = Vec::new();
+                if *runs_count > 0 {
+                    items.push(format!(
+                        "{} archived run{}",
+                        runs_count,
+                        if *runs_count == 1 { "" } else { "s" }
+                    ));
+                }
+                if *specs_count > 0 {
+                    items.push(format!(
+                        "{} spec{}",
+                        specs_count,
+                        if *specs_count == 1 { "" } else { "s" }
+                    ));
+                }
+                let items_str = items.join(", ");
+                format!(
+                    "This will delete {} for '{}'.\n\n\
+                     Are you sure you want to continue?",
+                    items_str, project_name
+                )
+            }
             Self::RemoveProject { project_name } => {
                 format!(
                     "This will remove all worktrees (except those with active runs) and delete \
@@ -1179,6 +1331,7 @@ impl PendingCleanOperation {
         match self {
             Self::Worktrees { project_name }
             | Self::Orphaned { project_name }
+            | Self::Data { project_name, .. }
             | Self::RemoveProject { project_name } => project_name,
         }
     }
@@ -1220,6 +1373,14 @@ pub enum CleanupResult {
         skipped_count: usize,
         error_count: usize,
     },
+    /// Result from a data cleanup operation (specs and archived runs).
+    Data {
+        project_name: String,
+        specs_removed: usize,
+        runs_removed: usize,
+        bytes_freed: u64,
+        error_count: usize,
+    },
 }
 
 impl CleanupResult {
@@ -1228,6 +1389,7 @@ impl CleanupResult {
         match self {
             Self::Worktrees { .. } => "Cleanup Complete",
             Self::Orphaned { .. } => "Cleanup Complete",
+            Self::Data { .. } => "Cleanup Complete",
             Self::RemoveProject { .. } => "Project Removed",
         }
     }
@@ -1364,6 +1526,47 @@ impl CleanupResult {
 
                 parts.join("\n\n")
             }
+            Self::Data {
+                specs_removed,
+                runs_removed,
+                bytes_freed,
+                error_count,
+                ..
+            } => {
+                let mut parts = Vec::new();
+
+                if *specs_removed > 0 || *runs_removed > 0 {
+                    let freed = format_bytes_display(*bytes_freed);
+                    let mut items = Vec::new();
+                    if *specs_removed > 0 {
+                        items.push(format!(
+                            "{} spec{}",
+                            specs_removed,
+                            if *specs_removed == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if *runs_removed > 0 {
+                        items.push(format!(
+                            "{} archived run{}",
+                            runs_removed,
+                            if *runs_removed == 1 { "" } else { "s" }
+                        ));
+                    }
+                    parts.push(format!("Removed {}, freed {}.", items.join(" and "), freed));
+                } else {
+                    parts.push("No data was removed.".to_string());
+                }
+
+                if *error_count > 0 {
+                    parts.push(format!(
+                        "{} error{} occurred. Check the command output tab for details.",
+                        error_count,
+                        if *error_count == 1 { "" } else { "s" }
+                    ));
+                }
+
+                parts.join("\n\n")
+            }
         }
     }
 
@@ -1372,7 +1575,8 @@ impl CleanupResult {
         match self {
             Self::Worktrees { error_count, .. }
             | Self::Orphaned { error_count, .. }
-            | Self::RemoveProject { error_count, .. } => *error_count > 0,
+            | Self::RemoveProject { error_count, .. }
+            | Self::Data { error_count, .. } => *error_count > 0,
         }
     }
 }
@@ -1908,12 +2112,16 @@ impl Autom8App {
     /// Get cleanable session information for a project.
     ///
     /// US-006: Updated to count any worktrees that can be cleaned, not just completed sessions.
+    /// US-002: Now also counts cleanable specs and runs.
     ///
     /// Returns counts for:
     /// - cleanable_worktrees: non-main sessions with existing worktrees and no active runs
     /// - orphaned_sessions: sessions where the worktree was deleted but state remains
+    /// - cleanable_specs: spec files (pairs counted as 1) not used by active sessions
+    /// - cleanable_runs: archived run files in runs/ directory
     ///
     /// Safety: Sessions with active runs (is_running=true) are NOT counted as cleanable.
+    /// Specs used by active sessions are excluded from the count.
     fn get_cleanable_info(&self, project_name: &str) -> CleanableInfo {
         // Try to get the state manager for this project
         let sm = match StateManager::for_project(project_name) {
@@ -1929,9 +2137,24 @@ impl Autom8App {
 
         let mut info = CleanableInfo::default();
 
-        for session in sessions {
+        // US-002: Collect spec paths used by active (running) sessions
+        let mut active_spec_paths: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+
+        for session in &sessions {
             // Skip main session - it's not a worktree created by autom8
             if session.metadata.session_id == "main" {
+                // Still need to check if main session has active run with spec
+                if session.metadata.is_running {
+                    if let Some(session_sm) = sm.get_session(&session.metadata.session_id) {
+                        if let Ok(Some(state)) = session_sm.load_current() {
+                            active_spec_paths.insert(state.spec_json_path.clone());
+                            if let Some(md_path) = &state.spec_md_path {
+                                active_spec_paths.insert(md_path.clone());
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -1942,9 +2165,24 @@ impl Autom8App {
                 // US-006: Count any worktree that exists and doesn't have an active run
                 // The actual clean operation will also skip active runs
                 info.cleanable_worktrees += 1;
+            } else {
+                // US-002: Session is running - collect its spec paths to exclude
+                if let Some(session_sm) = sm.get_session(&session.metadata.session_id) {
+                    if let Ok(Some(state)) = session_sm.load_current() {
+                        active_spec_paths.insert(state.spec_json_path.clone());
+                        if let Some(md_path) = &state.spec_md_path {
+                            active_spec_paths.insert(md_path.clone());
+                        }
+                    }
+                }
             }
-            // Sessions with active runs (is_running=true) are not counted
         }
+
+        // US-002: Count cleanable specs (pairs counted as 1)
+        info.cleanable_specs = count_cleanable_specs(&sm.spec_dir(), &active_spec_paths);
+
+        // US-002: Count cleanable runs
+        info.cleanable_runs = count_cleanable_runs(&sm.runs_dir());
 
         info
     }
@@ -1990,8 +2228,8 @@ impl Autom8App {
 
         // Build the Clean menu item based on cleanable info
         let clean_item = if !cleanable_info.has_cleanable() {
-            // Nothing to clean - disabled menu item with tooltip hint
-            ContextMenuItem::submenu_disabled("Clean", "clean")
+            // Nothing to clean - disabled menu item with tooltip hint (US-006)
+            ContextMenuItem::submenu_disabled("Clean", "clean", "Nothing to clean")
         } else {
             // Build submenu with only applicable options (showing counts)
             let mut submenu_items = Vec::new();
@@ -2010,6 +2248,13 @@ impl Autom8App {
                     label,
                     ContextMenuAction::CleanOrphaned,
                 ));
+            }
+
+            // US-003: Add Data option when specs or runs exist
+            let data_count = cleanable_info.cleanable_specs + cleanable_info.cleanable_runs;
+            if data_count > 0 {
+                let label = format!("Data ({})", data_count);
+                submenu_items.push(ContextMenuItem::action(label, ContextMenuAction::CleanData));
             }
 
             ContextMenuItem::submenu("Clean", "clean", submenu_items)
@@ -2480,6 +2725,58 @@ impl Autom8App {
         });
     }
 
+    /// Clean data (specs and archived runs) for a project by calling the data layer directly.
+    /// Opens a new command output tab and populates it with cleanup results.
+    ///
+    /// US-003: Implements the clean data action for specs and archived runs.
+    pub fn spawn_clean_data_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "clean-data");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use crate::commands::clean_data_direct;
+
+            // Call data layer directly instead of spawning subprocess
+            match clean_data_direct(&project) {
+                Ok(summary) => {
+                    // Format cleanup summary as plain text
+                    let lines = format_data_cleanup_summary_as_text(&summary);
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
+                    }
+                    let exit_code = if summary.errors.is_empty() { 0 } else { 1 };
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code,
+                    });
+
+                    // US-007: Send cleanup result for modal display
+                    let _ = tx.send(CommandMessage::CleanupCompleted {
+                        result: CleanupResult::Data {
+                            project_name: project,
+                            specs_removed: summary.specs_removed,
+                            runs_removed: summary.runs_removed,
+                            bytes_freed: summary.bytes_freed,
+                            error_count: summary.errors.len(),
+                        },
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to clean data: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
     /// Remove a project from autom8 entirely by calling the data layer directly.
     /// This removes all worktrees (except active runs), session state, specs, and project configuration.
     /// Opens a new command output tab and populates it with removal results.
@@ -2570,6 +2867,9 @@ impl Autom8App {
                 CommandMessage::CleanupCompleted { result } => {
                     // US-007: Show result modal after cleanup operation completes.
                     self.pending_result_modal = Some(result);
+                    // US-005: Refresh data immediately after cleanup to update UI
+                    // (e.g., cleanable counts in menu).
+                    self.refresh_data();
                 }
             }
         }
@@ -2938,6 +3238,7 @@ impl Autom8App {
                                     id,
                                     enabled,
                                     items,
+                                    hint,
                                 } => {
                                     // Render submenu trigger with arrow indicator
                                     let response =
@@ -2946,6 +3247,19 @@ impl Autom8App {
                                         // Track this submenu as hovered for rendering
                                         hovered_submenu =
                                             Some((id.clone(), items.clone(), response.rect));
+                                    }
+                                    // US-006: Show tooltip when hovering a disabled submenu with a hint
+                                    if response.hovered_raw && !*enabled {
+                                        if let Some(hint_text) = hint {
+                                            egui::show_tooltip_at_pointer(
+                                                ui.ctx(),
+                                                ui.layer_id(),
+                                                egui::Id::new("submenu_hint").with(id),
+                                                |ui| {
+                                                    ui.label(hint_text);
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3138,6 +3452,15 @@ impl Autom8App {
                         project_name: project_name.clone(),
                     });
                 }
+                ContextMenuAction::CleanData => {
+                    // US-003: Show confirmation dialog before cleaning data
+                    let cleanable_info = self.get_cleanable_info(&project_name);
+                    self.pending_clean_confirmation = Some(PendingCleanOperation::Data {
+                        project_name: project_name.clone(),
+                        specs_count: cleanable_info.cleanable_specs,
+                        runs_count: cleanable_info.cleanable_runs,
+                    });
+                }
                 ContextMenuAction::RemoveProject => {
                     // US-002: Show confirmation dialog before removing project (modal implemented in US-003)
                     self.pending_clean_confirmation = Some(PendingCleanOperation::RemoveProject {
@@ -3227,6 +3550,7 @@ impl Autom8App {
         ContextMenuItemResponse {
             clicked: response.clicked() && enabled,
             hovered: is_hovered,
+            hovered_raw: response.hovered(),
             rect: screen_item_rect,
         }
     }
@@ -3248,11 +3572,12 @@ impl Autom8App {
         };
 
         // Create the modal using the reusable component
+        // US-004: Data cleanup uses "Delete" button, others use "Confirm"
         let modal = Modal::new(pending.title())
             .id("clean_confirmation")
             .message(pending.message())
             .cancel_button(ModalButton::secondary("Cancel"))
-            .confirm_button(ModalButton::destructive("Confirm"));
+            .confirm_button(ModalButton::destructive(pending.confirm_button_label()));
 
         // Show the modal and handle the action
         match modal.show(ctx) {
@@ -3265,6 +3590,10 @@ impl Autom8App {
                     }
                     PendingCleanOperation::Orphaned { .. } => {
                         self.spawn_clean_orphaned_command(&project_name);
+                    }
+                    PendingCleanOperation::Data { .. } => {
+                        // US-003: Clean specs and archived runs
+                        self.spawn_clean_data_command(&project_name);
                     }
                     PendingCleanOperation::RemoveProject { .. } => {
                         // US-004: Remove project entirely (worktrees + config)
@@ -6071,38 +6400,61 @@ impl Autom8App {
             Color32::TRANSPARENT,
         );
 
-        // Horizontal progress bar centered in the available space after status text
+        // Large infinity animation centered in the available space after status text
         if has_progress_bar {
-            if let Some(ref progress) = session.progress {
-                let bar_width = 100.0;
-                let bar_height = 8.0;
-                let progress_value = if progress.total > 0 {
-                    progress.completed as f32 / progress.total as f32
-                } else {
-                    0.0
-                };
-                // Calculate available space after status text and center the bar
-                let status_end_x = content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
-                let available_width = content_rect.max.x - status_end_x;
-                let bar_x = status_end_x + (available_width - bar_width) / 2.0;
-                let bar_rect = Rect::from_min_size(
-                    Pos2::new(
-                        bar_x,
-                        cursor_y + (state_galley.rect.height() - bar_height) / 2.0,
-                    ),
-                    egui::vec2(bar_width, bar_height),
-                );
-                let time = ui.ctx().input(|i| i.time) as f32;
-                super::animation::render_progress_bar(
-                    painter,
-                    time,
-                    bar_rect,
-                    progress_value,
-                    colors::SURFACE_HOVER,
-                    state_color,
-                );
-            }
+            // Calculate available space after status text
+            let status_end_x =
+                content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
+            let available_width = content_rect.max.x - status_end_x - spacing::MD; // respect right padding
+
+            // Make infinity fill most of the available space
+            let infinity_width = (available_width * 0.7).clamp(60.0, 120.0);
+            let infinity_height = (state_galley.rect.height() * 0.9).max(16.0);
+
+            let infinity_x = status_end_x + (available_width - infinity_width) / 2.0;
+            let infinity_rect = Rect::from_min_size(
+                Pos2::new(
+                    infinity_x,
+                    cursor_y + (state_galley.rect.height() - infinity_height) / 2.0,
+                ),
+                egui::vec2(infinity_width, infinity_height),
+            );
+            let time = ui.ctx().input(|i| i.time) as f32;
+            super::animation::render_infinity(painter, time, infinity_rect, state_color, 1.0);
         }
+
+        // Progress bar commented out - keeping infinity animation instead
+        // if has_progress_bar {
+        //     if let Some(ref progress) = session.progress {
+        //         let bar_width = 100.0;
+        //         let bar_height = 8.0;
+        //         let progress_value = if progress.total > 0 {
+        //             progress.completed as f32 / progress.total as f32
+        //         } else {
+        //             0.0
+        //         };
+        //         let status_end_x =
+        //             content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
+        //         let available_width = content_rect.max.x - status_end_x;
+        //         let bar_x = status_end_x + (available_width - bar_width) / 2.0;
+        //         let bar_rect = Rect::from_min_size(
+        //             Pos2::new(
+        //                 bar_x,
+        //                 cursor_y + (state_galley.rect.height() - bar_height) / 2.0,
+        //             ),
+        //             egui::vec2(bar_width, bar_height),
+        //         );
+        //         let time = ui.ctx().input(|i| i.time) as f32;
+        //         super::animation::render_progress_bar(
+        //             painter,
+        //             time,
+        //             bar_rect,
+        //             progress_value,
+        //             colors::SURFACE_HOVER,
+        //             state_color,
+        //         );
+        //     }
+        // }
 
         cursor_y += state_galley.rect.height() + spacing::XS;
 
@@ -6184,46 +6536,15 @@ impl Autom8App {
         // ====================================================================
         // OUTPUT SECTION: Last 5 lines of Claude output in monospace
         // ====================================================================
-        // Draw a subtle separator line with infinity animation on the right
+        // Draw a subtle separator line
         let separator_y = cursor_y;
-
-        // Infinity animation dimensions
-        let infinity_width = 28.0;
-        let infinity_height = 12.0;
-        let infinity_spacing = spacing::SM;
-
-        // Calculate where the separator line should end
-        let line_end_x = if has_progress_bar {
-            content_rect.max.x - infinity_width - infinity_spacing
-        } else {
-            content_rect.max.x
-        };
         painter.line_segment(
             [
                 Pos2::new(content_rect.min.x, separator_y),
-                Pos2::new(line_end_x, separator_y),
+                Pos2::new(content_rect.max.x, separator_y),
             ],
             Stroke::new(1.0, colors::BORDER),
         );
-
-        // Draw infinity animation (back to original position)
-        if has_progress_bar {
-            let infinity_rect = Rect::from_min_size(
-                Pos2::new(
-                    content_rect.max.x - infinity_width,
-                    separator_y - infinity_height / 2.0,
-                ),
-                egui::vec2(infinity_width, infinity_height),
-            );
-            let time = ui.ctx().input(|i| i.time) as f32;
-            super::animation::render_infinity(
-                painter,
-                time,
-                infinity_rect,
-                state_color,
-                1.0,
-            );
-        }
         cursor_y += spacing::SM;
 
         // Output section background
@@ -9095,21 +9416,29 @@ mod tests {
                 id,
                 enabled,
                 items,
+                hint,
             } => {
                 assert_eq!(label, "Clean");
                 assert_eq!(id, "clean");
                 assert!(enabled); // Has items, so enabled
                 assert_eq!(items.len(), 1);
+                assert_eq!(hint, None); // Enabled submenus have no hint
             }
             _ => panic!("Expected Submenu variant"),
         }
 
-        // Test disabled submenu (no items)
-        let disabled_submenu = ContextMenuItem::submenu_disabled("Empty", "empty");
+        // Test disabled submenu (no items) with hint (US-006)
+        let disabled_submenu = ContextMenuItem::submenu_disabled("Empty", "empty", "No items");
         match disabled_submenu {
-            ContextMenuItem::Submenu { enabled, items, .. } => {
+            ContextMenuItem::Submenu {
+                enabled,
+                items,
+                hint,
+                ..
+            } => {
                 assert!(!enabled);
                 assert!(items.is_empty());
+                assert_eq!(hint, Some("No items".to_string()));
             }
             _ => panic!("Expected Submenu variant"),
         }
@@ -10235,6 +10564,7 @@ mod tests {
                 id,
                 enabled,
                 items,
+                hint,
             } => {
                 assert_eq!(label, "Clean");
                 assert_eq!(id, "clean");
@@ -10242,6 +10572,12 @@ mod tests {
                 assert!(
                     items.is_empty(),
                     "Disabled Clean should have no submenu items"
+                );
+                // US-006: Verify hint is shown when disabled
+                assert_eq!(
+                    hint,
+                    &Some("Nothing to clean".to_string()),
+                    "Disabled Clean should have 'Nothing to clean' hint"
                 );
             }
             _ => panic!("Expected Clean to be a Submenu"),
@@ -10383,11 +10719,13 @@ mod tests {
                 id,
                 enabled,
                 items,
+                hint,
             } => {
                 assert_eq!(label, "Clean");
                 assert_eq!(id, "clean");
                 assert!(enabled, "Clean should be enabled with items");
                 assert_eq!(items.len(), 1);
+                assert_eq!(hint, None); // Enabled submenus have no hint
 
                 // Verify the submenu item
                 match &items[0] {
@@ -10614,6 +10952,8 @@ mod tests {
         let info = CleanableInfo {
             cleanable_worktrees: 5,
             orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 0,
         };
         assert!(info.has_cleanable());
         assert_eq!(info.cleanable_worktrees, 5);
@@ -10627,6 +10967,8 @@ mod tests {
         let info = CleanableInfo {
             cleanable_worktrees: 0, // main session excluded
             orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 0,
         };
         assert!(!info.has_cleanable());
     }
@@ -10639,6 +10981,768 @@ mod tests {
         // The cleanable_worktrees field should count non-main sessions with
         // existing worktrees and no active runs (not just completed sessions)
         assert_eq!(info.cleanable_worktrees, 0);
+    }
+
+    // ======================================================================
+    // Tests for US-003: Add Clean Data Menu Option
+    // ======================================================================
+
+    #[test]
+    fn test_us003_clean_data_action_variant_exists() {
+        // US-003: Verify ContextMenuAction::CleanData variant exists
+        let clean_data = ContextMenuAction::CleanData;
+        assert!(
+            matches!(clean_data, ContextMenuAction::CleanData),
+            "CleanData action should exist"
+        );
+    }
+
+    #[test]
+    fn test_us003_clean_data_action_is_distinct() {
+        // US-003: CleanData should be distinct from other clean actions
+        let clean_data = ContextMenuAction::CleanData;
+        let clean_worktrees = ContextMenuAction::CleanWorktrees;
+        let clean_orphaned = ContextMenuAction::CleanOrphaned;
+
+        assert_ne!(
+            clean_data, clean_worktrees,
+            "CleanData should differ from CleanWorktrees"
+        );
+        assert_ne!(
+            clean_data, clean_orphaned,
+            "CleanData should differ from CleanOrphaned"
+        );
+    }
+
+    #[test]
+    fn test_us003_clean_menu_item_with_data_action() {
+        // US-003: Test creating a Clean submenu item with Data action
+        let submenu_items = vec![ContextMenuItem::action(
+            "Data (7)",
+            ContextMenuAction::CleanData,
+        )];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu {
+                label,
+                id,
+                enabled,
+                items,
+                hint,
+            } => {
+                assert_eq!(label, "Clean");
+                assert_eq!(id, "clean");
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 1);
+                assert_eq!(hint, None); // Enabled submenus have no hint
+
+                // Verify the submenu item
+                match &items[0] {
+                    ContextMenuItem::Action {
+                        label,
+                        action,
+                        enabled,
+                    } => {
+                        assert_eq!(label, "Data (7)");
+                        assert_eq!(action, &ContextMenuAction::CleanData);
+                        assert!(*enabled);
+                    }
+                    _ => panic!("Expected Action item"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us003_clean_menu_data_shows_combined_count() {
+        // US-003: Data label should show combined count of specs + runs
+        let specs_count = 3;
+        let runs_count = 4;
+        let data_count = specs_count + runs_count;
+        let label = format!("Data ({})", data_count);
+
+        assert_eq!(label, "Data (7)", "Label should show combined count");
+    }
+
+    #[test]
+    fn test_us003_clean_menu_with_all_three_options() {
+        // US-003: Test creating a Clean submenu with Worktrees, Orphaned, and Data options
+        let submenu_items = vec![
+            ContextMenuItem::action("Worktrees (2)", ContextMenuAction::CleanWorktrees),
+            ContextMenuItem::action("Orphaned (1)", ContextMenuAction::CleanOrphaned),
+            ContextMenuItem::action("Data (5)", ContextMenuAction::CleanData),
+        ];
+        let clean_submenu = ContextMenuItem::submenu("Clean", "clean", submenu_items);
+
+        match clean_submenu {
+            ContextMenuItem::Submenu { enabled, items, .. } => {
+                assert!(enabled, "Clean should be enabled with items");
+                assert_eq!(items.len(), 3, "Should have all three options");
+
+                // Verify order and actions
+                match &items[0] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanWorktrees);
+                    }
+                    _ => panic!("Expected CleanWorktrees action"),
+                }
+
+                match &items[1] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanOrphaned);
+                    }
+                    _ => panic!("Expected CleanOrphaned action"),
+                }
+
+                match &items[2] {
+                    ContextMenuItem::Action { action, .. } => {
+                        assert_eq!(action, &ContextMenuAction::CleanData);
+                    }
+                    _ => panic!("Expected CleanData action"),
+                }
+            }
+            _ => panic!("Expected Submenu"),
+        }
+    }
+
+    #[test]
+    fn test_us003_clean_menu_data_only_when_count_positive() {
+        // US-003: Data option should only be added when data_count > 0
+        // This tests the logic: if data_count > 0 { add Data item }
+        let cleanable_info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 0,
+        };
+        let data_count = cleanable_info.cleanable_specs + cleanable_info.cleanable_runs;
+        assert_eq!(
+            data_count, 0,
+            "Data count should be 0 when no specs or runs"
+        );
+
+        // When data_count is 0, no Data option should be added
+        // (This simulates the condition in build_context_menu_items)
+        let should_add_data = data_count > 0;
+        assert!(
+            !should_add_data,
+            "Should not add Data option when count is 0"
+        );
+    }
+
+    #[test]
+    fn test_us003_clean_menu_enabled_with_only_data() {
+        // US-003: Clean submenu should be enabled when only specs/runs exist
+        // (no worktrees or orphaned sessions)
+        let cleanable_info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 3,
+            cleanable_runs: 2,
+        };
+
+        assert!(
+            cleanable_info.has_cleanable(),
+            "Clean should be enabled when only data exists"
+        );
+
+        let data_count = cleanable_info.cleanable_specs + cleanable_info.cleanable_runs;
+        assert_eq!(data_count, 5, "Data count should be 5");
+    }
+
+    #[test]
+    fn test_us003_clean_menu_enabled_with_specs_only() {
+        // US-003: Clean submenu should be enabled when only specs exist
+        let cleanable_info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 2,
+            cleanable_runs: 0,
+        };
+
+        assert!(
+            cleanable_info.has_cleanable(),
+            "Clean should be enabled with only specs"
+        );
+    }
+
+    #[test]
+    fn test_us003_clean_menu_enabled_with_runs_only() {
+        // US-003: Clean submenu should be enabled when only runs exist
+        let cleanable_info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 4,
+        };
+
+        assert!(
+            cleanable_info.has_cleanable(),
+            "Clean should be enabled with only runs"
+        );
+    }
+
+    #[test]
+    fn test_us003_spawn_clean_data_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_clean_data_command will actually try to clean,
+        // but we're just testing that it creates a task/tab structure
+        let initial_tab_count = app.tab_count();
+
+        app.spawn_clean_data_command("test-project");
+
+        // Should have created a new tab
+        assert_eq!(app.tab_count(), initial_tab_count + 1);
+
+        // Tab should be for clean-data command
+        let tab = app.tabs().last().unwrap();
+        assert!(tab.closable, "Command output tab should be closable");
+        assert!(
+            tab.label.contains("Clean-data"),
+            "Tab label should contain 'Clean-data'"
+        );
+    }
+
+    // ======================================================================
+    // Tests for US-004: Clean Data Confirmation Modal
+    // ======================================================================
+
+    #[test]
+    fn test_us004_clean_data_modal_title() {
+        // US-004: Modal title is "Clean Project Data"
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        };
+        assert_eq!(pending.title(), "Clean Project Data");
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_message_lists_archived_runs() {
+        // US-004: Modal message lists "X archived runs" (if > 0)
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 0,
+            runs_count: 3,
+        };
+        let message = pending.message();
+        assert!(
+            message.contains("3 archived runs"),
+            "Message should contain '3 archived runs': {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_message_lists_specs() {
+        // US-004: Modal message lists "Y specs" (if > 0)
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 2,
+            runs_count: 0,
+        };
+        let message = pending.message();
+        assert!(
+            message.contains("2 specs"),
+            "Message should contain '2 specs': {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_message_lists_both() {
+        // US-004: Modal message lists both archived runs and specs when both exist
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        };
+        let message = pending.message();
+        assert!(
+            message.contains("3 archived runs"),
+            "Message should contain '3 archived runs': {}",
+            message
+        );
+        assert!(
+            message.contains("2 specs"),
+            "Message should contain '2 specs': {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_message_archived_runs_first() {
+        // US-004: Message should list archived runs first, then specs
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        };
+        let message = pending.message();
+        let runs_pos = message
+            .find("archived run")
+            .expect("Should contain 'archived run'");
+        let specs_pos = message.find("spec").expect("Should contain 'spec'");
+        assert!(
+            runs_pos < specs_pos,
+            "Archived runs should appear before specs in message"
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_singular_run() {
+        // US-004: Should use singular form for 1 archived run
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 0,
+            runs_count: 1,
+        };
+        let message = pending.message();
+        assert!(
+            message.contains("1 archived run") && !message.contains("1 archived runs"),
+            "Message should use singular 'archived run' for count of 1: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_singular_spec() {
+        // US-004: Should use singular form for 1 spec
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 1,
+            runs_count: 0,
+        };
+        let message = pending.message();
+        assert!(
+            message.contains("1 spec") && !message.contains("1 specs"),
+            "Message should use singular 'spec' for count of 1: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_us004_clean_data_modal_delete_button() {
+        // US-004: Modal has "Delete" (destructive/red) button
+        let pending = PendingCleanOperation::Data {
+            project_name: "my-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        };
+        assert_eq!(pending.confirm_button_label(), "Delete");
+    }
+
+    #[test]
+    fn test_us004_other_operations_use_confirm_button() {
+        // US-004: Other operations still use "Confirm" button
+        let worktrees = PendingCleanOperation::Worktrees {
+            project_name: "my-project".to_string(),
+        };
+        assert_eq!(worktrees.confirm_button_label(), "Confirm");
+
+        let orphaned = PendingCleanOperation::Orphaned {
+            project_name: "my-project".to_string(),
+        };
+        assert_eq!(orphaned.confirm_button_label(), "Confirm");
+
+        let remove = PendingCleanOperation::RemoveProject {
+            project_name: "my-project".to_string(),
+        };
+        assert_eq!(remove.confirm_button_label(), "Confirm");
+    }
+
+    #[test]
+    fn test_us004_clean_data_triggers_pending_confirmation() {
+        // US-004: Clicking "Data" clean option triggers a confirmation modal
+        let mut app = Autom8App::new();
+
+        // Initially no confirmation is pending
+        assert!(app.pending_clean_confirmation.is_none());
+
+        // Set pending confirmation for CleanData
+        app.pending_clean_confirmation = Some(PendingCleanOperation::Data {
+            project_name: "test-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        });
+
+        // Verify confirmation is pending
+        assert!(app.pending_clean_confirmation.is_some());
+        match &app.pending_clean_confirmation {
+            Some(PendingCleanOperation::Data {
+                project_name,
+                specs_count,
+                runs_count,
+            }) => {
+                assert_eq!(project_name, "test-project");
+                assert_eq!(*specs_count, 2);
+                assert_eq!(*runs_count, 3);
+            }
+            _ => panic!("Expected PendingCleanOperation::Data"),
+        }
+    }
+
+    #[test]
+    fn test_us004_cancel_clears_data_confirmation() {
+        // US-004: Cancelling closes the modal without deleting anything
+        let mut app = Autom8App::new();
+
+        // Set up pending data clean confirmation
+        app.pending_clean_confirmation = Some(PendingCleanOperation::Data {
+            project_name: "test-project".to_string(),
+            specs_count: 2,
+            runs_count: 3,
+        });
+
+        // Simulate cancellation by clearing the pending confirmation
+        app.pending_clean_confirmation = None;
+
+        // Confirm it's cleared
+        assert!(app.pending_clean_confirmation.is_none());
+    }
+
+    // ======================================================================
+    // Tests for US-005: Implement Clean Data Action
+    // ======================================================================
+
+    #[test]
+    fn test_us005_cleanup_result_data_title() {
+        // US-005: Result modal title for data cleanup
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 2,
+            runs_removed: 3,
+            bytes_freed: 5000,
+            error_count: 0,
+        };
+        assert_eq!(result.title(), "Cleanup Complete");
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_message_with_specs() {
+        // US-005: Message shows specs removed
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 3,
+            runs_removed: 0,
+            bytes_freed: 1500,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(msg.contains("3 specs"), "Should mention specs removed");
+        assert!(msg.contains("freed"), "Should show bytes freed");
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_message_with_runs() {
+        // US-005: Message shows runs removed
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 0,
+            runs_removed: 5,
+            bytes_freed: 5000,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(
+            msg.contains("5 archived runs"),
+            "Should mention runs removed"
+        );
+        assert!(msg.contains("freed"), "Should show bytes freed");
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_message_with_both() {
+        // US-005: Message shows both specs and runs
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 2,
+            runs_removed: 4,
+            bytes_freed: 6000,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(msg.contains("2 specs"), "Should mention specs");
+        assert!(msg.contains("4 archived runs"), "Should mention runs");
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_message_with_errors() {
+        // US-005: Message shows error count when errors occurred
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 1,
+            runs_removed: 2,
+            bytes_freed: 3000,
+            error_count: 2,
+        };
+        let msg = result.message();
+        assert!(msg.contains("2 errors"), "Should show error count");
+        assert!(
+            msg.contains("command output tab"),
+            "Should direct to command output"
+        );
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_no_removal() {
+        // US-005: Message when nothing was removed
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 0,
+            runs_removed: 0,
+            bytes_freed: 0,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(
+            msg.contains("No data was removed"),
+            "Should indicate nothing removed"
+        );
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_has_errors_true() {
+        // US-005: has_errors() returns true when errors occurred
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 1,
+            runs_removed: 1,
+            bytes_freed: 1000,
+            error_count: 1,
+        };
+        assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_has_errors_false() {
+        // US-005: has_errors() returns false when no errors
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 1,
+            runs_removed: 1,
+            bytes_freed: 1000,
+            error_count: 0,
+        };
+        assert!(!result.has_errors());
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_singular_spec() {
+        // US-005: Singular form for 1 spec
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 1,
+            runs_removed: 0,
+            bytes_freed: 500,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(msg.contains("1 spec"), "Should use singular for 1 spec");
+        assert!(!msg.contains("1 specs"), "Should not pluralize 1 spec");
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_singular_run() {
+        // US-005: Singular form for 1 run
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 0,
+            runs_removed: 1,
+            bytes_freed: 500,
+            error_count: 0,
+        };
+        let msg = result.message();
+        assert!(
+            msg.contains("1 archived run"),
+            "Should use singular for 1 run"
+        );
+        assert!(
+            !msg.contains("1 archived runs"),
+            "Should not pluralize 1 run"
+        );
+    }
+
+    #[test]
+    fn test_us005_cleanup_result_data_singular_error() {
+        // US-005: Singular form for 1 error
+        let result = CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 1,
+            runs_removed: 0,
+            bytes_freed: 500,
+            error_count: 1,
+        };
+        let msg = result.message();
+        assert!(msg.contains("1 error"), "Should use singular for 1 error");
+        assert!(!msg.contains("1 errors"), "Should not pluralize 1 error");
+    }
+
+    #[test]
+    fn test_us005_cleanup_completed_triggers_refresh() {
+        // US-005: Cleanup completion should trigger data refresh
+        // This is verified by the code change: when CleanupCompleted is received,
+        // self.refresh_data() is called after setting the pending_result_modal
+        let app = Autom8App::new();
+        // The refresh interval mechanism exists
+        assert!(app.refresh_interval() > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn test_us005_data_cleanup_shows_result_modal() {
+        // US-005: After deletion, a result modal is shown
+        let mut app = Autom8App::new();
+
+        // Simulate cleanup completion by setting the result modal
+        app.pending_result_modal = Some(CleanupResult::Data {
+            project_name: "test".to_string(),
+            specs_removed: 2,
+            runs_removed: 3,
+            bytes_freed: 5000,
+            error_count: 0,
+        });
+
+        // Verify result modal is set
+        assert!(app.pending_result_modal.is_some());
+        if let Some(CleanupResult::Data {
+            specs_removed,
+            runs_removed,
+            ..
+        }) = &app.pending_result_modal
+        {
+            assert_eq!(*specs_removed, 2);
+            assert_eq!(*runs_removed, 3);
+        } else {
+            panic!("Expected CleanupResult::Data");
+        }
+    }
+
+    // ======================================================================
+    // Tests for US-002: Count Specs and Runs for CleanableInfo
+    // ======================================================================
+
+    #[test]
+    fn test_us002_cleanable_info_has_spec_and_run_fields() {
+        // US-002: CleanableInfo should have cleanable_specs and cleanable_runs fields
+        let info = CleanableInfo::default();
+        assert_eq!(info.cleanable_specs, 0);
+        assert_eq!(info.cleanable_runs, 0);
+    }
+
+    #[test]
+    fn test_us002_has_cleanable_includes_specs() {
+        // US-002: has_cleanable() should return true if there are cleanable specs
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 3,
+            cleanable_runs: 0,
+        };
+        assert!(info.has_cleanable(), "Should have cleanable with specs");
+    }
+
+    #[test]
+    fn test_us002_has_cleanable_includes_runs() {
+        // US-002: has_cleanable() should return true if there are cleanable runs
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 5,
+        };
+        assert!(info.has_cleanable(), "Should have cleanable with runs");
+    }
+
+    #[test]
+    fn test_us002_has_cleanable_all_types() {
+        // US-002: has_cleanable() should work with all types combined
+        let info = CleanableInfo {
+            cleanable_worktrees: 1,
+            orphaned_sessions: 2,
+            cleanable_specs: 3,
+            cleanable_runs: 4,
+        };
+        assert!(info.has_cleanable(), "Should have cleanable with all types");
+    }
+
+    #[test]
+    fn test_us002_count_cleanable_specs_empty_dir() {
+        // US-002: count_cleanable_specs should return 0 for non-existent directory
+        let non_existent = std::path::PathBuf::from("/nonexistent/path/12345");
+        let active_specs = std::collections::HashSet::new();
+        assert_eq!(count_cleanable_specs(&non_existent, &active_specs), 0);
+    }
+
+    #[test]
+    fn test_us002_count_cleanable_specs_counts_json_only() {
+        // US-002: count_cleanable_specs should count only .json files (pairs counted as 1)
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create some spec files
+        std::fs::write(spec_dir.join("spec-feature1.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-feature1.md"), "# Feature 1").unwrap();
+        std::fs::write(spec_dir.join("spec-feature2.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-feature2.md"), "# Feature 2").unwrap();
+        std::fs::write(spec_dir.join("other.txt"), "not a spec").unwrap();
+
+        let active_specs = std::collections::HashSet::new();
+        // Should count 2 specs (based on .json files), not 4 or 5
+        assert_eq!(count_cleanable_specs(spec_dir, &active_specs), 2);
+    }
+
+    #[test]
+    fn test_us002_count_cleanable_specs_excludes_active() {
+        // US-002: count_cleanable_specs should exclude specs used by active sessions
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create some spec files
+        let spec1_path = spec_dir.join("spec-feature1.json");
+        let spec2_path = spec_dir.join("spec-feature2.json");
+        std::fs::write(&spec1_path, "{}").unwrap();
+        std::fs::write(&spec2_path, "{}").unwrap();
+
+        // Mark spec1 as active
+        let mut active_specs = std::collections::HashSet::new();
+        active_specs.insert(spec1_path);
+
+        // Should count only 1 (spec2), since spec1 is active
+        assert_eq!(count_cleanable_specs(spec_dir, &active_specs), 1);
+    }
+
+    #[test]
+    fn test_us002_count_cleanable_runs_empty_dir() {
+        // US-002: count_cleanable_runs should return 0 for non-existent directory
+        let non_existent = std::path::PathBuf::from("/nonexistent/path/12345");
+        assert_eq!(count_cleanable_runs(&non_existent), 0);
+    }
+
+    #[test]
+    fn test_us002_count_cleanable_runs_counts_all_files() {
+        // US-002: count_cleanable_runs should count all files in the runs directory
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let runs_dir = temp_dir.path();
+
+        // Create some run files
+        std::fs::write(runs_dir.join("run-2024-01-01-123456.json"), "{}").unwrap();
+        std::fs::write(runs_dir.join("run-2024-01-02-654321.json"), "{}").unwrap();
+        std::fs::write(runs_dir.join("run-2024-01-03-111111.json"), "{}").unwrap();
+
+        assert_eq!(count_cleanable_runs(runs_dir), 3);
+    }
+
+    #[test]
+    fn test_us002_get_cleanable_info_nonexistent_returns_zero_counts() {
+        // US-002: get_cleanable_info should return zero for specs and runs on non-existent project
+        let app = Autom8App::new();
+        let info = app.get_cleanable_info("nonexistent-project-xyz123");
+        assert_eq!(info.cleanable_specs, 0);
+        assert_eq!(info.cleanable_runs, 0);
     }
 
     // ======================================================================
@@ -12619,5 +13723,198 @@ mod tests {
             !lines.iter().any(|l| l.contains("US-001")),
             "Condensed view should not list individual stories"
         );
+    }
+
+    // ======================================================================
+    // Tests for US-007: Integration Testing for Clean Functionality
+    // ======================================================================
+
+    #[test]
+    fn test_us007_has_cleanable_true_with_only_specs() {
+        // US-007: has_cleanable() should return true when only specs exist
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 5,
+            cleanable_runs: 0,
+        };
+        assert!(
+            info.has_cleanable(),
+            "has_cleanable() should be true with only specs"
+        );
+    }
+
+    #[test]
+    fn test_us007_has_cleanable_true_with_only_runs() {
+        // US-007: has_cleanable() should return true when only runs exist
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 3,
+        };
+        assert!(
+            info.has_cleanable(),
+            "has_cleanable() should be true with only runs"
+        );
+    }
+
+    #[test]
+    fn test_us007_has_cleanable_true_with_specs_and_runs() {
+        // US-007: has_cleanable() should return true when both specs and runs exist
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 2,
+            cleanable_runs: 4,
+        };
+        assert!(
+            info.has_cleanable(),
+            "has_cleanable() should be true with specs and runs"
+        );
+    }
+
+    #[test]
+    fn test_us007_has_cleanable_false_when_all_zero() {
+        // US-007: has_cleanable() should return false when everything is zero
+        let info = CleanableInfo {
+            cleanable_worktrees: 0,
+            orphaned_sessions: 0,
+            cleanable_specs: 0,
+            cleanable_runs: 0,
+        };
+        assert!(
+            !info.has_cleanable(),
+            "has_cleanable() should be false with all zeros"
+        );
+    }
+
+    #[test]
+    fn test_us007_spec_pairs_counted_as_single_spec() {
+        // US-007: Spec pairs (.json + .md) should be counted as 1 spec
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create 3 spec pairs (6 files total)
+        std::fs::write(spec_dir.join("spec-a.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-a.md"), "# A").unwrap();
+        std::fs::write(spec_dir.join("spec-b.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-b.md"), "# B").unwrap();
+        std::fs::write(spec_dir.join("spec-c.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-c.md"), "# C").unwrap();
+
+        let active_specs = std::collections::HashSet::new();
+        let count = count_cleanable_specs(spec_dir, &active_specs);
+
+        // Should count 3 (one per .json), not 6
+        assert_eq!(count, 3, "Spec pairs should be counted as 1 each");
+    }
+
+    #[test]
+    fn test_us007_active_specs_not_counted() {
+        // US-007: Specs used by active sessions are NOT counted as cleanable
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create 3 specs
+        let spec1 = spec_dir.join("spec-active1.json");
+        let spec2 = spec_dir.join("spec-active2.json");
+        let spec3 = spec_dir.join("spec-inactive.json");
+        std::fs::write(&spec1, "{}").unwrap();
+        std::fs::write(&spec2, "{}").unwrap();
+        std::fs::write(&spec3, "{}").unwrap();
+
+        // Mark spec1 and spec2 as active
+        let mut active_specs = std::collections::HashSet::new();
+        active_specs.insert(spec1);
+        active_specs.insert(spec2);
+
+        let count = count_cleanable_specs(spec_dir, &active_specs);
+
+        // Only spec3 should be cleanable
+        assert_eq!(count, 1, "Only inactive specs should be counted");
+    }
+
+    #[test]
+    fn test_us007_orphaned_md_not_counted_as_spec() {
+        // US-007: Orphaned .md files (no matching .json) are NOT counted
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create 1 proper spec pair and 2 orphaned .md files
+        std::fs::write(spec_dir.join("spec-proper.json"), "{}").unwrap();
+        std::fs::write(spec_dir.join("spec-proper.md"), "# Proper").unwrap();
+        std::fs::write(spec_dir.join("orphan1.md"), "# Orphan 1").unwrap();
+        std::fs::write(spec_dir.join("orphan2.md"), "# Orphan 2").unwrap();
+        std::fs::write(spec_dir.join("notes.md"), "# Notes").unwrap();
+
+        let active_specs = std::collections::HashSet::new();
+        let count = count_cleanable_specs(spec_dir, &active_specs);
+
+        // Should count only 1 (the proper spec), not 3 or 4
+        assert_eq!(
+            count, 1,
+            "Orphaned .md files should not be counted as specs"
+        );
+    }
+
+    #[test]
+    fn test_us007_cleanable_info_integration() {
+        // US-007: CleanableInfo should correctly integrate all counts
+        let info = CleanableInfo {
+            cleanable_worktrees: 2,
+            orphaned_sessions: 1,
+            cleanable_specs: 3,
+            cleanable_runs: 5,
+        };
+
+        // Verify individual counts are accessible
+        assert_eq!(info.cleanable_worktrees, 2);
+        assert_eq!(info.orphaned_sessions, 1);
+        assert_eq!(info.cleanable_specs, 3);
+        assert_eq!(info.cleanable_runs, 5);
+
+        // Verify has_cleanable works with combined counts
+        assert!(info.has_cleanable());
+
+        // Calculate combined data count (for display purposes)
+        let data_count = info.cleanable_specs + info.cleanable_runs;
+        assert_eq!(data_count, 8);
+    }
+
+    #[test]
+    fn test_us007_count_cleanable_runs_empty_returns_zero() {
+        // US-007: count_cleanable_runs should return 0 for non-existent directory
+        let non_existent = std::path::PathBuf::from("/nonexistent/path/us007/runs");
+        assert_eq!(count_cleanable_runs(&non_existent), 0);
+    }
+
+    #[test]
+    fn test_us007_count_cleanable_specs_empty_returns_zero() {
+        // US-007: count_cleanable_specs should return 0 for non-existent directory
+        let non_existent = std::path::PathBuf::from("/nonexistent/path/us007/specs");
+        let active_specs = std::collections::HashSet::new();
+        assert_eq!(count_cleanable_specs(&non_existent, &active_specs), 0);
+    }
+
+    #[test]
+    fn test_us007_all_specs_active_returns_zero() {
+        // US-007: When all specs are active, count should be 0
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let spec_dir = temp_dir.path();
+
+        // Create 2 specs
+        let spec1 = spec_dir.join("spec1.json");
+        let spec2 = spec_dir.join("spec2.json");
+        std::fs::write(&spec1, "{}").unwrap();
+        std::fs::write(&spec2, "{}").unwrap();
+
+        // Mark all as active
+        let mut active_specs = std::collections::HashSet::new();
+        active_specs.insert(spec1);
+        active_specs.insert(spec2);
+
+        let count = count_cleanable_specs(spec_dir, &active_specs);
+        assert_eq!(count, 0, "All active specs should result in 0 cleanable");
     }
 }

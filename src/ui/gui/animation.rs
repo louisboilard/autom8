@@ -225,10 +225,8 @@ pub fn render_progress_bar(
     if progress > 0.0 {
         // Calculate filled portion (fills from left to right)
         let fill_width = rect.width() * progress;
-        let fill_rect = Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.min.x + fill_width, rect.max.y),
-        );
+        let fill_rect =
+            Rect::from_min_max(rect.min, egui::pos2(rect.min.x + fill_width, rect.max.y));
         painter.rect_filled(fill_rect, rounding, fill_color);
 
         // Animated shimmer effect - a bright highlight that sweeps across
@@ -241,8 +239,14 @@ pub fn render_progress_bar(
             if shimmer_x >= fill_rect.min.x && shimmer_x <= fill_rect.max.x {
                 let shimmer_width = 12.0_f32.min(fill_width * 0.3);
                 let shimmer_rect = Rect::from_min_max(
-                    egui::pos2((shimmer_x - shimmer_width / 2.0).max(fill_rect.min.x), rect.min.y),
-                    egui::pos2((shimmer_x + shimmer_width / 2.0).min(fill_rect.max.x), rect.max.y),
+                    egui::pos2(
+                        (shimmer_x - shimmer_width / 2.0).max(fill_rect.min.x),
+                        rect.min.y,
+                    ),
+                    egui::pos2(
+                        (shimmer_x + shimmer_width / 2.0).min(fill_rect.max.x),
+                        rect.max.y,
+                    ),
                 );
 
                 let shimmer_color = Color32::from_rgba_unmultiplied(255, 255, 255, 76);
