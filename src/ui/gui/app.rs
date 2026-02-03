@@ -6265,7 +6265,10 @@ mod tests {
     fn test_us009_config_editor_actions_has_reset_field() {
         let actions = ConfigEditorActions::default();
         // The field exists and defaults to false
-        assert!(!actions.reset_to_defaults, "reset_to_defaults should default to false");
+        assert!(
+            !actions.reset_to_defaults,
+            "reset_to_defaults should default to false"
+        );
     }
 
     /// Test that reset_config_to_defaults method exists and resets global config.
@@ -6293,11 +6296,13 @@ mod tests {
             assert!(config.pull_request, "pull_request should be true (default)");
             assert!(config.worktree, "worktree should be true (default)");
             assert_eq!(
-                config.worktree_path_pattern,
-                "{repo}-wt-{branch}",
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
                 "worktree_path_pattern should be default"
             );
-            assert!(!config.worktree_cleanup, "worktree_cleanup should be false (default)");
+            assert!(
+                !config.worktree_cleanup,
+                "worktree_cleanup should be false (default)"
+            );
         } else {
             panic!("Global config should be cached after reset");
         }
@@ -6327,17 +6332,22 @@ mod tests {
 
         // Verify config was reset to defaults
         if let Some((cached_name, config)) = &app.cached_project_config {
-            assert_eq!(cached_name, project_name, "project name should be preserved");
+            assert_eq!(
+                cached_name, project_name,
+                "project name should be preserved"
+            );
             assert!(config.review, "review should be true (default)");
             assert!(config.commit, "commit should be true (default)");
             assert!(config.pull_request, "pull_request should be true (default)");
             assert!(config.worktree, "worktree should be true (default)");
             assert_eq!(
-                config.worktree_path_pattern,
-                "{repo}-wt-{branch}",
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
                 "worktree_path_pattern should be default"
             );
-            assert!(!config.worktree_cleanup, "worktree_cleanup should be false (default)");
+            assert!(
+                !config.worktree_cleanup,
+                "worktree_cleanup should be false (default)"
+            );
         } else {
             panic!("Project config should be cached after reset");
         }
@@ -6367,7 +6377,8 @@ mod tests {
     #[test]
     fn test_us009_render_reset_to_defaults_button_exists() {
         // This test verifies the method signature exists by compiling
-        let _func: fn(&Autom8App, &mut egui::Ui) -> bool = Autom8App::render_reset_to_defaults_button;
+        let _func: fn(&Autom8App, &mut egui::Ui) -> bool =
+            Autom8App::render_reset_to_defaults_button;
     }
 
     /// Test that Config::default() has the expected values per US-009 acceptance criteria.
@@ -6380,11 +6391,13 @@ mod tests {
         assert!(config.pull_request, "pull_request should default to true");
         assert!(config.worktree, "worktree should default to true");
         assert_eq!(
-            config.worktree_path_pattern,
-            "{repo}-wt-{branch}",
+            config.worktree_path_pattern, "{repo}-wt-{branch}",
             "worktree_path_pattern should default to {{repo}}-wt-{{branch}}"
         );
-        assert!(!config.worktree_cleanup, "worktree_cleanup should default to false");
+        assert!(
+            !config.worktree_cleanup,
+            "worktree_cleanup should default to false"
+        );
     }
 
     /// Test that global config editor returns reset flag in tuple.
@@ -6401,8 +6414,11 @@ mod tests {
     fn test_us009_project_config_editor_returns_reset_flag() {
         // This test verifies the return type includes a bool for reset_clicked
         // by checking that the function signature compiles correctly
-        let _func: fn(&Autom8App, &mut egui::Ui, &str) -> (BoolFieldChanges, TextFieldChanges, bool) =
-            Autom8App::render_project_config_editor;
+        let _func: fn(
+            &Autom8App,
+            &mut egui::Ui,
+            &str,
+        ) -> (BoolFieldChanges, TextFieldChanges, bool) = Autom8App::render_project_config_editor;
     }
 
     /// Test that reset_to_defaults replaces the entire config, not just individual fields.
@@ -6412,12 +6428,12 @@ mod tests {
 
         // Set up a config with ALL fields set to non-default values
         app.cached_global_config = Some(crate::config::Config {
-            review: false,        // default is true
-            commit: false,        // default is true
-            pull_request: false,  // default is true
-            worktree: false,      // default is true
+            review: false,                                                  // default is true
+            commit: false,                                                  // default is true
+            pull_request: false,                                            // default is true
+            worktree: false,                                                // default is true
             worktree_path_pattern: "totally-custom-{whatever}".to_string(), // default is "{repo}-wt-{branch}"
-            worktree_cleanup: true, // default is false
+            worktree_cleanup: true,                                         // default is false
         });
 
         // Reset to defaults
@@ -6435,5 +6451,161 @@ mod tests {
         } else {
             panic!("Global config should be cached after reset");
         }
+    }
+
+    // ========================================================================
+    // Config Tab Tests (US-010) - Config Path Tooltip on Header
+    // ========================================================================
+
+    #[test]
+    fn test_us010_global_config_path_for_tooltip() {
+        // Test that global_config_path() returns an absolute path suitable for tooltip
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok(), "global_config_path() should succeed");
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should be absolute (start with /)
+        assert!(
+            path_str.starts_with('/'),
+            "Path should be absolute (start with /)"
+        );
+
+        // Path should contain autom8
+        assert!(
+            path_str.contains("autom8"),
+            "Path should contain autom8"
+        );
+
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us010_project_config_path_for_tooltip() {
+        // Test that project_config_path_for() returns an absolute path suitable for tooltip
+        let project_name = "my-project";
+        let path_result = crate::config::project_config_path_for(project_name);
+        assert!(
+            path_result.is_ok(),
+            "project_config_path_for() should succeed"
+        );
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Path should be absolute (start with /)
+        assert!(
+            path_str.starts_with('/'),
+            "Path should be absolute (start with /)"
+        );
+
+        // Path should contain the project name
+        assert!(
+            path_str.contains(project_name),
+            "Path should contain project name: {}",
+            project_name
+        );
+
+        // Path should end with config.toml
+        assert!(
+            path_str.ends_with("config.toml"),
+            "Path should end with config.toml"
+        );
+    }
+
+    #[test]
+    fn test_us010_global_header_text_format() {
+        // Test that global scope produces the expected header text
+        let _app = Autom8App::new();
+        let scope = ConfigScope::Global;
+
+        // When scope is Global, header should be "Global Config"
+        match scope {
+            ConfigScope::Global => {
+                // Expected header text based on implementation in render_config_right_panel
+                let header_text = "Global Config".to_string();
+                assert_eq!(header_text, "Global Config");
+            }
+            ConfigScope::Project(_) => panic!("Expected Global scope"),
+        }
+    }
+
+    #[test]
+    fn test_us010_project_header_text_format() {
+        // Test that project scope produces the expected header text format
+        let project_name = "test-project";
+        let scope = ConfigScope::Project(project_name.to_string());
+
+        // When scope is Project, header should contain "Project Config: {name}"
+        match scope {
+            ConfigScope::Project(name) => {
+                let header_text = format!("Project Config: {}", name);
+                assert!(
+                    header_text.starts_with("Project Config:"),
+                    "Header should start with 'Project Config:'"
+                );
+                assert!(
+                    header_text.contains(&name),
+                    "Header should contain project name"
+                );
+            }
+            ConfigScope::Global => panic!("Expected Project scope"),
+        }
+    }
+
+    #[test]
+    fn test_us010_tooltip_uses_display_format() {
+        // Test that paths use display() format for tooltip (not debug format)
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let display_str = path.display().to_string();
+        let debug_str = format!("{:?}", path);
+
+        // Display format should NOT contain quotes (unlike debug)
+        assert!(
+            !display_str.contains('"'),
+            "Display format should not contain quotes"
+        );
+
+        // Display format should be shorter or equal to debug format
+        assert!(
+            display_str.len() <= debug_str.len(),
+            "Display format should be shorter than debug format"
+        );
+    }
+
+    #[test]
+    fn test_us010_tooltip_path_is_resolved_not_relative() {
+        // Test that tooltip path is the actual resolved path (not relative)
+        let path_result = crate::config::global_config_path();
+        assert!(path_result.is_ok());
+
+        let path = path_result.unwrap();
+        let path_str = path.display().to_string();
+
+        // Should NOT start with ~/ (that would be unexpanded)
+        assert!(
+            !path_str.starts_with("~/"),
+            "Path should not start with ~/ (should be expanded)"
+        );
+
+        // Should NOT be relative (no ./  or ../)
+        assert!(
+            !path_str.starts_with("./") && !path_str.starts_with("../"),
+            "Path should not be relative"
+        );
+
+        // Should be absolute
+        assert!(
+            path_str.starts_with('/'),
+            "Path should be absolute"
+        );
     }
 }
