@@ -1356,9 +1356,10 @@ impl Autom8App {
             use std::io::{BufRead, BufReader};
             use std::process::{Command, Stdio};
 
-            // Spawn the autom8 status command
+            // Spawn the autom8 status command (--all shows all sessions for the project)
             let result = Command::new("autom8")
                 .arg("status")
+                .arg("--all")
                 .arg("--project")
                 .arg(&project)
                 .stdout(Stdio::piped())
@@ -1443,10 +1444,9 @@ impl Autom8App {
             use std::io::{BufRead, BufReader};
             use std::process::{Command, Stdio};
 
-            // Spawn the autom8 describe command
+            // Spawn the autom8 describe command (project name is a positional argument)
             let result = Command::new("autom8")
                 .arg("describe")
-                .arg("--project")
                 .arg(&project)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
