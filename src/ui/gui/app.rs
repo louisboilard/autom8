@@ -492,6 +492,23 @@ impl CommandExecution {
 }
 
 // ============================================================================
+// Command Message Types (for async command execution)
+// ============================================================================
+
+/// Message sent from background command execution threads to the UI.
+#[derive(Debug, Clone)]
+pub enum CommandMessage {
+    /// A line of stdout output.
+    Stdout { cache_key: String, line: String },
+    /// A line of stderr output.
+    Stderr { cache_key: String, line: String },
+    /// Command completed with exit code.
+    Completed { cache_key: String, exit_code: i32 },
+    /// Command failed to spawn or encountered an error.
+    Failed { cache_key: String, error: String },
+}
+
+// ============================================================================
 // GUI-specific Extensions
 // ============================================================================
 
@@ -704,6 +721,16 @@ pub struct Autom8App {
     /// Cached command executions for open command output tabs.
     /// Maps cache_key (project:command:id) to the command execution state.
     command_executions: std::collections::HashMap<String, CommandExecution>,
+
+    // ========================================================================
+    // Command Channel (for async command execution - US-003)
+    // ========================================================================
+    /// Receiver for command execution messages from background threads.
+    /// The sender is cloned and moved to each background thread.
+    command_rx: std::sync::mpsc::Receiver<CommandMessage>,
+    /// Sender for command execution messages.
+    /// Cloned for each background command thread.
+    command_tx: std::sync::mpsc::Sender<CommandMessage>,
 }
 
 impl Default for Autom8App {
@@ -730,6 +757,9 @@ impl Autom8App {
             TabInfo::permanent(TabId::Projects, "Projects"),
         ];
 
+        // Create channel for command execution messages
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+
         let mut app = Self {
             current_tab: Tab::default(),
             tabs,
@@ -748,6 +778,8 @@ impl Autom8App {
             sidebar_collapsed: false,
             context_menu: None,
             command_executions: std::collections::HashMap::new(),
+            command_rx,
+            command_tx,
         };
         // Initial data load
         app.refresh_data();
@@ -1056,6 +1088,116 @@ impl Autom8App {
         }
     }
 
+    /// Spawn the `autom8 status --project <name>` command in a background thread.
+    /// Opens a new command output tab and streams output to it.
+    pub fn spawn_status_command(&mut self, project_name: &str) {
+        // Open the tab first to get the cache key
+        let id = self.open_command_output_tab(project_name, "status");
+        let cache_key = id.cache_key();
+        let tx = self.command_tx.clone();
+        let project = project_name.to_string();
+
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+
+            // Spawn the autom8 status command
+            let result = Command::new("autom8")
+                .arg("status")
+                .arg("--project")
+                .arg(&project)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match result {
+                Ok(mut child) => {
+                    // Read stdout in a separate thread
+                    let stdout = child.stdout.take();
+                    let stderr = child.stderr.take();
+                    let tx_stdout = tx.clone();
+                    let tx_stderr = tx.clone();
+                    let cache_key_stdout = cache_key.clone();
+                    let cache_key_stderr = cache_key.clone();
+
+                    let stdout_handle = std::thread::spawn(move || {
+                        if let Some(stdout) = stdout {
+                            let reader = BufReader::new(stdout);
+                            for line in reader.lines() {
+                                if let Ok(line) = line {
+                                    let _ = tx_stdout.send(CommandMessage::Stdout {
+                                        cache_key: cache_key_stdout.clone(),
+                                        line,
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    let stderr_handle = std::thread::spawn(move || {
+                        if let Some(stderr) = stderr {
+                            let reader = BufReader::new(stderr);
+                            for line in reader.lines() {
+                                if let Ok(line) = line {
+                                    let _ = tx_stderr.send(CommandMessage::Stderr {
+                                        cache_key: cache_key_stderr.clone(),
+                                        line,
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    // Wait for output threads to finish
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+
+                    // Wait for the child process to exit
+                    match child.wait() {
+                        Ok(status) => {
+                            let exit_code = status.code().unwrap_or(-1);
+                            let _ = tx.send(CommandMessage::Completed { cache_key, exit_code });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(CommandMessage::Failed {
+                                cache_key,
+                                error: format!("Failed to wait for process: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(CommandMessage::Failed {
+                        cache_key,
+                        error: format!("Failed to spawn autom8: {}", e),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Poll for command execution messages and update state.
+    /// This should be called in the update loop to process messages from background threads.
+    fn poll_command_messages(&mut self) {
+        // Process all pending messages (non-blocking)
+        while let Ok(msg) = self.command_rx.try_recv() {
+            match msg {
+                CommandMessage::Stdout { cache_key, line } => {
+                    self.add_command_stdout(&cache_key, line);
+                }
+                CommandMessage::Stderr { cache_key, line } => {
+                    self.add_command_stderr(&cache_key, line);
+                }
+                CommandMessage::Completed { cache_key, exit_code } => {
+                    self.complete_command(&cache_key, exit_code);
+                }
+                CommandMessage::Failed { cache_key, error } => {
+                    self.fail_command(&cache_key, error);
+                }
+            }
+        }
+    }
+
     /// Close a tab by ID.
     /// Returns true if the tab was closed, false if the tab doesn't exist or is not closable.
     /// If the closed tab was active, switches to the previous tab or Projects tab.
@@ -1159,6 +1301,9 @@ impl eframe::App for Autom8App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Refresh data from disk if interval has elapsed
         self.maybe_refresh();
+
+        // Poll for command execution messages from background threads
+        self.poll_command_messages();
 
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
@@ -1418,12 +1563,13 @@ impl Autom8App {
             }
         }
 
-        // Handle the selected action (placeholder for US-003+)
+        // Handle the selected action
         if let Some(action) = selected_action {
-            // TODO: Implement actual command execution in US-003, US-004, US-005, US-006
+            let project_name = menu_state.project_name.clone();
             match action {
                 ContextMenuAction::Status => {
-                    // Will be implemented in US-003
+                    // Spawn the status command (US-003)
+                    self.spawn_status_command(&project_name);
                 }
                 ContextMenuAction::Describe => {
                     // Will be implemented in US-004
@@ -4794,5 +4940,260 @@ mod tests {
         let mut set = std::collections::HashSet::new();
         set.insert(tab_id.clone());
         assert!(set.contains(&TabId::CommandOutput(cache_key)));
+    }
+
+    // ========================================================================
+    // Command Message and Channel Tests (US-003)
+    // ========================================================================
+
+    #[test]
+    fn test_command_message_stdout() {
+        let msg = CommandMessage::Stdout {
+            cache_key: "test:status:123".to_string(),
+            line: "output line".to_string(),
+        };
+        if let CommandMessage::Stdout { cache_key, line } = msg {
+            assert_eq!(cache_key, "test:status:123");
+            assert_eq!(line, "output line");
+        } else {
+            panic!("Expected Stdout variant");
+        }
+    }
+
+    #[test]
+    fn test_command_message_stderr() {
+        let msg = CommandMessage::Stderr {
+            cache_key: "test:status:123".to_string(),
+            line: "error line".to_string(),
+        };
+        if let CommandMessage::Stderr { cache_key, line } = msg {
+            assert_eq!(cache_key, "test:status:123");
+            assert_eq!(line, "error line");
+        } else {
+            panic!("Expected Stderr variant");
+        }
+    }
+
+    #[test]
+    fn test_command_message_completed() {
+        let msg = CommandMessage::Completed {
+            cache_key: "test:status:123".to_string(),
+            exit_code: 0,
+        };
+        if let CommandMessage::Completed { cache_key, exit_code } = msg {
+            assert_eq!(cache_key, "test:status:123");
+            assert_eq!(exit_code, 0);
+        } else {
+            panic!("Expected Completed variant");
+        }
+    }
+
+    #[test]
+    fn test_command_message_failed() {
+        let msg = CommandMessage::Failed {
+            cache_key: "test:status:123".to_string(),
+            error: "spawn error".to_string(),
+        };
+        if let CommandMessage::Failed { cache_key, error } = msg {
+            assert_eq!(cache_key, "test:status:123");
+            assert_eq!(error, "spawn error");
+        } else {
+            panic!("Expected Failed variant");
+        }
+    }
+
+    #[test]
+    fn test_poll_command_messages_stdout() {
+        let mut app = Autom8App::new();
+
+        // Open a command output tab first
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Send a message through the channel
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "test output".to_string(),
+            })
+            .unwrap();
+
+        // Poll for messages
+        app.poll_command_messages();
+
+        // Verify the stdout was added
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 1);
+        assert_eq!(exec.stdout[0], "test output");
+    }
+
+    #[test]
+    fn test_poll_command_messages_stderr() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Stderr {
+                cache_key: cache_key.clone(),
+                line: "error output".to_string(),
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "error output");
+    }
+
+    #[test]
+    fn test_poll_command_messages_completed() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Completed {
+                cache_key: cache_key.clone(),
+                exit_code: 0,
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Completed);
+        assert_eq!(exec.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_poll_command_messages_failed() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        app.command_tx
+            .send(CommandMessage::Failed {
+                cache_key: cache_key.clone(),
+                error: "spawn error".to_string(),
+            })
+            .unwrap();
+
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.status, CommandStatus::Failed);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.stderr[0], "spawn error");
+    }
+
+    #[test]
+    fn test_poll_command_messages_multiple() {
+        let mut app = Autom8App::new();
+
+        let id = app.open_command_output_tab("project", "status");
+        let cache_key = id.cache_key();
+
+        // Send multiple messages
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "line 1".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: cache_key.clone(),
+                line: "line 2".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Stderr {
+                cache_key: cache_key.clone(),
+                line: "error".to_string(),
+            })
+            .unwrap();
+        app.command_tx
+            .send(CommandMessage::Completed {
+                cache_key: cache_key.clone(),
+                exit_code: 1,
+            })
+            .unwrap();
+
+        // Poll should process all messages
+        app.poll_command_messages();
+
+        let exec = app.get_command_execution(&cache_key).unwrap();
+        assert_eq!(exec.stdout.len(), 2);
+        assert_eq!(exec.stderr.len(), 1);
+        assert_eq!(exec.status, CommandStatus::Failed); // exit code 1
+        assert_eq!(exec.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_poll_command_messages_ignores_unknown_cache_key() {
+        let mut app = Autom8App::new();
+
+        // Send message for a cache key that doesn't exist
+        app.command_tx
+            .send(CommandMessage::Stdout {
+                cache_key: "nonexistent:key:123".to_string(),
+                line: "should be ignored".to_string(),
+            })
+            .unwrap();
+
+        // This should not panic
+        app.poll_command_messages();
+
+        // Verify no command execution was created
+        assert!(app.get_command_execution("nonexistent:key:123").is_none());
+    }
+
+    #[test]
+    fn test_spawn_status_command_creates_tab() {
+        let mut app = Autom8App::new();
+
+        // Note: spawn_status_command will actually try to spawn autom8,
+        // which may not be in PATH during tests. We test that the tab
+        // and execution are created correctly. The background thread
+        // will send a Failed message if autom8 isn't found.
+        app.spawn_status_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Status:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_status_tab_label_format() {
+        // Per US-003: Tab title format: "Status: {project-name}"
+        let id = CommandOutputId::new("my-awesome-project", "status");
+        let label = id.tab_label();
+        assert_eq!(label, "Status: my-awesome-project");
     }
 }
