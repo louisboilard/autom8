@@ -2791,6 +2791,7 @@ impl Autom8App {
             } else {
                 // Scrollable run history list
                 egui::ScrollArea::vertical()
+                    .id_salt("projects_right_panel")
                     .auto_shrink([false, false])
                     .scroll_bar_visibility(
                         egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
@@ -3025,6 +3026,7 @@ impl Autom8App {
         let selected = self.selected_project.clone();
 
         egui::ScrollArea::vertical()
+            .id_salt("projects_left_panel")
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
