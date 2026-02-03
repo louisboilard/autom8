@@ -58,22 +58,29 @@ pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 500;
 // ============================================================================
 
 /// Minimum width for a card in the grid layout.
-const CARD_MIN_WIDTH: f32 = 280.0;
+/// Cards should take approximately 50% of available width.
+const CARD_MIN_WIDTH: f32 = 400.0;
 
 /// Maximum width for a card in the grid layout.
-const CARD_MAX_WIDTH: f32 = 400.0;
+/// Allows cards to grow larger for better content display.
+const CARD_MAX_WIDTH: f32 = 800.0;
 
-/// Spacing between cards in the grid (uses LG from spacing scale).
-const CARD_SPACING: f32 = 16.0; // spacing::LG
+/// Spacing between cards in the grid (uses XL from spacing scale for larger cards).
+const CARD_SPACING: f32 = 24.0; // spacing::XL
 
-/// Internal padding for cards (uses LG from spacing scale).
-const CARD_PADDING: f32 = 16.0; // spacing::LG
+/// Internal padding for cards (uses XL from spacing scale for larger cards).
+const CARD_PADDING: f32 = 20.0; // Between LG and XL
 
 /// Minimum height for a card.
-const CARD_MIN_HEIGHT: f32 = 240.0;
+/// Cards should take approximately 50% of available height.
+const CARD_MIN_HEIGHT: f32 = 320.0;
 
 /// Number of output lines to display in session cards.
-const OUTPUT_LINES_TO_SHOW: usize = 5;
+/// Increased for better monitoring of streaming output.
+const OUTPUT_LINES_TO_SHOW: usize = 12;
+
+/// Maximum number of columns in the grid layout (2x2 grid for 1/4 screen each).
+const MAX_GRID_COLUMNS: usize = 2;
 
 // MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
@@ -1985,19 +1992,22 @@ impl Autom8App {
     }
 
     /// Calculate the number of grid columns based on available width.
+    /// Always returns at most 2 columns for a 2x2 grid layout where each card
+    /// takes approximately 1/4 of the screen.
     fn calculate_grid_columns(available_width: f32) -> usize {
         // Calculate how many cards fit, accounting for spacing
         let card_with_spacing = CARD_MIN_WIDTH + CARD_SPACING;
         let columns = ((available_width + CARD_SPACING) / card_with_spacing).floor() as usize;
 
-        // Clamp to reasonable range: minimum 2, maximum 4
-        columns.clamp(2, 4)
+        // Clamp to range: minimum 1, maximum 2 (for 2x2 grid of 1/4 screen cards)
+        columns.clamp(1, MAX_GRID_COLUMNS)
     }
 
     /// Calculate the card width for the current number of columns.
+    /// Accounts for edge spacing and inter-card spacing.
     fn calculate_card_width(available_width: f32, columns: usize) -> f32 {
-        // Total spacing between cards
-        let total_spacing = CARD_SPACING * (columns as f32 - 1.0);
+        // Total spacing: edges (left + right) + between cards
+        let total_spacing = CARD_SPACING * (columns as f32 + 1.0);
         let card_width = (available_width - total_spacing) / columns as f32;
 
         // Clamp to min/max bounds
@@ -2005,28 +2015,50 @@ impl Autom8App {
     }
 
     /// Render the sessions in a responsive grid layout.
+    /// Cards are sized to approximately 50% width and 50% height, creating a 2x2 visible grid.
+    /// When more than 4 sessions exist, the content scrolls vertically.
     fn render_sessions_grid(&self, ui: &mut egui::Ui) {
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+        let columns = Self::calculate_grid_columns(available_width);
+
+        // Calculate card dimensions based on available space
+        let card_width = Self::calculate_card_width(available_width, columns);
+
+        // Calculate height: 2 rows visible with spacing (edge spacing + inter-row spacing)
+        let total_v_spacing = CARD_SPACING * 3.0; // Top + between rows + bottom
+        let card_height = ((available_height - total_v_spacing) / 2.0).max(CARD_MIN_HEIGHT);
+
+        // Calculate total width of card row for centering
+        let row_width = (card_width * columns as f32) + (CARD_SPACING * (columns as f32 - 1.0));
+        let h_offset = ((available_width - row_width) / 2.0).max(0.0);
+
         // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
-                let available_width = ui.available_width();
-                let columns = Self::calculate_grid_columns(available_width);
-                let card_width = Self::calculate_card_width(available_width, columns);
+                // Add top spacing
+                ui.add_space(CARD_SPACING);
 
-                // Create rows of cards with consistent spacing
+                // Create rows of cards with consistent spacing, centered horizontally
                 let mut session_iter = self.sessions.iter().peekable();
                 while session_iter.peek().is_some() {
                     ui.horizontal(|ui| {
-                        for _ in 0..columns {
+                        // Add horizontal offset for centering
+                        ui.add_space(h_offset);
+
+                        for i in 0..columns {
                             if let Some(session) = session_iter.next() {
-                                self.render_session_card(ui, session, card_width);
-                                ui.add_space(spacing::LG);
+                                self.render_session_card(ui, session, card_width, card_height);
+                                // Add spacing between cards (but not after the last one in row)
+                                if i < columns - 1 {
+                                    ui.add_space(CARD_SPACING);
+                                }
                             }
                         }
                     });
-                    ui.add_space(spacing::LG);
+                    ui.add_space(CARD_SPACING);
                 }
             });
     }
@@ -2038,10 +2070,16 @@ impl Autom8App {
     /// - Status row: Colored indicator dot with state label
     /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
     /// - Duration row: Time elapsed since run started
-    /// - Output section: Last 5 lines of Claude output in monospace font
-    fn render_session_card(&self, ui: &mut egui::Ui, session: &SessionData, card_width: f32) {
+    /// - Output section: Last OUTPUT_LINES_TO_SHOW lines of Claude output in monospace font
+    fn render_session_card(
+        &self,
+        ui: &mut egui::Ui,
+        session: &SessionData,
+        card_width: f32,
+        card_height: f32,
+    ) {
         // Define card dimensions
-        let card_size = Vec2::new(card_width, CARD_MIN_HEIGHT);
+        let card_size = Vec2::new(card_width, card_height);
 
         // Allocate space for the card
         let (rect, _response) = ui.allocate_exact_size(card_size, Sense::hover());
@@ -2999,24 +3037,35 @@ mod tests {
 
     #[test]
     fn test_calculate_grid_columns() {
-        assert_eq!(Autom8App::calculate_grid_columns(300.0), 2); // Very narrow
-        assert_eq!(Autom8App::calculate_grid_columns(500.0), 2); // Narrow
-        assert_eq!(Autom8App::calculate_grid_columns(900.0), 3); // Medium
-        assert_eq!(Autom8App::calculate_grid_columns(1400.0), 4); // Wide
-        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 4); // Very wide (capped)
+        // Cards take ~50% of width, so max 2 columns for 2x2 grid layout
+        assert_eq!(Autom8App::calculate_grid_columns(300.0), 1); // Very narrow - single column
+        assert_eq!(Autom8App::calculate_grid_columns(500.0), 1); // Narrow - single column
+        assert_eq!(Autom8App::calculate_grid_columns(900.0), 2); // Medium - 2 columns
+        assert_eq!(Autom8App::calculate_grid_columns(1400.0), 2); // Wide - capped at 2
+        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 2); // Very wide - capped at 2
     }
 
     #[test]
     fn test_calculate_card_width() {
-        // Normal cases
-        let width_2col = Autom8App::calculate_card_width(600.0, 2);
+        // With new formula: (available - (columns+1)*spacing) / columns
+        // For 2 columns: (width - 3*24) / 2 = (width - 72) / 2
+
+        // Normal cases - cards should be within bounds
+        // 1200 - 72 = 1128 / 2 = 564, within 400-800 range
+        let width_2col = Autom8App::calculate_card_width(1200.0, 2);
         assert!(width_2col >= CARD_MIN_WIDTH && width_2col <= CARD_MAX_WIDTH);
 
-        // Clamps to min
-        assert_eq!(Autom8App::calculate_card_width(400.0, 4), CARD_MIN_WIDTH);
+        // Clamps to min when width is too small
+        // 600 - 72 = 528 / 2 = 264, should clamp to 400
+        assert_eq!(Autom8App::calculate_card_width(600.0, 2), CARD_MIN_WIDTH);
 
-        // Clamps to max
-        assert_eq!(Autom8App::calculate_card_width(1000.0, 2), CARD_MAX_WIDTH);
+        // Clamps to max when width is very large
+        // 2000 - 72 = 1928 / 2 = 964, should clamp to 800
+        assert_eq!(Autom8App::calculate_card_width(2000.0, 2), CARD_MAX_WIDTH);
+
+        // Single column case
+        // 900 - 48 = 852 / 1 = 852, should clamp to 800
+        assert_eq!(Autom8App::calculate_card_width(900.0, 1), CARD_MAX_WIDTH);
     }
 
     // ========================================================================
