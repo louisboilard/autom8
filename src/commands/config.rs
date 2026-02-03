@@ -106,10 +106,7 @@ fn display_project_config() -> Result<()> {
 fn load_config_from_path(path: &std::path::Path) -> Result<Config> {
     let content = fs::read_to_string(path)?;
     toml::from_str(&content).map_err(|e| {
-        Autom8Error::Config(format!(
-            "Failed to parse config file at {:?}: {}",
-            path, e
-        ))
+        Autom8Error::Config(format!("Failed to parse config file at {:?}: {}", path, e))
     })
 }
 
@@ -123,11 +120,15 @@ fn print_config_as_toml(config: &Config) {
         "{CYAN}worktree_path_pattern{RESET} = \"{}\"",
         config.worktree_path_pattern
     );
-    println!("{CYAN}worktree_cleanup{RESET} = {}", config.worktree_cleanup);
+    println!(
+        "{CYAN}worktree_cleanup{RESET} = {}",
+        config.worktree_cleanup
+    );
 }
 
 /// Convert a Config to a TOML string (for testing).
-pub fn config_to_toml_string(config: &Config) -> String {
+#[cfg(test)]
+fn config_to_toml_string(config: &Config) -> String {
     format!(
         "review = {}\n\
          commit = {}\n\

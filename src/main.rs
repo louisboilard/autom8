@@ -233,61 +233,9 @@ VALID KEYS:
 fn main() {
     let cli = Cli::parse();
 
-    let runner = match Runner::new() {
-        Ok(r) => r.with_verbose(cli.verbose),
-        Err(e) => {
-            print_error(&format!("Failed to initialize runner: {}", e));
-            std::process::exit(1);
-        }
-    };
-
+    // Handle commands that don't require a Runner (can work outside git repos)
     let result = match (&cli.file, &cli.command) {
-        // Positional file argument takes precedence
-        (Some(file), _) => run_with_file(&runner, file),
-
-        // Subcommands
-        (
-            None,
-            Some(Commands::Run {
-                spec,
-                skip_review,
-                worktree,
-                no_worktree,
-            }),
-        ) => run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree),
-
-        (None, Some(Commands::Status { all, global })) => {
-            print_header();
-            if *global {
-                global_status_command()
-            } else if *all {
-                all_sessions_status_command()
-            } else {
-                status_command(&runner)
-            }
-        }
-
-        (None, Some(Commands::Resume { session, list })) => {
-            resume_command(session.as_deref(), *list)
-        }
-
-        (
-            None,
-            Some(Commands::Clean {
-                worktrees,
-                all,
-                session,
-                orphaned,
-                force,
-            }),
-        ) => clean_command(CleanOptions {
-            worktrees: *worktrees,
-            all: *all,
-            session: session.clone(),
-            orphaned: *orphaned,
-            force: *force,
-        }),
-
+        // Config command - handle all scopes to give proper error messages
         (None, Some(Commands::Config { global, project })) => {
             let scope = match (global, project) {
                 (true, false) => ConfigScope::Global,
@@ -297,23 +245,7 @@ fn main() {
             config_display_command(scope)
         }
 
-        (None, Some(Commands::Init)) => init_command(),
-
-        (None, Some(Commands::Projects)) => projects_command(),
-
-        (None, Some(Commands::List)) => list_command(),
-
-        (None, Some(Commands::Describe { project_name })) => {
-            describe_command(project_name.as_deref().unwrap_or(""))
-        }
-
-        (None, Some(Commands::PrReview)) => {
-            print_header();
-            pr_review_command(cli.verbose)
-        }
-
-        (None, Some(Commands::Monitor { project })) => monitor_command(project.as_deref()),
-
+        // Completions command doesn't need a git repo
         (None, Some(Commands::Completions { shell })) => match ShellType::from_name(shell) {
             Ok(shell_type) => {
                 print_completion_script(shell_type);
@@ -329,8 +261,90 @@ fn main() {
             }
         },
 
-        // No file and no command - check for existing state first, then start spec creation
-        (None, None) => default_command(cli.verbose),
+        // All other commands need the Runner (which requires a git repo)
+        _ => {
+            let runner = match Runner::new() {
+                Ok(r) => r.with_verbose(cli.verbose),
+                Err(e) => {
+                    print_error(&format!("Failed to initialize runner: {}", e));
+                    std::process::exit(1);
+                }
+            };
+
+            match (&cli.file, &cli.command) {
+                // Positional file argument takes precedence
+                (Some(file), _) => run_with_file(&runner, file),
+
+                // Subcommands
+                (
+                    None,
+                    Some(Commands::Run {
+                        spec,
+                        skip_review,
+                        worktree,
+                        no_worktree,
+                    }),
+                ) => run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree),
+
+                (None, Some(Commands::Status { all, global })) => {
+                    print_header();
+                    if *global {
+                        global_status_command()
+                    } else if *all {
+                        all_sessions_status_command()
+                    } else {
+                        status_command(&runner)
+                    }
+                }
+
+                (None, Some(Commands::Resume { session, list })) => {
+                    resume_command(session.as_deref(), *list)
+                }
+
+                (
+                    None,
+                    Some(Commands::Clean {
+                        worktrees,
+                        all,
+                        session,
+                        orphaned,
+                        force,
+                    }),
+                ) => clean_command(CleanOptions {
+                    worktrees: *worktrees,
+                    all: *all,
+                    session: session.clone(),
+                    orphaned: *orphaned,
+                    force: *force,
+                }),
+
+                // Config already handled above
+                (None, Some(Commands::Config { .. })) => unreachable!(),
+
+                (None, Some(Commands::Init)) => init_command(),
+
+                (None, Some(Commands::Projects)) => projects_command(),
+
+                (None, Some(Commands::List)) => list_command(),
+
+                (None, Some(Commands::Describe { project_name })) => {
+                    describe_command(project_name.as_deref().unwrap_or(""))
+                }
+
+                (None, Some(Commands::PrReview)) => {
+                    print_header();
+                    pr_review_command(cli.verbose)
+                }
+
+                (None, Some(Commands::Monitor { project })) => monitor_command(project.as_deref()),
+
+                // Completions already handled above
+                (None, Some(Commands::Completions { .. })) => unreachable!(),
+
+                // No file and no command - check for existing state first, then start spec creation
+                (None, None) => default_command(cli.verbose),
+            }
+        }
     };
 
     if let Err(e) = result {
