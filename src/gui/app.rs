@@ -111,6 +111,29 @@ const SPLIT_DIVIDER_MARGIN: f32 = 12.0; // spacing::MD
 const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
 
 // ============================================================================
+// Sidebar Constants (Sidebar Navigation - US-003)
+// ============================================================================
+
+/// Width of the sidebar when expanded.
+/// Based on Claude desktop reference (~200-220px).
+const SIDEBAR_WIDTH: f32 = 220.0;
+
+/// Height of each navigation item in the sidebar.
+const SIDEBAR_ITEM_HEIGHT: f32 = 40.0;
+
+/// Horizontal padding for sidebar items.
+const SIDEBAR_ITEM_PADDING_H: f32 = 16.0; // spacing::LG
+
+/// Vertical padding for sidebar items.
+const SIDEBAR_ITEM_PADDING_V: f32 = 8.0; // spacing::SM
+
+/// Width of the accent bar indicator for active items.
+const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
+
+/// Corner rounding for sidebar item backgrounds.
+const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
+
+// ============================================================================
 // Data Layer Types
 // ============================================================================
 
@@ -938,16 +961,23 @@ impl eframe::App for Autom8App {
         #[cfg(target_os = "macos")]
         self.render_title_bar(ctx);
 
-        // Header with tab bar
-        egui::TopBottomPanel::top("header")
-            .exact_height(HEADER_HEIGHT)
+        // Sidebar navigation (replaces horizontal tab bar - US-003)
+        egui::SidePanel::left("sidebar")
+            .exact_width(SIDEBAR_WIDTH)
+            .resizable(false)
             .frame(
                 egui::Frame::none()
-                    .fill(colors::SURFACE)
-                    .inner_margin(egui::Margin::symmetric(spacing::LG, 0.0)),
+                    .fill(colors::BACKGROUND)
+                    .inner_margin(egui::Margin {
+                        left: spacing::MD,
+                        right: spacing::MD,
+                        top: spacing::LG,
+                        bottom: spacing::LG,
+                    })
+                    .stroke(Stroke::new(1.0, colors::SEPARATOR)),
             )
             .show(ctx, |ui| {
-                self.render_header(ui);
+                self.render_sidebar(ui);
             });
 
         // Content area fills remaining space
@@ -991,7 +1021,11 @@ impl Autom8App {
             .show(ctx, |ui| {
                 // Make the entire title bar area draggable for window movement
                 let title_bar_rect = ui.max_rect();
-                let response = ui.interact(title_bar_rect, ui.id().with("title_bar_drag"), Sense::click_and_drag());
+                let response = ui.interact(
+                    title_bar_rect,
+                    ui.id().with("title_bar_drag"),
+                    Sense::click_and_drag(),
+                );
 
                 // Enable window dragging when the title bar is dragged
                 if response.drag_started() {
@@ -1018,6 +1052,124 @@ impl Autom8App {
                     // (currently empty - available for future enhancements)
                 });
             });
+    }
+
+    // ========================================================================
+    // Sidebar Navigation (US-003)
+    // ========================================================================
+
+    /// Render the sidebar navigation panel.
+    ///
+    /// The sidebar contains permanent navigation items (Active Runs, Projects)
+    /// as a vertical list with visual indicators for the active item.
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            // Add some top spacing to align with content area
+            ui.add_space(spacing::SM);
+
+            // Render permanent navigation items
+            let mut tab_to_activate: Option<TabId> = None;
+
+            // Snapshot of permanent tabs (ActiveRuns and Projects only)
+            let permanent_tabs: Vec<(TabId, &'static str)> = vec![
+                (TabId::ActiveRuns, "Active Runs"),
+                (TabId::Projects, "Projects"),
+            ];
+
+            for (tab_id, label) in permanent_tabs {
+                let is_active = self.active_tab_id == tab_id;
+                if self.render_sidebar_item(ui, label, is_active) {
+                    tab_to_activate = Some(tab_id);
+                }
+                ui.add_space(spacing::XS);
+            }
+
+            // Process tab activation after render loop
+            if let Some(tab_id) = tab_to_activate {
+                self.set_active_tab(tab_id);
+            }
+        });
+    }
+
+    /// Render a single sidebar navigation item.
+    ///
+    /// Returns true if the item was clicked.
+    fn render_sidebar_item(&self, ui: &mut egui::Ui, label: &str, is_active: bool) -> bool {
+        // Calculate item dimensions
+        let available_width = ui.available_width();
+        let item_size = egui::vec2(available_width, SIDEBAR_ITEM_HEIGHT);
+
+        // Allocate space and create interaction response
+        let (rect, response) = ui.allocate_exact_size(item_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Determine background color based on state
+        let bg_color = if is_active {
+            colors::SURFACE_SELECTED
+        } else if is_hovered {
+            colors::SURFACE_HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        // Draw background
+        if bg_color != Color32::TRANSPARENT {
+            ui.painter().rect_filled(
+                rect,
+                Rounding::same(SIDEBAR_ITEM_ROUNDING),
+                bg_color,
+            );
+        }
+
+        // Draw active indicator (accent bar on the left)
+        if is_active {
+            let indicator_rect = Rect::from_min_size(
+                rect.min,
+                egui::vec2(SIDEBAR_ACTIVE_INDICATOR_WIDTH, rect.height()),
+            );
+            ui.painter().rect_filled(
+                indicator_rect,
+                Rounding {
+                    nw: SIDEBAR_ITEM_ROUNDING,
+                    sw: SIDEBAR_ITEM_ROUNDING,
+                    ne: 0.0,
+                    se: 0.0,
+                },
+                colors::ACCENT,
+            );
+        }
+
+        // Determine text color based on state
+        let text_color = if is_active {
+            colors::TEXT_PRIMARY
+        } else if is_hovered {
+            colors::TEXT_SECONDARY
+        } else {
+            colors::TEXT_SECONDARY
+        };
+
+        // Draw text label
+        let text_pos = egui::pos2(
+            rect.left() + SIDEBAR_ITEM_PADDING_H,
+            rect.center().y,
+        );
+
+        ui.painter().text(
+            text_pos,
+            egui::Align2::LEFT_CENTER,
+            label,
+            typography::font(
+                FontSize::Body,
+                if is_active {
+                    FontWeight::SemiBold
+                } else {
+                    FontWeight::Medium
+                },
+            ),
+            text_color,
+        );
+
+        response.clicked()
     }
 
     // ========================================================================
@@ -4908,6 +5060,102 @@ mod tests {
             "MIN_HEIGHT ({}) should accommodate title bar, header, and minimal content ({})",
             MIN_HEIGHT,
             min_ui_height
+        );
+    }
+
+    // ========================================================================
+    // Sidebar Navigation Tests (US-003)
+    // ========================================================================
+
+    #[test]
+    fn test_sidebar_width_is_within_spec() {
+        // Acceptance criteria: Sidebar width is fixed (~200-220px)
+        assert!(
+            SIDEBAR_WIDTH >= 200.0 && SIDEBAR_WIDTH <= 220.0,
+            "Sidebar width ({}) should be between 200-220px as specified",
+            SIDEBAR_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_sidebar_item_height_is_reasonable() {
+        // Navigation items should have comfortable touch/click targets
+        assert!(
+            SIDEBAR_ITEM_HEIGHT >= 32.0 && SIDEBAR_ITEM_HEIGHT <= 56.0,
+            "Sidebar item height ({}) should be comfortable for interaction",
+            SIDEBAR_ITEM_HEIGHT
+        );
+    }
+
+    #[test]
+    fn test_sidebar_item_padding_is_reasonable() {
+        // Padding should provide visual breathing room
+        assert!(
+            SIDEBAR_ITEM_PADDING_H >= spacing::SM && SIDEBAR_ITEM_PADDING_H <= spacing::XL,
+            "Horizontal padding should use spacing scale"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_active_indicator_is_visible() {
+        // Active indicator should be noticeable but not overwhelming
+        assert!(
+            SIDEBAR_ACTIVE_INDICATOR_WIDTH >= 2.0 && SIDEBAR_ACTIVE_INDICATOR_WIDTH <= 4.0,
+            "Active indicator width ({}) should be visible but subtle",
+            SIDEBAR_ACTIVE_INDICATOR_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_sidebar_item_rounding_matches_theme() {
+        // Rounding should be consistent with the app's visual style
+        assert!(
+            SIDEBAR_ITEM_ROUNDING >= rounding::BUTTON && SIDEBAR_ITEM_ROUNDING <= rounding::CARD,
+            "Sidebar item rounding should be consistent with theme"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_uses_warm_background() {
+        // Sidebar should use the warm BACKGROUND color from the theme
+        // This is a documentation test - the actual color is set in update()
+        // Verify BACKGROUND has warm tones (R >= G >= B)
+        let bg = colors::BACKGROUND;
+        assert!(
+            bg.r() >= bg.g() && bg.g() >= bg.b(),
+            "Sidebar background should use warm BACKGROUND color"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_item_states_use_theme_colors() {
+        // Active state should use SURFACE_SELECTED
+        let selected = colors::SURFACE_SELECTED;
+        assert_ne!(selected, Color32::TRANSPARENT, "Selected state should have a color");
+
+        // Hover state should use SURFACE_HOVER
+        let hover = colors::SURFACE_HOVER;
+        assert_ne!(hover, Color32::TRANSPARENT, "Hover state should have a color");
+
+        // Hover should be lighter than selected (in warm theme, higher values = lighter)
+        let hover_sum = hover.r() as u32 + hover.g() as u32 + hover.b() as u32;
+        let selected_sum = selected.r() as u32 + selected.g() as u32 + selected.b() as u32;
+        assert!(
+            hover_sum > selected_sum,
+            "Hover should be lighter than selected"
+        );
+    }
+
+    #[test]
+    fn test_sidebar_fits_in_minimum_window() {
+        // Sidebar should fit within minimum window width with room for content
+        let min_content_width = 150.0; // Minimum reasonable content width
+        assert!(
+            SIDEBAR_WIDTH + min_content_width <= MIN_WIDTH,
+            "Sidebar ({}) + min content ({}) should fit in min window width ({})",
+            SIDEBAR_WIDTH,
+            min_content_width,
+            MIN_WIDTH
         );
     }
 }
