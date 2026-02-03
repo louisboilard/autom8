@@ -325,11 +325,13 @@ impl Default for ProgressBar {
 /// Truncate a string with ellipsis if it exceeds the max length.
 ///
 /// If the string fits within `max_len` characters, it is returned unchanged.
-/// Otherwise, it is truncated to `max_len - 3` characters plus "...".
+/// Otherwise, it is truncated at the last word boundary (space) before the
+/// character limit, with "..." appended.
 ///
 /// Special cases:
 /// - If `max_len <= 3`, the string is simply truncated without ellipsis
 /// - Empty strings are returned unchanged
+/// - If no space exists before the limit, falls back to character-based truncation
 ///
 /// This function is Unicode-safe and operates on characters, not bytes.
 pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
@@ -339,8 +341,18 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     } else if max_len <= 3 {
         s.chars().take(max_len).collect()
     } else {
-        let truncated: String = s.chars().take(max_len - 3).collect();
-        format!("{}...", truncated)
+        let target_len = max_len - 3; // Reserve space for "..."
+        let truncated: String = s.chars().take(target_len).collect();
+
+        // Try to find the last space to break at a word boundary
+        let truncate_at = truncated.rfind(' ').unwrap_or(target_len);
+
+        if truncate_at == 0 {
+            // No space found or only leading space - fall back to character truncation
+            format!("{}...", truncated.trim_end())
+        } else {
+            format!("{}...", truncated[..truncate_at].trim_end())
+        }
     }
 }
 
@@ -751,10 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_with_ellipsis_long_string() {
+    fn test_truncate_with_ellipsis_long_string_word_boundary() {
+        // Should break at word boundary "is a" instead of mid-word "ve"
         let result = truncate_with_ellipsis("this is a very long string", 15);
-        assert_eq!(result, "this is a ve...");
-        assert_eq!(result.len(), 15);
+        assert_eq!(result, "this is a...");
+        assert!(result.len() <= 15);
     }
 
     #[test]
@@ -767,6 +780,59 @@ mod tests {
     fn test_truncate_with_ellipsis_empty_string() {
         let result = truncate_with_ellipsis("", 10);
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_no_space_fallback() {
+        // When there's no space, fall back to character-based truncation
+        let result = truncate_with_ellipsis("superlongword", 10);
+        assert_eq!(result, "superlo...");
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_word_boundary_exact() {
+        // "hello world" with max 11 fits exactly
+        let result = truncate_with_ellipsis("hello world", 11);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_word_boundary_just_over() {
+        // "hello world test" with max 14 -> target_len = 11 -> "hello world" -> last space at 5
+        // Should truncate at "hello" since "world" would exceed
+        let result = truncate_with_ellipsis("hello world test", 14);
+        assert_eq!(result, "hello...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_single_word_too_long() {
+        // Single word that's too long should use character truncation
+        // max_len 15, target_len = 12 -> "internationa" -> no space -> fall back to char truncation
+        let result = truncate_with_ellipsis("internationalization", 15);
+        assert_eq!(result, "internationa...");
+        assert!(result.len() <= 15);
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_preserves_short_content() {
+        // Short content should be unchanged
+        let result = truncate_with_ellipsis("ok", 10);
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_multiple_spaces() {
+        // max_len 16, target_len = 13 -> "one two three" -> last space at 7 -> "one two"
+        let result = truncate_with_ellipsis("one two three four five", 16);
+        assert_eq!(result, "one two...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_trailing_space_trimmed() {
+        // Trailing spaces before truncation point should be trimmed
+        let result = truncate_with_ellipsis("hello   world", 10);
+        assert_eq!(result, "hello...");
     }
 
     // ------------------------------------------------------------------------
