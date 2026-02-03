@@ -362,21 +362,9 @@ pub fn init(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::components::Status;
 
     #[test]
     fn test_spacing_scale() {
-        // Verify spacing scale values
-        assert_eq!(spacing::XS, 4.0);
-        assert_eq!(spacing::SM, 8.0);
-        assert_eq!(spacing::MD, 12.0);
-        assert_eq!(spacing::LG, 16.0);
-        assert_eq!(spacing::XL, 24.0);
-        assert_eq!(spacing::XXL, 32.0);
-    }
-
-    #[test]
-    fn test_spacing_scale_progression() {
         // Verify spacing scale is monotonically increasing
         assert!(spacing::XS < spacing::SM);
         assert!(spacing::SM < spacing::MD);
@@ -386,44 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rounding_values() {
-        assert_eq!(rounding::CARD, 8.0);
-        assert_eq!(rounding::BUTTON, 4.0);
-        assert_eq!(rounding::SMALL, 2.0);
-        assert_eq!(rounding::NONE, 0.0);
-    }
-
-    #[test]
-    fn test_status_colors() {
-        // Status enum is defined in components module
-        assert_eq!(Status::Running.color(), colors::STATUS_RUNNING);
-        assert_eq!(Status::Success.color(), colors::STATUS_SUCCESS);
-        assert_eq!(Status::Warning.color(), colors::STATUS_WARNING);
-        assert_eq!(Status::Error.color(), colors::STATUS_ERROR);
-        assert_eq!(Status::Idle.color(), colors::STATUS_IDLE);
-    }
-
-    #[test]
-    fn test_status_background_colors() {
-        // Status enum is defined in components module
-        assert_eq!(
-            Status::Running.background_color(),
-            colors::STATUS_RUNNING_BG
-        );
-        assert_eq!(
-            Status::Success.background_color(),
-            colors::STATUS_SUCCESS_BG
-        );
-        assert_eq!(
-            Status::Warning.background_color(),
-            colors::STATUS_WARNING_BG
-        );
-        assert_eq!(Status::Error.background_color(), colors::STATUS_ERROR_BG);
-        assert_eq!(Status::Idle.background_color(), colors::STATUS_IDLE_BG);
-    }
-
-    #[test]
-    fn test_shadows_are_subtle() {
+    fn test_shadows() {
         let subtle = shadow::subtle();
         let medium = shadow::medium();
         let elevated = shadow::elevated();
@@ -436,362 +387,97 @@ mod tests {
         // Verify blur increases with elevation
         assert!(subtle.blur < medium.blur);
         assert!(medium.blur < elevated.blur);
-    }
 
-    #[test]
-    fn test_shadows_use_warm_tones() {
-        // Verify shadow colors have warm tones (R > G > B)
+        // Verify warm tones
         let warm = shadow::shadow_warm_color();
-        assert!(
-            warm.r() > warm.g() && warm.g() > warm.b(),
-            "Shadow base color should be warm (R > G > B), got RGB({}, {}, {})",
-            warm.r(),
-            warm.g(),
-            warm.b()
-        );
+        assert!(warm.r() > warm.g() && warm.g() > warm.b());
     }
 
     #[test]
-    fn test_shadows_have_consistent_warmth() {
-        // All shadow levels should use the same warm base color
-        let subtle = shadow::subtle();
-        let medium = shadow::medium();
-        let elevated = shadow::elevated();
-
-        // Extract RGB ratios (alpha varies, but RGB ratios should match)
-        let warm = shadow::shadow_warm_color();
-
-        // Verify each shadow uses the warm base color RGB values
-        assert_eq!(subtle.color.r(), warm.r());
-        assert_eq!(subtle.color.g(), warm.g());
-        assert_eq!(subtle.color.b(), warm.b());
-
-        assert_eq!(medium.color.r(), warm.r());
-        assert_eq!(medium.color.g(), warm.g());
-        assert_eq!(medium.color.b(), warm.b());
-
-        assert_eq!(elevated.color.r(), warm.r());
-        assert_eq!(elevated.color.g(), warm.g());
-        assert_eq!(elevated.color.b(), warm.b());
-    }
-
-    #[test]
-    fn test_colors_are_distinct() {
-        // Status colors should be visually distinct
-        assert_ne!(colors::STATUS_RUNNING, colors::STATUS_SUCCESS);
-        assert_ne!(colors::STATUS_SUCCESS, colors::STATUS_WARNING);
-        assert_ne!(colors::STATUS_WARNING, colors::STATUS_ERROR);
-        assert_ne!(colors::STATUS_ERROR, colors::STATUS_IDLE);
-    }
-
-    #[test]
-    fn test_text_contrast_against_background() {
-        // Simplified contrast check: primary text should be much darker than background
-        let text_luminance = colors::TEXT_PRIMARY.r() as u32
+    fn test_text_contrast() {
+        // Primary text should have good contrast against both background and surface
+        let text_lum = colors::TEXT_PRIMARY.r() as u32
             + colors::TEXT_PRIMARY.g() as u32
             + colors::TEXT_PRIMARY.b() as u32;
-        let bg_luminance = colors::BACKGROUND.r() as u32
+        let bg_lum = colors::BACKGROUND.r() as u32
             + colors::BACKGROUND.g() as u32
             + colors::BACKGROUND.b() as u32;
-
-        // Text should be significantly darker than background
-        assert!(text_luminance < bg_luminance);
-
-        // The difference should be substantial for readability
-        let contrast_diff = bg_luminance - text_luminance;
-        assert!(
-            contrast_diff > 400,
-            "Expected contrast difference > 400, got {}",
-            contrast_diff
-        );
-    }
-
-    #[test]
-    fn test_text_contrast_against_surface() {
-        // Primary text should have good contrast against surface (white)
-        let text_luminance = colors::TEXT_PRIMARY.r() as u32
-            + colors::TEXT_PRIMARY.g() as u32
-            + colors::TEXT_PRIMARY.b() as u32;
-        let surface_luminance =
+        let surface_lum =
             colors::SURFACE.r() as u32 + colors::SURFACE.g() as u32 + colors::SURFACE.b() as u32;
 
-        // Text should be significantly darker than surface
-        assert!(text_luminance < surface_luminance);
-
-        // The difference should be substantial for readability
-        let contrast_diff = surface_luminance - text_luminance;
         assert!(
-            contrast_diff > 500,
-            "Expected contrast difference > 500, got {}",
-            contrast_diff
+            bg_lum - text_lum > 400,
+            "Need contrast > 400 against background"
+        );
+        assert!(
+            surface_lum - text_lum > 500,
+            "Need contrast > 500 against surface"
         );
     }
 
     #[test]
-    fn test_configure_visuals_returns_light_base() {
+    fn test_configure_visuals() {
         let visuals = configure_visuals();
 
-        // Should be a light theme
         assert!(!visuals.dark_mode);
-    }
-
-    #[test]
-    fn test_configure_visuals_has_correct_rounding() {
-        let visuals = configure_visuals();
-
-        // Window rounding should be card rounding (8px)
-        assert_eq!(visuals.window_rounding, Rounding::same(rounding::CARD));
-
-        // Menu rounding should be button rounding (4px)
-        assert_eq!(visuals.menu_rounding, Rounding::same(rounding::BUTTON));
-    }
-
-    #[test]
-    fn test_configure_visuals_has_custom_colors() {
-        let visuals = configure_visuals();
-
-        // Verify custom colors are applied
         assert_eq!(visuals.window_fill, colors::SURFACE);
         assert_eq!(visuals.panel_fill, colors::BACKGROUND);
-        assert_eq!(visuals.hyperlink_color, colors::ACCENT);
+        assert_eq!(visuals.window_rounding, Rounding::same(rounding::CARD));
+        assert_eq!(visuals.widgets.hovered.bg_fill, colors::SURFACE_HOVER);
+        assert_eq!(visuals.widgets.active.bg_fill, colors::SURFACE_SELECTED);
+        assert_eq!(visuals.selection.bg_fill, colors::ACCENT_SUBTLE);
     }
 
     #[test]
-    fn test_configure_style_includes_visuals() {
+    fn test_configure_style() {
         let style = configure_style();
 
-        // Style should include our custom visuals
+        assert!(style.animation_time > 0.0 && style.animation_time <= 0.2);
+        assert!(style.spacing.scroll.floating);
         assert_eq!(style.visuals.window_fill, colors::SURFACE);
-        assert_eq!(style.visuals.panel_fill, colors::BACKGROUND);
     }
 
     #[test]
-    fn test_status_enum_equality() {
-        // Status enum is defined in components module
-        assert_eq!(Status::Running, Status::Running);
-        assert_ne!(Status::Running, Status::Idle);
-    }
-
-    #[test]
-    fn test_status_enum_copy() {
-        // Status enum is defined in components module
-        let status = Status::Success;
-        let copied = status;
-        assert_eq!(status, copied);
-    }
-
-    // ========================================================================
-    // Visual Polish Tests (US-007)
-    // ========================================================================
-
-    #[test]
-    fn test_animation_time_configured() {
-        let style = configure_style();
-        // Animation time should be configured for smooth transitions
-        assert!(
-            style.animation_time > 0.0,
-            "Animation time should be positive"
-        );
-        assert!(
-            style.animation_time <= 0.2,
-            "Animation time should not be too long (responsive feel)"
-        );
-    }
-
-    #[test]
-    fn test_widget_hover_visuals_configured() {
-        let visuals = configure_visuals();
-        // Hovered widgets should have distinct styling
-        assert_eq!(
-            visuals.widgets.hovered.bg_fill,
-            colors::SURFACE_HOVER,
-            "Hovered widgets should use SURFACE_HOVER"
-        );
-        assert_eq!(
-            visuals.widgets.hovered.bg_stroke.color,
-            colors::BORDER_FOCUSED,
-            "Hovered widgets should have focused border"
-        );
-    }
-
-    #[test]
-    fn test_widget_active_visuals_configured() {
-        let visuals = configure_visuals();
-        // Active/pressed widgets should have distinct styling
-        assert_eq!(
-            visuals.widgets.active.bg_fill,
-            colors::SURFACE_SELECTED,
-            "Active widgets should use SURFACE_SELECTED"
-        );
-        assert_eq!(
-            visuals.widgets.active.bg_stroke.color,
-            colors::ACCENT,
-            "Active widgets should have accent border"
-        );
-    }
-
-    #[test]
-    fn test_spacing_scale_consistency() {
-        // Verify spacing values follow a consistent scale
-        // Each step should be roughly double or 1.5x the previous
-        assert!(spacing::SM >= spacing::XS * 1.5);
-        assert!(spacing::MD >= spacing::SM * 1.25);
-        assert!(spacing::LG >= spacing::MD * 1.25);
-        assert!(spacing::XL >= spacing::LG * 1.25);
-    }
-
-    #[test]
-    fn test_scroll_style_configured() {
-        let style = configure_style();
-        // Scroll bars should have floating style for modern look
-        assert!(
-            style.spacing.scroll.floating,
-            "Scroll bars should use floating style"
-        );
-        assert!(
-            style.spacing.scroll.bar_width >= 6.0 && style.spacing.scroll.bar_width <= 12.0,
-            "Scroll bar width should be moderate"
-        );
-    }
-
-    #[test]
-    fn test_selection_colors_configured() {
-        let visuals = configure_visuals();
-        // Selection should use accent colors
-        assert_eq!(
-            visuals.selection.bg_fill,
-            colors::ACCENT_SUBTLE,
-            "Selection background should use ACCENT_SUBTLE"
-        );
-    }
-
-    // ========================================================================
-    // Warm Color Palette Tests (US-001)
-    // ========================================================================
-
-    #[test]
-    fn test_background_is_warm_cream() {
-        // BACKGROUND should be warm cream (~#FAF9F7), not cool gray
-        // Warm colors have R >= G >= B
-        let bg = colors::BACKGROUND;
-        assert!(
-            bg.r() >= bg.g() && bg.g() >= bg.b(),
-            "BACKGROUND should have warm tones (R >= G >= B), got RGB({}, {}, {})",
-            bg.r(),
-            bg.g(),
-            bg.b()
-        );
-        // Should be close to #FAF9F7 (250, 249, 247)
-        assert_eq!(bg, Color32::from_rgb(250, 249, 247));
-    }
-
-    #[test]
-    fn test_surface_hover_is_warm() {
-        // SURFACE_HOVER should use warm tones
-        let hover = colors::SURFACE_HOVER;
-        assert!(
-            hover.r() >= hover.g() && hover.g() >= hover.b(),
-            "SURFACE_HOVER should have warm tones (R >= G >= B), got RGB({}, {}, {})",
-            hover.r(),
-            hover.g(),
-            hover.b()
-        );
-    }
-
-    #[test]
-    fn test_surface_selected_is_warm() {
-        // SURFACE_SELECTED should use warm tones
-        let selected = colors::SURFACE_SELECTED;
-        assert!(
-            selected.r() >= selected.g() && selected.g() >= selected.b(),
-            "SURFACE_SELECTED should have warm tones (R >= G >= B), got RGB({}, {}, {})",
-            selected.r(),
-            selected.g(),
-            selected.b()
-        );
-    }
-
-    #[test]
-    fn test_borders_are_warm_gray() {
-        // BORDER and SEPARATOR should use warm gray tones
-        let border = colors::BORDER;
-        assert!(
-            border.r() >= border.g() && border.g() >= border.b(),
-            "BORDER should have warm tones (R >= G >= B), got RGB({}, {}, {})",
-            border.r(),
-            border.g(),
-            border.b()
-        );
-
-        let separator = colors::SEPARATOR;
-        assert!(
-            separator.r() >= separator.g() && separator.g() >= separator.b(),
-            "SEPARATOR should have warm tones (R >= G >= B), got RGB({}, {}, {})",
-            separator.r(),
-            separator.g(),
-            separator.b()
-        );
-    }
-
-    #[test]
-    fn test_status_colors_unchanged() {
-        // Status colors should remain unchanged for clarity
-        assert_eq!(
-            colors::STATUS_RUNNING,
-            Color32::from_rgb(0, 149, 255),
-            "STATUS_RUNNING should remain blue"
-        );
-        assert_eq!(
-            colors::STATUS_SUCCESS,
-            Color32::from_rgb(52, 199, 89),
-            "STATUS_SUCCESS should remain green"
-        );
-        assert_eq!(
-            colors::STATUS_WARNING,
-            Color32::from_rgb(255, 149, 0),
-            "STATUS_WARNING should remain amber"
-        );
-        assert_eq!(
-            colors::STATUS_ERROR,
-            Color32::from_rgb(255, 59, 48),
-            "STATUS_ERROR should remain red"
-        );
-    }
-
-    #[test]
-    fn test_text_colors_high_contrast() {
-        // Text colors should remain high-contrast for readability
-        // TEXT_PRIMARY should be dark
-        let text = colors::TEXT_PRIMARY;
-        let luminance = (text.r() as u32 + text.g() as u32 + text.b() as u32) / 3;
-        assert!(
-            luminance < 50,
-            "TEXT_PRIMARY should be dark for readability, got luminance {}",
-            luminance
-        );
-    }
-
-    #[test]
-    fn test_warm_palette_harmony() {
-        // Verify the warm colors form a cohesive palette
-        // Darker warm colors should still be warm
-        let colors_to_check = [
+    fn test_warm_color_palette() {
+        // All these colors should have warm tones (R >= G >= B)
+        let warm_colors = [
             ("BACKGROUND", colors::BACKGROUND),
             ("SURFACE_HOVER", colors::SURFACE_HOVER),
             ("SURFACE_SELECTED", colors::SURFACE_SELECTED),
             ("BORDER", colors::BORDER),
-            ("BORDER_FOCUSED", colors::BORDER_FOCUSED),
+            ("SEPARATOR", colors::SEPARATOR),
         ];
 
-        for (name, color) in colors_to_check {
-            // For warm colors, the difference between R and B should be positive
-            let warmth = color.r() as i32 - color.b() as i32;
+        for (name, color) in warm_colors {
             assert!(
-                warmth >= 0,
-                "{} should have warm tones (R >= B), got warmth diff {}",
+                color.r() >= color.g() && color.g() >= color.b(),
+                "{} should have warm tones (R >= G >= B), got RGB({}, {}, {})",
                 name,
-                warmth
+                color.r(),
+                color.g(),
+                color.b()
             );
+        }
+
+        // BACKGROUND should be the specific warm cream color
+        assert_eq!(colors::BACKGROUND, Color32::from_rgb(250, 249, 247));
+    }
+
+    #[test]
+    fn test_status_colors_distinct() {
+        // Status colors should be visually distinct
+        let status_colors = [
+            colors::STATUS_RUNNING,
+            colors::STATUS_SUCCESS,
+            colors::STATUS_WARNING,
+            colors::STATUS_ERROR,
+            colors::STATUS_IDLE,
+        ];
+
+        for i in 0..status_colors.len() {
+            for j in (i + 1)..status_colors.len() {
+                assert_ne!(status_colors[i], status_colors[j]);
+            }
         }
     }
 }

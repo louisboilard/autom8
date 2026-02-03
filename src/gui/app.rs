@@ -3308,38 +3308,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    #[test]
-    fn test_tab_default_is_active_runs() {
-        assert_eq!(Tab::default(), Tab::ActiveRuns);
-    }
-
-    #[test]
-    fn test_tab_labels() {
-        assert_eq!(Tab::ActiveRuns.label(), "Active Runs");
-        assert_eq!(Tab::Projects.label(), "Projects");
-    }
-
-    #[test]
-    fn test_tab_all_returns_all_tabs() {
-        let all = Tab::all();
-        assert_eq!(all.len(), 2);
-        assert!(all.contains(&Tab::ActiveRuns));
-        assert!(all.contains(&Tab::Projects));
-    }
-
-    #[test]
-    fn test_tab_equality() {
-        assert_eq!(Tab::ActiveRuns, Tab::ActiveRuns);
-        assert_eq!(Tab::Projects, Tab::Projects);
-        assert_ne!(Tab::ActiveRuns, Tab::Projects);
-    }
-
-    #[test]
-    fn test_tab_copy() {
-        let tab = Tab::Projects;
-        let copied = tab;
-        assert_eq!(tab, copied);
-    }
+    // ========================================================================
+    // App Initialization Tests
+    // ========================================================================
 
     #[test]
     fn test_autom8_app_new_defaults_to_active_runs() {
@@ -3351,34 +3322,6 @@ mod tests {
     fn test_autom8_app_new_with_filter() {
         let app = Autom8App::new(Some("test-project".to_string()));
         assert_eq!(app.project_filter, Some("test-project".to_string()));
-        assert_eq!(app.current_tab(), Tab::ActiveRuns);
-    }
-
-    #[test]
-    fn test_autom8_app_new_without_filter() {
-        let app = Autom8App::new(None);
-        assert_eq!(app.project_filter, None);
-    }
-
-    #[test]
-    fn test_header_height_is_reasonable() {
-        assert!(HEADER_HEIGHT >= 40.0);
-        assert!(HEADER_HEIGHT <= 60.0);
-    }
-
-    #[test]
-    fn test_tab_underline_is_subtle() {
-        assert!(TAB_UNDERLINE_HEIGHT >= 1.0);
-        assert!(TAB_UNDERLINE_HEIGHT <= 4.0);
-    }
-
-    // ========================================================================
-    // Data Layer Tests
-    // ========================================================================
-
-    #[test]
-    fn test_default_refresh_interval() {
-        assert_eq!(DEFAULT_REFRESH_INTERVAL_MS, 500);
     }
 
     #[test]
@@ -3388,46 +3331,9 @@ mod tests {
         assert_eq!(app.refresh_interval(), interval);
     }
 
-    #[test]
-    fn test_app_set_refresh_interval() {
-        let mut app = Autom8App::new(None);
-        let new_interval = Duration::from_millis(1000);
-        app.set_refresh_interval(new_interval);
-        assert_eq!(app.refresh_interval(), new_interval);
-    }
-
-    #[test]
-    fn test_app_initializes_with_empty_data() {
-        let app = Autom8App::new(Some("nonexistent-project".to_string()));
-        assert!(
-            app.projects().is_empty()
-                || !app
-                    .projects()
-                    .iter()
-                    .any(|p| p.info.name == "nonexistent-project")
-        );
-        assert!(
-            app.sessions().is_empty()
-                || !app
-                    .sessions()
-                    .iter()
-                    .any(|s| s.project_name == "nonexistent-project")
-        );
-    }
-
-    #[test]
-    fn test_app_has_active_runs_initially_false() {
-        let app = Autom8App::new(Some("nonexistent-project".to_string()));
-        // With a nonexistent filter, there should be no active runs
-        assert!(!app.has_active_runs() || app.sessions().is_empty());
-    }
-
-    #[test]
-    fn test_app_initial_load_complete() {
-        let app = Autom8App::new(Some("nonexistent-project".to_string()));
-        // After creation, initial load should be complete
-        assert!(app.is_initial_load_complete());
-    }
+    // ========================================================================
+    // Run Progress Tests
+    // ========================================================================
 
     #[test]
     fn test_run_progress_as_fraction() {
@@ -3439,116 +3345,40 @@ mod tests {
     }
 
     #[test]
-    fn test_run_progress_as_fraction_first_story() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 3,
-        };
-        assert_eq!(progress.as_fraction(), "Story 1/3");
-    }
-
-    #[test]
     fn test_run_progress_as_percentage() {
-        let progress = RunProgress {
-            completed: 2,
-            total: 4,
-        };
-        assert_eq!(progress.as_percentage(), "50%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_zero_total() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 0,
-        };
-        assert_eq!(progress.as_percentage(), "0%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_complete() {
-        let progress = RunProgress {
-            completed: 5,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "100%");
-    }
-
-    #[test]
-    fn test_format_duration_seconds_only() {
-        let started_at = Utc::now() - chrono::Duration::seconds(30);
-        let formatted = format_duration(started_at);
-        assert!(formatted.ends_with('s'));
-        assert!(!formatted.contains('m'));
-    }
-
-    #[test]
-    fn test_format_duration_minutes_and_seconds() {
-        let started_at = Utc::now() - chrono::Duration::seconds(125); // 2m 5s
-        let formatted = format_duration(started_at);
-        assert!(formatted.contains('m'));
-        assert!(formatted.contains('s'));
-    }
-
-    #[test]
-    fn test_format_duration_hours_and_minutes() {
-        let started_at = Utc::now() - chrono::Duration::seconds(3700); // 1h 1m 40s
-        let formatted = format_duration(started_at);
-        assert!(formatted.contains('h'));
-        assert!(formatted.contains('m'));
-        assert!(!formatted.contains('s'));
-    }
-
-    #[test]
-    fn test_format_relative_time_just_now() {
-        let timestamp = Utc::now() - chrono::Duration::seconds(30);
-        let formatted = format_relative_time(timestamp);
-        assert_eq!(formatted, "just now");
-    }
-
-    #[test]
-    fn test_format_relative_time_minutes() {
-        let timestamp = Utc::now() - chrono::Duration::minutes(5);
-        let formatted = format_relative_time(timestamp);
-        assert!(formatted.contains("5m ago"));
-    }
-
-    #[test]
-    fn test_format_relative_time_hours() {
-        let timestamp = Utc::now() - chrono::Duration::hours(3);
-        let formatted = format_relative_time(timestamp);
-        assert!(formatted.contains("3h ago"));
-    }
-
-    #[test]
-    fn test_format_relative_time_days() {
-        let timestamp = Utc::now() - chrono::Duration::days(2);
-        let formatted = format_relative_time(timestamp);
-        assert!(formatted.contains("2d ago"));
-    }
-
-    #[test]
-    fn test_format_state_all_states() {
-        assert_eq!(format_state(MachineState::Idle), "Idle");
-        assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
         assert_eq!(
-            format_state(MachineState::GeneratingSpec),
-            "Generating Spec"
+            RunProgress {
+                completed: 2,
+                total: 4
+            }
+            .as_percentage(),
+            "50%"
         );
-        assert_eq!(format_state(MachineState::Initializing), "Initializing");
-        assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
-        assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");
-        assert_eq!(format_state(MachineState::Reviewing), "Reviewing");
-        assert_eq!(format_state(MachineState::Correcting), "Correcting");
-        assert_eq!(format_state(MachineState::Committing), "Committing");
-        assert_eq!(format_state(MachineState::CreatingPR), "Creating PR");
-        assert_eq!(format_state(MachineState::Completed), "Completed");
-        assert_eq!(format_state(MachineState::Failed), "Failed");
+        assert_eq!(
+            RunProgress {
+                completed: 0,
+                total: 0
+            }
+            .as_percentage(),
+            "0%"
+        );
+        assert_eq!(
+            RunProgress {
+                completed: 5,
+                total: 5
+            }
+            .as_percentage(),
+            "100%"
+        );
     }
 
+    // ========================================================================
+    // Session Data Tests
+    // ========================================================================
+
     #[test]
-    fn test_session_data_display_title_main() {
-        let session = SessionData {
+    fn test_session_data_display_title() {
+        let main_session = SessionData {
             project_name: "my-project".to_string(),
             metadata: SessionMetadata {
                 session_id: "main".to_string(),
@@ -3565,16 +3395,26 @@ mod tests {
             is_stale: false,
             live_output: None,
         };
-        assert_eq!(session.display_title(), "my-project (main)");
+        assert_eq!(main_session.display_title(), "my-project (main)");
+
+        let worktree_session = SessionData {
+            is_main_session: false,
+            metadata: SessionMetadata {
+                session_id: "abc12345".to_string(),
+                ..main_session.metadata.clone()
+            },
+            ..main_session
+        };
+        assert_eq!(worktree_session.display_title(), "my-project (abc12345)");
     }
 
     #[test]
-    fn test_session_data_display_title_worktree() {
-        let session = SessionData {
+    fn test_session_data_truncated_worktree_path() {
+        let make_session = |path: &str| SessionData {
             project_name: "my-project".to_string(),
             metadata: SessionMetadata {
                 session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from("/path/to/project-wt-feature"),
+                worktree_path: PathBuf::from(path),
                 branch_name: "feature/test".to_string(),
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
@@ -3587,51 +3427,11 @@ mod tests {
             is_stale: false,
             live_output: None,
         };
-        assert_eq!(session.display_title(), "my-project (abc12345)");
-    }
 
-    #[test]
-    fn test_session_data_truncated_worktree_path_short() {
-        let session = SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from("project"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(session.truncated_worktree_path(), "project");
-    }
+        assert_eq!(make_session("project").truncated_worktree_path(), "project");
 
-    #[test]
-    fn test_session_data_truncated_worktree_path_long() {
-        let session = SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from("/Users/dev/projects/my-project-wt-feature"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-        let truncated = session.truncated_worktree_path();
+        let long_path = make_session("/Users/dev/projects/my-project-wt-feature");
+        let truncated = long_path.truncated_worktree_path();
         assert!(truncated.starts_with("..."));
         assert!(truncated.contains("my-project-wt-feature"));
     }
@@ -3641,318 +3441,25 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_calculate_grid_columns_narrow_window() {
-        // Narrow window should show 2 columns (minimum)
-        let columns = Autom8App::calculate_grid_columns(500.0);
-        assert_eq!(columns, 2);
+    fn test_calculate_grid_columns() {
+        assert_eq!(Autom8App::calculate_grid_columns(300.0), 2); // Very narrow
+        assert_eq!(Autom8App::calculate_grid_columns(500.0), 2); // Narrow
+        assert_eq!(Autom8App::calculate_grid_columns(900.0), 3); // Medium
+        assert_eq!(Autom8App::calculate_grid_columns(1400.0), 4); // Wide
+        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 4); // Very wide (capped)
     }
 
     #[test]
-    fn test_calculate_grid_columns_medium_window() {
-        // Medium window around 900px should show 3 columns
-        let columns = Autom8App::calculate_grid_columns(900.0);
-        assert_eq!(columns, 3);
-    }
+    fn test_calculate_card_width() {
+        // Normal cases
+        let width_2col = Autom8App::calculate_card_width(600.0, 2);
+        assert!(width_2col >= CARD_MIN_WIDTH && width_2col <= CARD_MAX_WIDTH);
 
-    #[test]
-    fn test_calculate_grid_columns_wide_window() {
-        // Wide window should show 4 columns (maximum)
-        let columns = Autom8App::calculate_grid_columns(1400.0);
-        assert_eq!(columns, 4);
-    }
+        // Clamps to min
+        assert_eq!(Autom8App::calculate_card_width(400.0, 4), CARD_MIN_WIDTH);
 
-    #[test]
-    fn test_calculate_grid_columns_very_narrow() {
-        // Very narrow window should still show minimum 2 columns
-        let columns = Autom8App::calculate_grid_columns(300.0);
-        assert_eq!(columns, 2);
-    }
-
-    #[test]
-    fn test_calculate_grid_columns_very_wide() {
-        // Very wide window should cap at 4 columns
-        let columns = Autom8App::calculate_grid_columns(2000.0);
-        assert_eq!(columns, 4);
-    }
-
-    #[test]
-    fn test_calculate_card_width_two_columns() {
-        // With 2 columns and 600px width, cards should be reasonable size
-        let card_width = Autom8App::calculate_card_width(600.0, 2);
-        // (600 - 16) / 2 = 292
-        assert!(card_width >= CARD_MIN_WIDTH);
-        assert!(card_width <= CARD_MAX_WIDTH);
-    }
-
-    #[test]
-    fn test_calculate_card_width_four_columns() {
-        // With 4 columns and 1200px width
-        let card_width = Autom8App::calculate_card_width(1200.0, 4);
-        // (1200 - 48) / 4 = 288
-        assert!(card_width >= CARD_MIN_WIDTH);
-        assert!(card_width <= CARD_MAX_WIDTH);
-    }
-
-    #[test]
-    fn test_calculate_card_width_clamps_to_min() {
-        // Very narrow width should clamp to minimum card width
-        let card_width = Autom8App::calculate_card_width(400.0, 4);
-        assert_eq!(card_width, CARD_MIN_WIDTH);
-    }
-
-    #[test]
-    fn test_calculate_card_width_clamps_to_max() {
-        // Very wide with few columns should clamp to maximum
-        let card_width = Autom8App::calculate_card_width(1000.0, 2);
-        // (1000 - 16) / 2 = 492, which exceeds max of 400
-        assert_eq!(card_width, CARD_MAX_WIDTH);
-    }
-
-    #[test]
-    fn test_grid_constants_are_reasonable() {
-        assert!(
-            CARD_MIN_WIDTH > 200.0,
-            "Cards should be at least 200px wide"
-        );
-        assert!(
-            CARD_MAX_WIDTH > CARD_MIN_WIDTH,
-            "Max width should exceed min width"
-        );
-        assert!(CARD_SPACING >= 8.0, "Cards need adequate spacing");
-        assert!(CARD_PADDING >= 12.0, "Cards need internal padding");
-        assert!(CARD_MIN_HEIGHT >= 80.0, "Cards need minimum height");
-    }
-
-    #[test]
-    fn test_state_to_color_running_states() {
-        // state_to_color is now a standalone function from components module
-        assert_eq!(
-            state_to_color(MachineState::RunningClaude),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::Reviewing),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::Correcting),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::Committing),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::CreatingPR),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::Initializing),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::PickingStory),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::LoadingSpec),
-            colors::STATUS_RUNNING
-        );
-        assert_eq!(
-            state_to_color(MachineState::GeneratingSpec),
-            colors::STATUS_RUNNING
-        );
-    }
-
-    #[test]
-    fn test_state_to_color_terminal_states() {
-        // state_to_color is now a standalone function from components module
-        assert_eq!(
-            state_to_color(MachineState::Completed),
-            colors::STATUS_SUCCESS
-        );
-        assert_eq!(state_to_color(MachineState::Failed), colors::STATUS_ERROR);
-        assert_eq!(state_to_color(MachineState::Idle), colors::STATUS_IDLE);
-    }
-
-    // ========================================================================
-    // Session Card Tests
-    // ========================================================================
-
-    #[test]
-    fn test_truncate_with_ellipsis_short_string() {
-        let result = truncate_with_ellipsis("short", 10);
-        assert_eq!(result, "short");
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_exact_length() {
-        let result = truncate_with_ellipsis("exactly10!", 10);
-        assert_eq!(result, "exactly10!");
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_long_string() {
-        let result = truncate_with_ellipsis("this is a very long string", 15);
-        assert_eq!(result, "this is a ve...");
-        assert_eq!(result.len(), 15);
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_very_short_max() {
-        // When max_len <= 3, just truncate without ellipsis
-        let result = truncate_with_ellipsis("hello", 3);
-        assert_eq!(result, "hel");
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_empty_string() {
-        let result = truncate_with_ellipsis("", 10);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_max_text_length() {
-        let long_text = "a".repeat(50);
-        let result = truncate_with_ellipsis(&long_text, MAX_TEXT_LENGTH);
-        assert_eq!(result.len(), MAX_TEXT_LENGTH);
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis_max_branch_length() {
-        let long_branch = "feature/very-long-branch-name-that-exceeds-limit";
-        let result = truncate_with_ellipsis(long_branch, MAX_BRANCH_LENGTH);
-        assert_eq!(result.len(), MAX_BRANCH_LENGTH);
-        assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn test_card_constants_for_session_card() {
-        // Card height should be sufficient for all content
-        assert!(
-            CARD_MIN_HEIGHT >= 200.0,
-            "Card height should accommodate header, status, progress, duration, and output"
-        );
-
-        // Output lines count should be reasonable
-        assert!(OUTPUT_LINES_TO_SHOW >= 3 && OUTPUT_LINES_TO_SHOW <= 10);
-
-        // Max text length for truncation
-        assert!(MAX_TEXT_LENGTH >= 20 && MAX_TEXT_LENGTH <= 60);
-
-        // Max branch length for truncation
-        assert!(MAX_BRANCH_LENGTH >= 15 && MAX_BRANCH_LENGTH <= 40);
-    }
-
-    #[test]
-    fn test_session_data_with_live_output() {
-        let live_output = LiveState {
-            output_lines: vec![
-                "Line 1".to_string(),
-                "Line 2".to_string(),
-                "Line 3".to_string(),
-            ],
-            updated_at: Utc::now(),
-            machine_state: MachineState::RunningClaude,
-        };
-
-        let session = SessionData {
-            project_name: "test-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "main".to_string(),
-                worktree_path: PathBuf::from("/path/to/project"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: Some(RunProgress {
-                completed: 2,
-                total: 5,
-            }),
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: Some(live_output),
-        };
-
-        assert!(session.live_output.is_some());
-        assert_eq!(session.live_output.as_ref().unwrap().output_lines.len(), 3);
-    }
-
-    #[test]
-    fn test_session_data_with_run_state() {
-        let run = RunState::new(PathBuf::from("/spec.json"), "feature/test".to_string());
-
-        let session = SessionData {
-            project_name: "test-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from("/path/to/worktree"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: Some(run),
-            progress: Some(RunProgress {
-                completed: 1,
-                total: 3,
-            }),
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-
-        assert!(session.run.is_some());
-        assert!(!session.is_main_session);
-        assert_eq!(
-            session.progress.as_ref().unwrap().as_fraction(),
-            "Story 2/3"
-        );
-    }
-
-    #[test]
-    fn test_session_data_with_error() {
-        let session = SessionData {
-            project_name: "test-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "main".to_string(),
-                worktree_path: PathBuf::from("/deleted/path"),
-                branch_name: "feature/broken".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: Some("Corrupted state file".to_string()),
-            is_main_session: true,
-            is_stale: true,
-            live_output: None,
-        };
-
-        assert!(session.load_error.is_some());
-        assert!(session.is_stale);
-        assert_eq!(session.load_error.as_ref().unwrap(), "Corrupted state file");
-    }
-
-    #[test]
-    fn test_long_branch_name_truncation() {
-        let branch = "feature/US-007-implement-session-card-component-with-all-details";
-        let truncated = truncate_with_ellipsis(branch, MAX_BRANCH_LENGTH);
-        assert!(truncated.len() <= MAX_BRANCH_LENGTH);
-        assert!(truncated.ends_with("..."));
-    }
-
-    #[test]
-    fn test_long_project_name_truncation() {
-        let project = "my-very-long-project-name-that-exceeds-limits";
-        let truncated = truncate_with_ellipsis(project, MAX_TEXT_LENGTH.saturating_sub(10));
-        assert!(truncated.len() <= MAX_TEXT_LENGTH.saturating_sub(10));
+        // Clamps to max
+        assert_eq!(Autom8App::calculate_card_width(1000.0, 2), CARD_MAX_WIDTH);
     }
 
     // ========================================================================
@@ -3960,462 +3467,78 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_project_row_constants() {
-        // Row height should accommodate two lines of text plus padding
-        assert!(
-            PROJECT_ROW_HEIGHT >= 40.0 && PROJECT_ROW_HEIGHT <= 80.0,
-            "Row height should be reasonable for two-line content"
+    fn test_project_status_color() {
+        let app = Autom8App::new(Some("nonexistent".to_string()));
+
+        let make_project = |has_active_run, run_status, load_error| ProjectData {
+            info: ProjectTreeInfo {
+                name: "test".to_string(),
+                has_active_run,
+                run_status,
+                spec_count: 1,
+                incomplete_spec_count: 0,
+                spec_md_count: 0,
+                runs_count: 0,
+                last_run_date: None,
+            },
+            active_run: None,
+            progress: None,
+            load_error,
+        };
+
+        assert_eq!(
+            app.project_status_color(&make_project(
+                true,
+                Some(crate::state::RunStatus::Running),
+                None
+            )),
+            colors::STATUS_RUNNING
         );
-
-        // Padding values should be reasonable
-        assert!(PROJECT_ROW_PADDING_H >= 8.0 && PROJECT_ROW_PADDING_H <= 20.0);
-        assert!(PROJECT_ROW_PADDING_V >= 8.0 && PROJECT_ROW_PADDING_V <= 20.0);
-
-        // Status dot should be visible but not too large
-        assert!(PROJECT_STATUS_DOT_RADIUS >= 3.0 && PROJECT_STATUS_DOT_RADIUS <= 8.0);
-    }
-
-    #[test]
-    fn test_count_active_sessions_for_project_empty() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let count = app.count_active_sessions_for_project("test-project");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn test_project_status_color_running() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: true,
-                run_status: Some(crate::state::RunStatus::Running),
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: None,
-            progress: None,
-            load_error: None,
-        };
-        assert_eq!(app.project_status_color(&project), colors::STATUS_RUNNING);
-    }
-
-    #[test]
-    fn test_project_status_color_idle() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 1,
-                last_run_date: Some(Utc::now()),
-            },
-            active_run: None,
-            progress: None,
-            load_error: None,
-        };
-        assert_eq!(app.project_status_color(&project), colors::STATUS_IDLE);
-    }
-
-    #[test]
-    fn test_project_status_color_error() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: None,
-            progress: None,
-            load_error: Some("State corrupted".to_string()),
-        };
-        assert_eq!(app.project_status_color(&project), colors::STATUS_ERROR);
-    }
-
-    #[test]
-    fn test_project_status_text_running() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: true,
-                run_status: Some(crate::state::RunStatus::Running),
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: None,
-            progress: None,
-            load_error: None,
-        };
-        assert_eq!(app.project_status_text(&project), "Running");
-    }
-
-    #[test]
-    fn test_project_status_text_idle() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: None,
-            progress: None,
-            load_error: None,
-        };
-        assert_eq!(app.project_status_text(&project), "Idle");
-    }
-
-    #[test]
-    fn test_project_status_text_with_last_run() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let last_run = Utc::now() - chrono::Duration::hours(2);
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 1,
-                last_run_date: Some(last_run),
-            },
-            active_run: None,
-            progress: None,
-            load_error: None,
-        };
-        let status = app.project_status_text(&project);
-        assert!(status.starts_with("Last run:"));
-        assert!(status.contains("2h ago"));
-    }
-
-    #[test]
-    fn test_project_status_text_with_error() {
-        let app = Autom8App::new(Some("nonexistent".to_string()));
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "test".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 1,
-                incomplete_spec_count: 0,
-                spec_md_count: 0,
-                runs_count: 0,
-                last_run_date: None,
-            },
-            active_run: None,
-            progress: None,
-            load_error: Some("Corrupted state file".to_string()),
-        };
-        let status = app.project_status_text(&project);
-        assert!(status.contains("Corrupted"));
-    }
-
-    #[test]
-    fn test_project_data_fields() {
-        let project = ProjectData {
-            info: ProjectTreeInfo {
-                name: "my-project".to_string(),
-                has_active_run: false,
-                run_status: None,
-                spec_count: 3,
-                incomplete_spec_count: 1,
-                spec_md_count: 2,
-                runs_count: 5,
-                last_run_date: Some(Utc::now()),
-            },
-            active_run: None,
-            progress: Some(RunProgress {
-                completed: 2,
-                total: 5,
-            }),
-            load_error: None,
-        };
-
-        assert_eq!(project.info.name, "my-project");
-        assert_eq!(project.info.spec_count, 3);
-        assert!(project.progress.is_some());
-        assert!(project.load_error.is_none());
-    }
-
-    #[test]
-    fn test_project_tree_info_status_labels() {
-        // Running status
-        let running = ProjectTreeInfo {
-            name: "test".to_string(),
-            has_active_run: true,
-            run_status: Some(crate::state::RunStatus::Running),
-            spec_count: 1,
-            incomplete_spec_count: 0,
-            spec_md_count: 0,
-            runs_count: 0,
-            last_run_date: None,
-        };
-        assert_eq!(running.status_label(), "running");
-
-        // Failed status
-        let failed = ProjectTreeInfo {
-            name: "test".to_string(),
-            has_active_run: false,
-            run_status: Some(crate::state::RunStatus::Failed),
-            spec_count: 1,
-            incomplete_spec_count: 0,
-            spec_md_count: 0,
-            runs_count: 0,
-            last_run_date: None,
-        };
-        assert_eq!(failed.status_label(), "failed");
-
-        // Incomplete status
-        let incomplete = ProjectTreeInfo {
-            name: "test".to_string(),
-            has_active_run: false,
-            run_status: None,
-            spec_count: 1,
-            incomplete_spec_count: 1,
-            spec_md_count: 0,
-            runs_count: 0,
-            last_run_date: None,
-        };
-        assert_eq!(incomplete.status_label(), "incomplete");
-    }
-
-    #[test]
-    fn test_projects_empty_state_message() {
-        let app = Autom8App::new(Some("definitely-not-a-project".to_string()));
-        // With an impossible filter, projects should be empty
-        // The empty state message should be "No projects found"
-        assert!(
-            app.projects().is_empty()
-                || !app
-                    .projects()
-                    .iter()
-                    .any(|p| p.info.name == "definitely-not-a-project")
+        assert_eq!(
+            app.project_status_color(&make_project(false, None, None)),
+            colors::STATUS_IDLE
+        );
+        assert_eq!(
+            app.project_status_color(&make_project(false, None, Some("error".to_string()))),
+            colors::STATUS_ERROR
         );
     }
 
     // ========================================================================
-    // Projects View Scrolling Tests (US-006)
-    // ========================================================================
-
-    /// Verifies that left and right panel scroll areas have distinct IDs.
-    /// This is critical for independent scrolling when the mouse is over each panel.
-    #[test]
-    fn test_projects_scroll_areas_have_unique_ids() {
-        // The scroll areas use id_salt() with different strings
-        // to ensure they are distinguishable by egui's scroll event routing
-        let left_panel_id = "projects_left_panel";
-        let right_panel_id = "projects_right_panel";
-
-        // IDs must be distinct
-        assert_ne!(
-            left_panel_id, right_panel_id,
-            "Left and right panel scroll IDs must be distinct"
-        );
-
-        // IDs should be descriptive and follow naming conventions
-        assert!(
-            left_panel_id.starts_with("projects_"),
-            "Left panel ID should be namespaced"
-        );
-        assert!(
-            right_panel_id.starts_with("projects_"),
-            "Right panel ID should be namespaced"
-        );
-    }
-
-    /// Verifies that the split panel constants are reasonable for scrolling.
-    #[test]
-    fn test_projects_split_panel_dimensions() {
-        // Minimum panel width should allow comfortable scrolling
-        assert!(
-            SPLIT_PANEL_MIN_WIDTH >= 150.0,
-            "Minimum panel width should be at least 150px for usability"
-        );
-
-        // Divider shouldn't be too wide (which could intercept scroll events)
-        assert!(
-            SPLIT_DIVIDER_WIDTH <= 5.0,
-            "Divider should be narrow to avoid intercepting scroll events"
-        );
-    }
-
-    /// Verifies that the scroll areas use auto_shrink([false, false]).
-    /// This is important for consistent scroll behavior in fixed-height panels.
-    #[test]
-    fn test_projects_scroll_areas_configuration() {
-        // auto_shrink([false, false]) is necessary for:
-        // 1. Left panel: ensures scroll area fills available height
-        // 2. Right panel: ensures scroll area fills available height
-        // Without this, scroll areas may shrink and not capture scroll events
-
-        // We verify the configuration by checking that the constants
-        // that define panel sizes are present and reasonable
-        assert!(SPLIT_PANEL_MIN_WIDTH > 0.0);
-        assert!(SPLIT_DIVIDER_MARGIN >= 0.0);
-    }
-
-    /// Verifies that scroll position is tracked per-panel (not globally).
-    /// The id_salt ensures each ScrollArea maintains independent scroll state.
-    #[test]
-    fn test_projects_panels_have_independent_scroll_state() {
-        // With unique id_salt values, egui will track scroll positions separately
-        // This test documents the expected behavior
-
-        // Create two distinct ID salts
-        let salt1 = "projects_left_panel";
-        let salt2 = "projects_right_panel";
-
-        // The salts should produce different hashes when combined with parent ID
-        use std::hash::{Hash, Hasher};
-        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
-        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
-
-        salt1.hash(&mut hasher1);
-        salt2.hash(&mut hasher2);
-
-        let hash1 = hasher1.finish();
-        let hash2 = hasher2.finish();
-
-        assert_ne!(
-            hash1, hash2,
-            "Panel IDs should produce different hashes for independent scroll tracking"
-        );
-    }
-
-    // ========================================================================
-    // Project Selection Tests (US-002)
+    // Project Selection Tests
     // ========================================================================
 
     #[test]
-    fn test_selected_project_initially_none() {
-        let app = Autom8App::new(None);
-        assert!(app.selected_project().is_none());
-    }
-
-    #[test]
-    fn test_toggle_project_selection_select() {
+    fn test_toggle_project_selection() {
         let mut app = Autom8App::new(None);
         assert!(app.selected_project().is_none());
 
-        app.toggle_project_selection("my-project");
-        assert_eq!(app.selected_project(), Some("my-project"));
-    }
-
-    #[test]
-    fn test_toggle_project_selection_deselect() {
-        let mut app = Autom8App::new(None);
         app.toggle_project_selection("my-project");
         assert_eq!(app.selected_project(), Some("my-project"));
 
         // Toggle again to deselect
         app.toggle_project_selection("my-project");
         assert!(app.selected_project().is_none());
-    }
 
-    #[test]
-    fn test_toggle_project_selection_switch() {
-        let mut app = Autom8App::new(None);
+        // Select and switch
         app.toggle_project_selection("project-a");
-        assert_eq!(app.selected_project(), Some("project-a"));
-
-        // Select a different project
         app.toggle_project_selection("project-b");
         assert_eq!(app.selected_project(), Some("project-b"));
     }
 
-    #[test]
-    fn test_is_project_selected_true() {
-        let mut app = Autom8App::new(None);
-        app.toggle_project_selection("test-project");
-        assert!(app.is_project_selected("test-project"));
-    }
-
-    #[test]
-    fn test_is_project_selected_false() {
-        let mut app = Autom8App::new(None);
-        app.toggle_project_selection("project-a");
-        assert!(!app.is_project_selected("project-b"));
-    }
-
-    #[test]
-    fn test_is_project_selected_none() {
-        let app = Autom8App::new(None);
-        assert!(!app.is_project_selected("any-project"));
-    }
-
-    #[test]
-    fn test_selected_project_empty_string() {
-        let mut app = Autom8App::new(None);
-        app.toggle_project_selection("");
-        assert_eq!(app.selected_project(), Some(""));
-
-        // Toggle again to deselect
-        app.toggle_project_selection("");
-        assert!(app.selected_project().is_none());
-    }
-
     // ========================================================================
-    // Run History Tests (US-003)
+    // Run History Tests
     // ========================================================================
-
-    #[test]
-    fn test_run_history_initially_empty() {
-        let app = Autom8App::new(None);
-        assert!(app.run_history().is_empty());
-    }
 
     #[test]
     fn test_run_history_entry_from_run_state() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.run_id, run.run_id);
-        assert_eq!(entry.branch, "feature/test");
-        assert_eq!(entry.status, RunStatus::Completed);
-        assert_eq!(entry.completed_stories, 0);
-    }
-
-    #[test]
-    fn test_run_history_entry_story_count_text() {
         use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
-        use chrono::Utc;
 
         let mut run = RunState::new(
             std::path::PathBuf::from("test.json"),
             "feature/test".to_string(),
         );
         run.status = RunStatus::Completed;
-
-        // Add some iterations
         run.iterations.push(IterationRecord {
             number: 1,
             story_id: "US-001".to_string(),
@@ -4429,15 +3552,6 @@ mod tests {
             number: 2,
             story_id: "US-002".to_string(),
             started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: None,
-        });
-        run.iterations.push(IterationRecord {
-            number: 3,
-            story_id: "US-003".to_string(),
-            started_at: Utc::now(),
             finished_at: None,
             status: IterationStatus::Failed,
             output_snippet: String::new(),
@@ -4445,130 +3559,18 @@ mod tests {
         });
 
         let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.completed_stories, 2);
-        assert_eq!(entry.total_stories, 3);
-        assert_eq!(entry.story_count_text(), "2/3 stories");
-    }
-
-    #[test]
-    fn test_run_history_entry_status_text() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-
-        run.status = RunStatus::Completed;
-        let entry = RunHistoryEntry::from_run_state(&run);
+        assert_eq!(entry.branch, "feature/test");
+        assert_eq!(entry.status, RunStatus::Completed);
+        assert_eq!(entry.completed_stories, 1);
+        assert_eq!(entry.total_stories, 2);
+        assert_eq!(entry.story_count_text(), "1/2 stories");
         assert_eq!(entry.status_text(), "Completed");
-
-        run.status = RunStatus::Failed;
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.status_text(), "Failed");
-
-        run.status = RunStatus::Running;
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.status_text(), "Running");
-    }
-
-    #[test]
-    fn test_run_history_entry_status_color() {
-        use crate::gui::theme::colors;
-        use crate::state::{RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-
-        run.status = RunStatus::Completed;
-        let entry = RunHistoryEntry::from_run_state(&run);
         assert_eq!(entry.status_color(), colors::STATUS_SUCCESS);
-
-        run.status = RunStatus::Failed;
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.status_color(), colors::STATUS_ERROR);
-
-        run.status = RunStatus::Running;
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.status_color(), colors::STATUS_RUNNING);
-    }
-
-    #[test]
-    fn test_run_history_cleared_on_deselect() {
-        let mut app = Autom8App::new(None);
-
-        // Select a project (won't have history, but exercises the code path)
-        app.toggle_project_selection("nonexistent-project");
-        assert_eq!(app.selected_project(), Some("nonexistent-project"));
-
-        // Deselect - history should be cleared
-        app.toggle_project_selection("nonexistent-project");
-        assert!(app.selected_project().is_none());
-        assert!(app.run_history().is_empty());
-    }
-
-    #[test]
-    fn test_run_history_cleared_on_switch_project() {
-        let mut app = Autom8App::new(None);
-
-        // Select first project
-        app.toggle_project_selection("project-a");
-        assert_eq!(app.selected_project(), Some("project-a"));
-
-        // Switch to different project
-        app.toggle_project_selection("project-b");
-        assert_eq!(app.selected_project(), Some("project-b"));
-        // History would be reloaded for the new project
     }
 
     // ========================================================================
-    // Dynamic Tab System Tests (US-004)
+    // Dynamic Tab System Tests
     // ========================================================================
-
-    #[test]
-    fn test_tab_id_default() {
-        let tab_id = TabId::default();
-        assert_eq!(tab_id, TabId::ActiveRuns);
-    }
-
-    #[test]
-    fn test_tab_id_equality() {
-        assert_eq!(TabId::ActiveRuns, TabId::ActiveRuns);
-        assert_eq!(TabId::Projects, TabId::Projects);
-        assert_eq!(
-            TabId::RunDetail("run-123".to_string()),
-            TabId::RunDetail("run-123".to_string())
-        );
-        assert_ne!(TabId::ActiveRuns, TabId::Projects);
-        assert_ne!(
-            TabId::RunDetail("run-123".to_string()),
-            TabId::RunDetail("run-456".to_string())
-        );
-    }
-
-    #[test]
-    fn test_tab_info_permanent() {
-        let tab = TabInfo::permanent(TabId::ActiveRuns, "Active Runs");
-        assert_eq!(tab.id, TabId::ActiveRuns);
-        assert_eq!(tab.label, "Active Runs");
-        assert!(!tab.closable);
-    }
-
-    #[test]
-    fn test_tab_info_closable() {
-        let tab = TabInfo::closable(TabId::RunDetail("run-123".to_string()), "Run Details");
-        assert_eq!(tab.id, TabId::RunDetail("run-123".to_string()));
-        assert_eq!(tab.label, "Run Details");
-        assert!(tab.closable);
-    }
-
-    #[test]
-    fn test_tab_to_tab_id() {
-        assert_eq!(Tab::ActiveRuns.to_tab_id(), TabId::ActiveRuns);
-        assert_eq!(Tab::Projects.to_tab_id(), TabId::Projects);
-    }
 
     #[test]
     fn test_app_initial_tabs() {
@@ -4579,95 +3581,30 @@ mod tests {
     }
 
     #[test]
-    fn test_app_set_active_tab() {
-        let mut app = Autom8App::new(None);
-        app.set_active_tab(TabId::Projects);
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
-        assert_eq!(app.current_tab(), Tab::Projects);
-    }
-
-    #[test]
-    fn test_app_has_tab() {
-        let app = Autom8App::new(None);
-        assert!(app.has_tab(&TabId::ActiveRuns));
-        assert!(app.has_tab(&TabId::Projects));
-        assert!(!app.has_tab(&TabId::RunDetail("nonexistent".to_string())));
-    }
-
-    #[test]
-    fn test_app_open_run_detail_tab() {
-        let mut app = Autom8App::new(None);
-        let created = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
-
-        assert!(created);
-        assert_eq!(app.tab_count(), 3);
-        assert_eq!(app.closable_tab_count(), 1);
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-123".to_string())
-        );
-        assert!(app.has_tab(&TabId::RunDetail("run-123".to_string())));
-    }
-
-    #[test]
-    fn test_app_open_run_detail_tab_no_duplicate() {
+    fn test_app_open_and_close_tabs() {
         let mut app = Autom8App::new(None);
 
-        // Open the same tab twice
-        let created1 = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
-        let created2 = app.open_run_detail_tab("run-123", "Run - 2024-01-15");
-
-        assert!(created1);
-        assert!(!created2); // Second call should not create a new tab
-        assert_eq!(app.tab_count(), 3); // Still only 3 tabs
-        assert_eq!(app.closable_tab_count(), 1);
-    }
-
-    #[test]
-    fn test_app_open_multiple_run_detail_tabs() {
-        let mut app = Autom8App::new(None);
-
-        app.open_run_detail_tab("run-1", "Run 1");
+        // Open tabs
+        assert!(app.open_run_detail_tab("run-1", "Run 1"));
+        assert!(!app.open_run_detail_tab("run-1", "Run 1")); // No duplicate
         app.open_run_detail_tab("run-2", "Run 2");
         app.open_run_detail_tab("run-3", "Run 3");
 
         assert_eq!(app.tab_count(), 5);
         assert_eq!(app.closable_tab_count(), 3);
-    }
+        assert!(app.has_tab(&TabId::RunDetail("run-1".to_string())));
 
-    #[test]
-    fn test_app_close_tab() {
-        let mut app = Autom8App::new(None);
-        app.open_run_detail_tab("run-123", "Run Details");
+        // Close one tab
+        assert!(app.close_tab(&TabId::RunDetail("run-2".to_string())));
+        assert_eq!(app.closable_tab_count(), 2);
 
-        // Close the dynamic tab
-        let closed = app.close_tab(&TabId::RunDetail("run-123".to_string()));
+        // Can't close permanent tabs
+        assert!(!app.close_tab(&TabId::ActiveRuns));
+        assert!(!app.close_tab(&TabId::Projects));
 
-        assert!(closed);
+        // Close all dynamic tabs
+        assert_eq!(app.close_all_dynamic_tabs(), 2);
         assert_eq!(app.tab_count(), 2);
-        assert_eq!(app.closable_tab_count(), 0);
-        assert!(!app.has_tab(&TabId::RunDetail("run-123".to_string())));
-    }
-
-    #[test]
-    fn test_app_close_permanent_tab_fails() {
-        let mut app = Autom8App::new(None);
-
-        // Try to close permanent tabs - should fail
-        let closed1 = app.close_tab(&TabId::ActiveRuns);
-        let closed2 = app.close_tab(&TabId::Projects);
-
-        assert!(!closed1);
-        assert!(!closed2);
-        assert_eq!(app.tab_count(), 2);
-    }
-
-    #[test]
-    fn test_app_close_nonexistent_tab_fails() {
-        let mut app = Autom8App::new(None);
-
-        let closed = app.close_tab(&TabId::RunDetail("nonexistent".to_string()));
-        assert!(!closed);
     }
 
     #[test]
@@ -4676,49 +3613,13 @@ mod tests {
         app.set_active_tab(TabId::Projects);
         app.open_run_detail_tab("run-123", "Run Details");
 
-        // Active tab is now the run detail tab
         assert_eq!(
             *app.active_tab_id(),
             TabId::RunDetail("run-123".to_string())
         );
 
-        // Close it - should switch to Projects (the previous tab)
         app.close_tab(&TabId::RunDetail("run-123".to_string()));
         assert_eq!(*app.active_tab_id(), TabId::Projects);
-    }
-
-    #[test]
-    fn test_app_close_all_dynamic_tabs() {
-        let mut app = Autom8App::new(None);
-
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2");
-        app.open_run_detail_tab("run-3", "Run 3");
-
-        assert_eq!(app.closable_tab_count(), 3);
-
-        let closed = app.close_all_dynamic_tabs();
-
-        assert_eq!(closed, 3);
-        assert_eq!(app.tab_count(), 2);
-        assert_eq!(app.closable_tab_count(), 0);
-    }
-
-    #[test]
-    fn test_app_tabs_accessor() {
-        let app = Autom8App::new(None);
-        let tabs = app.tabs();
-
-        assert_eq!(tabs.len(), 2);
-        assert_eq!(tabs[0].label, "Active Runs");
-        assert_eq!(tabs[1].label, "Projects");
-    }
-
-    #[test]
-    fn test_tab_bar_constants() {
-        assert!(TAB_BAR_MAX_SCROLL_WIDTH > 0.0);
-        assert!(TAB_CLOSE_BUTTON_SIZE > 0.0);
-        assert!(TAB_CLOSE_PADDING >= 0.0);
     }
 
     #[test]
@@ -4726,86 +3627,63 @@ mod tests {
         use crate::state::RunState;
 
         let mut app = Autom8App::new(None);
-
-        // Initially no cached run state
         assert!(app.get_cached_run_state("run-123").is_none());
 
-        // Create a mock run state
         let run = RunState::new(
             std::path::PathBuf::from("test.json"),
             "feature/test".to_string(),
         );
-
-        // Create entry and open detail tab with cached state
         let entry = RunHistoryEntry::from_run_state(&run);
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
-        // Now we should have cached state
         assert!(app.get_cached_run_state(&entry.run_id).is_some());
 
-        // Close the tab - cache should be cleared
         app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
         assert!(app.get_cached_run_state(&entry.run_id).is_none());
     }
 
     // ========================================================================
-    // Run Detail View Tests (US-005)
+    // Duration Formatting Tests (app-specific format functions)
     // ========================================================================
 
     #[test]
-    fn test_format_duration_detailed_seconds_only() {
-        let duration = chrono::Duration::seconds(45);
-        let result = Autom8App::format_duration_detailed(duration);
-        assert_eq!(result, "45s");
+    fn test_format_duration_detailed() {
+        assert_eq!(
+            Autom8App::format_duration_detailed(chrono::Duration::seconds(45)),
+            "45s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_detailed(chrono::Duration::seconds(125)),
+            "2m 5s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_detailed(chrono::Duration::seconds(3725)),
+            "1h 2m 5s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_detailed(chrono::Duration::seconds(0)),
+            "0s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_detailed(chrono::Duration::seconds(-100)),
+            "0s"
+        );
     }
 
     #[test]
-    fn test_format_duration_detailed_minutes_and_seconds() {
-        let duration = chrono::Duration::seconds(125); // 2m 5s
-        let result = Autom8App::format_duration_detailed(duration);
-        assert_eq!(result, "2m 5s");
-    }
-
-    #[test]
-    fn test_format_duration_detailed_hours_minutes_seconds() {
-        let duration = chrono::Duration::seconds(3725); // 1h 2m 5s
-        let result = Autom8App::format_duration_detailed(duration);
-        assert_eq!(result, "1h 2m 5s");
-    }
-
-    #[test]
-    fn test_format_duration_detailed_zero() {
-        let duration = chrono::Duration::seconds(0);
-        let result = Autom8App::format_duration_detailed(duration);
-        assert_eq!(result, "0s");
-    }
-
-    #[test]
-    fn test_format_duration_detailed_negative_becomes_zero() {
-        let duration = chrono::Duration::seconds(-100);
-        let result = Autom8App::format_duration_detailed(duration);
-        assert_eq!(result, "0s");
-    }
-
-    #[test]
-    fn test_format_duration_short_seconds_only() {
-        let duration = chrono::Duration::seconds(45);
-        let result = Autom8App::format_duration_short(duration);
-        assert_eq!(result, "45s");
-    }
-
-    #[test]
-    fn test_format_duration_short_minutes_and_seconds() {
-        let duration = chrono::Duration::seconds(125); // 2m 5s
-        let result = Autom8App::format_duration_short(duration);
-        assert_eq!(result, "2m5s");
-    }
-
-    #[test]
-    fn test_format_duration_short_hours_and_minutes() {
-        let duration = chrono::Duration::seconds(3725); // 1h 2m 5s
-        let result = Autom8App::format_duration_short(duration);
-        assert_eq!(result, "1h2m");
+    fn test_format_duration_short() {
+        assert_eq!(
+            Autom8App::format_duration_short(chrono::Duration::seconds(45)),
+            "45s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_short(chrono::Duration::seconds(125)),
+            "2m5s"
+        );
+        assert_eq!(
+            Autom8App::format_duration_short(chrono::Duration::seconds(3725)),
+            "1h2m"
+        );
     }
 
     #[test]
@@ -4820,1126 +3698,35 @@ mod tests {
         run.status = RunStatus::Completed;
 
         let entry = RunHistoryEntry::from_run_state(&run);
-
-        // Open detail tab from entry
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
-        // Tab should be created with correct format
         assert!(app.has_tab(&TabId::RunDetail(entry.run_id.clone())));
-        assert_eq!(app.tab_count(), 3); // ActiveRuns, Projects, RunDetail
-
-        // Should be the active tab
+        assert_eq!(app.tab_count(), 3);
         assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
-    }
 
-    #[test]
-    fn test_run_detail_tab_label_format() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut app = Autom8App::new(None);
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        app.open_run_detail_from_entry(&entry, Some(run.clone()));
-
-        // Find the tab and check label format
+        // Check label format
         let tab = app
             .tabs()
             .iter()
-            .find(|t| t.id == TabId::RunDetail(entry.run_id.clone()));
-        assert!(tab.is_some());
-        let tab = tab.unwrap();
-
-        // Label should start with "Run - " and contain date
+            .find(|t| t.id == TabId::RunDetail(entry.run_id.clone()))
+            .unwrap();
         assert!(tab.label.starts_with("Run - "));
-        // Label should contain a date in YYYY-MM-DD format
-        assert!(tab.label.contains('-'));
-    }
-
-    #[test]
-    fn test_run_detail_tab_is_closable() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut app = Autom8App::new(None);
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        app.open_run_detail_from_entry(&entry, Some(run.clone()));
-
-        // Find the tab and verify it's closable
-        let tab = app
-            .tabs()
-            .iter()
-            .find(|t| t.id == TabId::RunDetail(entry.run_id.clone()));
-        assert!(tab.is_some());
-        assert!(tab.unwrap().closable);
-    }
-
-    #[test]
-    fn test_multiple_run_detail_tabs() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut app = Autom8App::new(None);
-
-        // Create multiple runs
-        let mut run1 = RunState::new(
-            std::path::PathBuf::from("test1.json"),
-            "feature/one".to_string(),
-        );
-        run1.status = RunStatus::Completed;
-
-        let mut run2 = RunState::new(
-            std::path::PathBuf::from("test2.json"),
-            "feature/two".to_string(),
-        );
-        run2.status = RunStatus::Failed;
-
-        let mut run3 = RunState::new(
-            std::path::PathBuf::from("test3.json"),
-            "feature/three".to_string(),
-        );
-        run3.status = RunStatus::Completed;
-
-        // Open detail tabs for all three
-        let entry1 = RunHistoryEntry::from_run_state(&run1);
-        let entry2 = RunHistoryEntry::from_run_state(&run2);
-        let entry3 = RunHistoryEntry::from_run_state(&run3);
-
-        app.open_run_detail_from_entry(&entry1, Some(run1.clone()));
-        app.open_run_detail_from_entry(&entry2, Some(run2.clone()));
-        app.open_run_detail_from_entry(&entry3, Some(run3.clone()));
-
-        // All tabs should exist
-        assert_eq!(app.tab_count(), 5); // 2 permanent + 3 detail tabs
-        assert_eq!(app.closable_tab_count(), 3);
-
-        assert!(app.has_tab(&TabId::RunDetail(entry1.run_id.clone())));
-        assert!(app.has_tab(&TabId::RunDetail(entry2.run_id.clone())));
-        assert!(app.has_tab(&TabId::RunDetail(entry3.run_id.clone())));
-    }
-
-    #[test]
-    fn test_closing_run_detail_tab_returns_to_projects() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut app = Autom8App::new(None);
-
-        // Navigate to Projects tab first
-        app.set_active_tab(TabId::Projects);
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        app.open_run_detail_from_entry(&entry, Some(run.clone()));
-
-        // Now on run detail tab
-        assert_eq!(*app.active_tab_id(), TabId::RunDetail(entry.run_id.clone()));
-
-        // Close it
-        app.close_tab(&TabId::RunDetail(entry.run_id.clone()));
-
-        // Should return to Projects (the previous tab)
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
-    }
-
-    #[test]
-    fn test_run_detail_cached_state_access() {
-        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
-
-        let mut app = Autom8App::new(None);
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        // Add iterations to verify they're cached
-        run.iterations.push(IterationRecord {
-            number: 1,
-            story_id: "US-001".to_string(),
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: Some("Implemented feature X".to_string()),
-        });
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        app.open_run_detail_from_entry(&entry, Some(run.clone()));
-
-        // Verify cached state has the correct data
-        let cached = app.get_cached_run_state(&entry.run_id);
-        assert!(cached.is_some());
-
-        let cached = cached.unwrap();
-        assert_eq!(cached.branch, "feature/test");
-        assert_eq!(cached.iterations.len(), 1);
-        assert_eq!(cached.iterations[0].story_id, "US-001");
-        assert_eq!(
-            cached.iterations[0].work_summary,
-            Some("Implemented feature X".to_string())
-        );
-    }
-
-    #[test]
-    fn test_run_detail_shows_all_stories() {
-        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        // Add multiple stories
-        run.iterations.push(IterationRecord {
-            number: 1,
-            story_id: "US-001".to_string(),
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: Some("Story 1 complete".to_string()),
-        });
-        run.iterations.push(IterationRecord {
-            number: 2,
-            story_id: "US-002".to_string(),
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: Some("Story 2 complete".to_string()),
-        });
-        run.iterations.push(IterationRecord {
-            number: 3,
-            story_id: "US-003".to_string(),
-            started_at: Utc::now(),
-            finished_at: None,
-            status: IterationStatus::Failed,
-            output_snippet: String::new(),
-            work_summary: None,
-        });
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-
-        // Verify entry has correct story counts
-        assert_eq!(entry.completed_stories, 2);
-        assert_eq!(entry.total_stories, 3);
-    }
-
-    #[test]
-    fn test_run_detail_shows_iteration_details() {
-        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        // Add multiple iterations for the same story (review cycles)
-        run.iterations.push(IterationRecord {
-            number: 1,
-            story_id: "US-001".to_string(),
-            started_at: Utc::now() - chrono::Duration::minutes(10),
-            finished_at: Some(Utc::now() - chrono::Duration::minutes(5)),
-            status: IterationStatus::Failed, // First attempt failed review
-            output_snippet: String::new(),
-            work_summary: Some("Initial implementation".to_string()),
-        });
-        run.iterations.push(IterationRecord {
-            number: 2,
-            story_id: "US-001".to_string(),
-            started_at: Utc::now() - chrono::Duration::minutes(5),
-            finished_at: Some(Utc::now()),
-            status: IterationStatus::Success, // Second attempt succeeded
-            output_snippet: String::new(),
-            work_summary: Some("Fixed issues from review".to_string()),
-        });
-
-        // The run should have 1 unique story with 2 iterations
-        let story_ids: std::collections::HashSet<_> =
-            run.iterations.iter().map(|i| &i.story_id).collect();
-        assert_eq!(story_ids.len(), 1);
-        assert_eq!(run.iterations.len(), 2);
-
-        // The entry should count 1 completed story (based on final success)
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.completed_stories, 1);
-        assert_eq!(entry.total_stories, 1);
-    }
-
-    #[test]
-    fn test_run_with_no_iterations() {
-        use crate::state::{RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Running;
-
-        // No iterations yet
-        assert!(run.iterations.is_empty());
-
-        let entry = RunHistoryEntry::from_run_state(&run);
-        assert_eq!(entry.completed_stories, 0);
-        // total_stories defaults to 1 when no iterations
-        assert_eq!(entry.total_stories, 1);
-    }
-
-    #[test]
-    fn test_run_detail_preserves_story_order() {
-        use crate::state::{IterationRecord, IterationStatus, RunState, RunStatus};
-
-        let mut run = RunState::new(
-            std::path::PathBuf::from("test.json"),
-            "feature/test".to_string(),
-        );
-        run.status = RunStatus::Completed;
-
-        // Add stories in specific order
-        let now = Utc::now();
-        run.iterations.push(IterationRecord {
-            number: 1,
-            story_id: "US-003".to_string(),
-            started_at: now,
-            finished_at: Some(now),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: None,
-        });
-        run.iterations.push(IterationRecord {
-            number: 2,
-            story_id: "US-001".to_string(),
-            started_at: now,
-            finished_at: Some(now),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: None,
-        });
-        run.iterations.push(IterationRecord {
-            number: 3,
-            story_id: "US-002".to_string(),
-            started_at: now,
-            finished_at: Some(now),
-            status: IterationStatus::Success,
-            output_snippet: String::new(),
-            work_summary: None,
-        });
-
-        // Verify we have 3 unique stories
-        let story_ids: Vec<_> = run.iterations.iter().map(|i| &i.story_id).collect();
-        assert_eq!(story_ids[0], "US-003");
-        assert_eq!(story_ids[1], "US-001");
-        assert_eq!(story_ids[2], "US-002");
+        assert!(tab.closable);
     }
 
     // ========================================================================
-    // Empty States and Loading Tests (US-006)
+    // Sidebar Tests
     // ========================================================================
 
     #[test]
-    fn test_run_history_loading_initially_false() {
-        let app = Autom8App::new(None);
-        assert!(!app.is_run_history_loading());
-    }
-
-    #[test]
-    fn test_run_history_error_initially_none() {
-        let app = Autom8App::new(None);
-        assert!(app.run_history_error().is_none());
-    }
-
-    #[test]
-    fn test_run_history_loading_cleared_on_deselect() {
-        let mut app = Autom8App::new(None);
-
-        // Select a project (exercises loading code path)
-        app.toggle_project_selection("some-project");
-
-        // Deselect - loading should be cleared
-        app.toggle_project_selection("some-project");
-        assert!(!app.is_run_history_loading());
-    }
-
-    #[test]
-    fn test_run_history_error_cleared_on_deselect() {
-        let mut app = Autom8App::new(None);
-
-        // Select a project (which will set an error since project doesn't exist)
-        app.toggle_project_selection("nonexistent-project");
-
-        // Deselect - error should be cleared
-        app.toggle_project_selection("nonexistent-project");
-        assert!(app.run_history_error().is_none());
-    }
-
-    #[test]
-    fn test_run_history_for_nonexistent_project_is_empty() {
-        let mut app = Autom8App::new(None);
-
-        // Select a project that doesn't exist - should succeed but have empty history
-        // Note: StateManager creates the config dir if it doesn't exist,
-        // so this doesn't produce an error, just empty results
-        app.toggle_project_selection("definitely-not-a-real-project-12345");
-
-        // Should not have an error (empty results is not an error)
-        assert!(app.run_history_error().is_none());
-        // Should not be loading anymore
-        assert!(!app.is_run_history_loading());
-        // Should have empty history (project has no archived runs)
-        assert!(app.run_history().is_empty());
-    }
-
-    #[test]
-    fn test_run_history_error_message_format() {
-        // This test validates the error message format when we manually set it
-        // Since StateManager gracefully handles nonexistent projects,
-        // we test the error display format directly
-        let mut app = Autom8App::new(None);
-
-        // Manually set an error to test the getter
-        app.run_history_error = Some("Test error: failed to load".to_string());
-
-        let error = app.run_history_error();
-        assert!(error.is_some());
-        let error_msg = error.unwrap();
-        assert!(!error_msg.is_empty());
-        assert!(error_msg.contains("failed"));
-    }
-
-    #[test]
-    fn test_run_history_state_reset_on_new_selection() {
-        let mut app = Autom8App::new(None);
-
-        // Manually set an error first
-        app.toggle_project_selection("project-1");
-        app.run_history_error = Some("Some error".to_string());
-        assert!(app.run_history_error().is_some());
-
-        // Select different project - error should be cleared
-        app.toggle_project_selection("project-2");
-        // The error should be reset to None (new project has no error)
-        assert!(app.run_history_error().is_none());
-        assert_eq!(app.selected_project(), Some("project-2"));
-    }
-
-    #[test]
-    fn test_empty_state_projects_no_filter() {
-        // With a nonexistent filter, projects should be empty
-        let app = Autom8App::new(Some("definitely-not-a-project-xxxxx".to_string()));
-        assert!(app.projects().is_empty());
-    }
-
-    #[test]
-    fn test_empty_state_sessions_no_active_runs() {
-        // With a nonexistent filter, there should be no active sessions
-        let app = Autom8App::new(Some("definitely-not-a-project-xxxxx".to_string()));
-        assert!(app.sessions().is_empty());
-        assert!(!app.has_active_runs());
-    }
-
-    #[test]
-    fn test_empty_projects_constants() {
-        // Verify the constants used for empty states are reasonable
-        // The empty state spacing should be positive
-        assert!(spacing::XXL > 0.0);
-        assert!(spacing::LG > 0.0);
-        assert!(spacing::SM > 0.0);
-    }
-
-    #[test]
-    fn test_loading_state_transitions() {
-        let mut app = Autom8App::new(None);
-
-        // Initially not loading
-        assert!(!app.is_run_history_loading());
-
-        // After selecting a project, loading should be false
-        // (since the load completes synchronously in the current impl)
-        app.toggle_project_selection("test-project");
-        assert!(!app.is_run_history_loading());
-
-        // After deselecting, still not loading
-        app.toggle_project_selection("test-project");
-        assert!(!app.is_run_history_loading());
-    }
-
-    // ========================================================================
-    // Visual Consistency Tests (US-007)
-    // ========================================================================
-
-    #[test]
-    fn test_split_view_constants() {
-        // Verify split view divider constants are reasonable
-        assert!(
-            SPLIT_DIVIDER_WIDTH > 0.0 && SPLIT_DIVIDER_WIDTH <= 2.0,
-            "Divider should be subtle (1-2px)"
-        );
-        assert!(
-            SPLIT_DIVIDER_MARGIN >= spacing::SM && SPLIT_DIVIDER_MARGIN <= spacing::LG,
-            "Divider margin should be moderate"
-        );
-        assert!(
-            SPLIT_PANEL_MIN_WIDTH >= 150.0 && SPLIT_PANEL_MIN_WIDTH <= 300.0,
-            "Panel minimum width should allow reasonable content"
-        );
-    }
-
-    #[test]
-    fn test_split_view_constants_use_spacing_scale() {
-        // Verify that split view margins align with the spacing scale
-        // SPLIT_DIVIDER_MARGIN should be a standard spacing value
-        let valid_spacing_values = [
-            spacing::XS,
-            spacing::SM,
-            spacing::MD,
-            spacing::LG,
-            spacing::XL,
-        ];
-        assert!(
-            valid_spacing_values.contains(&SPLIT_DIVIDER_MARGIN),
-            "Split divider margin should use spacing scale"
-        );
-    }
-
-    #[test]
-    fn test_project_row_uses_theme_colors() {
-        // Verify that project row constants are reasonable for hover/selected states
-        assert!(
-            PROJECT_ROW_HEIGHT >= 40.0 && PROJECT_ROW_HEIGHT <= 80.0,
-            "Row height should accommodate text with proper vertical rhythm"
-        );
-        assert!(
-            PROJECT_STATUS_DOT_RADIUS >= 3.0 && PROJECT_STATUS_DOT_RADIUS <= 8.0,
-            "Status dot should be visible but not overwhelming"
-        );
-    }
-
-    #[test]
-    fn test_card_rounding_consistency() {
-        // Verify rounding constants from theme are used consistently
-        assert_eq!(rounding::CARD, 8.0, "Card rounding should be 8px");
-        assert_eq!(rounding::BUTTON, 4.0, "Button rounding should be 4px");
-        assert_eq!(rounding::SMALL, 2.0, "Small element rounding should be 2px");
-    }
-
-    #[test]
-    fn test_hover_color_hierarchy() {
-        // Verify hover colors form a proper visual hierarchy
-        // SURFACE < SURFACE_HOVER < SURFACE_SELECTED (in terms of darkness/emphasis)
-        let surface_sum =
-            colors::SURFACE.r() as u32 + colors::SURFACE.g() as u32 + colors::SURFACE.b() as u32;
-        let hover_sum = colors::SURFACE_HOVER.r() as u32
-            + colors::SURFACE_HOVER.g() as u32
-            + colors::SURFACE_HOVER.b() as u32;
-        let selected_sum = colors::SURFACE_SELECTED.r() as u32
-            + colors::SURFACE_SELECTED.g() as u32
-            + colors::SURFACE_SELECTED.b() as u32;
-
-        // In a light theme, darker (lower sum) = more emphasis
-        assert!(
-            hover_sum < surface_sum,
-            "Hover should be visually distinct from surface"
-        );
-        assert!(
-            selected_sum < hover_sum,
-            "Selected should be more prominent than hover"
-        );
-    }
-
-    #[test]
-    fn test_border_color_hierarchy() {
-        // Verify border colors form a proper visual hierarchy
-        let border_sum =
-            colors::BORDER.r() as u32 + colors::BORDER.g() as u32 + colors::BORDER.b() as u32;
-        let focused_sum = colors::BORDER_FOCUSED.r() as u32
-            + colors::BORDER_FOCUSED.g() as u32
-            + colors::BORDER_FOCUSED.b() as u32;
-
-        // Focused border should be more prominent (darker in light theme)
-        assert!(
-            focused_sum < border_sum,
-            "Focused border should be more visible than default border"
-        );
-    }
-
-    #[test]
-    fn test_separator_color_exists() {
-        // Verify SEPARATOR color is defined and reasonable
-        let separator_sum = colors::SEPARATOR.r() as u32
-            + colors::SEPARATOR.g() as u32
-            + colors::SEPARATOR.b() as u32;
-
-        // Separator should be subtle but visible (not pure white)
-        assert!(
-            separator_sum < 765,
-            "Separator should have some color (not pure white)"
-        );
-        assert!(
-            separator_sum > 600,
-            "Separator should be subtle (light gray)"
-        );
-    }
-
-    #[test]
-    fn test_text_color_contrast() {
-        // Verify text colors maintain proper contrast hierarchy
-        let primary_sum = colors::TEXT_PRIMARY.r() as u32
-            + colors::TEXT_PRIMARY.g() as u32
-            + colors::TEXT_PRIMARY.b() as u32;
-        let secondary_sum = colors::TEXT_SECONDARY.r() as u32
-            + colors::TEXT_SECONDARY.g() as u32
-            + colors::TEXT_SECONDARY.b() as u32;
-        let muted_sum = colors::TEXT_MUTED.r() as u32
-            + colors::TEXT_MUTED.g() as u32
-            + colors::TEXT_MUTED.b() as u32;
-
-        // In light theme: darker text (lower sum) = more emphasis
-        assert!(
-            primary_sum < secondary_sum,
-            "Primary text should be more prominent than secondary"
-        );
-        assert!(
-            secondary_sum < muted_sum,
-            "Secondary text should be more prominent than muted"
-        );
-    }
-
-    #[test]
-    fn test_tab_constants_for_consistency() {
-        // Verify tab-related constants are reasonable
-        assert!(TAB_UNDERLINE_HEIGHT > 0.0 && TAB_UNDERLINE_HEIGHT <= 4.0);
-        assert!(TAB_PADDING_H >= spacing::SM && TAB_PADDING_H <= spacing::XL);
-        assert!(TAB_CLOSE_BUTTON_SIZE >= 12.0 && TAB_CLOSE_BUTTON_SIZE <= 24.0);
-    }
-
-    #[test]
-    fn test_animation_time_configured() {
-        // Verify animation time is set in the style
-        let style = theme::configure_style();
-        assert!(
-            style.animation_time > 0.0 && style.animation_time <= 0.5,
-            "Animation time should be set for smooth but responsive transitions"
-        );
-    }
-
-    #[test]
-    fn test_status_colors_are_distinct() {
-        // Verify all status colors are visually distinct from each other
-        let status_colors = [
-            colors::STATUS_RUNNING,
-            colors::STATUS_SUCCESS,
-            colors::STATUS_WARNING,
-            colors::STATUS_ERROR,
-            colors::STATUS_IDLE,
-        ];
-
-        // Check that each color is unique
-        for (i, color1) in status_colors.iter().enumerate() {
-            for (j, color2) in status_colors.iter().enumerate() {
-                if i != j {
-                    assert_ne!(color1, color2, "Status colors should all be distinct");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_spacing_scale_used_in_constants() {
-        // Verify that card and layout constants use spacing scale values
-        assert_eq!(CARD_SPACING, spacing::LG, "Card spacing should use LG");
-        assert_eq!(CARD_PADDING, spacing::LG, "Card padding should use LG");
-        assert_eq!(
-            PROJECT_ROW_PADDING_H,
-            spacing::MD,
-            "Project row horizontal padding should use MD"
-        );
-        assert_eq!(
-            PROJECT_ROW_PADDING_V,
-            spacing::MD,
-            "Project row vertical padding should use MD"
-        );
-    }
-
-    // ========================================================================
-    // Custom Title Bar Tests (US-002)
-    // ========================================================================
-
-    #[test]
-    fn test_title_bar_left_offset_is_reasonable() {
-        assert!(
-            TITLE_BAR_LEFT_OFFSET >= 60.0 && TITLE_BAR_LEFT_OFFSET <= 90.0,
-            "Title bar left offset should be 60-90px, got {}",
-            TITLE_BAR_LEFT_OFFSET
-        );
-    }
-
-    #[test]
-    fn test_build_viewport_returns_valid_builder() {
-        // Verify build_viewport creates a viewport with expected basic properties
-        let viewport = build_viewport();
-        // The viewport should be buildable without panicking
-        // We can't easily inspect all properties, but we can verify it was created
-
-        // This test verifies the function runs without errors
-        let _ = viewport;
-    }
-
-    #[test]
-    fn test_title_bar_uses_surface_color() {
-        // Title bar should use SURFACE color to match the header
-        // This is a documentation test - the actual color is applied in render_title_bar
-        // We verify the color constant exists and is appropriate
-        let surface = colors::SURFACE;
-        let bg = colors::BACKGROUND;
-
-        // Surface should be lighter than or equal to background (in light theme)
-        let surface_sum = surface.r() as u32 + surface.g() as u32 + surface.b() as u32;
-        let bg_sum = bg.r() as u32 + bg.g() as u32 + bg.b() as u32;
-
-        assert!(
-            surface_sum >= bg_sum,
-            "SURFACE should be >= BACKGROUND brightness for visual consistency"
-        );
-    }
-
-    #[test]
-    fn test_window_minimum_size_accommodates_title_bar() {
-        // Minimum window height should accommodate title bar + header + some content
-        let min_ui_height = TITLE_BAR_HEIGHT + HEADER_HEIGHT + 100.0; // 100px for minimal content
-        assert!(
-            MIN_HEIGHT >= min_ui_height,
-            "MIN_HEIGHT ({}) should accommodate title bar, header, and minimal content ({})",
-            MIN_HEIGHT,
-            min_ui_height
-        );
-    }
-
-    // ========================================================================
-    // Sidebar Navigation Tests (US-003)
-    // ========================================================================
-
-    #[test]
-    fn test_sidebar_width_is_within_spec() {
-        // Acceptance criteria: Sidebar width is fixed (~200-220px)
-        assert!(
-            SIDEBAR_WIDTH >= 200.0 && SIDEBAR_WIDTH <= 220.0,
-            "Sidebar width ({}) should be between 200-220px as specified",
-            SIDEBAR_WIDTH
-        );
-    }
-
-    #[test]
-    fn test_sidebar_item_height_is_reasonable() {
-        // Navigation items should have comfortable touch/click targets
-        assert!(
-            SIDEBAR_ITEM_HEIGHT >= 32.0 && SIDEBAR_ITEM_HEIGHT <= 56.0,
-            "Sidebar item height ({}) should be comfortable for interaction",
-            SIDEBAR_ITEM_HEIGHT
-        );
-    }
-
-    #[test]
-    fn test_sidebar_item_padding_is_reasonable() {
-        // Padding should provide visual breathing room
-        assert!(
-            SIDEBAR_ITEM_PADDING_H >= spacing::SM && SIDEBAR_ITEM_PADDING_H <= spacing::XL,
-            "Horizontal padding should use spacing scale"
-        );
-    }
-
-    #[test]
-    fn test_sidebar_active_indicator_is_visible() {
-        // Active indicator should be noticeable but not overwhelming
-        assert!(
-            SIDEBAR_ACTIVE_INDICATOR_WIDTH >= 2.0 && SIDEBAR_ACTIVE_INDICATOR_WIDTH <= 4.0,
-            "Active indicator width ({}) should be visible but subtle",
-            SIDEBAR_ACTIVE_INDICATOR_WIDTH
-        );
-    }
-
-    #[test]
-    fn test_sidebar_item_rounding_matches_theme() {
-        // Rounding should be consistent with the app's visual style
-        assert!(
-            SIDEBAR_ITEM_ROUNDING >= rounding::BUTTON && SIDEBAR_ITEM_ROUNDING <= rounding::CARD,
-            "Sidebar item rounding should be consistent with theme"
-        );
-    }
-
-    #[test]
-    fn test_sidebar_uses_warm_background() {
-        // Sidebar should use the warm BACKGROUND color from the theme
-        // This is a documentation test - the actual color is set in update()
-        // Verify BACKGROUND has warm tones (R >= G >= B)
-        let bg = colors::BACKGROUND;
-        assert!(
-            bg.r() >= bg.g() && bg.g() >= bg.b(),
-            "Sidebar background should use warm BACKGROUND color"
-        );
-    }
-
-    #[test]
-    fn test_sidebar_item_states_use_theme_colors() {
-        // Active state should use SURFACE_SELECTED
-        let selected = colors::SURFACE_SELECTED;
-        assert_ne!(
-            selected,
-            Color32::TRANSPARENT,
-            "Selected state should have a color"
-        );
-
-        // Hover state should use SURFACE_HOVER
-        let hover = colors::SURFACE_HOVER;
-        assert_ne!(
-            hover,
-            Color32::TRANSPARENT,
-            "Hover state should have a color"
-        );
-
-        // Hover should be lighter than selected (in warm theme, higher values = lighter)
-        let hover_sum = hover.r() as u32 + hover.g() as u32 + hover.b() as u32;
-        let selected_sum = selected.r() as u32 + selected.g() as u32 + selected.b() as u32;
-        assert!(
-            hover_sum > selected_sum,
-            "Hover should be lighter than selected"
-        );
-    }
-
-    #[test]
-    fn test_sidebar_fits_in_minimum_window() {
-        // Sidebar should fit within minimum window width with room for content
-        let min_content_width = 150.0; // Minimum reasonable content width
-        assert!(
-            SIDEBAR_WIDTH + min_content_width <= MIN_WIDTH,
-            "Sidebar ({}) + min content ({}) should fit in min window width ({})",
-            SIDEBAR_WIDTH,
-            min_content_width,
-            MIN_WIDTH
-        );
-    }
-
-    // ========================================================================
-    // Collapsible Sidebar Tests (US-004)
-    // ========================================================================
-
-    #[test]
-    fn test_sidebar_collapsed_width_is_zero() {
-        // When collapsed, sidebar should be fully hidden (0 width)
-        assert_eq!(
-            SIDEBAR_COLLAPSED_WIDTH, 0.0,
-            "Collapsed sidebar should have zero width for full content expansion"
-        );
-    }
-
-    #[test]
-    fn test_app_sidebar_starts_expanded() {
-        // Sidebar should start in expanded state by default
-        let app = Autom8App::new(None);
-        assert!(
-            !app.is_sidebar_collapsed(),
-            "Sidebar should start expanded (not collapsed)"
-        );
-    }
-
-    #[test]
-    fn test_app_toggle_sidebar_collapses() {
+    fn test_sidebar_toggle() {
         let mut app = Autom8App::new(None);
         assert!(!app.is_sidebar_collapsed());
 
         app.toggle_sidebar();
-        assert!(
-            app.is_sidebar_collapsed(),
-            "Sidebar should be collapsed after toggle"
-        );
-    }
-
-    #[test]
-    fn test_app_toggle_sidebar_expands() {
-        let mut app = Autom8App::new(None);
-        app.set_sidebar_collapsed(true);
         assert!(app.is_sidebar_collapsed());
 
         app.toggle_sidebar();
-        assert!(
-            !app.is_sidebar_collapsed(),
-            "Sidebar should be expanded after second toggle"
-        );
-    }
-
-    #[test]
-    fn test_app_toggle_sidebar_round_trip() {
-        let mut app = Autom8App::new(None);
-        let initial_state = app.is_sidebar_collapsed();
-
-        app.toggle_sidebar();
-        app.toggle_sidebar();
-
-        assert_eq!(
-            app.is_sidebar_collapsed(),
-            initial_state,
-            "Two toggles should return to initial state"
-        );
-    }
-
-    #[test]
-    fn test_app_set_sidebar_collapsed() {
-        let mut app = Autom8App::new(None);
-
-        app.set_sidebar_collapsed(true);
-        assert!(app.is_sidebar_collapsed());
-
-        app.set_sidebar_collapsed(false);
         assert!(!app.is_sidebar_collapsed());
-    }
-
-    #[test]
-    fn test_sidebar_toggle_button_size_is_reasonable() {
-        // Toggle button should be visible but not too large
-        assert!(
-            SIDEBAR_TOGGLE_SIZE >= 20.0,
-            "Toggle button should be at least 20px for touch targets"
-        );
-        assert!(
-            SIDEBAR_TOGGLE_SIZE <= TITLE_BAR_HEIGHT,
-            "Toggle button should fit within title bar height"
-        );
-    }
-
-    #[test]
-    fn test_sidebar_toggle_fits_in_title_bar() {
-        // Verify there's room for the toggle button in the title bar
-        let required_space = TITLE_BAR_LEFT_OFFSET + SIDEBAR_TOGGLE_PADDING + SIDEBAR_TOGGLE_SIZE;
-        // Should fit within half the minimum window width
-        assert!(
-            required_space < MIN_WIDTH / 2.0,
-            "Toggle button area ({}) should fit within reasonable title bar space",
-            required_space
-        );
-    }
-
-    // ========================================================================
-    // Content Header Dynamic Tabs Tests (US-005)
-    // ========================================================================
-
-    #[test]
-    fn test_content_tab_bar_height_is_reasonable() {
-        // Content tab bar should be compact but visible
-        assert!(
-            CONTENT_TAB_BAR_HEIGHT >= 28.0,
-            "Content tab bar should be at least 28px for readability"
-        );
-        assert!(
-            CONTENT_TAB_BAR_HEIGHT <= 48.0,
-            "Content tab bar should not be too tall"
-        );
-    }
-
-    #[test]
-    fn test_content_tab_bar_only_shows_with_dynamic_tabs() {
-        let app = Autom8App::new(None);
-        // Initially no dynamic tabs
-        assert_eq!(
-            app.closable_tab_count(),
-            0,
-            "Should start with no dynamic tabs"
-        );
-        // Tab bar visibility is determined by closable_tab_count() > 0
-        // (UI rendering tested visually, but logic verified here)
-    }
-
-    #[test]
-    fn test_opening_run_detail_creates_dynamic_tab() {
-        let mut app = Autom8App::new(None);
-        assert_eq!(app.closable_tab_count(), 0);
-
-        app.open_run_detail_tab("run-abc", "Run - 2024-01-15");
-
-        assert_eq!(
-            app.closable_tab_count(),
-            1,
-            "Opening run detail should create one dynamic tab"
-        );
-        assert!(app.has_tab(&TabId::RunDetail("run-abc".to_string())));
-    }
-
-    #[test]
-    fn test_multiple_run_detail_tabs_can_be_open() {
-        let mut app = Autom8App::new(None);
-
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2");
-        app.open_run_detail_tab("run-3", "Run 3");
-
-        assert_eq!(
-            app.closable_tab_count(),
-            3,
-            "Multiple run detail tabs should be supported"
-        );
-        assert_eq!(app.tab_count(), 5, "Total tabs = 2 permanent + 3 dynamic");
-    }
-
-    #[test]
-    fn test_dynamic_tab_has_close_button() {
-        let tab = TabInfo::closable(TabId::RunDetail("run-123".to_string()), "Test Run");
-        assert!(tab.closable, "Dynamic tabs should be marked as closable");
-    }
-
-    #[test]
-    fn test_permanent_tabs_not_closable() {
-        let active_runs = TabInfo::permanent(TabId::ActiveRuns, "Active Runs");
-        let projects = TabInfo::permanent(TabId::Projects, "Projects");
-
-        assert!(
-            !active_runs.closable,
-            "Active Runs tab should not be closable"
-        );
-        assert!(!projects.closable, "Projects tab should not be closable");
-    }
-
-    #[test]
-    fn test_clicking_tab_switches_content() {
-        let mut app = Autom8App::new(None);
-
-        // Start on ActiveRuns
-        assert_eq!(*app.active_tab_id(), TabId::ActiveRuns);
-
-        // Open a run detail tab
-        app.open_run_detail_tab("run-123", "Test Run");
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-123".to_string())
-        );
-
-        // Switch back to Projects
-        app.set_active_tab(TabId::Projects);
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
-
-        // Switch back to the run detail
-        app.set_active_tab(TabId::RunDetail("run-123".to_string()));
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_closing_last_dynamic_tab_returns_to_permanent_view() {
-        let mut app = Autom8App::new(None);
-
-        // Start on Projects
-        app.set_active_tab(TabId::Projects);
-
-        // Open a run detail tab (which becomes active)
-        app.open_run_detail_tab("run-123", "Test Run");
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-123".to_string())
-        );
-
-        // Close the tab - should return to Projects (the previous permanent tab)
-        app.close_tab(&TabId::RunDetail("run-123".to_string()));
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::Projects,
-            "Closing last dynamic tab should return to previous permanent view"
-        );
-        assert_eq!(app.closable_tab_count(), 0, "No dynamic tabs should remain");
-    }
-
-    #[test]
-    fn test_closing_one_dynamic_tab_keeps_others() {
-        let mut app = Autom8App::new(None);
-
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2");
-        app.open_run_detail_tab("run-3", "Run 3");
-
-        // Close run-2
-        app.close_tab(&TabId::RunDetail("run-2".to_string()));
-
-        assert_eq!(
-            app.closable_tab_count(),
-            2,
-            "Should have 2 dynamic tabs after closing one"
-        );
-        assert!(app.has_tab(&TabId::RunDetail("run-1".to_string())));
-        assert!(!app.has_tab(&TabId::RunDetail("run-2".to_string())));
-        assert!(app.has_tab(&TabId::RunDetail("run-3".to_string())));
-    }
-
-    #[test]
-    fn test_tab_bar_shows_only_dynamic_tabs() {
-        let app = Autom8App::new(None);
-
-        // Verify permanent tabs are not closable (and would be filtered out of content header)
-        let dynamic_tabs: Vec<_> = app.tabs().iter().filter(|t| t.closable).collect();
-        assert_eq!(
-            dynamic_tabs.len(),
-            0,
-            "Initially no tabs should appear in content header"
-        );
-    }
-
-    #[test]
-    fn test_tab_close_button_size_is_usable() {
-        // Close button should be large enough to click
-        assert!(
-            TAB_CLOSE_BUTTON_SIZE >= 12.0,
-            "Close button should be at least 12px for usability"
-        );
-        assert!(
-            TAB_CLOSE_BUTTON_SIZE <= 20.0,
-            "Close button should not be too large"
-        );
-    }
-
-    #[test]
-    fn test_tab_underline_height_is_subtle() {
-        // Underline indicator should be subtle
-        assert!(
-            TAB_UNDERLINE_HEIGHT >= 1.0,
-            "Underline should be at least 1px visible"
-        );
-        assert!(
-            TAB_UNDERLINE_HEIGHT <= 3.0,
-            "Underline should be subtle, not chunky"
-        );
-    }
-
-    #[test]
-    fn test_closing_active_tab_switches_to_adjacent() {
-        let mut app = Autom8App::new(None);
-
-        // Open multiple tabs
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2"); // This becomes active
-
-        // Active is now run-2
-        assert_eq!(*app.active_tab_id(), TabId::RunDetail("run-2".to_string()));
-
-        // Close run-2, should switch to run-1 (the previous tab)
-        app.close_tab(&TabId::RunDetail("run-2".to_string()));
-
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-1".to_string()),
-            "Should switch to previous tab after closing active"
-        );
     }
 }

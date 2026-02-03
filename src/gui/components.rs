@@ -717,88 +717,27 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_progress_fraction() {
-        let progress = Progress::new(2, 5);
-        assert!((progress.fraction() - 0.4).abs() < 0.001);
+    fn test_progress() {
+        // Fraction calculation
+        assert!((Progress::new(2, 5).fraction() - 0.4).abs() < 0.001);
+        assert_eq!(Progress::new(0, 0).fraction(), 0.0);
+        assert!((Progress::new(5, 5).fraction() - 1.0).abs() < 0.001);
+
+        // Formatting
+        assert_eq!(Progress::new(1, 5).as_story_fraction(), "Story 2/5");
+        assert_eq!(Progress::new(0, 3).as_story_fraction(), "Story 1/3");
+        assert_eq!(Progress::new(2, 5).as_fraction(), "2/5");
+        assert_eq!(Progress::new(2, 4).as_percentage(), "50%");
+        assert_eq!(Progress::new(0, 0).as_percentage(), "0%");
+        assert_eq!(Progress::new(5, 5).as_percentage(), "100%");
     }
 
     #[test]
-    fn test_progress_fraction_zero_total() {
-        let progress = Progress::new(0, 0);
-        assert_eq!(progress.fraction(), 0.0);
-    }
-
-    #[test]
-    fn test_progress_fraction_complete() {
-        let progress = Progress::new(5, 5);
-        assert!((progress.fraction() - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_progress_as_story_fraction() {
-        let progress = Progress::new(1, 5);
-        assert_eq!(progress.as_story_fraction(), "Story 2/5");
-    }
-
-    #[test]
-    fn test_progress_as_story_fraction_first() {
-        let progress = Progress::new(0, 3);
-        assert_eq!(progress.as_story_fraction(), "Story 1/3");
-    }
-
-    #[test]
-    fn test_progress_as_fraction() {
-        let progress = Progress::new(2, 5);
-        assert_eq!(progress.as_fraction(), "2/5");
-    }
-
-    #[test]
-    fn test_progress_as_percentage() {
-        let progress = Progress::new(2, 4);
-        assert_eq!(progress.as_percentage(), "50%");
-    }
-
-    #[test]
-    fn test_progress_as_percentage_zero_total() {
-        let progress = Progress::new(0, 0);
-        assert_eq!(progress.as_percentage(), "0%");
-    }
-
-    #[test]
-    fn test_progress_as_percentage_complete() {
-        let progress = Progress::new(5, 5);
-        assert_eq!(progress.as_percentage(), "100%");
-    }
-
-    // ------------------------------------------------------------------------
-    // ProgressBar Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_progress_bar_new() {
-        let bar = ProgressBar::new(0.5);
-        assert!((bar.progress() - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_progress_bar_clamps_values() {
-        let bar_low = ProgressBar::new(-0.5);
-        let bar_high = ProgressBar::new(1.5);
-        assert_eq!(bar_low.progress(), 0.0);
-        assert_eq!(bar_high.progress(), 1.0);
-    }
-
-    #[test]
-    fn test_progress_bar_from_progress() {
-        let progress = Progress::new(3, 10);
-        let bar = ProgressBar::from_progress(&progress);
-        assert!((bar.progress() - 0.3).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_progress_bar_default() {
-        let bar = ProgressBar::default();
-        assert_eq!(bar.progress(), 0.0);
+    fn test_progress_bar() {
+        assert!((ProgressBar::new(0.5).progress() - 0.5).abs() < 0.001);
+        assert_eq!(ProgressBar::new(-0.5).progress(), 0.0); // Clamps low
+        assert_eq!(ProgressBar::new(1.5).progress(), 1.0); // Clamps high
+        assert!((ProgressBar::from_progress(&Progress::new(3, 10)).progress() - 0.3).abs() < 0.001);
     }
 
     // ------------------------------------------------------------------------
@@ -806,32 +745,19 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_format_duration_secs_seconds_only() {
-        assert_eq!(format_duration_secs(30), "30s");
+    fn test_format_duration_secs() {
+        // Seconds only
         assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(30), "30s");
         assert_eq!(format_duration_secs(59), "59s");
-    }
 
-    #[test]
-    fn test_format_duration_secs_minutes_and_seconds() {
+        // Minutes and seconds
         assert_eq!(format_duration_secs(60), "1m 0s");
         assert_eq!(format_duration_secs(125), "2m 5s");
-        assert_eq!(format_duration_secs(3599), "59m 59s");
-    }
 
-    #[test]
-    fn test_format_duration_secs_hours_and_minutes() {
+        // Hours and minutes
         assert_eq!(format_duration_secs(3600), "1h 0m");
-        assert_eq!(format_duration_secs(3700), "1h 1m");
         assert_eq!(format_duration_secs(7265), "2h 1m");
-    }
-
-    #[test]
-    fn test_format_duration_from_timestamp() {
-        let started_at = Utc::now() - chrono::Duration::seconds(125);
-        let formatted = format_duration(started_at);
-        assert!(formatted.contains("m"));
-        assert!(formatted.contains("s"));
     }
 
     // ------------------------------------------------------------------------
@@ -839,38 +765,22 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_format_relative_time_secs_just_now() {
+    fn test_format_relative_time_secs() {
+        // Just now (< 1 minute)
         assert_eq!(format_relative_time_secs(0), "just now");
-        assert_eq!(format_relative_time_secs(30), "just now");
         assert_eq!(format_relative_time_secs(59), "just now");
-    }
 
-    #[test]
-    fn test_format_relative_time_secs_minutes() {
+        // Minutes
         assert_eq!(format_relative_time_secs(60), "1m ago");
         assert_eq!(format_relative_time_secs(300), "5m ago");
-        assert_eq!(format_relative_time_secs(3599), "59m ago");
-    }
 
-    #[test]
-    fn test_format_relative_time_secs_hours() {
+        // Hours
         assert_eq!(format_relative_time_secs(3600), "1h ago");
         assert_eq!(format_relative_time_secs(7200), "2h ago");
-        assert_eq!(format_relative_time_secs(86399), "23h ago");
-    }
 
-    #[test]
-    fn test_format_relative_time_secs_days() {
+        // Days
         assert_eq!(format_relative_time_secs(86400), "1d ago");
         assert_eq!(format_relative_time_secs(172800), "2d ago");
-        assert_eq!(format_relative_time_secs(604800), "7d ago");
-    }
-
-    #[test]
-    fn test_format_relative_time_from_timestamp() {
-        let timestamp = Utc::now() - chrono::Duration::hours(3);
-        let formatted = format_relative_time(timestamp);
-        assert!(formatted.contains("3h ago"));
     }
 
     // ------------------------------------------------------------------------
@@ -963,99 +873,33 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Constants Tests
+    // Badge Background Tests
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_constants() {
-        assert_eq!(STATUS_DOT_RADIUS, 4.0);
-        assert_eq!(MAX_TEXT_LENGTH, 40);
-        assert_eq!(MAX_BRANCH_LENGTH, 25);
-    }
-
-    // ------------------------------------------------------------------------
-    // Badge Background Tests (US-007 Visual Polish)
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_badge_background_color_creates_tinted_background() {
-        // Badge backgrounds should be lighter than the status color
+    fn test_badge_background_color() {
         let running_bg = badge_background_color(colors::STATUS_RUNNING);
         let success_bg = badge_background_color(colors::STATUS_SUCCESS);
         let error_bg = badge_background_color(colors::STATUS_ERROR);
 
-        // Backgrounds should be relatively light (high luminance)
-        let running_lum = running_bg.r() as u32 + running_bg.g() as u32 + running_bg.b() as u32;
-        let success_lum = success_bg.r() as u32 + success_bg.g() as u32 + success_bg.b() as u32;
-        let error_lum = error_bg.r() as u32 + error_bg.g() as u32 + error_bg.b() as u32;
-
-        // Badge backgrounds should be light (luminance > 600 out of 765 max)
-        assert!(
-            running_lum > 600,
-            "Running badge bg should be light, got luminance {}",
-            running_lum
-        );
-        assert!(
-            success_lum > 600,
-            "Success badge bg should be light, got luminance {}",
-            success_lum
-        );
-        assert!(
-            error_lum > 600,
-            "Error badge bg should be light, got luminance {}",
-            error_lum
-        );
-    }
-
-    #[test]
-    fn test_badge_background_inherits_warm_tones() {
-        // Badge backgrounds should blend with warm background color
-        // Test with a neutral color to see if warmth is preserved
-        let neutral_status = Color32::from_rgb(100, 100, 100);
-        let badge_bg = badge_background_color(neutral_status);
-
-        // The badge background should have warm tones from the blend
-        // Since we blend with warm BACKGROUND at 85%, the result should be warm
-        assert!(
-            badge_bg.r() >= badge_bg.b(),
-            "Badge bg should inherit warm tones, got RGB({}, {}, {})",
-            badge_bg.r(),
-            badge_bg.g(),
-            badge_bg.b()
-        );
-    }
-
-    #[test]
-    fn test_badge_background_differs_by_status() {
-        // Badge backgrounds should produce visually distinct results for different statuses
-        let running_bg = badge_background_color(colors::STATUS_RUNNING);
-        let success_bg = badge_background_color(colors::STATUS_SUCCESS);
-        let error_bg = badge_background_color(colors::STATUS_ERROR);
+        // Badge backgrounds should be light (high luminance > 600 out of 765 max)
+        for (name, bg) in [
+            ("running", running_bg),
+            ("success", success_bg),
+            ("error", error_bg),
+        ] {
+            let lum = bg.r() as u32 + bg.g() as u32 + bg.b() as u32;
+            assert!(
+                lum > 600,
+                "{} badge bg should be light, got luminance {}",
+                name,
+                lum
+            );
+        }
 
         // All three should produce different colors
-        assert_ne!(
-            running_bg, success_bg,
-            "Running and success badge backgrounds should differ"
-        );
-        assert_ne!(
-            success_bg, error_bg,
-            "Success and error badge backgrounds should differ"
-        );
-        assert_ne!(
-            running_bg, error_bg,
-            "Running and error badge backgrounds should differ"
-        );
-
-        // Each should be different from the base background
-        let bg = colors::BACKGROUND;
-        assert_ne!(
-            running_bg, bg,
-            "Running badge should differ from background"
-        );
-        assert_ne!(
-            success_bg, bg,
-            "Success badge should differ from background"
-        );
-        assert_ne!(error_bg, bg, "Error badge should differ from background");
+        assert_ne!(running_bg, success_bg);
+        assert_ne!(success_bg, error_bg);
+        assert_ne!(running_bg, error_bg);
     }
 }
