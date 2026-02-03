@@ -383,6 +383,114 @@ fn format_machine_state_text(state: &MachineState) -> &'static str {
     }
 }
 
+/// Format project description as plain text lines for display.
+///
+/// US-003: This replaces the CLI output formatting from print_project_description() for GUI display.
+/// Shows: project name, path, status, specs with progress, file counts.
+fn format_project_description_as_text(
+    desc: &crate::config::ProjectDescription,
+) -> Vec<String> {
+    use crate::state::RunStatus;
+
+    let mut lines = Vec::new();
+
+    // Project header
+    lines.push(format!("Project: {}", desc.name));
+    lines.push(format!("Path: {}", desc.path.display()));
+    lines.push(String::new());
+
+    // Status
+    let status_text = match desc.run_status {
+        Some(RunStatus::Running) => "[running]",
+        Some(RunStatus::Failed) => "[failed]",
+        Some(RunStatus::Interrupted) => "[interrupted]",
+        Some(RunStatus::Completed) => "[completed]",
+        None => "[idle]",
+    };
+    lines.push(format!("Status: {}", status_text));
+
+    // Branch (if any)
+    if let Some(branch) = &desc.current_branch {
+        lines.push(format!("Branch: {}", branch));
+    }
+
+    // Current story (if any)
+    if let Some(story) = &desc.current_story {
+        lines.push(format!("Current Story: {}", story));
+    }
+    lines.push(String::new());
+
+    // Specs
+    if desc.specs.is_empty() {
+        lines.push("No specs found.".to_string());
+    } else {
+        lines.push(format!("Specs: ({} total)", desc.specs.len()));
+        lines.push(String::new());
+
+        for spec in &desc.specs {
+            lines.extend(format_spec_summary_as_text(spec));
+        }
+    }
+
+    // File counts summary
+    lines.push("─────────────────────────────────────────────────────────".to_string());
+    lines.push(format!(
+        "Files: {} spec md, {} spec json, {} archived runs",
+        desc.spec_md_count,
+        desc.specs.len(),
+        desc.runs_count
+    ));
+
+    lines
+}
+
+/// Format a single spec summary as plain text lines.
+fn format_spec_summary_as_text(spec: &crate::config::SpecSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push(format!("━━━ {}", spec.filename));
+    lines.push(format!("Project: {}", spec.project_name));
+    lines.push(format!("Branch:  {}", spec.branch_name));
+
+    // Description preview (first line, truncated to 100 chars)
+    let desc_preview = if spec.description.len() > 100 {
+        format!("{}...", &spec.description[..100])
+    } else {
+        spec.description.clone()
+    };
+    let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
+    lines.push(format!("Description: {}", first_line));
+    lines.push(String::new());
+
+    // Progress bar (simple text version)
+    let progress_bar = make_progress_bar_text(spec.completed_count, spec.total_count, 12);
+    lines.push(format!(
+        "Progress: [{}] {}/{} stories complete",
+        progress_bar, spec.completed_count, spec.total_count
+    ));
+    lines.push(String::new());
+
+    // User stories
+    lines.push("User Stories:".to_string());
+    for story in &spec.stories {
+        let status_icon = if story.passes { "✓" } else { "○" };
+        lines.push(format!("  {} {}: {}", status_icon, story.id, story.title));
+    }
+    lines.push(String::new());
+
+    lines
+}
+
+/// Create a simple text progress bar.
+fn make_progress_bar_text(completed: usize, total: usize, width: usize) -> String {
+    if total == 0 {
+        return " ".repeat(width);
+    }
+    let filled = (completed * width) / total;
+    let empty = width - filled;
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
 // ============================================================================
 // Context Menu Types (Right-Click Context Menu - US-002)
 // ============================================================================
@@ -1553,8 +1661,10 @@ impl Autom8App {
         });
     }
 
-    /// Spawn the `autom8 describe --project <name>` command in a background thread.
-    /// Opens a new command output tab and streams output to it.
+    /// Get project description and display in a command output tab.
+    ///
+    /// US-003: Calls data layer directly instead of spawning subprocess.
+    /// Opens a new command output tab and formats ProjectDescription as plain text.
     pub fn spawn_describe_command(&mut self, project_name: &str) {
         // Open the tab first to get the cache key
         let id = self.open_command_output_tab(project_name, "describe");
@@ -1563,76 +1673,36 @@ impl Autom8App {
         let project = project_name.to_string();
 
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            use std::process::{Command, Stdio};
-
-            // Spawn the autom8 describe command (project name is a positional argument)
-            let result = Command::new("autom8")
-                .arg("describe")
-                .arg(&project)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-
-            match result {
-                Ok(mut child) => {
-                    // Read stdout in a separate thread
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let tx_stdout = tx.clone();
-                    let tx_stderr = tx.clone();
-                    let cache_key_stdout = cache_key.clone();
-                    let cache_key_stderr = cache_key.clone();
-
-                    let stdout_handle = std::thread::spawn(move || {
-                        if let Some(stdout) = stdout {
-                            let reader = BufReader::new(stdout);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stdout.send(CommandMessage::Stdout {
-                                    cache_key: cache_key_stdout.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    let stderr_handle = std::thread::spawn(move || {
-                        if let Some(stderr) = stderr {
-                            let reader = BufReader::new(stderr);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stderr.send(CommandMessage::Stderr {
-                                    cache_key: cache_key_stderr.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    // Wait for output threads to finish
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-
-                    // Wait for the child process to exit
-                    match child.wait() {
-                        Ok(status) => {
-                            let exit_code = status.code().unwrap_or(-1);
-                            let _ = tx.send(CommandMessage::Completed {
-                                cache_key,
-                                exit_code,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = tx.send(CommandMessage::Failed {
-                                cache_key,
-                                error: format!("Failed to wait for process: {}", e),
-                            });
-                        }
+            // Call data layer directly instead of spawning subprocess
+            match crate::config::get_project_description(&project) {
+                Ok(Some(desc)) => {
+                    // Format project description as plain text
+                    let lines = format_project_description_as_text(&desc);
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
                     }
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code: 0,
+                    });
+                }
+                Ok(None) => {
+                    let _ = tx.send(CommandMessage::Stdout {
+                        cache_key: cache_key.clone(),
+                        line: format!("Project '{}' not found.", project),
+                    });
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code: 1,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(CommandMessage::Failed {
                         cache_key,
-                        error: format!("Failed to spawn autom8: {}", e),
+                        error: format!("Failed to get project description: {}", e),
                     });
                 }
             }
@@ -6647,13 +6717,19 @@ mod tests {
         assert!(session_line.contains("(current)"));
 
         // Should have branch
-        assert!(lines.iter().any(|l| l.contains("Branch:") && l.contains("feature/test")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Branch:") && l.contains("feature/test")));
 
         // Should have state
-        assert!(lines.iter().any(|l| l.contains("State:") && l.contains("Running Claude")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("State:") && l.contains("Running Claude")));
 
         // Should have story
-        assert!(lines.iter().any(|l| l.contains("Story:") && l.contains("US-001")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Story:") && l.contains("US-001")));
 
         // Should have started time
         assert!(lines.iter().any(|l| l.contains("Started:")));
@@ -6759,13 +6835,19 @@ mod tests {
         let current_line = lines.iter().find(|l| l.contains("current")).unwrap();
         assert!(current_line.contains("→"));
 
-        let running_line = lines.iter().find(|l| l.contains("running") && !l.contains("(")).unwrap();
+        let running_line = lines
+            .iter()
+            .find(|l| l.contains("running") && !l.contains("("))
+            .unwrap();
         assert!(running_line.contains("●"));
 
         let idle_line = lines.iter().find(|l| l.contains("idle")).unwrap();
         assert!(idle_line.contains("○"));
 
-        let stale_line = lines.iter().find(|l| l.contains("stale") && !l.contains("(")).unwrap();
+        let stale_line = lines
+            .iter()
+            .find(|l| l.contains("stale") && !l.contains("("))
+            .unwrap();
         assert!(stale_line.contains("✗"));
     }
 
@@ -6804,7 +6886,7 @@ mod tests {
 
         assert!(summary.contains("4 sessions"));
         assert!(summary.contains("2 running")); // s1 and s2 only
-        assert!(summary.contains("1 stale"));   // s3
+        assert!(summary.contains("1 stale")); // s3
     }
 
     #[test]
@@ -6827,6 +6909,224 @@ mod tests {
         let tab = tab.unwrap();
         assert!(tab.label.contains("test-project"));
         assert!(tab.label.starts_with("Status:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    // ========================================================================
+    // US-003: Project Description Formatting Tests
+    // ========================================================================
+
+    #[test]
+    fn test_us003_format_project_description_basic() {
+        use crate::config::ProjectDescription;
+        use std::path::PathBuf;
+
+        let desc = ProjectDescription {
+            name: "test-project".to_string(),
+            path: PathBuf::from("/home/user/.config/autom8/test-project"),
+            has_active_run: false,
+            run_status: None,
+            current_story: None,
+            current_branch: None,
+            specs: vec![],
+            spec_md_count: 0,
+            runs_count: 0,
+        };
+
+        let lines = format_project_description_as_text(&desc);
+
+        // Should have project header
+        assert!(lines.iter().any(|l| l.contains("Project: test-project")));
+
+        // Should have path
+        assert!(lines.iter().any(|l| l.contains("Path:")));
+
+        // Should have status (idle)
+        assert!(lines.iter().any(|l| l.contains("Status:") && l.contains("[idle]")));
+
+        // Should have "No specs found" when empty
+        assert!(lines.iter().any(|l| l.contains("No specs found")));
+
+        // Should have file counts summary
+        assert!(lines.iter().any(|l| l.contains("Files:")));
+    }
+
+    #[test]
+    fn test_us003_format_project_description_with_status() {
+        use crate::config::ProjectDescription;
+        use crate::state::RunStatus;
+        use std::path::PathBuf;
+
+        // Test running status
+        let desc = ProjectDescription {
+            name: "test".to_string(),
+            path: PathBuf::from("/test"),
+            has_active_run: true,
+            run_status: Some(RunStatus::Running),
+            current_story: Some("US-001".to_string()),
+            current_branch: Some("feature/test".to_string()),
+            specs: vec![],
+            spec_md_count: 2,
+            runs_count: 5,
+        };
+
+        let lines = format_project_description_as_text(&desc);
+
+        // Should show running status
+        assert!(lines.iter().any(|l| l.contains("[running]")));
+
+        // Should show branch
+        assert!(lines.iter().any(|l| l.contains("Branch: feature/test")));
+
+        // Should show current story
+        assert!(lines.iter().any(|l| l.contains("Current Story: US-001")));
+
+        // Should show file counts
+        let files_line = lines.iter().find(|l| l.contains("Files:")).unwrap();
+        assert!(files_line.contains("2 spec md"));
+        assert!(files_line.contains("5 archived runs"));
+    }
+
+    #[test]
+    fn test_us003_format_project_description_all_statuses() {
+        use crate::config::ProjectDescription;
+        use crate::state::RunStatus;
+        use std::path::PathBuf;
+
+        let make_desc = |status: Option<RunStatus>| ProjectDescription {
+            name: "test".to_string(),
+            path: PathBuf::from("/test"),
+            has_active_run: status.is_some(),
+            run_status: status,
+            current_story: None,
+            current_branch: None,
+            specs: vec![],
+            spec_md_count: 0,
+            runs_count: 0,
+        };
+
+        // Test each status
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Running)));
+        assert!(lines.iter().any(|l| l.contains("[running]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Failed)));
+        assert!(lines.iter().any(|l| l.contains("[failed]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Interrupted)));
+        assert!(lines.iter().any(|l| l.contains("[interrupted]")));
+
+        let lines = format_project_description_as_text(&make_desc(Some(RunStatus::Completed)));
+        assert!(lines.iter().any(|l| l.contains("[completed]")));
+
+        let lines = format_project_description_as_text(&make_desc(None));
+        assert!(lines.iter().any(|l| l.contains("[idle]")));
+    }
+
+    #[test]
+    fn test_us003_format_spec_summary() {
+        use crate::config::{SpecSummary, StorySummary};
+        use std::path::PathBuf;
+
+        let spec = SpecSummary {
+            filename: "spec-feature.json".to_string(),
+            path: PathBuf::from("/test/spec-feature.json"),
+            project_name: "my-project".to_string(),
+            branch_name: "feature/new-thing".to_string(),
+            description: "Add a new feature to handle user input".to_string(),
+            stories: vec![
+                StorySummary {
+                    id: "US-001".to_string(),
+                    title: "First story".to_string(),
+                    passes: true,
+                },
+                StorySummary {
+                    id: "US-002".to_string(),
+                    title: "Second story".to_string(),
+                    passes: false,
+                },
+            ],
+            completed_count: 1,
+            total_count: 2,
+        };
+
+        let lines = format_spec_summary_as_text(&spec);
+
+        // Should have filename header
+        assert!(lines.iter().any(|l| l.contains("spec-feature.json")));
+
+        // Should have project name
+        assert!(lines.iter().any(|l| l.contains("Project: my-project")));
+
+        // Should have branch
+        assert!(lines.iter().any(|l| l.contains("Branch:") && l.contains("feature/new-thing")));
+
+        // Should have description
+        assert!(lines.iter().any(|l| l.contains("Description:")));
+
+        // Should have progress
+        let progress_line = lines.iter().find(|l| l.contains("Progress:")).unwrap();
+        assert!(progress_line.contains("1/2 stories complete"));
+
+        // Should have user stories section
+        assert!(lines.iter().any(|l| l.contains("User Stories:")));
+
+        // Should show completed story with checkmark
+        assert!(lines.iter().any(|l| l.contains("✓") && l.contains("US-001")));
+
+        // Should show incomplete story with empty circle
+        assert!(lines.iter().any(|l| l.contains("○") && l.contains("US-002")));
+    }
+
+    #[test]
+    fn test_us003_make_progress_bar_text() {
+        // Empty progress
+        let bar = make_progress_bar_text(0, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '░').count(), 10);
+
+        // Full progress
+        let bar = make_progress_bar_text(10, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '█').count(), 10);
+
+        // Half progress
+        let bar = make_progress_bar_text(5, 10, 10);
+        assert_eq!(bar.chars().filter(|c| *c == '█').count(), 5);
+        assert_eq!(bar.chars().filter(|c| *c == '░').count(), 5);
+
+        // Zero total should return empty bar
+        let bar = make_progress_bar_text(0, 0, 10);
+        assert_eq!(bar, "          "); // 10 spaces
+    }
+
+    #[test]
+    fn test_us003_spawn_describe_creates_tab() {
+        // Verify spawn_describe_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_describe_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.label.starts_with("Describe:"));
         assert!(tab.closable);
 
         // Check that a command execution was created
