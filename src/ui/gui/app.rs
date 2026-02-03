@@ -395,8 +395,14 @@ fn format_resume_info_as_text(session: &ResumableSessionInfo) -> Vec<String> {
     lines.push(String::new());
     lines.push(format!("Session ID:    {}", session.session_id));
     lines.push(format!("Branch:        {}", session.branch_name));
-    lines.push(format!("Worktree Path: {}", session.worktree_path.display()));
-    lines.push(format!("Current State: {}", format_machine_state_text(&session.machine_state)));
+    lines.push(format!(
+        "Worktree Path: {}",
+        session.worktree_path.display()
+    ));
+    lines.push(format!(
+        "Current State: {}",
+        format_machine_state_text(&session.machine_state)
+    ));
     lines.push(String::new());
     lines.push(format!(
         "To resume, run `autom8 resume --session {}` in terminal",
@@ -6486,7 +6492,11 @@ mod tests {
             );
 
             let lines = format_resume_info_as_text(&info);
-            assert_eq!(lines[5], expected_line, "State {:?} should format correctly", state);
+            assert_eq!(
+                lines[5], expected_line,
+                "State {:?} should format correctly",
+                state
+            );
         }
     }
 
@@ -6503,7 +6513,10 @@ mod tests {
         let lines = format_resume_info_as_text(&info);
 
         assert_eq!(lines[2], "Session ID:    main");
-        assert_eq!(lines[7], "To resume, run `autom8 resume --session main` in terminal");
+        assert_eq!(
+            lines[7],
+            "To resume, run `autom8 resume --session main` in terminal"
+        );
     }
 
     #[test]
@@ -6513,7 +6526,7 @@ mod tests {
             "abcd1234",
             "feature/very-long-branch-name",
             std::path::PathBuf::from(
-                "/home/user/very/deep/nested/directory/structure/projects/my-project-wt-feature"
+                "/home/user/very/deep/nested/directory/structure/projects/my-project-wt-feature",
             ),
             MachineState::RunningClaude,
         );
