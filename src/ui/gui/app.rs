@@ -6184,14 +6184,13 @@ mod tests {
         // Simulate the changes that would be pushed when cascade occurs
         let mut bool_changes: Vec<(ConfigBoolField, bool)> = Vec::new();
         let commit = false; // User disabled commit
-        let mut pull_request = true;
+        let pull_request = true;
 
         // Push the commit change
         bool_changes.push((ConfigBoolField::Commit, commit));
 
-        // Cascade
+        // Cascade: when commit is disabled and pull_request was true, we need to disable it too
         if !commit && pull_request {
-            pull_request = false;
             bool_changes.push((ConfigBoolField::PullRequest, false));
         }
 
