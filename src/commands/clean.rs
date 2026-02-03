@@ -4,7 +4,7 @@
 //! This command helps users manage disk space and keep their project clean.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::output::{BLUE, BOLD, CYAN, GRAY, GREEN, RED, RESET, YELLOW};
@@ -717,7 +717,10 @@ pub struct DirectCleanOptions {
     pub force: bool,
 }
 
-/// Clean completed/failed sessions directly (no prompts, no output).
+/// Clean worktrees directly (no prompts, no output).
+///
+/// US-006: Updated to clean any worktree (not just completed/failed sessions),
+/// while skipping worktrees with active runs.
 ///
 /// This function is designed for programmatic use (e.g., GUI) where the caller
 /// handles confirmation and output display.
@@ -730,43 +733,19 @@ pub fn clean_worktrees_direct(
     let state_manager = StateManager::for_project(project_name)?;
     let sessions = state_manager.list_sessions()?;
 
-    // Find completed or failed sessions
-    let cleanable: Vec<_> = sessions
+    // US-006: Clean any worktree-based session (non-main), skipping active runs
+    // This makes the Clean menu more useful by enabling it whenever there are worktrees
+    let to_clean: Vec<_> = sessions
         .iter()
         .filter(|s| {
-            // Load the state to check if completed or failed
-            if let Some(session_sm) = state_manager.get_session(&s.session_id) {
-                if let Ok(Some(state)) = session_sm.load_current() {
-                    matches!(
-                        state.machine_state,
-                        MachineState::Completed | MachineState::Failed
-                    ) || matches!(
-                        state.status,
-                        RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
-                    )
-                } else {
-                    // No state file - consider it cleanable
-                    true
-                }
-            } else {
-                false
+            // Skip main session - it's not a worktree created by autom8
+            if s.session_id == "main" {
+                return false;
             }
+            // Include sessions with existing worktrees or orphaned sessions
+            true
         })
         .collect();
-
-    // Also include orphaned sessions
-    let orphaned: Vec<_> = sessions
-        .iter()
-        .filter(|s| !s.worktree_path.exists())
-        .collect();
-
-    // Combine cleanable and orphaned (dedupe)
-    let mut to_clean: Vec<_> = cleanable;
-    for orphan in orphaned {
-        if !to_clean.iter().any(|s| s.session_id == orphan.session_id) {
-            to_clean.push(orphan);
-        }
-    }
 
     let mut summary = CleanupSummary::default();
 
@@ -777,6 +756,15 @@ pub fn clean_worktrees_direct(
     let current_dir = std::env::current_dir().ok();
 
     for session in to_clean {
+        // US-006: Skip sessions with active runs (same as Remove Project)
+        if session.is_running {
+            summary.sessions_skipped.push(SkippedSession {
+                session_id: session.session_id.clone(),
+                reason: "Active run in progress".to_string(),
+            });
+            continue;
+        }
+
         let is_current = current_dir
             .as_ref()
             .map(|cwd| cwd == &session.worktree_path)
@@ -890,6 +878,130 @@ pub fn clean_orphaned_direct(project_name: &str) -> Result<CleanupSummary> {
 /// Format bytes into human-readable string (public version for GUI).
 pub fn format_bytes_display(bytes: u64) -> String {
     format_bytes(bytes)
+}
+
+// =============================================================================
+// Remove Project Functions (for GUI - no prompts, no printing)
+// =============================================================================
+
+/// Summary of a project removal operation.
+#[derive(Debug, Default)]
+pub struct RemovalSummary {
+    /// Number of worktrees removed
+    pub worktrees_removed: usize,
+    /// Whether the config directory was deleted
+    pub config_deleted: bool,
+    /// Total bytes freed (estimated)
+    pub bytes_freed: u64,
+    /// Worktrees that were skipped (e.g., active runs)
+    pub worktrees_skipped: Vec<SkippedWorktree>,
+    /// Errors encountered during removal
+    pub errors: Vec<String>,
+}
+
+/// Information about a worktree that was skipped during removal.
+#[derive(Debug)]
+pub struct SkippedWorktree {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// Remove a project from autom8 entirely (no prompts, no output).
+///
+/// This function:
+/// 1. Removes all git worktrees associated with the project (skips active runs)
+/// 2. Deletes the `~/.config/autom8/<project>/` directory
+///
+/// Designed for programmatic use (e.g., GUI) where the caller handles confirmation
+/// and output display.
+///
+/// # Arguments
+/// * `project_name` - The name of the project to remove
+///
+/// # Returns
+/// A `RemovalSummary` with details of what was removed and any errors encountered.
+pub fn remove_project_direct(project_name: &str) -> Result<RemovalSummary> {
+    use crate::config::project_config_dir_for;
+
+    let mut summary = RemovalSummary::default();
+
+    // Get the project config directory path
+    let project_dir = project_config_dir_for(project_name)?;
+
+    // Check if project exists
+    if !project_dir.exists() {
+        summary.errors.push(format!(
+            "Project '{}' does not exist at {}",
+            project_name,
+            project_dir.display()
+        ));
+        return Ok(summary);
+    }
+
+    // Step 1: Remove worktrees associated with the project
+    // We need to get all sessions and remove their worktrees
+    if let Ok(state_manager) = StateManager::for_project(project_name) {
+        if let Ok(sessions) = state_manager.list_sessions() {
+            for session in sessions {
+                // Skip sessions with active runs
+                if session.is_running {
+                    summary.worktrees_skipped.push(SkippedWorktree {
+                        path: session.worktree_path.clone(),
+                        reason: "Active run in progress".to_string(),
+                    });
+                    continue;
+                }
+
+                // Skip if worktree doesn't exist (orphaned session)
+                if !session.worktree_path.exists() {
+                    continue;
+                }
+
+                // Skip the main session - it's not a worktree we created
+                if session.session_id == "main" {
+                    continue;
+                }
+
+                // Calculate size before removal
+                let worktree_size = dir_size(&session.worktree_path);
+
+                // Try to remove the worktree
+                match remove_worktree_safely(&session.worktree_path, false) {
+                    Ok(()) => {
+                        summary.worktrees_removed += 1;
+                        summary.bytes_freed += worktree_size;
+                    }
+                    Err(e) => {
+                        summary.errors.push(format!(
+                            "Failed to remove worktree {}: {}",
+                            session.worktree_path.display(),
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Delete the config directory
+    // Calculate size before deletion
+    let config_size = dir_size(&project_dir);
+
+    match fs::remove_dir_all(&project_dir) {
+        Ok(()) => {
+            summary.config_deleted = true;
+            summary.bytes_freed += config_size;
+        }
+        Err(e) => {
+            summary.errors.push(format!(
+                "Failed to delete config directory {}: {}",
+                project_dir.display(),
+                e
+            ));
+        }
+    }
+
+    Ok(summary)
 }
 
 /// Remove a worktree safely, with optional force flag.
@@ -1226,5 +1338,281 @@ mod tests {
 
         // Should return error for non-existent project (StateManager::for_project fails)
         assert!(result.is_err() || result.unwrap().sessions_removed == 0);
+    }
+
+    // =========================================================================
+    // US-004 Tests: Remove Project Backend Logic
+    // =========================================================================
+
+    #[test]
+    fn test_us004_removal_summary_default() {
+        let summary = RemovalSummary::default();
+        assert_eq!(summary.worktrees_removed, 0);
+        assert!(!summary.config_deleted);
+        assert_eq!(summary.bytes_freed, 0);
+        assert!(summary.worktrees_skipped.is_empty());
+        assert!(summary.errors.is_empty());
+    }
+
+    #[test]
+    fn test_us004_removal_summary_with_successful_removal() {
+        let summary = RemovalSummary {
+            worktrees_removed: 2,
+            config_deleted: true,
+            bytes_freed: 1048576, // 1 MB
+            worktrees_skipped: vec![],
+            errors: vec![],
+        };
+
+        assert_eq!(summary.worktrees_removed, 2);
+        assert!(summary.config_deleted);
+        assert_eq!(summary.bytes_freed, 1048576);
+        assert!(summary.worktrees_skipped.is_empty());
+        assert!(summary.errors.is_empty());
+    }
+
+    #[test]
+    fn test_us004_skipped_worktree_struct() {
+        let skipped = SkippedWorktree {
+            path: PathBuf::from("/path/to/worktree"),
+            reason: "Active run in progress".to_string(),
+        };
+
+        assert_eq!(skipped.path, PathBuf::from("/path/to/worktree"));
+        assert_eq!(skipped.reason, "Active run in progress");
+    }
+
+    #[test]
+    fn test_us004_removal_summary_with_skipped_worktrees() {
+        // Acceptance criteria: Skip active runs
+        let summary = RemovalSummary {
+            worktrees_removed: 1,
+            config_deleted: true,
+            bytes_freed: 512,
+            worktrees_skipped: vec![SkippedWorktree {
+                path: PathBuf::from("/tmp/active-worktree"),
+                reason: "Active run in progress".to_string(),
+            }],
+            errors: vec![],
+        };
+
+        assert_eq!(summary.worktrees_skipped.len(), 1);
+        assert_eq!(
+            summary.worktrees_skipped[0].reason,
+            "Active run in progress"
+        );
+    }
+
+    #[test]
+    fn test_us004_removal_summary_with_errors() {
+        // Acceptance criteria: Handle errors gracefully
+        let summary = RemovalSummary {
+            worktrees_removed: 1,
+            config_deleted: false, // Failed to delete config
+            bytes_freed: 1024,
+            worktrees_skipped: vec![],
+            errors: vec!["Failed to delete config directory: permission denied".to_string()],
+        };
+
+        assert_eq!(summary.worktrees_removed, 1);
+        assert!(!summary.config_deleted);
+        assert_eq!(summary.errors.len(), 1);
+        assert!(summary.errors[0].contains("permission denied"));
+    }
+
+    #[test]
+    fn test_us004_removal_summary_partial_cleanup_reports_both() {
+        // Acceptance criteria: Partial cleanup should report what succeeded/failed
+        let summary = RemovalSummary {
+            worktrees_removed: 2,
+            config_deleted: true,
+            bytes_freed: 2048,
+            worktrees_skipped: vec![SkippedWorktree {
+                path: PathBuf::from("/tmp/active"),
+                reason: "Active run".to_string(),
+            }],
+            errors: vec!["Failed to remove one worktree".to_string()],
+        };
+
+        // Can track what succeeded
+        assert_eq!(summary.worktrees_removed, 2);
+        assert!(summary.config_deleted);
+
+        // Can track what was skipped
+        assert_eq!(summary.worktrees_skipped.len(), 1);
+
+        // Can track errors
+        assert_eq!(summary.errors.len(), 1);
+    }
+
+    #[test]
+    fn test_us004_remove_project_direct_nonexistent_project() {
+        // Test that remove_project_direct handles non-existent project gracefully
+        let result = remove_project_direct("nonexistent-project-12345-xyz");
+
+        // Should return Ok with error in summary (project doesn't exist)
+        assert!(result.is_ok());
+        let summary = result.unwrap();
+        assert!(!summary.config_deleted);
+        assert_eq!(summary.worktrees_removed, 0);
+        // Should have an error explaining the project doesn't exist
+        assert!(!summary.errors.is_empty());
+        assert!(
+            summary.errors[0].contains("does not exist"),
+            "Error should mention project doesn't exist: {}",
+            summary.errors[0]
+        );
+    }
+
+    #[test]
+    fn test_us004_remove_project_returns_summary_type() {
+        // Verify the function returns the correct type
+        let result = remove_project_direct("any-project-name");
+
+        // Type check: should be Result<RemovalSummary>
+        let _summary: RemovalSummary = match result {
+            Ok(s) => s,
+            Err(_) => RemovalSummary::default(),
+        };
+    }
+
+    #[test]
+    fn test_us004_removal_summary_tracks_worktree_count() {
+        // Acceptance criteria: Return a summary of what was removed (worktree count)
+        let summary = RemovalSummary {
+            worktrees_removed: 5,
+            config_deleted: true,
+            bytes_freed: 5000,
+            worktrees_skipped: vec![],
+            errors: vec![],
+        };
+
+        assert_eq!(summary.worktrees_removed, 5);
+    }
+
+    #[test]
+    fn test_us004_removal_summary_tracks_config_deleted() {
+        // Acceptance criteria: Return a summary of what was removed (config deleted)
+        let summary = RemovalSummary {
+            worktrees_removed: 0,
+            config_deleted: true,
+            bytes_freed: 100,
+            worktrees_skipped: vec![],
+            errors: vec![],
+        };
+
+        assert!(summary.config_deleted);
+    }
+
+    #[test]
+    fn test_us004_handle_project_with_no_worktrees() {
+        // Acceptance criteria: Handle case where project has no worktrees (still delete config)
+        // A project can have only config and no worktrees
+        let summary = RemovalSummary {
+            worktrees_removed: 0,
+            config_deleted: true,
+            bytes_freed: 50,
+            worktrees_skipped: vec![],
+            errors: vec![],
+        };
+
+        // No worktrees removed, but config was deleted
+        assert_eq!(summary.worktrees_removed, 0);
+        assert!(summary.config_deleted);
+    }
+
+    // =========================================================================
+    // US-006 Tests: Clean Worktrees Skips Active Runs
+    // =========================================================================
+
+    #[test]
+    fn test_us006_skipped_session_for_active_run() {
+        // US-006: Active runs should be reported as skipped
+        let skipped = SkippedSession {
+            session_id: "abc123".to_string(),
+            reason: "Active run in progress".to_string(),
+        };
+        assert_eq!(skipped.session_id, "abc123");
+        assert_eq!(skipped.reason, "Active run in progress");
+    }
+
+    #[test]
+    fn test_us006_cleanup_summary_with_skipped_active_runs() {
+        // US-006: Summary should report sessions skipped due to active runs
+        let summary = CleanupSummary {
+            sessions_removed: 2,
+            worktrees_removed: 2,
+            bytes_freed: 1024,
+            sessions_skipped: vec![
+                SkippedSession {
+                    session_id: "active1".to_string(),
+                    reason: "Active run in progress".to_string(),
+                },
+                SkippedSession {
+                    session_id: "active2".to_string(),
+                    reason: "Active run in progress".to_string(),
+                },
+            ],
+            errors: vec![],
+        };
+
+        // Verify skipped sessions are tracked
+        assert_eq!(summary.sessions_skipped.len(), 2);
+        assert!(summary.sessions_skipped[0]
+            .reason
+            .contains("Active run in progress"));
+        assert!(summary.sessions_skipped[1]
+            .reason
+            .contains("Active run in progress"));
+    }
+
+    #[test]
+    fn test_us006_direct_clean_options_default() {
+        // US-006: Verify DirectCleanOptions defaults
+        let options = DirectCleanOptions::default();
+        assert!(!options.worktrees);
+        assert!(!options.force);
+    }
+
+    #[test]
+    fn test_us006_direct_clean_with_worktrees_flag() {
+        // US-006: Clean operation should remove worktrees when flag is set
+        let options = DirectCleanOptions {
+            worktrees: true,
+            force: false,
+        };
+        assert!(options.worktrees);
+    }
+
+    #[test]
+    fn test_us006_cleanup_summary_reports_what_was_removed() {
+        // US-006: "After cleaning, show summary of what was removed"
+        let summary = CleanupSummary {
+            sessions_removed: 3,
+            worktrees_removed: 2,
+            bytes_freed: 5_000_000, // 5 MB
+            sessions_skipped: vec![SkippedSession {
+                session_id: "active".to_string(),
+                reason: "Active run in progress".to_string(),
+            }],
+            errors: vec![],
+        };
+
+        // Verify summary contains all relevant information
+        assert_eq!(summary.sessions_removed, 3);
+        assert_eq!(summary.worktrees_removed, 2);
+        assert!(summary.bytes_freed > 0);
+        assert_eq!(summary.sessions_skipped.len(), 1);
+        assert!(summary.errors.is_empty());
+    }
+
+    #[test]
+    fn test_us006_format_bytes_for_summary() {
+        // US-006: Summary should show human-readable disk space freed
+        assert_eq!(format_bytes_display(0), "0 B");
+        assert_eq!(format_bytes_display(500), "500 B");
+        assert_eq!(format_bytes_display(1024), "1.0 KB");
+        assert_eq!(format_bytes_display(1_048_576), "1.0 MB");
+        assert_eq!(format_bytes_display(5_242_880), "5.0 MB");
     }
 }

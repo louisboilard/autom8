@@ -6,5 +6,6 @@
 pub mod animation;
 pub mod app;
 pub mod components;
+pub mod modal;
 pub mod theme;
 pub mod typography;
