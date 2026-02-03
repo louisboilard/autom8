@@ -3,10 +3,10 @@
 //! Parses command-line arguments and dispatches to the appropriate command handler.
 
 use autom8::commands::{
-    all_sessions_status_command, clean_command, config_display_command, default_command,
-    describe_command, global_status_command, init_command, list_command, monitor_command,
-    pr_review_command, projects_command, resume_command, run_command, run_with_file,
-    status_command, CleanOptions, ConfigScope, ConfigSubcommand,
+    all_sessions_status_command, clean_command, config_display_command, config_set_command,
+    default_command, describe_command, global_status_command, init_command, list_command,
+    monitor_command, pr_review_command, projects_command, resume_command, run_command,
+    run_with_file, status_command, CleanOptions, ConfigScope, ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -250,7 +250,14 @@ fn main() {
     // Handle commands that don't require a Runner (can work outside git repos)
     let result = match (&cli.file, &cli.command) {
         // Config command - handle all scopes and subcommands
-        (None, Some(Commands::Config { global, project, subcommand })) => {
+        (
+            None,
+            Some(Commands::Config {
+                global,
+                project,
+                subcommand,
+            }),
+        ) => {
             match subcommand {
                 // Display config (default behavior when no subcommand)
                 None => {
@@ -261,18 +268,12 @@ fn main() {
                     };
                     config_display_command(scope)
                 }
-                // Set subcommand - to be implemented in US-002
-                Some(ConfigSubcommand::Set { global: g, key, value }) => {
-                    // Placeholder for US-002 implementation
-                    // For now, return an informative error
-                    Err(autom8::error::Autom8Error::Config(format!(
-                        "The 'config set' subcommand is not yet implemented.\n\
-                        Planned: autom8 config set{} {} {}",
-                        if *g { " --global" } else { "" },
-                        key,
-                        value
-                    )))
-                }
+                // Set subcommand (US-002)
+                Some(ConfigSubcommand::Set {
+                    global: g,
+                    key,
+                    value,
+                }) => config_set_command(key, value, *g),
                 // Reset subcommand - to be implemented in US-003
                 Some(ConfigSubcommand::Reset { global: g, yes }) => {
                     // Placeholder for US-003 implementation
