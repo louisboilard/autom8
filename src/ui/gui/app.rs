@@ -11,11 +11,11 @@ use crate::ui::gui::components::{
 };
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
+use crate::ui::shared::{ProjectData, RunHistoryEntry, RunProgress, SessionData};
 use crate::spec::Spec;
-use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
+use crate::state::{MachineState, StateManager};
 use crate::worktree::MAIN_SESSION_ID;
 use eframe::egui::{self, Color32, Rect, Rounding, Sense, Stroke, Vec2};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
@@ -147,163 +147,17 @@ const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
 const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
 
 // ============================================================================
-// Data Layer Types
+// GUI-specific Extensions
 // ============================================================================
 
-/// Progress information for a run.
-#[derive(Debug, Clone)]
-pub struct RunProgress {
-    /// Number of completed stories.
-    pub completed: usize,
-    /// Total number of stories.
-    pub total: usize,
+/// Extension trait for GUI-specific methods on RunHistoryEntry.
+pub trait RunHistoryEntryExt {
+    /// Get the status color for display (GUI-specific).
+    fn status_color(&self) -> Color32;
 }
 
-impl RunProgress {
-    /// Format progress as a fraction string (e.g., "Story 2/5").
-    pub fn as_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
-    }
-
-    /// Format progress as a percentage (e.g., "40%").
-    pub fn as_percentage(&self) -> String {
-        if self.total == 0 {
-            return "0%".to_string();
-        }
-        let pct = (self.completed * 100) / self.total;
-        format!("{}%", pct)
-    }
-}
-
-/// Data collected from a single project for display.
-#[derive(Debug, Clone)]
-pub struct ProjectData {
-    /// Project metadata from the tree.
-    pub info: ProjectTreeInfo,
-    /// The active run state (if any).
-    pub active_run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file).
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable.
-    pub load_error: Option<String>,
-}
-
-/// Data for a single session in the Active Runs view.
-///
-/// This struct represents one running session, which can be from
-/// the main repo or a worktree. Multiple sessions can belong to
-/// the same project (when using worktree mode).
-#[derive(Debug, Clone)]
-pub struct SessionData {
-    /// Project name (e.g., "autom8").
-    pub project_name: String,
-    /// Session metadata (includes session_id, worktree_path, branch).
-    pub metadata: SessionMetadata,
-    /// The active run state for this session.
-    pub run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file).
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable.
-    pub load_error: Option<String>,
-    /// Whether this is the main repo session (vs. a worktree).
-    pub is_main_session: bool,
-    /// Whether this session is stale (worktree was deleted).
-    pub is_stale: bool,
-    /// Live output state for streaming Claude output (from live.json).
-    pub live_output: Option<LiveState>,
-}
-
-impl SessionData {
-    /// Format the display title for this session.
-    /// Returns "project-name (main)" or "project-name (abc12345)".
-    pub fn display_title(&self) -> String {
-        if self.is_main_session {
-            format!("{} (main)", self.project_name)
-        } else {
-            format!("{} ({})", self.project_name, &self.metadata.session_id)
-        }
-    }
-
-    /// Get a truncated worktree path for display (last 2 components).
-    pub fn truncated_worktree_path(&self) -> String {
-        let path = &self.metadata.worktree_path;
-        let components: Vec<_> = path.components().collect();
-        if components.len() <= 2 {
-            path.display().to_string()
-        } else {
-            let last_two: PathBuf = components[components.len() - 2..].iter().collect();
-            format!(".../{}", last_two.display())
-        }
-    }
-}
-
-/// Data for a single entry in the run history panel.
-///
-/// Represents an archived run for a project, displayed in the right panel
-/// when a project is selected.
-#[derive(Debug, Clone)]
-pub struct RunHistoryEntry {
-    /// The run ID.
-    pub run_id: String,
-    /// When the run started.
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    /// When the run finished (if completed).
-    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// The run status (completed/failed).
-    pub status: crate::state::RunStatus,
-    /// Number of completed stories.
-    pub completed_stories: usize,
-    /// Total number of stories in the spec.
-    pub total_stories: usize,
-    /// Branch name for this run.
-    pub branch: String,
-}
-
-impl RunHistoryEntry {
-    /// Create a RunHistoryEntry from a RunState.
-    pub fn from_run_state(run: &RunState) -> Self {
-        // Count completed stories by looking at iterations with status Completed
-        let completed_stories = run
-            .iterations
-            .iter()
-            .filter(|i| i.status == crate::state::IterationStatus::Success)
-            .map(|i| &i.story_id)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-
-        // Total stories is harder to determine from archived state
-        // Use the iteration count as a proxy (each story should have at least one iteration)
-        let story_ids: std::collections::HashSet<_> =
-            run.iterations.iter().map(|i| &i.story_id).collect();
-        let total_stories = story_ids.len().max(1);
-
-        Self {
-            run_id: run.run_id.clone(),
-            started_at: run.started_at,
-            finished_at: run.finished_at,
-            status: run.status,
-            completed_stories,
-            total_stories,
-            branch: run.branch.clone(),
-        }
-    }
-
-    /// Format the story count as "X/Y stories".
-    pub fn story_count_text(&self) -> String {
-        format!("{}/{} stories", self.completed_stories, self.total_stories)
-    }
-
-    /// Format the run status as a display string.
-    pub fn status_text(&self) -> &'static str {
-        match self.status {
-            crate::state::RunStatus::Completed => "Completed",
-            crate::state::RunStatus::Failed => "Failed",
-            crate::state::RunStatus::Running => "Running",
-        }
-    }
-
-    /// Get the status color for display.
-    pub fn status_color(&self) -> Color32 {
+impl RunHistoryEntryExt for RunHistoryEntry {
+    fn status_color(&self) -> Color32 {
         match self.status {
             crate::state::RunStatus::Completed => colors::STATUS_SUCCESS,
             crate::state::RunStatus::Failed => colors::STATUS_ERROR,
@@ -651,7 +505,7 @@ impl Autom8App {
         // Convert to RunHistoryEntry and store (already sorted newest first by list_archived)
         self.run_history = archived
             .iter()
-            .map(RunHistoryEntry::from_run_state)
+            .map(|run| RunHistoryEntry::from_run_state(project_name.to_string(), run))
             .collect();
 
         self.run_history_loading = false;
@@ -3306,7 +3160,9 @@ pub fn run_gui(project_filter: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SessionMetadata;
     use chrono::Utc;
+    use std::path::PathBuf;
 
     // ========================================================================
     // App Initialization Tests
@@ -3558,7 +3414,8 @@ mod tests {
             work_summary: None,
         });
 
-        let entry = RunHistoryEntry::from_run_state(&run);
+        let entry = RunHistoryEntry::from_run_state("test-project".to_string(), &run);
+        assert_eq!(entry.project_name, "test-project");
         assert_eq!(entry.branch, "feature/test");
         assert_eq!(entry.status, RunStatus::Completed);
         assert_eq!(entry.completed_stories, 1);
@@ -3633,7 +3490,7 @@ mod tests {
             std::path::PathBuf::from("test.json"),
             "feature/test".to_string(),
         );
-        let entry = RunHistoryEntry::from_run_state(&run);
+        let entry = RunHistoryEntry::from_run_state("test-project".to_string(), &run);
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
         assert!(app.get_cached_run_state(&entry.run_id).is_some());
@@ -3697,7 +3554,7 @@ mod tests {
         );
         run.status = RunStatus::Completed;
 
-        let entry = RunHistoryEntry::from_run_state(&run);
+        let entry = RunHistoryEntry::from_run_state("test-project".to_string(), &run);
         app.open_run_detail_from_entry(&entry, Some(run.clone()));
 
         assert!(app.has_tab(&TabId::RunDetail(entry.run_id.clone())));

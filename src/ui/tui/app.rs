@@ -6,7 +6,8 @@ use super::views::View;
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
 use crate::spec::Spec;
-use crate::state::{LiveState, MachineState, RunState, SessionMetadata, StateManager};
+use crate::state::{LiveState, MachineState, RunState, StateManager};
+use crate::ui::shared::{ProjectData, RunHistoryEntry, RunProgress, SessionData};
 use crate::worktree::MAIN_SESSION_ID;
 use chrono::{DateTime, Utc};
 use crossterm::{
@@ -23,7 +24,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
-use std::path::PathBuf;
 use std::time::Duration;
 
 // ============================================================================
@@ -80,103 +80,8 @@ impl From<crate::error::Autom8Error> for MonitorError {
     }
 }
 
-/// Progress information for a run.
-#[derive(Debug, Clone)]
-pub struct RunProgress {
-    /// Number of completed stories
-    pub completed: usize,
-    /// Total number of stories
-    pub total: usize,
-}
-
-impl RunProgress {
-    /// Format progress as a fraction string (e.g., "Story 2/5")
-    pub fn as_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
-    }
-
-    /// Format progress as a percentage (e.g., "40%")
-    pub fn as_percentage(&self) -> String {
-        if self.total == 0 {
-            return "0%".to_string();
-        }
-        let pct = (self.completed * 100) / self.total;
-        format!("{}%", pct)
-    }
-}
-
-/// Data collected from a single project for display.
-#[derive(Debug, Clone)]
-pub struct ProjectData {
-    pub info: ProjectTreeInfo,
-    pub active_run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file)
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable
-    pub load_error: Option<String>,
-}
-
-/// Data for a single session in the Active Runs view.
-///
-/// This struct represents one running session, which can be from
-/// the main repo or a worktree. Multiple sessions can belong to
-/// the same project (when using worktree mode).
-#[derive(Debug, Clone)]
-pub struct SessionData {
-    /// Project name (e.g., "autom8")
-    pub project_name: String,
-    /// Session metadata (includes session_id, worktree_path, branch)
-    pub metadata: SessionMetadata,
-    /// The active run state for this session
-    pub run: Option<RunState>,
-    /// Progress through the spec (loaded from spec file)
-    pub progress: Option<RunProgress>,
-    /// Error message if state file is corrupted or unreadable
-    pub load_error: Option<String>,
-    /// Whether this is the main repo session (vs. a worktree)
-    pub is_main_session: bool,
-    /// Whether this session is stale (worktree was deleted)
-    pub is_stale: bool,
-    /// Live output state for streaming Claude output (from live.json)
-    pub live_output: Option<LiveState>,
-}
-
-impl SessionData {
-    /// Format the display title for this session.
-    /// Returns "project-name (main)" or "project-name (abc12345)"
-    pub fn display_title(&self) -> String {
-        if self.is_main_session {
-            format!("{} (main)", self.project_name)
-        } else {
-            format!("{} ({})", self.project_name, &self.metadata.session_id)
-        }
-    }
-
-    /// Get a truncated worktree path for display (last 2 components)
-    pub fn truncated_worktree_path(&self) -> String {
-        let path = &self.metadata.worktree_path;
-        let components: Vec<_> = path.components().collect();
-        if components.len() <= 2 {
-            path.display().to_string()
-        } else {
-            let last_two: PathBuf = components[components.len() - 2..].iter().collect();
-            format!(".../{}", last_two.display())
-        }
-    }
-}
-
-/// A single entry in the run history view.
-#[derive(Debug, Clone)]
-pub struct RunHistoryEntry {
-    /// The project this run belongs to
-    pub project_name: String,
-    /// The run state data
-    pub run: RunState,
-    /// Number of stories that were completed
-    pub completed_stories: usize,
-    /// Total number of stories in the spec
-    pub total_stories: usize,
-}
+// Data types (RunProgress, ProjectData, SessionData, RunHistoryEntry) are imported
+// from crate::ui::shared.
 
 /// Format a duration in seconds as a human-readable string (e.g., "5m 32s", "1h 5m")
 pub fn format_duration(started_at: DateTime<Utc>) -> String {
@@ -283,6 +188,8 @@ pub struct MonitorApp {
     quadrant_col: usize,
     /// Scroll offset for detail view
     detail_scroll_offset: usize,
+    /// Cache of full RunState objects for detail view (keyed by run_id)
+    run_state_cache: std::collections::HashMap<String, RunState>,
 }
 
 impl MonitorApp {
@@ -304,6 +211,7 @@ impl MonitorApp {
             quadrant_row: 0,
             quadrant_col: 0,
             detail_scroll_offset: 0,
+            run_state_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -547,6 +455,9 @@ impl MonitorApp {
             self.projects.iter().map(|p| p.info.name.clone()).collect()
         };
 
+        // Clear the run state cache before refreshing
+        self.run_state_cache.clear();
+
         // Load archived runs from each project
         // Errors are handled gracefully - corrupted files are simply skipped
         for project_name in project_names {
@@ -567,19 +478,23 @@ impl MonitorApp {
                                 (completed, run.iterations.len().max(completed))
                             });
 
-                        history.push(RunHistoryEntry {
-                            project_name: project_name.clone(),
-                            run,
-                            completed_stories: completed,
-                            total_stories: total,
-                        });
+                        // Cache the full run state for detail view
+                        self.run_state_cache
+                            .insert(run.run_id.clone(), run.clone());
+
+                        history.push(RunHistoryEntry::new(
+                            project_name.clone(),
+                            &run,
+                            completed,
+                            total,
+                        ));
                     }
                 }
             }
         }
 
         // Sort by date, most recent first
-        history.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
+        history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
         // Limit to last 100 runs for performance
         history.truncate(100);
@@ -1549,7 +1464,7 @@ impl MonitorApp {
                 let is_selected = i == self.selected_index;
 
                 // Status indicator and color
-                let (status_indicator, status_clr) = match entry.run.status {
+                let (status_indicator, status_clr) = match entry.status {
                     crate::state::RunStatus::Completed => ("✓", COLOR_SUCCESS),
                     crate::state::RunStatus::Failed => ("✗", COLOR_ERROR),
                     crate::state::RunStatus::Running => ("●", COLOR_WARNING),
@@ -1557,14 +1472,14 @@ impl MonitorApp {
                 };
 
                 // Format date/time
-                let date_str = entry.run.started_at.format("%Y-%m-%d %H:%M").to_string();
+                let date_str = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
 
                 // Story count
                 let story_str = format!("{}/{}", entry.completed_stories, entry.total_stories);
 
                 // Duration if completed
-                let duration_str = if let Some(finished) = entry.run.finished_at {
-                    let duration = finished.signed_duration_since(entry.run.started_at);
+                let duration_str = if let Some(finished) = entry.finished_at {
+                    let duration = finished.signed_duration_since(entry.started_at);
                     let secs = duration.num_seconds().max(0) as u64;
                     let mins = secs / 60;
                     let hours = secs / 3600;
@@ -1636,6 +1551,9 @@ impl MonitorApp {
             None => return,
         };
 
+        // Get the full run state from cache (needed for iterations)
+        let run_state = self.run_state_cache.get(&entry.run_id);
+
         let title = format!(" Run Details: {} ", entry.project_name);
 
         // Create a centered modal area
@@ -1656,11 +1574,9 @@ impl MonitorApp {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        // Build detail content
-        let run = &entry.run;
-
+        // Build detail content using entry fields
         // Status with color
-        let (status_str, status_clr) = match run.status {
+        let (status_str, status_clr) = match entry.status {
             crate::state::RunStatus::Completed => ("Completed", COLOR_SUCCESS),
             crate::state::RunStatus::Failed => ("Failed", COLOR_ERROR),
             crate::state::RunStatus::Running => ("Running", COLOR_WARNING),
@@ -1668,8 +1584,8 @@ impl MonitorApp {
         };
 
         // Duration
-        let duration_str = if let Some(finished) = run.finished_at {
-            let duration = finished.signed_duration_since(run.started_at);
+        let duration_str = if let Some(finished) = entry.finished_at {
+            let duration = finished.signed_duration_since(entry.started_at);
             let secs = duration.num_seconds().max(0) as u64;
             let mins = secs / 60;
             let hours = secs / 3600;
@@ -1692,7 +1608,7 @@ impl MonitorApp {
             Line::from(vec![
                 Span::styled("Started:    ", Style::default().fg(COLOR_DIM)),
                 Span::styled(
-                    run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    entry.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                     Style::default().fg(Color::White),
                 ),
             ]),
@@ -1702,7 +1618,7 @@ impl MonitorApp {
             ]),
             Line::from(vec![
                 Span::styled("Branch:     ", Style::default().fg(COLOR_DIM)),
-                Span::styled(&run.branch, Style::default().fg(COLOR_PRIMARY)),
+                Span::styled(&entry.branch, Style::default().fg(COLOR_PRIMARY)),
             ]),
             Line::from(vec![
                 Span::styled("Stories:    ", Style::default().fg(COLOR_DIM)),
@@ -1723,36 +1639,43 @@ impl MonitorApp {
             )),
         ];
 
-        // Add iteration details
-        for iter in &run.iterations {
-            let iter_status_clr = match iter.status {
-                crate::state::IterationStatus::Success => COLOR_SUCCESS,
-                crate::state::IterationStatus::Failed => COLOR_ERROR,
-                crate::state::IterationStatus::Running => COLOR_WARNING,
-            };
-            let iter_status_str = match iter.status {
-                crate::state::IterationStatus::Success => "✓",
-                crate::state::IterationStatus::Failed => "✗",
-                crate::state::IterationStatus::Running => "●",
-            };
+        // Add iteration details from cached run state (if available)
+        if let Some(run) = run_state {
+            for iter in &run.iterations {
+                let iter_status_clr = match iter.status {
+                    crate::state::IterationStatus::Success => COLOR_SUCCESS,
+                    crate::state::IterationStatus::Failed => COLOR_ERROR,
+                    crate::state::IterationStatus::Running => COLOR_WARNING,
+                };
+                let iter_status_str = match iter.status {
+                    crate::state::IterationStatus::Success => "✓",
+                    crate::state::IterationStatus::Failed => "✗",
+                    crate::state::IterationStatus::Running => "●",
+                };
 
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("{} ", iter_status_str),
-                    Style::default().fg(iter_status_clr),
-                ),
-                Span::styled(&iter.story_id, Style::default().fg(Color::White)),
-            ]));
-
-            // Show work summary if available
-            if let Some(ref summary) = iter.work_summary {
-                let truncated = truncate_string(summary, 60);
                 lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(truncated, Style::default().fg(COLOR_DIM)),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format!("{} ", iter_status_str),
+                        Style::default().fg(iter_status_clr),
+                    ),
+                    Span::styled(&iter.story_id, Style::default().fg(Color::White)),
                 ]));
+
+                // Show work summary if available
+                if let Some(ref summary) = iter.work_summary {
+                    let truncated = truncate_string(summary, 60);
+                    lines.push(Line::from(vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(truncated, Style::default().fg(COLOR_DIM)),
+                    ]));
+                }
             }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  (iteration details not available)",
+                Style::default().fg(COLOR_DIM),
+            )));
         }
 
         lines.push(Line::from(""));
@@ -1920,6 +1843,8 @@ pub fn run_monitor(project_filter: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SessionMetadata;
+    use std::path::PathBuf;
 
     /// Helper function to create a test SessionData for use in tests
     fn create_test_session(project_name: &str, session_id: &str, branch: &str) -> SessionData {
@@ -2582,16 +2507,12 @@ mod tests {
         use std::path::PathBuf;
 
         let run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 3,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 3, 5);
 
         assert_eq!(entry.project_name, "test-project");
         assert_eq!(entry.completed_stories, 3);
         assert_eq!(entry.total_stories, 5);
+        assert_eq!(entry.branch, "test-branch");
     }
 
     #[test]
@@ -2609,24 +2530,24 @@ mod tests {
         let mut app = MonitorApp::new(None);
         app.current_view = View::RunHistory;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
-            RunHistoryEntry {
-                project_name: "project-c".to_string(),
-                run: RunState::new(PathBuf::from("c.json"), "branch-c".to_string()),
-                completed_stories: 3,
-                total_stories: 4,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
+            RunHistoryEntry::new(
+                "project-c".to_string(),
+                &RunState::new(PathBuf::from("c.json"), "branch-c".to_string()),
+                3,
+                4,
+            ),
         ];
 
         assert_eq!(app.selected_index, 0);
@@ -2658,12 +2579,12 @@ mod tests {
 
         let mut app = MonitorApp::new(None);
         app.current_view = View::RunHistory;
-        app.run_history = vec![RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run: RunState::new(PathBuf::from("test.json"), "test-branch".to_string()),
-            completed_stories: 1,
-            total_stories: 2,
-        }];
+        app.run_history = vec![RunHistoryEntry::new(
+            "test-project".to_string(),
+            &RunState::new(PathBuf::from("test.json"), "test-branch".to_string()),
+            1,
+            2,
+        )];
 
         assert!(!app.show_run_detail);
         assert!(!app.is_showing_run_detail());
@@ -2807,14 +2728,9 @@ mod tests {
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.transition_to(MachineState::Failed);
 
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 2,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 2, 5);
 
-        assert_eq!(entry.run.status, crate::state::RunStatus::Failed);
+        assert_eq!(entry.status, crate::state::RunStatus::Failed);
     }
 
     #[test]
@@ -2824,15 +2740,10 @@ mod tests {
         let mut run = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         run.transition_to(MachineState::Completed);
 
-        let entry = RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run,
-            completed_stories: 5,
-            total_stories: 5,
-        };
+        let entry = RunHistoryEntry::new("test-project".to_string(), &run, 5, 5);
 
-        assert_eq!(entry.run.status, crate::state::RunStatus::Completed);
-        assert!(entry.run.finished_at.is_some());
+        assert_eq!(entry.status, crate::state::RunStatus::Completed);
+        assert!(entry.finished_at.is_some());
     }
 
     #[test]
@@ -3490,18 +3401,18 @@ mod tests {
         let mut app = MonitorApp::new(None);
         app.current_view = View::RunHistory;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
         ];
 
         assert_eq!(app.selected_index, 0);
@@ -3518,18 +3429,18 @@ mod tests {
         app.current_view = View::RunHistory;
         app.selected_index = 1;
         app.run_history = vec![
-            RunHistoryEntry {
-                project_name: "project-a".to_string(),
-                run: RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
-                completed_stories: 1,
-                total_stories: 2,
-            },
-            RunHistoryEntry {
-                project_name: "project-b".to_string(),
-                run: RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
-                completed_stories: 2,
-                total_stories: 3,
-            },
+            RunHistoryEntry::new(
+                "project-a".to_string(),
+                &RunState::new(PathBuf::from("a.json"), "branch-a".to_string()),
+                1,
+                2,
+            ),
+            RunHistoryEntry::new(
+                "project-b".to_string(),
+                &RunState::new(PathBuf::from("b.json"), "branch-b".to_string()),
+                2,
+                3,
+            ),
         ];
 
         app.handle_key(KeyCode::Char('k'));
@@ -4006,15 +3917,15 @@ mod tests {
         }];
 
         // Add a run history entry
-        app.run_history = vec![RunHistoryEntry {
-            project_name: "test-project".to_string(),
-            run: RunState::new(
+        app.run_history = vec![RunHistoryEntry::new(
+            "test-project".to_string(),
+            &RunState::new(
                 std::path::PathBuf::from("test.json"),
                 "test-branch".to_string(),
             ),
-            completed_stories: 3,
-            total_stories: 3,
-        }];
+            3,
+            3,
+        )];
 
         // Start at ProjectList
         app.current_view = View::ProjectList;
