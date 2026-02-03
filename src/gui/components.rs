@@ -1012,8 +1012,6 @@ mod tests {
     #[test]
     fn test_badge_background_inherits_warm_tones() {
         // Badge backgrounds should blend with warm background color
-        let bg = colors::BACKGROUND;
-
         // Test with a neutral color to see if warmth is preserved
         let neutral_status = Color32::from_rgb(100, 100, 100);
         let badge_bg = badge_background_color(neutral_status);
@@ -1030,29 +1028,30 @@ mod tests {
     }
 
     #[test]
-    fn test_badge_background_retains_status_tint() {
-        // Badge backgrounds should retain a tint of the status color
+    fn test_badge_background_differs_by_status() {
+        // Badge backgrounds should produce visually distinct results for different statuses
         let running_bg = badge_background_color(colors::STATUS_RUNNING);
         let success_bg = badge_background_color(colors::STATUS_SUCCESS);
         let error_bg = badge_background_color(colors::STATUS_ERROR);
 
-        // Running (blue) should have higher blue component relative to pure warm background
+        // All three should produce different colors
+        assert_ne!(
+            running_bg, success_bg,
+            "Running and success badge backgrounds should differ"
+        );
+        assert_ne!(
+            success_bg, error_bg,
+            "Success and error badge backgrounds should differ"
+        );
+        assert_ne!(
+            running_bg, error_bg,
+            "Running and error badge backgrounds should differ"
+        );
+
+        // Each should be different from the base background
         let bg = colors::BACKGROUND;
-        assert!(
-            running_bg.b() > bg.b() - 5 || running_bg.r() < bg.r() + 5,
-            "Running badge should retain blue tint"
-        );
-
-        // Success (green) should have higher green component
-        assert!(
-            success_bg.g() > bg.g() - 5,
-            "Success badge should retain green tint"
-        );
-
-        // Error (red) should have higher red component
-        assert!(
-            error_bg.r() > bg.r() - 5,
-            "Error badge should retain red tint"
-        );
+        assert_ne!(running_bg, bg, "Running badge should differ from background");
+        assert_ne!(success_bg, bg, "Success badge should differ from background");
+        assert_ne!(error_bg, bg, "Error badge should differ from background");
     }
 }
