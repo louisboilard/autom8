@@ -387,9 +387,7 @@ fn format_machine_state_text(state: &MachineState) -> &'static str {
 ///
 /// US-003: This replaces the CLI output formatting from print_project_description() for GUI display.
 /// Shows: project name, path, status, specs with progress, file counts.
-fn format_project_description_as_text(
-    desc: &crate::config::ProjectDescription,
-) -> Vec<String> {
+fn format_project_description_as_text(desc: &crate::config::ProjectDescription) -> Vec<String> {
     use crate::state::RunStatus;
 
     let mut lines = Vec::new();
@@ -489,6 +487,61 @@ fn make_progress_bar_text(completed: usize, total: usize, width: usize) -> Strin
     let filled = (completed * width) / total;
     let empty = width - filled;
     format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
+/// Format cleanup summary as plain text lines for display.
+///
+/// US-004: This formats CleanupSummary from direct clean operations for GUI display.
+/// Shows: sessions removed, worktrees removed, bytes freed, skipped sessions, errors.
+fn format_cleanup_summary_as_text(
+    summary: &crate::commands::CleanupSummary,
+    operation: &str,
+) -> Vec<String> {
+    use crate::commands::format_bytes_display;
+
+    let mut lines = Vec::new();
+
+    lines.push(format!("Cleanup Operation: {}", operation));
+    lines.push(String::new());
+
+    // Results section
+    if summary.sessions_removed == 0 && summary.worktrees_removed == 0 {
+        lines.push("No sessions or worktrees were removed.".to_string());
+    } else {
+        let freed_str = format_bytes_display(summary.bytes_freed);
+        lines.push(format!(
+            "Removed {} session{}, {} worktree{}, freed {}",
+            summary.sessions_removed,
+            if summary.sessions_removed == 1 { "" } else { "s" },
+            summary.worktrees_removed,
+            if summary.worktrees_removed == 1 { "" } else { "s" },
+            freed_str
+        ));
+    }
+
+    // Skipped sessions
+    if !summary.sessions_skipped.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "Skipped {} session{}:",
+            summary.sessions_skipped.len(),
+            if summary.sessions_skipped.len() == 1 { "" } else { "s" }
+        ));
+        for skipped in &summary.sessions_skipped {
+            lines.push(format!("  - {}: {}", skipped.session_id, skipped.reason));
+        }
+    }
+
+    // Errors
+    if !summary.errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Errors during cleanup:".to_string());
+        for error in &summary.errors {
+            lines.push(format!("  - {}", error));
+        }
+    }
+
+    lines
 }
 
 // ============================================================================
@@ -1709,10 +1762,12 @@ impl Autom8App {
         });
     }
 
-    /// Spawn the `autom8 clean --worktrees --project <name>` command in a background thread.
-    /// Opens a new command output tab and streams output to it.
-    /// Note: The clean command respects safety filters - only Completed/Failed/Interrupted sessions
-    /// are cleaned, not Running/InProgress ones.
+    /// Clean completed/failed sessions with worktrees by calling the data layer directly.
+    /// Opens a new command output tab and populates it with cleanup results.
+    ///
+    /// US-004: Replaces subprocess spawning with direct clean_worktrees_direct() call.
+    /// Note: The clean operation respects safety filters - only Completed/Failed/Interrupted
+    /// sessions are cleaned, not Running/InProgress ones.
     pub fn spawn_clean_worktrees_command(&mut self, project_name: &str) {
         // Open the tab first to get the cache key
         let id = self.open_command_output_tab(project_name, "clean-worktrees");
@@ -1721,86 +1776,46 @@ impl Autom8App {
         let project = project_name.to_string();
 
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            use std::process::{Command, Stdio};
+            use crate::commands::{clean_worktrees_direct, DirectCleanOptions};
 
-            // Spawn the autom8 clean --worktrees command
-            let result = Command::new("autom8")
-                .arg("clean")
-                .arg("--worktrees")
-                .arg("--project")
-                .arg(&project)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+            // Call data layer directly instead of spawning subprocess
+            let options = DirectCleanOptions {
+                worktrees: true,
+                force: false,
+            };
 
-            match result {
-                Ok(mut child) => {
-                    // Read stdout in a separate thread
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let tx_stdout = tx.clone();
-                    let tx_stderr = tx.clone();
-                    let cache_key_stdout = cache_key.clone();
-                    let cache_key_stderr = cache_key.clone();
-
-                    let stdout_handle = std::thread::spawn(move || {
-                        if let Some(stdout) = stdout {
-                            let reader = BufReader::new(stdout);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stdout.send(CommandMessage::Stdout {
-                                    cache_key: cache_key_stdout.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    let stderr_handle = std::thread::spawn(move || {
-                        if let Some(stderr) = stderr {
-                            let reader = BufReader::new(stderr);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stderr.send(CommandMessage::Stderr {
-                                    cache_key: cache_key_stderr.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    // Wait for output threads to finish
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-
-                    // Wait for the child process to exit
-                    match child.wait() {
-                        Ok(status) => {
-                            let exit_code = status.code().unwrap_or(-1);
-                            let _ = tx.send(CommandMessage::Completed {
-                                cache_key,
-                                exit_code,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = tx.send(CommandMessage::Failed {
-                                cache_key,
-                                error: format!("Failed to wait for process: {}", e),
-                            });
-                        }
+            match clean_worktrees_direct(&project, options) {
+                Ok(summary) => {
+                    // Format cleanup summary as plain text
+                    let lines = format_cleanup_summary_as_text(&summary, "Clean Worktrees");
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
                     }
+                    let exit_code = if summary.errors.is_empty() { 0 } else { 1 };
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(CommandMessage::Failed {
                         cache_key,
-                        error: format!("Failed to spawn autom8: {}", e),
+                        error: format!("Failed to clean sessions: {}", e),
                     });
                 }
             }
         });
     }
 
-    /// Spawn the `autom8 clean --orphaned --project <name>` command in a background thread.
-    /// Opens a new command output tab and streams output to it.
+    /// Clean orphaned sessions by calling the data layer directly.
+    /// Orphaned sessions are those where the worktree has been deleted but the
+    /// session state remains.
+    /// Opens a new command output tab and populates it with cleanup results.
+    ///
+    /// US-004: Replaces subprocess spawning with direct clean_orphaned_direct() call.
     pub fn spawn_clean_orphaned_command(&mut self, project_name: &str) {
         // Open the tab first to get the cache key
         let id = self.open_command_output_tab(project_name, "clean-orphaned");
@@ -1809,78 +1824,29 @@ impl Autom8App {
         let project = project_name.to_string();
 
         std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            use std::process::{Command, Stdio};
+            use crate::commands::clean_orphaned_direct;
 
-            // Spawn the autom8 clean --orphaned command
-            let result = Command::new("autom8")
-                .arg("clean")
-                .arg("--orphaned")
-                .arg("--project")
-                .arg(&project)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-
-            match result {
-                Ok(mut child) => {
-                    // Read stdout in a separate thread
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let tx_stdout = tx.clone();
-                    let tx_stderr = tx.clone();
-                    let cache_key_stdout = cache_key.clone();
-                    let cache_key_stderr = cache_key.clone();
-
-                    let stdout_handle = std::thread::spawn(move || {
-                        if let Some(stdout) = stdout {
-                            let reader = BufReader::new(stdout);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stdout.send(CommandMessage::Stdout {
-                                    cache_key: cache_key_stdout.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    let stderr_handle = std::thread::spawn(move || {
-                        if let Some(stderr) = stderr {
-                            let reader = BufReader::new(stderr);
-                            for line in reader.lines().map_while(|r| r.ok()) {
-                                let _ = tx_stderr.send(CommandMessage::Stderr {
-                                    cache_key: cache_key_stderr.clone(),
-                                    line,
-                                });
-                            }
-                        }
-                    });
-
-                    // Wait for output threads to finish
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-
-                    // Wait for the child process to exit
-                    match child.wait() {
-                        Ok(status) => {
-                            let exit_code = status.code().unwrap_or(-1);
-                            let _ = tx.send(CommandMessage::Completed {
-                                cache_key,
-                                exit_code,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = tx.send(CommandMessage::Failed {
-                                cache_key,
-                                error: format!("Failed to wait for process: {}", e),
-                            });
-                        }
+            // Call data layer directly instead of spawning subprocess
+            match clean_orphaned_direct(&project) {
+                Ok(summary) => {
+                    // Format cleanup summary as plain text
+                    let lines = format_cleanup_summary_as_text(&summary, "Clean Orphaned");
+                    for line in lines {
+                        let _ = tx.send(CommandMessage::Stdout {
+                            cache_key: cache_key.clone(),
+                            line,
+                        });
                     }
+                    let exit_code = if summary.errors.is_empty() { 0 } else { 1 };
+                    let _ = tx.send(CommandMessage::Completed {
+                        cache_key,
+                        exit_code,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(CommandMessage::Failed {
                         cache_key,
-                        error: format!("Failed to spawn autom8: {}", e),
+                        error: format!("Failed to clean orphaned sessions: {}", e),
                     });
                 }
             }
@@ -6952,7 +6918,9 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("Path:")));
 
         // Should have status (idle)
-        assert!(lines.iter().any(|l| l.contains("Status:") && l.contains("[idle]")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Status:") && l.contains("[idle]")));
 
         // Should have "No specs found" when empty
         assert!(lines.iter().any(|l| l.contains("No specs found")));
@@ -7068,7 +7036,9 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("Project: my-project")));
 
         // Should have branch
-        assert!(lines.iter().any(|l| l.contains("Branch:") && l.contains("feature/new-thing")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Branch:") && l.contains("feature/new-thing")));
 
         // Should have description
         assert!(lines.iter().any(|l| l.contains("Description:")));
@@ -7081,10 +7051,14 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("User Stories:")));
 
         // Should show completed story with checkmark
-        assert!(lines.iter().any(|l| l.contains("✓") && l.contains("US-001")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("✓") && l.contains("US-001")));
 
         // Should show incomplete story with empty circle
-        assert!(lines.iter().any(|l| l.contains("○") && l.contains("US-002")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("○") && l.contains("US-002")));
     }
 
     #[test]
@@ -7127,6 +7101,209 @@ mod tests {
         let tab = tab.unwrap();
         assert!(tab.label.contains("test-project"));
         assert!(tab.label.starts_with("Describe:"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    // =========================================================================
+    // US-004 Tests: Replace Clean with Direct Logic Call
+    // =========================================================================
+
+    #[test]
+    fn test_us004_format_cleanup_summary_empty() {
+        // Test formatting empty summary (no sessions cleaned)
+        let summary = crate::commands::CleanupSummary::default();
+        let lines = format_cleanup_summary_as_text(&summary, "Test Operation");
+
+        assert!(!lines.is_empty());
+        assert!(
+            lines.iter().any(|l| l.contains("Test Operation")),
+            "Should include operation name"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("No sessions or worktrees were removed")),
+            "Should indicate nothing was removed"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_removed_sessions() {
+        // Test formatting summary with removed sessions
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 3,
+            worktrees_removed: 2,
+            bytes_freed: 1048576, // 1 MB
+            sessions_skipped: vec![],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Worktrees");
+
+        assert!(
+            lines.iter().any(|l| l.contains("3 sessions")),
+            "Should show 3 sessions removed"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("2 worktrees")),
+            "Should show 2 worktrees removed"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("1.0 MB")),
+            "Should show freed space"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_single_session() {
+        // Test singular form for 1 session
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 1,
+            worktrees_removed: 1,
+            bytes_freed: 1024,
+            sessions_skipped: vec![],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Orphaned");
+
+        // Should use singular "session" and "worktree" (not "sessions"/"worktrees")
+        let line = lines.iter().find(|l| l.contains("session")).unwrap();
+        assert!(
+            !line.contains("sessions"),
+            "Should use singular 'session' for count of 1"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_skipped() {
+        // Test formatting summary with skipped sessions
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 1,
+            worktrees_removed: 0,
+            bytes_freed: 512,
+            sessions_skipped: vec![
+                crate::commands::SkippedSession {
+                    session_id: "session1".to_string(),
+                    reason: "Current session".to_string(),
+                },
+                crate::commands::SkippedSession {
+                    session_id: "session2".to_string(),
+                    reason: "Uncommitted changes".to_string(),
+                },
+            ],
+            errors: vec![],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean All");
+
+        assert!(
+            lines.iter().any(|l| l.contains("Skipped")),
+            "Should have skipped section"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("session1")),
+            "Should list first skipped session"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Current session")),
+            "Should show reason for first skip"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Uncommitted changes")),
+            "Should show reason for second skip"
+        );
+    }
+
+    #[test]
+    fn test_us004_format_cleanup_summary_with_errors() {
+        // Test formatting summary with errors
+        let summary = crate::commands::CleanupSummary {
+            sessions_removed: 2,
+            worktrees_removed: 1,
+            bytes_freed: 2048,
+            sessions_skipped: vec![],
+            errors: vec![
+                "Failed to remove worktree /tmp/test".to_string(),
+                "Permission denied".to_string(),
+            ],
+        };
+        let lines = format_cleanup_summary_as_text(&summary, "Clean Operation");
+
+        assert!(
+            lines.iter().any(|l| l.contains("Errors")),
+            "Should have errors section"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Failed to remove worktree")),
+            "Should list first error"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Permission denied")),
+            "Should list second error"
+        );
+    }
+
+    #[test]
+    fn test_us004_spawn_clean_worktrees_creates_tab() {
+        // Verify spawn_clean_worktrees_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_clean_worktrees_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
+        assert!(tab.closable);
+
+        // Check that a command execution was created
+        if let TabId::CommandOutput(cache_key) = &tab.id {
+            let exec = app.get_command_execution(cache_key);
+            assert!(exec.is_some());
+            // Initially should be running (thread spawned)
+            assert_eq!(exec.unwrap().status, CommandStatus::Running);
+        } else {
+            panic!("Expected CommandOutput tab");
+        }
+    }
+
+    #[test]
+    fn test_us004_spawn_clean_orphaned_creates_tab() {
+        // Verify spawn_clean_orphaned_command creates a tab
+        // (now using data layer instead of subprocess)
+        let mut app = Autom8App::new();
+        app.spawn_clean_orphaned_command("test-project");
+
+        // Check that a command output tab was created
+        assert_eq!(app.closable_tab_count(), 1);
+
+        // Find the tab
+        let tab = app
+            .tabs()
+            .iter()
+            .find(|t| matches!(&t.id, TabId::CommandOutput(_)));
+        assert!(tab.is_some());
+
+        let tab = tab.unwrap();
+        assert!(tab.label.contains("test-project"));
         assert!(tab.closable);
 
         // Check that a command execution was created
