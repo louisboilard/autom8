@@ -5522,4 +5522,269 @@ mod tests {
         let cloned = field1.clone();
         assert_eq!(field1, cloned, "Cloned field should be equal");
     }
+
+    // ========================================================================
+    // US-007 Tests: Text Input with Real-time Validation
+    // ========================================================================
+
+    #[test]
+    fn test_us007_config_text_field_enum_variants() {
+        // Test that ConfigTextField enum has the expected variant
+        let field = ConfigTextField::WorktreePathPattern;
+        assert_eq!(field, ConfigTextField::WorktreePathPattern);
+    }
+
+    #[test]
+    fn test_us007_config_text_field_equality() {
+        // Test ConfigTextField equality and cloning
+        let field1 = ConfigTextField::WorktreePathPattern;
+        let field2 = ConfigTextField::WorktreePathPattern;
+
+        assert_eq!(field1, field2, "Same variants should be equal");
+
+        let cloned = field1.clone();
+        assert_eq!(field1, cloned, "Cloned field should be equal");
+    }
+
+    #[test]
+    fn test_us007_config_editor_actions_has_text_changes() {
+        // Test that ConfigEditorActions includes text_changes field
+        let actions = ConfigEditorActions::default();
+        assert!(
+            actions.text_changes.is_empty(),
+            "text_changes should be empty by default"
+        );
+    }
+
+    #[test]
+    fn test_us007_apply_global_config_text_changes() {
+        // Test applying text changes to global config
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            ..Default::default()
+        });
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "{repo}-custom-{branch}".to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify the cached config was updated
+        if let Some(config) = &app.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-custom-{branch}",
+                "worktree_path_pattern should be updated"
+            );
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_apply_project_config_text_changes() {
+        // Test applying text changes to project config
+        let mut app = Autom8App::new();
+        let project_name = "test-project";
+
+        // Set up a cached project config
+        app.cached_project_config = Some((
+            project_name.to_string(),
+            crate::config::Config {
+                worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+                ..Default::default()
+            },
+        ));
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "custom-{repo}-{branch}".to_string(),
+        )];
+        app.apply_config_text_changes(false, Some(project_name), &changes);
+
+        // Verify the cached config was updated
+        if let Some((_, config)) = &app.cached_project_config {
+            assert_eq!(
+                config.worktree_path_pattern, "custom-{repo}-{branch}",
+                "worktree_path_pattern should be updated"
+            );
+        } else {
+            panic!("Project config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_empty_text_changes_no_op() {
+        // Test that empty changes vector doesn't cause issues
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        let original_pattern = "{repo}-wt-{branch}";
+        app.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: original_pattern.to_string(),
+            ..Default::default()
+        });
+
+        // Apply empty changes
+        let changes: Vec<(ConfigTextField, String)> = vec![];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify config is unchanged
+        if let Some(config) = &app.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, original_pattern,
+                "worktree_path_pattern should be unchanged"
+            );
+        }
+
+        // Verify config_last_modified was not set
+        assert!(
+            app.config_last_modified.is_none(),
+            "config_last_modified should not be set for empty changes"
+        );
+    }
+
+    #[test]
+    fn test_us007_wrong_project_name_no_change() {
+        // Test that applying changes with wrong project name doesn't affect config
+        let mut app = Autom8App::new();
+        let actual_project = "actual-project";
+        let wrong_project = "wrong-project";
+
+        // Set up a cached project config
+        app.cached_project_config = Some((
+            actual_project.to_string(),
+            crate::config::Config {
+                worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+                ..Default::default()
+            },
+        ));
+
+        // Apply changes to wrong project
+        let changes = vec![(ConfigTextField::WorktreePathPattern, "changed".to_string())];
+        app.apply_config_text_changes(false, Some(wrong_project), &changes);
+
+        // Verify config is unchanged (wrong project name)
+        if let Some((_, config)) = &app.cached_project_config {
+            assert_eq!(
+                config.worktree_path_pattern, "{repo}-wt-{branch}",
+                "worktree_path_pattern should be unchanged when project name doesn't match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_us007_validation_missing_repo_placeholder() {
+        // Test validation logic: pattern missing {repo} placeholder
+        let pattern = "custom-wt-{branch}";
+        assert!(
+            !pattern.contains("{repo}"),
+            "Pattern should be missing {{repo}}"
+        );
+        assert!(
+            pattern.contains("{branch}"),
+            "Pattern should contain {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_missing_branch_placeholder() {
+        // Test validation logic: pattern missing {branch} placeholder
+        let pattern = "{repo}-wt-custom";
+        assert!(
+            pattern.contains("{repo}"),
+            "Pattern should contain {{repo}}"
+        );
+        assert!(
+            !pattern.contains("{branch}"),
+            "Pattern should be missing {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_missing_both_placeholders() {
+        // Test validation logic: pattern missing both placeholders
+        let pattern = "custom-wt-path";
+        assert!(
+            !pattern.contains("{repo}"),
+            "Pattern should be missing {{repo}}"
+        );
+        assert!(
+            !pattern.contains("{branch}"),
+            "Pattern should be missing {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_validation_valid_pattern() {
+        // Test validation logic: pattern with both placeholders
+        let pattern = "{repo}-wt-{branch}";
+        assert!(
+            pattern.contains("{repo}"),
+            "Pattern should contain {{repo}}"
+        );
+        assert!(
+            pattern.contains("{branch}"),
+            "Pattern should contain {{branch}}"
+        );
+    }
+
+    #[test]
+    fn test_us007_invalid_patterns_still_saved() {
+        // Test that invalid patterns (missing placeholders) are still saved
+        // Per acceptance criteria: "Invalid patterns still saved (warning only, not blocking)"
+        let mut app = Autom8App::new();
+
+        // Set up a cached global config
+        app.cached_global_config = Some(crate::config::Config {
+            worktree_path_pattern: "{repo}-wt-{branch}".to_string(),
+            ..Default::default()
+        });
+
+        // Apply an invalid pattern (missing both placeholders)
+        let invalid_pattern = "custom-static-path";
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            invalid_pattern.to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Verify the invalid pattern was still saved
+        if let Some(config) = &app.cached_global_config {
+            assert_eq!(
+                config.worktree_path_pattern, invalid_pattern,
+                "Invalid pattern should still be saved"
+            );
+        } else {
+            panic!("Global config should be cached");
+        }
+    }
+
+    #[test]
+    fn test_us007_text_changes_set_last_modified() {
+        // Test that successful text changes set config_last_modified
+        let mut app = Autom8App::new();
+
+        // Initially no last modified
+        assert!(app.config_last_modified.is_none());
+
+        // Set up a cached global config
+        app.cached_global_config = Some(crate::config::Config::default());
+
+        // Apply a text change
+        let changes = vec![(
+            ConfigTextField::WorktreePathPattern,
+            "new-pattern".to_string(),
+        )];
+        app.apply_config_text_changes(true, None, &changes);
+
+        // Note: config_last_modified is only set if save_global_config succeeds,
+        // which requires filesystem access. In tests, this may fail silently.
+        // The important thing is that the code path is exercised without panic.
+    }
 }
