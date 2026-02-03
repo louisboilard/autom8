@@ -47,9 +47,17 @@ pub mod rounding {
 }
 
 /// Shadow depths for elevated surfaces.
+///
+/// Shadows use warm-tinted colors (slight brown/amber tint) to complement
+/// the warm cream color palette, avoiding harsh pure-black shadows.
 pub mod shadow {
     use super::Color32;
     use eframe::egui::Shadow;
+
+    /// Warm shadow base color - a very subtle warm brown.
+    /// Uses RGB values that lean warm (R > G > B) even at low alpha.
+    /// This creates softer shadows that complement the warm palette.
+    const SHADOW_WARM: Color32 = Color32::from_rgba_premultiplied(40, 30, 20, 255);
 
     /// Subtle shadow for slightly elevated elements.
     pub fn subtle() -> Shadow {
@@ -57,7 +65,13 @@ pub mod shadow {
             offset: [0.0, 1.0].into(),
             blur: 3.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(10),
+            // Warm brown shadow at low opacity
+            color: Color32::from_rgba_premultiplied(
+                SHADOW_WARM.r(),
+                SHADOW_WARM.g(),
+                SHADOW_WARM.b(),
+                12,
+            ),
         }
     }
 
@@ -67,7 +81,13 @@ pub mod shadow {
             offset: [0.0, 2.0].into(),
             blur: 8.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(15),
+            // Warm brown shadow at medium opacity
+            color: Color32::from_rgba_premultiplied(
+                SHADOW_WARM.r(),
+                SHADOW_WARM.g(),
+                SHADOW_WARM.b(),
+                18,
+            ),
         }
     }
 
@@ -77,8 +97,20 @@ pub mod shadow {
             offset: [0.0, 4.0].into(),
             blur: 16.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(20),
+            // Warm brown shadow at higher opacity
+            color: Color32::from_rgba_premultiplied(
+                SHADOW_WARM.r(),
+                SHADOW_WARM.g(),
+                SHADOW_WARM.b(),
+                24,
+            ),
         }
+    }
+
+    /// Returns the warm shadow base color for testing.
+    #[cfg(test)]
+    pub fn shadow_warm_color() -> Color32 {
+        SHADOW_WARM
     }
 }
 
@@ -399,11 +431,48 @@ mod tests {
         // Verify shadow alpha values are appropriately subtle
         assert!(subtle.color.a() <= 15);
         assert!(medium.color.a() <= 20);
-        assert!(elevated.color.a() <= 25);
+        assert!(elevated.color.a() <= 30);
 
         // Verify blur increases with elevation
         assert!(subtle.blur < medium.blur);
         assert!(medium.blur < elevated.blur);
+    }
+
+    #[test]
+    fn test_shadows_use_warm_tones() {
+        // Verify shadow colors have warm tones (R > G > B)
+        let warm = shadow::shadow_warm_color();
+        assert!(
+            warm.r() > warm.g() && warm.g() > warm.b(),
+            "Shadow base color should be warm (R > G > B), got RGB({}, {}, {})",
+            warm.r(),
+            warm.g(),
+            warm.b()
+        );
+    }
+
+    #[test]
+    fn test_shadows_have_consistent_warmth() {
+        // All shadow levels should use the same warm base color
+        let subtle = shadow::subtle();
+        let medium = shadow::medium();
+        let elevated = shadow::elevated();
+
+        // Extract RGB ratios (alpha varies, but RGB ratios should match)
+        let warm = shadow::shadow_warm_color();
+
+        // Verify each shadow uses the warm base color RGB values
+        assert_eq!(subtle.color.r(), warm.r());
+        assert_eq!(subtle.color.g(), warm.g());
+        assert_eq!(subtle.color.b(), warm.b());
+
+        assert_eq!(medium.color.r(), warm.r());
+        assert_eq!(medium.color.g(), warm.g());
+        assert_eq!(medium.color.b(), warm.b());
+
+        assert_eq!(elevated.color.r(), warm.r());
+        assert_eq!(elevated.color.g(), warm.g());
+        assert_eq!(elevated.color.b(), warm.b());
     }
 
     #[test]

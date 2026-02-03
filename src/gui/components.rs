@@ -172,6 +172,24 @@ pub fn state_to_background_color(state: MachineState) -> Color32 {
     Status::from_machine_state(state).background_color()
 }
 
+/// Create a badge background color from any status color.
+///
+/// This blends the status color with the warm background color to create
+/// a soft, theme-consistent badge background. Use this instead of
+/// `color.gamma_multiply()` for status badges.
+pub fn badge_background_color(status_color: Color32) -> Color32 {
+    // Blend the status color with warm cream at ~15% opacity
+    // This creates a soft tinted background that complements the warm theme
+    let bg = colors::BACKGROUND;
+    let alpha = 0.15;
+
+    let r = (status_color.r() as f32 * alpha + bg.r() as f32 * (1.0 - alpha)) as u8;
+    let g = (status_color.g() as f32 * alpha + bg.g() as f32 * (1.0 - alpha)) as u8;
+    let b = (status_color.b() as f32 * alpha + bg.b() as f32 * (1.0 - alpha)) as u8;
+
+    Color32::from_rgb(r, g, b)
+}
+
 // ============================================================================
 // Progress Components
 // ============================================================================
@@ -953,5 +971,88 @@ mod tests {
         assert_eq!(STATUS_DOT_RADIUS, 4.0);
         assert_eq!(MAX_TEXT_LENGTH, 40);
         assert_eq!(MAX_BRANCH_LENGTH, 25);
+    }
+
+    // ------------------------------------------------------------------------
+    // Badge Background Tests (US-007 Visual Polish)
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_badge_background_color_creates_tinted_background() {
+        // Badge backgrounds should be lighter than the status color
+        let running_bg = badge_background_color(colors::STATUS_RUNNING);
+        let success_bg = badge_background_color(colors::STATUS_SUCCESS);
+        let error_bg = badge_background_color(colors::STATUS_ERROR);
+
+        // Backgrounds should be relatively light (high luminance)
+        let running_lum =
+            running_bg.r() as u32 + running_bg.g() as u32 + running_bg.b() as u32;
+        let success_lum =
+            success_bg.r() as u32 + success_bg.g() as u32 + success_bg.b() as u32;
+        let error_lum = error_bg.r() as u32 + error_bg.g() as u32 + error_bg.b() as u32;
+
+        // Badge backgrounds should be light (luminance > 600 out of 765 max)
+        assert!(
+            running_lum > 600,
+            "Running badge bg should be light, got luminance {}",
+            running_lum
+        );
+        assert!(
+            success_lum > 600,
+            "Success badge bg should be light, got luminance {}",
+            success_lum
+        );
+        assert!(
+            error_lum > 600,
+            "Error badge bg should be light, got luminance {}",
+            error_lum
+        );
+    }
+
+    #[test]
+    fn test_badge_background_inherits_warm_tones() {
+        // Badge backgrounds should blend with warm background color
+        let bg = colors::BACKGROUND;
+
+        // Test with a neutral color to see if warmth is preserved
+        let neutral_status = Color32::from_rgb(100, 100, 100);
+        let badge_bg = badge_background_color(neutral_status);
+
+        // The badge background should have warm tones from the blend
+        // Since we blend with warm BACKGROUND at 85%, the result should be warm
+        assert!(
+            badge_bg.r() >= badge_bg.b(),
+            "Badge bg should inherit warm tones, got RGB({}, {}, {})",
+            badge_bg.r(),
+            badge_bg.g(),
+            badge_bg.b()
+        );
+    }
+
+    #[test]
+    fn test_badge_background_retains_status_tint() {
+        // Badge backgrounds should retain a tint of the status color
+        let running_bg = badge_background_color(colors::STATUS_RUNNING);
+        let success_bg = badge_background_color(colors::STATUS_SUCCESS);
+        let error_bg = badge_background_color(colors::STATUS_ERROR);
+
+        // Running (blue) should have higher blue component relative to pure warm background
+        let bg = colors::BACKGROUND;
+        assert!(
+            running_bg.b() > bg.b() - 5 || running_bg.r() < bg.r() + 5,
+            "Running badge should retain blue tint"
+        );
+
+        // Success (green) should have higher green component
+        assert!(
+            success_bg.g() > bg.g() - 5,
+            "Success badge should retain green tint"
+        );
+
+        // Error (red) should have higher red component
+        assert!(
+            error_bg.r() > bg.r() - 5,
+            "Error badge should retain red tint"
+        );
     }
 }

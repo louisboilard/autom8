@@ -6,8 +6,8 @@
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::{Autom8Error, Result};
 use crate::gui::components::{
-    format_duration, format_relative_time, format_state, state_to_color, truncate_with_ellipsis,
-    MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
+    badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
+    truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
 };
 use crate::gui::theme::{self, colors, rounding, spacing};
 use crate::gui::typography::{self, FontSize, FontWeight};
@@ -1913,7 +1913,7 @@ impl Autom8App {
             ui.painter().rect_filled(
                 badge_rect,
                 Rounding::same(rounding::SMALL),
-                status_color.gamma_multiply(0.2),
+                badge_background_color(status_color),
             );
 
             let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
@@ -2106,7 +2106,7 @@ impl Autom8App {
                         ui.painter().rect_filled(
                             badge_rect,
                             Rounding::same(rounding::SMALL),
-                            status_color.gamma_multiply(0.15),
+                            badge_background_color(status_color),
                         );
 
                         let text_pos = badge_rect.center() - badge_galley.rect.center().to_vec2();
@@ -2817,8 +2817,40 @@ impl Autom8App {
     fn render_run_history_loading(&self, ui: &mut egui::Ui) {
         ui.add_space(spacing::LG);
         ui.vertical_centered(|ui| {
-            // Spinner/loading indicator using egui's built-in spinner
-            ui.spinner();
+            // Custom spinner using theme accent color for visual consistency
+            let spinner_size = 24.0;
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::splat(spinner_size), egui::Sense::hover());
+
+            if ui.is_rect_visible(rect) {
+                // Draw a simple animated arc spinner in accent color
+                let center = rect.center();
+                let radius = spinner_size / 2.0 - 2.0;
+                let time = ui.input(|i| i.time);
+                let start_angle = (time * 2.0) as f32 % std::f32::consts::TAU;
+                let arc_length = std::f32::consts::PI * 1.5;
+
+                // Draw the spinner arc
+                let n_points = 32;
+                let points: Vec<_> = (0..=n_points)
+                    .map(|i| {
+                        let angle =
+                            start_angle + (i as f32 / n_points as f32) * arc_length;
+                        egui::pos2(
+                            center.x + radius * angle.cos(),
+                            center.y + radius * angle.sin(),
+                        )
+                    })
+                    .collect();
+
+                ui.painter().add(egui::Shape::line(
+                    points,
+                    Stroke::new(2.5, colors::ACCENT),
+                ));
+
+                // Request repaint for animation
+                ui.ctx().request_repaint();
+            }
 
             ui.add_space(spacing::SM);
 
@@ -2852,19 +2884,21 @@ impl Autom8App {
 
     /// Render empty state when run history has no entries.
     fn render_run_history_empty(&self, ui: &mut egui::Ui) {
-        ui.add_space(spacing::LG);
+        ui.add_space(spacing::XXL);
         ui.vertical_centered(|ui| {
+            ui.add_space(spacing::LG);
+
             ui.label(
                 egui::RichText::new("No run history")
-                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .font(typography::font(FontSize::Heading, FontWeight::Medium))
                     .color(colors::TEXT_MUTED),
             );
 
-            ui.add_space(spacing::XS);
+            ui.add_space(spacing::SM);
 
             ui.label(
                 egui::RichText::new("Completed runs will appear here")
-                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_MUTED),
             );
         });
@@ -2960,7 +2994,7 @@ impl Autom8App {
                 ui.painter().rect_filled(
                     badge_rect,
                     Rounding::same(rounding::SMALL),
-                    status_color.gamma_multiply(0.2),
+                    badge_background_color(status_color),
                 );
 
                 // Center the text in the badge
