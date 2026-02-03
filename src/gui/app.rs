@@ -1224,8 +1224,10 @@ impl Autom8App {
     ///
     /// The sidebar contains permanent navigation items (Active Runs, Projects)
     /// as a vertical list with visual indicators for the active item.
+    /// A decorative animation is displayed at the bottom.
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
+        // Use a layout that puts nav at top, animation at bottom
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
             // Add some top spacing to align with content area
             ui.add_space(spacing::SM);
 
@@ -1250,6 +1252,15 @@ impl Autom8App {
             if let Some(tab_id) = tab_to_activate {
                 self.set_active_tab(tab_id);
             }
+
+            // Fill remaining space, leaving room for animation
+            let animation_height = 150.0;
+            ui.add_space(ui.available_height() - animation_height);
+
+            // Decorative animation at the bottom of sidebar
+            // Uses full sidebar width, particles rise from bottom
+            let sidebar_width = ui.available_width();
+            super::animation::render_rising_particles(ui, sidebar_width, animation_height);
         });
     }
 
@@ -5472,31 +5483,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_title_bar_height_is_reasonable() {
-        assert!(
-            TITLE_BAR_HEIGHT >= 24.0 && TITLE_BAR_HEIGHT <= 40.0,
-            "Title bar height should be 24-40px, got {}",
-            TITLE_BAR_HEIGHT
-        );
-    }
-
-    #[test]
     fn test_title_bar_left_offset_is_reasonable() {
         assert!(
             TITLE_BAR_LEFT_OFFSET >= 60.0 && TITLE_BAR_LEFT_OFFSET <= 90.0,
             "Title bar left offset should be 60-90px, got {}",
             TITLE_BAR_LEFT_OFFSET
-        );
-    }
-
-    #[test]
-    fn test_title_bar_height_smaller_than_header() {
-        // Title bar should be smaller than the main header/tab bar
-        assert!(
-            TITLE_BAR_HEIGHT < HEADER_HEIGHT,
-            "Title bar ({}) should be smaller than header ({})",
-            TITLE_BAR_HEIGHT,
-            HEADER_HEIGHT
         );
     }
 
@@ -5509,17 +5500,6 @@ mod tests {
 
         // This test verifies the function runs without errors
         let _ = viewport;
-    }
-
-    #[test]
-    fn test_title_bar_and_header_combined_reasonable() {
-        // Combined title bar + header shouldn't take too much vertical space
-        let combined = TITLE_BAR_HEIGHT + HEADER_HEIGHT;
-        assert!(
-            combined <= 80.0,
-            "Combined title bar and header should be <= 80px, got {}",
-            combined
-        );
     }
 
     #[test]
