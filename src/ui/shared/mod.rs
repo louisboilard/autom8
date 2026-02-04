@@ -765,8 +765,19 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
         ));
     }
 
-    // Already sorted by list_archived, but ensure newest first
-    history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    // Sort with running sessions at top, then by date descending
+    history.sort_by(|a, b| {
+        // First priority: running status at top
+        let a_running = matches!(a.status, RunStatus::Running);
+        let b_running = matches!(b.status, RunStatus::Running);
+
+        match (a_running, b_running) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            // Both same category: sort by started_at descending (newest first)
+            _ => b.started_at.cmp(&a.started_at),
+        }
+    });
 
     Ok(history)
 }
