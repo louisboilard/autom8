@@ -20,9 +20,7 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
     load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
 };
-use eframe::egui::{
-    self, Color32, IconData, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2,
-};
+use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -167,8 +165,8 @@ const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
 const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
 
 /// Size of the sidebar mascot icon in pixels (US-005).
-/// Appropriately sized for the sidebar width while remaining decorative.
-const SIDEBAR_ICON_SIZE: f32 = 48.0;
+/// Sized for strong visual presence in the sidebar.
+const SIDEBAR_ICON_SIZE: f32 = 120.0;
 
 // ============================================================================
 // Context Menu Constants (Right-Click Context Menu - US-002)
@@ -3939,13 +3937,14 @@ impl Autom8App {
             }
 
             // Fill remaining space, leaving room for icon and animation
+            // Icon positioned higher in the sidebar for better visual balance
             let animation_height = 150.0;
-            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::MD * 2.0; // Icon + vertical padding
+            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::LG * 2.0; // Icon + generous padding
             ui.add_space(ui.available_height() - animation_height - icon_section_height);
 
             // Decorative mascot icon (US-005)
             // Centered between the tabs and the animation
-            ui.add_space(spacing::MD);
+            ui.add_space(spacing::LG);
             ui.horizontal(|ui| {
                 let sidebar_width = ui.available_width();
                 let icon_offset = (sidebar_width - SIDEBAR_ICON_SIZE) / 2.0;
@@ -3955,7 +3954,7 @@ impl Autom8App {
                         .fit_to_exact_size(egui::vec2(SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE)),
                 );
             });
-            ui.add_space(spacing::MD);
+            ui.add_space(spacing::LG);
 
             // Decorative animation at the bottom of sidebar
             // Uses full sidebar width, particles rise from bottom
@@ -7439,26 +7438,17 @@ impl Autom8App {
 /// # Returns
 ///
 /// `IconData` containing the RGBA pixels and dimensions for the window icon.
-/// Returns empty `IconData` if the icon fails to load (graceful degradation).
-fn load_window_icon() -> IconData {
+/// Returns `None` if the icon fails to load (graceful degradation to default).
+fn load_window_icon() -> Option<Arc<egui::IconData>> {
     // Embed the icon PNG at compile time
     let icon_bytes = include_bytes!("../../../assets/icon.png");
 
-    // Decode the PNG to RGBA pixels
-    match image::load_from_memory(icon_bytes) {
-        Ok(img) => {
-            let rgba_image = img.into_rgba8();
-            let (width, height) = rgba_image.dimensions();
-            let rgba = rgba_image.into_raw();
-            IconData {
-                rgba,
-                width,
-                height,
-            }
-        }
+    // Use eframe's built-in PNG decoder for proper icon loading
+    match eframe::icon_data::from_png_bytes(icon_bytes) {
+        Ok(icon_data) => Some(Arc::new(icon_data)),
         Err(_) => {
-            // Graceful degradation: return empty icon data
-            IconData::default()
+            // Graceful degradation: return None to use default icon
+            None
         }
     }
 }
@@ -7468,14 +7458,20 @@ fn load_window_icon() -> IconData {
 /// Configures a custom title bar that blends with the app's background color,
 /// and sets the application window icon (US-006).
 fn build_viewport() -> egui::ViewportBuilder {
-    egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title("autom8")
         .with_inner_size([DEFAULT_WIDTH, DEFAULT_HEIGHT])
         .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
-        .with_title_shown(false)
-        .with_icon(Arc::new(load_window_icon()))
+        .with_title_shown(false);
+
+    // Set the window/dock icon if loading succeeds
+    if let Some(icon) = load_window_icon() {
+        builder = builder.with_icon(icon);
+    }
+
+    builder
 }
 
 /// Launch the native GUI application.
@@ -7923,15 +7919,15 @@ mod tests {
             "Icon should be at least 48px for visibility"
         );
         assert!(
-            SIDEBAR_ICON_SIZE <= 64.0,
-            "Icon should be at most 64px to fit sidebar"
+            SIDEBAR_ICON_SIZE <= 140.0,
+            "Icon should be at most 140px to fit sidebar"
         );
     }
 
     #[test]
     fn test_us005_sidebar_icon_fits_in_sidebar() {
         // Icon should fit within the sidebar width with margin
-        let icon_with_margin = SIDEBAR_ICON_SIZE + spacing::MD * 2.0;
+        let icon_with_margin = SIDEBAR_ICON_SIZE + spacing::LG * 2.0;
         assert!(
             icon_with_margin < SIDEBAR_WIDTH,
             "Icon with margin ({}) should fit within sidebar width ({})",
@@ -7943,14 +7939,14 @@ mod tests {
     #[test]
     fn test_us005_sidebar_icon_section_height_is_reasonable() {
         // The icon section height should account for icon plus padding
-        let icon_section_height = SIDEBAR_ICON_SIZE + spacing::MD * 2.0;
+        let icon_section_height = SIDEBAR_ICON_SIZE + spacing::LG * 2.0;
 
         // Should be positive
         assert!(icon_section_height > 0.0);
 
         // Should be reasonable (not too tall)
         assert!(
-            icon_section_height < 100.0,
+            icon_section_height < 170.0,
             "Icon section should not be too tall"
         );
     }
@@ -7960,7 +7956,7 @@ mod tests {
         // Verify the icon asset file exists (compile-time check via include_image!)
         // The fact that this compiles means the asset exists.
         // We can also verify the constant is defined correctly.
-        assert_eq!(SIDEBAR_ICON_SIZE, 48.0);
+        assert_eq!(SIDEBAR_ICON_SIZE, 120.0);
     }
 
     // ========================================================================
@@ -7970,7 +7966,7 @@ mod tests {
     #[test]
     fn test_us006_window_icon_loads_successfully() {
         // Verify the window icon loads without error
-        let icon_data = load_window_icon();
+        let icon_data = load_window_icon().expect("Icon should load successfully");
 
         // Should have non-empty RGBA data
         assert!(!icon_data.rgba.is_empty(), "Icon should have pixel data");
@@ -7978,17 +7974,17 @@ mod tests {
 
     #[test]
     fn test_us006_window_icon_has_correct_dimensions() {
-        // Verify the icon has the expected dimensions (64x64 from the PNG)
-        let icon_data = load_window_icon();
+        // Verify the icon has the expected dimensions (400x400 from the PNG)
+        let icon_data = load_window_icon().expect("Icon should load");
 
-        assert_eq!(icon_data.width, 64, "Icon width should be 64px");
-        assert_eq!(icon_data.height, 64, "Icon height should be 64px");
+        assert_eq!(icon_data.width, 400, "Icon width should be 400px");
+        assert_eq!(icon_data.height, 400, "Icon height should be 400px");
     }
 
     #[test]
     fn test_us006_window_icon_rgba_size_is_valid() {
         // RGBA = 4 bytes per pixel, so total size should be width * height * 4
-        let icon_data = load_window_icon();
+        let icon_data = load_window_icon().expect("Icon should load");
 
         let expected_size = (icon_data.width * icon_data.height * 4) as usize;
         assert_eq!(
