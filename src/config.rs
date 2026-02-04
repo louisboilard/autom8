@@ -875,11 +875,24 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
         let archived_runs = sm.list_archived().unwrap_or_default();
         let runs_count = archived_runs.len();
 
-        // Determine last run date from archived runs or current run
-        let last_run_date = run_state
-            .as_ref()
-            .map(|s| s.started_at)
-            .or_else(|| archived_runs.first().map(|r| r.started_at));
+        // Determine last run date from archived runs or current run.
+        // For active runs: use started_at (shows how long it's been running).
+        // For completed runs: use finished_at (shows when it finished), falling back to started_at.
+        let last_run_date = if has_active_run {
+            // Active run: show when it started
+            run_state.as_ref().map(|s| s.started_at)
+        } else {
+            // No active run: check current state first (may be completed but not archived yet)
+            run_state
+                .as_ref()
+                .and_then(|s| s.finished_at.or(Some(s.started_at)))
+                .or_else(|| {
+                    // Fall back to most recent archived run
+                    archived_runs
+                        .first()
+                        .and_then(|r| r.finished_at.or(Some(r.started_at)))
+                })
+        };
 
         tree_info.push(ProjectTreeInfo {
             name: project_name,
