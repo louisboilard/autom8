@@ -42,6 +42,11 @@ pub struct SessionMetadata {
     /// Used for branch conflict detection - only running sessions "own" their branch.
     #[serde(default)]
     pub is_running: bool,
+    /// Whether a pause has been requested by the GUI.
+    /// The runner checks this field periodically and gracefully stops if true.
+    /// Note: No file locking needed - race conditions are unlikely for user-initiated actions.
+    #[serde(default)]
+    pub pause_requested: bool,
 }
 
 /// Enriched session status for display purposes.
@@ -851,6 +856,7 @@ impl StateManager {
             created_at: state.started_at,
             last_active_at: state.finished_at.unwrap_or_else(Utc::now),
             is_running: state.status == RunStatus::Running,
+            pause_requested: false,
         };
         let metadata_content = serde_json::to_string_pretty(&metadata)?;
         fs::write(main_session_dir.join(METADATA_FILE), metadata_content)?;
@@ -949,6 +955,8 @@ impl StateManager {
                 created_at: existing.created_at,
                 last_active_at: Utc::now(),
                 is_running,
+                // Preserve pause_requested from existing metadata
+                pause_requested: existing.pause_requested,
             }
         } else {
             SessionMetadata {
@@ -958,6 +966,7 @@ impl StateManager {
                 created_at: state.started_at,
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
             }
         };
 
@@ -1069,6 +1078,47 @@ impl StateManager {
         } else {
             Ok(false)
         }
+    }
+
+    /// Request a pause for this session (called by GUI).
+    ///
+    /// Sets `pause_requested: true` in the session metadata, which the runner
+    /// will detect and handle gracefully at the next safe checkpoint.
+    ///
+    /// Note: No file locking needed - race conditions are unlikely for user-initiated
+    /// actions (GUI writes, runner reads at intervals).
+    pub fn request_pause(&self) -> Result<()> {
+        self.ensure_dirs()?;
+
+        if let Some(mut metadata) = self.load_metadata()? {
+            metadata.pause_requested = true;
+            let content = serde_json::to_string_pretty(&metadata)?;
+            fs::write(self.metadata_file(), content)?;
+        }
+        Ok(())
+    }
+
+    /// Check if a pause was requested (called by Runner).
+    ///
+    /// Returns `true` if the GUI has requested a pause for this session.
+    pub fn is_pause_requested(&self) -> bool {
+        self.load_metadata()
+            .ok()
+            .flatten()
+            .map(|m| m.pause_requested)
+            .unwrap_or(false)
+    }
+
+    /// Clear the pause request (called by Runner after handling).
+    ///
+    /// Resets `pause_requested: false` in the session metadata.
+    pub fn clear_pause_request(&self) -> Result<()> {
+        if let Some(mut metadata) = self.load_metadata()? {
+            metadata.pause_requested = false;
+            let content = serde_json::to_string_pretty(&metadata)?;
+            fs::write(self.metadata_file(), content)?;
+        }
+        Ok(())
     }
 
     /// List all sessions for this project with their metadata.
@@ -3077,6 +3127,7 @@ src/lib.rs | Library module | [Config]
             created_at: Utc::now(),
             last_active_at: Utc::now(),
             is_running: true,
+            pause_requested: false,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -3086,6 +3137,7 @@ src/lib.rs | Library module | [Config]
         assert_eq!(parsed.worktree_path, PathBuf::from("/home/user/project"));
         assert_eq!(parsed.branch_name, "feature/test");
         assert!(parsed.is_running);
+        assert!(!parsed.pause_requested);
     }
 
     #[test]
@@ -3097,6 +3149,7 @@ src/lib.rs | Library module | [Config]
             created_at: Utc::now(),
             last_active_at: Utc::now(),
             is_running: false,
+            pause_requested: false,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -3999,6 +4052,7 @@ src/lib.rs | Library module | [Config]
             created_at: Utc::now(),
             last_active_at: Utc::now(),
             is_running: true,
+            pause_requested: false,
         };
 
         let status = SessionStatus {

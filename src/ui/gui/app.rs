@@ -19,7 +19,8 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
+    load_project_run_history, load_ui_data, request_session_pause, ProjectData, RunHistoryEntry,
+    SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::time::{Duration, Instant};
@@ -105,9 +106,6 @@ const CARD_ACTION_BUTTON_HEIGHT: f32 = 28.0;
 
 /// Width of action buttons in expanded view.
 const CARD_ACTION_BUTTON_WIDTH: f32 = 80.0;
-
-/// Spacing between action buttons.
-const CARD_ACTION_BUTTON_GAP: f32 = 8.0;
 
 /// Height of resource meter bars.
 const RESOURCE_METER_HEIGHT: f32 = 8.0;
@@ -1187,127 +1185,6 @@ impl PendingCleanOperation {
 }
 
 // ============================================================================
-// Process Control State (US-008)
-// ============================================================================
-
-/// Types of actions that can be in progress on a session.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActionType {
-    Killing,
-    Pausing,
-    Resuming,
-}
-
-impl ActionType {
-    /// Get the display text for this action type.
-    pub fn display_text(&self) -> &'static str {
-        match self {
-            ActionType::Killing => "Killing...",
-            ActionType::Pausing => "Pausing...",
-            ActionType::Resuming => "Resuming...",
-        }
-    }
-}
-
-/// Feedback state for an in-progress action.
-#[derive(Debug, Clone)]
-pub struct ActionFeedback {
-    /// The type of action in progress.
-    pub action_type: ActionType,
-    /// When the action started (for timeout/display duration).
-    pub started_at: Instant,
-}
-
-impl ActionFeedback {
-    /// Create new action feedback.
-    pub fn new(action_type: ActionType) -> Self {
-        Self {
-            action_type,
-            started_at: Instant::now(),
-        }
-    }
-
-    /// Duration in ms after which feedback should be cleared.
-    pub const FEEDBACK_DURATION_MS: u64 = 500;
-
-    /// Check if the feedback has expired and should be cleared.
-    pub fn is_expired(&self) -> bool {
-        self.started_at.elapsed() > Duration::from_millis(Self::FEEDBACK_DURATION_MS)
-    }
-}
-
-/// Error from a process control action.
-#[derive(Debug, Clone)]
-pub struct ProcessControlError {
-    /// Error message to display.
-    pub message: String,
-    /// When the error occurred (for auto-clear timeout).
-    pub occurred_at: Instant,
-}
-
-impl ProcessControlError {
-    /// Create a new error.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            occurred_at: Instant::now(),
-        }
-    }
-
-    /// Duration in ms after which error should be auto-cleared.
-    pub const ERROR_DISPLAY_DURATION_MS: u64 = 5000;
-
-    /// Check if the error has expired and should be cleared.
-    pub fn is_expired(&self) -> bool {
-        self.occurred_at.elapsed() > Duration::from_millis(Self::ERROR_DISPLAY_DURATION_MS)
-    }
-}
-
-// ============================================================================
-// Kill Process Confirmation (US-005)
-// ============================================================================
-
-/// Pending kill operation awaiting user confirmation.
-///
-/// US-005: Kill button shows confirmation before executing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingKillOperation {
-    /// The session ID (for matching after confirmation).
-    pub session_id: String,
-    /// The project name (for display in the dialog).
-    pub project_name: String,
-    /// The branch name (for display in the dialog).
-    pub branch_name: String,
-}
-
-impl PendingKillOperation {
-    /// Create a new pending kill operation.
-    pub fn new(session_id: String, project_name: String, branch_name: String) -> Self {
-        Self {
-            session_id,
-            project_name,
-            branch_name,
-        }
-    }
-
-    /// Get the title for the confirmation dialog.
-    pub fn title(&self) -> &'static str {
-        "Kill Process"
-    }
-
-    /// Get the message for the confirmation dialog.
-    pub fn message(&self) -> String {
-        format!(
-            "Are you sure you want to kill this session?\n\n\
-             Project: {}\n\
-             Branch: {}\n\n\
-             This cannot be undone.",
-            self.project_name, self.branch_name
-        )
-    }
-}
-
-// ============================================================================
 // Session Card Actions (US-005)
 // ============================================================================
 
@@ -1318,12 +1195,12 @@ impl PendingKillOperation {
 struct SessionCardActions {
     /// User clicked the expand/collapse toggle.
     toggle_expanded: bool,
-    /// User clicked the kill button (needs confirmation).
-    kill_clicked: bool,
-    /// User clicked the pause/resume button.
-    pause_clicked: bool,
     /// User clicked the view details button.
     details_clicked: bool,
+    /// User clicked the stop button (for running sessions).
+    stop_clicked: bool,
+    /// User clicked the resume button (for interrupted sessions).
+    resume_clicked: bool,
 }
 
 // ============================================================================
@@ -1414,9 +1291,6 @@ const DETAIL_MODAL_INFO_ROW_HEIGHT: f32 = 20.0;
 
 /// Height of resource meter bars.
 const DETAIL_MODAL_METER_HEIGHT: f32 = 12.0;
-
-/// Gap between footer buttons.
-const DETAIL_MODAL_BUTTON_GAP: f32 = 12.0;
 
 /// Width of footer buttons.
 const DETAIL_MODAL_BUTTON_WIDTH: f32 = 100.0;
@@ -1875,10 +1749,6 @@ pub struct Autom8App {
     /// Persists during refresh cycles (not reset when data is reloaded).
     expanded_sessions: std::collections::HashSet<String>,
 
-    /// Pending kill confirmation for a session.
-    /// When Some, shows a confirmation dialog before killing the process.
-    pending_kill_confirmation: Option<PendingKillOperation>,
-
     /// Animation progress for card expansion (0.0 = collapsed, 1.0 = expanded).
     /// Maps session_id to animation progress for smooth height transitions.
     card_expansion_progress: std::collections::HashMap<String, f32>,
@@ -1898,22 +1768,6 @@ pub struct Autom8App {
     /// Monitors are created when a session's PID is discovered and removed
     /// when the session ends or the process exits.
     process_monitors: std::collections::HashMap<String, ProcessMonitor>,
-
-    // ========================================================================
-    // Process Control State (US-008)
-    // ========================================================================
-    /// Set of session IDs that are currently paused (SIGSTOP sent).
-    /// Used to track pause state across GUI refreshes and toggle button labels.
-    paused_sessions: std::collections::HashSet<String>,
-
-    /// Pending action feedback (brief "Killing...", "Pausing...", etc. state).
-    /// Maps session_id to the pending action message and timestamp.
-    /// Cleared after a short duration (~500ms) or when the action completes.
-    pending_action_feedback: std::collections::HashMap<String, ActionFeedback>,
-
-    /// Last error message from a process control action.
-    /// Displayed in a toast-style notification and auto-cleared.
-    process_control_error: Option<ProcessControlError>,
 }
 
 impl Default for Autom8App {
@@ -1968,13 +1822,9 @@ impl Autom8App {
             pending_clean_confirmation: None,
             pending_result_modal: None,
             expanded_sessions: std::collections::HashSet::new(),
-            pending_kill_confirmation: None,
             card_expansion_progress: std::collections::HashMap::new(),
             pending_detail_modal: None,
             process_monitors: std::collections::HashMap::new(),
-            paused_sessions: std::collections::HashSet::new(),
-            pending_action_feedback: std::collections::HashMap::new(),
-            process_control_error: None,
         };
         // Initial data load
         app.refresh_data();
@@ -3023,182 +2873,6 @@ impl Autom8App {
         self.update_process_monitors();
     }
 
-    // ========================================================================
-    // Process Control Methods (US-008)
-    // ========================================================================
-
-    /// Kill a process by sending SIGKILL.
-    ///
-    /// US-008: Sends SIGKILL to the Claude process to terminate it immediately.
-    /// Called when user confirms kill action from the confirmation dialog.
-    ///
-    /// # Arguments
-    /// * `session_id` - The session ID whose process should be killed
-    ///
-    /// # Returns
-    /// * `Ok(true)` if the signal was sent successfully
-    /// * `Ok(false)` if no PID was found for the session
-    /// * `Err(message)` if the signal failed to send
-    #[cfg(unix)]
-    fn kill_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
-        // Find the session and its PID
-        let pid = self
-            .sessions
-            .iter()
-            .find(|s| s.metadata.session_id == session_id)
-            .and_then(|s| s.pid);
-
-        let Some(pid) = pid else {
-            return Ok(false);
-        };
-
-        // Send SIGKILL
-        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-
-        if result == 0 {
-            // Clean up paused state if it was paused
-            self.paused_sessions.remove(session_id);
-            // Remove the process monitor
-            self.process_monitors.remove(session_id);
-            Ok(true)
-        } else {
-            let err = std::io::Error::last_os_error();
-            // ESRCH means process doesn't exist (already dead) - not an error
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                self.paused_sessions.remove(session_id);
-                self.process_monitors.remove(session_id);
-                Ok(true)
-            } else {
-                Err(format!("Failed to kill process: {}", err))
-            }
-        }
-    }
-
-    /// Kill a process (non-Unix stub).
-    #[cfg(not(unix))]
-    fn kill_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
-        Err("Process control is not supported on this platform".to_string())
-    }
-
-    /// Pause a process by sending SIGSTOP.
-    ///
-    /// US-008: Sends SIGSTOP to pause the Claude process.
-    /// The button should toggle to show "Resume" after pausing.
-    ///
-    /// # Arguments
-    /// * `session_id` - The session ID whose process should be paused
-    ///
-    /// # Returns
-    /// * `Ok(true)` if the signal was sent successfully
-    /// * `Ok(false)` if no PID was found for the session
-    /// * `Err(message)` if the signal failed to send
-    #[cfg(unix)]
-    fn pause_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
-        // Find the session and its PID
-        let pid = self
-            .sessions
-            .iter()
-            .find(|s| s.metadata.session_id == session_id)
-            .and_then(|s| s.pid);
-
-        let Some(pid) = pid else {
-            return Ok(false);
-        };
-
-        // Send SIGSTOP
-        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
-
-        if result == 0 {
-            // Track as paused
-            self.paused_sessions.insert(session_id.to_string());
-            Ok(true)
-        } else {
-            let err = std::io::Error::last_os_error();
-            // ESRCH means process doesn't exist - treat as "no process to pause"
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                Ok(false)
-            } else {
-                Err(format!("Failed to pause process: {}", err))
-            }
-        }
-    }
-
-    /// Pause a process (non-Unix stub).
-    #[cfg(not(unix))]
-    fn pause_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
-        Err("Process control is not supported on this platform".to_string())
-    }
-
-    /// Resume a paused process by sending SIGCONT.
-    ///
-    /// US-008: Sends SIGCONT to resume a paused Claude process.
-    /// The button should toggle back to show "Pause" after resuming.
-    ///
-    /// # Arguments
-    /// * `session_id` - The session ID whose process should be resumed
-    ///
-    /// # Returns
-    /// * `Ok(true)` if the signal was sent successfully
-    /// * `Ok(false)` if no PID was found for the session
-    /// * `Err(message)` if the signal failed to send
-    #[cfg(unix)]
-    fn resume_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
-        // Find the session and its PID
-        let pid = self
-            .sessions
-            .iter()
-            .find(|s| s.metadata.session_id == session_id)
-            .and_then(|s| s.pid);
-
-        let Some(pid) = pid else {
-            return Ok(false);
-        };
-
-        // Send SIGCONT
-        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGCONT) };
-
-        if result == 0 {
-            // Remove from paused set
-            self.paused_sessions.remove(session_id);
-            Ok(true)
-        } else {
-            let err = std::io::Error::last_os_error();
-            // ESRCH means process doesn't exist - treat as "no process to resume"
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                self.paused_sessions.remove(session_id);
-                Ok(false)
-            } else {
-                Err(format!("Failed to resume process: {}", err))
-            }
-        }
-    }
-
-    /// Resume a process (non-Unix stub).
-    #[cfg(not(unix))]
-    fn resume_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
-        Err("Process control is not supported on this platform".to_string())
-    }
-
-    /// Check if a session is currently paused.
-    fn is_session_paused(&self, session_id: &str) -> bool {
-        self.paused_sessions.contains(session_id)
-    }
-
-    /// Clear expired action feedback entries.
-    fn clear_expired_feedback(&mut self) {
-        self.pending_action_feedback
-            .retain(|_, feedback| !feedback.is_expired());
-    }
-
-    /// Clear expired process control errors.
-    fn clear_expired_errors(&mut self) {
-        if let Some(ref error) = self.process_control_error {
-            if error.is_expired() {
-                self.process_control_error = None;
-            }
-        }
-    }
-
     /// Update process monitors for active sessions (US-007).
     ///
     /// This method:
@@ -3264,10 +2938,6 @@ impl eframe::App for Autom8App {
         // Poll for command execution messages from background threads
         self.poll_command_messages();
 
-        // US-008: Clear expired action feedback and errors
-        self.clear_expired_feedback();
-        self.clear_expired_errors();
-
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
 
@@ -3332,14 +3002,8 @@ impl eframe::App for Autom8App {
         // Render result modal if cleanup operation completed (US-007)
         self.render_result_modal(ctx);
 
-        // Render kill confirmation dialog (US-005)
-        self.render_kill_confirmation_dialog(ctx);
-
         // Render process detail modal (US-006)
         self.render_process_detail_modal(ctx);
-
-        // Render process control error toast (US-008)
-        self.render_process_control_error_toast(ctx);
     }
 }
 
@@ -3905,58 +3569,6 @@ impl Autom8App {
         }
     }
 
-    /// Render the kill confirmation dialog overlay.
-    ///
-    /// US-005: Kill button shows confirmation before executing.
-    /// This method renders a modal dialog when `pending_kill_confirmation` is Some.
-    fn render_kill_confirmation_dialog(&mut self, ctx: &egui::Context) {
-        // Early return if no confirmation is pending
-        let pending = match &self.pending_kill_confirmation {
-            Some(op) => op.clone(),
-            None => return,
-        };
-
-        // Create the modal using the reusable component
-        let modal = Modal::new(pending.title())
-            .id("kill_confirmation")
-            .message(pending.message())
-            .cancel_button(ModalButton::secondary("Cancel"))
-            .confirm_button(ModalButton::destructive("Kill Process"));
-
-        match modal.show(ctx) {
-            ModalAction::Confirmed => {
-                // US-008: Actually kill the process via SIGKILL
-                let session_id = pending.session_id.clone();
-
-                // Set action feedback
-                self.pending_action_feedback
-                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Killing));
-
-                // Send the kill signal
-                match self.kill_process(&session_id) {
-                    Ok(true) => {
-                        // Successfully killed
-                    }
-                    Ok(false) => {
-                        // No process to kill (already exited)
-                    }
-                    Err(msg) => {
-                        // Failed to kill - show error
-                        self.process_control_error = Some(ProcessControlError::new(msg));
-                    }
-                }
-
-                self.pending_kill_confirmation = None;
-            }
-            ModalAction::Cancelled => {
-                self.pending_kill_confirmation = None;
-            }
-            ModalAction::None => {
-                // Modal is still open, do nothing
-            }
-        }
-    }
-
     /// Render the process detail modal overlay.
     ///
     /// US-006: Modal dialog for viewing comprehensive process details and full output history.
@@ -3975,9 +3587,6 @@ impl Autom8App {
             .find(|s| s.metadata.session_id == modal_state.session_id)
             .cloned();
 
-        // US-008: Check if session is paused
-        let is_session_paused = self.paused_sessions.contains(&modal_state.session_id);
-
         // Calculate modal dimensions
         let screen_rect = ctx.screen_rect();
         let modal_width =
@@ -3992,9 +3601,6 @@ impl Autom8App {
 
         // Track whether to close the modal
         let mut should_close = false;
-        // Track action button clicks
-        let mut kill_clicked = false;
-        let mut pause_clicked = false;
         // Track auto_scroll toggle
         let mut toggle_auto_scroll = false;
 
@@ -4511,38 +4117,6 @@ impl Autom8App {
                                     if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], close_btn).clicked() {
                                         should_close = true;
                                     }
-
-                                    ui.add_space(DETAIL_MODAL_BUTTON_GAP);
-
-                                    // Pause/Resume button - US-008: Toggle based on paused state
-                                    let pause_btn_text = if is_session_paused { "Resume" } else { "Pause" };
-                                    let pause_btn_color = if is_session_paused { colors::STATUS_SUCCESS } else { colors::ACCENT };
-                                    let pause_btn = egui::Button::new(
-                                        egui::RichText::new(pause_btn_text)
-                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                            .color(Color32::WHITE),
-                                    )
-                                    .fill(pause_btn_color)
-                                    .rounding(Rounding::same(rounding::BUTTON));
-
-                                    if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], pause_btn).clicked() {
-                                        pause_clicked = true;
-                                    }
-
-                                    ui.add_space(DETAIL_MODAL_BUTTON_GAP);
-
-                                    // Kill button (leftmost of the group)
-                                    let kill_btn = egui::Button::new(
-                                        egui::RichText::new("Kill")
-                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                            .color(Color32::WHITE),
-                                    )
-                                    .fill(colors::STATUS_ERROR)
-                                    .rounding(Rounding::same(rounding::BUTTON));
-
-                                    if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], kill_btn).clicked() {
-                                        kill_clicked = true;
-                                    }
                                 },
                             );
                         });
@@ -4557,41 +4131,6 @@ impl Autom8App {
         // Process actions
         if should_close {
             self.pending_detail_modal = None;
-        } else if kill_clicked {
-            // Open kill confirmation dialog (reuse existing pattern)
-            self.pending_kill_confirmation = Some(PendingKillOperation::new(
-                modal_state.session_id.clone(),
-                modal_state.project_name.clone(),
-                modal_state.branch_name.clone(),
-            ));
-            self.pending_detail_modal = None;
-        } else if pause_clicked {
-            // US-008: Toggle pause/resume for the session
-            let session_id = modal_state.session_id.clone();
-            let is_paused = self.paused_sessions.contains(&session_id);
-            if is_paused {
-                // Resume
-                self.pending_action_feedback.insert(
-                    session_id.clone(),
-                    ActionFeedback::new(ActionType::Resuming),
-                );
-                match self.resume_process(&session_id) {
-                    Ok(_) => {}
-                    Err(msg) => {
-                        self.process_control_error = Some(ProcessControlError::new(msg));
-                    }
-                }
-            } else {
-                // Pause
-                self.pending_action_feedback
-                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Pausing));
-                match self.pause_process(&session_id) {
-                    Ok(_) => {}
-                    Err(msg) => {
-                        self.process_control_error = Some(ProcessControlError::new(msg));
-                    }
-                }
-            }
         } else if toggle_auto_scroll {
             // Toggle auto-scroll state
             if let Some(ref mut state) = self.pending_detail_modal {
@@ -4601,63 +4140,6 @@ impl Autom8App {
     }
 
     /// Render an error toast for process control errors.
-    ///
-    /// US-008: Displays a toast notification when a process control action fails.
-    /// The toast appears at the bottom of the screen and auto-dismisses.
-    fn render_process_control_error_toast(&mut self, ctx: &egui::Context) {
-        let error = match &self.process_control_error {
-            Some(e) => e.clone(),
-            None => return,
-        };
-
-        // Toast dimensions and position (bottom center)
-        let screen_rect = ctx.screen_rect();
-        let toast_width = 400.0_f32.min(screen_rect.width() - 32.0);
-        let toast_height = 48.0;
-        let toast_x = (screen_rect.width() - toast_width) / 2.0;
-        let toast_y = screen_rect.max.y - toast_height - 24.0;
-        let toast_pos = Pos2::new(toast_x, toast_y);
-
-        egui::Area::new(egui::Id::new("process_control_error_toast"))
-            .order(Order::Foreground)
-            .fixed_pos(toast_pos)
-            .show(ctx, |ui| {
-                egui::Frame::none()
-                    .fill(colors::STATUS_ERROR)
-                    .rounding(Rounding::same(rounding::CARD))
-                    .shadow(theme::shadow::elevated())
-                    .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-                    .show(ui, |ui| {
-                        ui.set_min_size(Vec2::new(toast_width, toast_height - 24.0));
-                        ui.horizontal(|ui| {
-                            // Error icon
-                            ui.label(
-                                egui::RichText::new("⚠")
-                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                    .color(Color32::WHITE),
-                            );
-                            ui.add_space(8.0);
-                            // Error message
-                            ui.label(
-                                egui::RichText::new(&error.message)
-                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                    .color(Color32::WHITE),
-                            );
-                        });
-                    });
-            });
-
-        // Also allow clicking the toast to dismiss it early
-        let toast_rect = Rect::from_min_size(toast_pos, Vec2::new(toast_width, toast_height));
-        if ctx.input(|i| i.pointer.any_click()) {
-            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                if toast_rect.contains(pos) {
-                    self.process_control_error = None;
-                }
-            }
-        }
-    }
-
     /// Render the sidebar toggle button in the title bar.
     ///
     /// The button uses a hamburger icon (☰) when collapsed (to expand)
@@ -7192,12 +6674,10 @@ impl Autom8App {
 
         // Track which sessions need expansion state updates
         let mut toggle_requests: Vec<String> = Vec::new();
-        // Track kill button clicks (session_id, project_name, branch_name)
-        let mut kill_requests: Vec<(String, String, String)> = Vec::new();
-        // Track pause/resume button clicks (session_id)
-        let mut pause_requests: Vec<String> = Vec::new();
         // Track details button clicks (session_id, project_name, branch_name, is_main_session)
         let mut details_requests: Vec<(String, String, String, bool)> = Vec::new();
+        // Track resume button clicks (project_name, session_id)
+        let mut resume_requests: Vec<(String, String)> = Vec::new();
 
         // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
@@ -7231,8 +6711,6 @@ impl Autom8App {
                         {
                             let card_height =
                                 base_card_height + (CARD_EXPANDED_EXTRA_HEIGHT * progress);
-                            let is_paused = self.paused_sessions.contains(session_id);
-                            let action_feedback = self.pending_action_feedback.get(session_id);
                             let card_actions = Self::render_session_card_inner(
                                 ui,
                                 session,
@@ -7241,22 +6719,9 @@ impl Autom8App {
                                 *progress,
                                 card_width,
                                 card_height,
-                                &self.pending_kill_confirmation,
-                                is_paused,
-                                action_feedback,
                             );
                             if card_actions.toggle_expanded {
                                 toggle_requests.push(session_id.clone());
-                            }
-                            if card_actions.kill_clicked {
-                                kill_requests.push((
-                                    session_id.clone(),
-                                    session.project_name.clone(),
-                                    session.metadata.branch_name.clone(),
-                                ));
-                            }
-                            if card_actions.pause_clicked {
-                                pause_requests.push(session_id.clone());
                             }
                             if card_actions.details_clicked {
                                 details_requests.push((
@@ -7265,6 +6730,14 @@ impl Autom8App {
                                     session.metadata.branch_name.clone(),
                                     session.is_main_session,
                                 ));
+                            }
+                            if card_actions.stop_clicked {
+                                // Request pause - runner will detect and stop gracefully
+                                let _ = request_session_pause(&session.project_name, session_id);
+                            }
+                            if card_actions.resume_clicked {
+                                resume_requests
+                                    .push((session.project_name.clone(), session_id.clone()));
                             }
                             // Add spacing between cards (but not after the last one in row)
                             if i < row_sessions.len() - 1 {
@@ -7281,45 +6754,6 @@ impl Autom8App {
             self.toggle_session_expanded(&session_id);
         }
 
-        // Process kill requests (show confirmation dialog)
-        // Only process the first one to avoid multiple dialogs
-        if let Some((session_id, project_name, branch_name)) = kill_requests.into_iter().next() {
-            self.pending_kill_confirmation = Some(PendingKillOperation::new(
-                session_id,
-                project_name,
-                branch_name,
-            ));
-        }
-
-        // Process pause/resume requests
-        // US-008: Toggle between pause (SIGSTOP) and resume (SIGCONT)
-        for session_id in pause_requests {
-            let is_paused = self.is_session_paused(&session_id);
-            if is_paused {
-                // Currently paused -> resume
-                self.pending_action_feedback.insert(
-                    session_id.clone(),
-                    ActionFeedback::new(ActionType::Resuming),
-                );
-                match self.resume_process(&session_id) {
-                    Ok(_) => {}
-                    Err(msg) => {
-                        self.process_control_error = Some(ProcessControlError::new(msg));
-                    }
-                }
-            } else {
-                // Currently running -> pause
-                self.pending_action_feedback
-                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Pausing));
-                match self.pause_process(&session_id) {
-                    Ok(_) => {}
-                    Err(msg) => {
-                        self.process_control_error = Some(ProcessControlError::new(msg));
-                    }
-                }
-            }
-        }
-
         // Process details requests (open detail modal)
         // Only process the first one to avoid multiple modals
         if let Some((session_id, project_name, branch_name, is_main_session)) =
@@ -7331,6 +6765,11 @@ impl Autom8App {
                 branch_name,
                 is_main_session,
             ));
+        }
+
+        // Process resume requests (show resume info in output tab)
+        if let Some((project_name, session_id)) = resume_requests.into_iter().next() {
+            self.show_resume_info(&project_name, &session_id);
         }
 
         // Update animation progress for all sessions
@@ -7384,7 +6823,6 @@ impl Autom8App {
     /// - Expanded section (when expanded): Process info, resource meters, action buttons
     ///
     /// Returns the actions triggered by user interaction with the card.
-    #[allow(clippy::too_many_arguments)]
     fn render_session_card_inner(
         ui: &mut egui::Ui,
         session: &SessionData,
@@ -7393,9 +6831,6 @@ impl Autom8App {
         expansion_progress: f32,
         card_width: f32,
         card_height: f32,
-        pending_kill: &Option<PendingKillOperation>,
-        is_paused: bool,
-        action_feedback: Option<&ActionFeedback>,
     ) -> SessionCardActions {
         let mut actions = SessionCardActions::default();
 
@@ -7584,33 +7019,46 @@ impl Autom8App {
         cursor_y += branch_galley.rect.height() + spacing::SM;
 
         // ====================================================================
-        // STATUS ROW: Colored indicator dot with state label + Paused badge
+        // STATUS ROW: Colored indicator dot with state label + Stopped badge
         // ====================================================================
-        let (state, state_color) = if let Some(ref run) = session.run {
+        // Check if session is interrupted (stopped)
+        let is_interrupted = session
+            .run
+            .as_ref()
+            .map(|r| r.status == crate::state::RunStatus::Interrupted)
+            .unwrap_or(false);
+
+        let (state, state_color) = if is_interrupted {
+            // Show "Stopped" with warning color for interrupted sessions
+            (MachineState::Idle, colors::STATUS_WARNING)
+        } else if let Some(ref run) = session.run {
             (run.machine_state, state_to_color(run.machine_state))
         } else {
             (MachineState::Idle, colors::STATUS_IDLE)
         };
 
-        // Status dot - use yellow when paused
+        // Status dot
         let dot_radius = 4.0;
-        let dot_color = if is_paused {
-            colors::STATUS_WARNING
-        } else {
-            state_color
-        };
         let dot_center = egui::pos2(
             content_rect.min.x + dot_radius,
             cursor_y + FontSize::Caption.pixels() / 2.0,
         );
-        painter.circle_filled(dot_center, dot_radius, dot_color);
+        painter.circle_filled(dot_center, dot_radius, state_color);
 
-        // State text
-        let state_text = format_state(state);
+        // State text - show "Stopped" for interrupted, otherwise machine state
+        let state_text = if is_interrupted {
+            "Stopped"
+        } else {
+            format_state(state)
+        };
         let state_galley = painter.layout_no_wrap(
             state_text.to_string(),
             typography::font(FontSize::Caption, FontWeight::Medium),
-            colors::TEXT_PRIMARY,
+            if is_interrupted {
+                colors::STATUS_WARNING
+            } else {
+                colors::TEXT_PRIMARY
+            },
         );
         let state_text_x = content_rect.min.x + dot_radius * 2.0 + spacing::SM;
         painter.galley(
@@ -7618,42 +7066,6 @@ impl Autom8App {
             state_galley.clone(),
             Color32::TRANSPARENT,
         );
-
-        // US-008: Add "Paused" badge when session is paused
-        if is_paused {
-            let badge_x = state_text_x + state_galley.rect.width() + spacing::SM;
-            let badge_text = "Paused";
-            let badge_galley = painter.layout_no_wrap(
-                badge_text.to_string(),
-                typography::font(FontSize::Caption, FontWeight::Medium),
-                colors::STATUS_WARNING,
-            );
-            // Draw badge background
-            let badge_padding = 4.0;
-            let badge_rect = Rect::from_min_size(
-                egui::pos2(badge_x - badge_padding, cursor_y - 2.0),
-                Vec2::new(
-                    badge_galley.rect.width() + badge_padding * 2.0,
-                    badge_galley.rect.height() + 4.0,
-                ),
-            );
-            painter.rect(
-                badge_rect,
-                Rounding::same(rounding::SMALL),
-                Color32::from_rgba_unmultiplied(
-                    colors::STATUS_WARNING.r(),
-                    colors::STATUS_WARNING.g(),
-                    colors::STATUS_WARNING.b(),
-                    40,
-                ),
-                Stroke::NONE,
-            );
-            painter.galley(
-                egui::pos2(badge_x, cursor_y),
-                badge_galley,
-                Color32::TRANSPARENT,
-            );
-        }
         cursor_y += state_galley.rect.height() + spacing::XS;
 
         // ====================================================================
@@ -7746,35 +7158,19 @@ impl Autom8App {
         let expanded_section_height = CARD_EXPANDED_EXTRA_HEIGHT * expansion_progress;
         let output_bottom = content_rect.max.y - expanded_section_height;
 
-        // Output section background - dimmed when paused
-        // US-008: Visual indication of paused state
+        // Output section background
         let output_rect = Rect::from_min_max(
             egui::pos2(content_rect.min.x, cursor_y),
             egui::pos2(content_rect.max.x, output_bottom),
         );
-        let output_bg_color = if is_paused {
-            // Slightly darker/dimmed when paused
-            Color32::from_rgba_unmultiplied(
-                colors::SURFACE_HOVER.r() / 2,
-                colors::SURFACE_HOVER.g() / 2,
-                colors::SURFACE_HOVER.b() / 2,
-                colors::SURFACE_HOVER.a(),
-            )
-        } else {
-            colors::SURFACE_HOVER
-        };
         painter.rect_filled(
             output_rect,
             Rounding::same(rounding::SMALL),
-            output_bg_color,
+            colors::SURFACE_HOVER,
         );
 
-        // Output text color - dimmed when paused
-        let output_text_color = if is_paused {
-            colors::TEXT_DISABLED
-        } else {
-            colors::TEXT_SECONDARY
-        };
+        // Output text color
+        let output_text_color = colors::TEXT_SECONDARY;
 
         // Output lines with consistent padding
         let output_padding = 6.0; // Inner padding for output section
@@ -8071,146 +7467,76 @@ impl Autom8App {
             let btn_y = expanded_y;
             let btn_height = CARD_ACTION_BUTTON_HEIGHT;
             let btn_width = CARD_ACTION_BUTTON_WIDTH;
-            let btn_gap = CARD_ACTION_BUTTON_GAP;
+            let btn_gap = 8.0;
 
-            // Calculate button positions (centered)
-            let total_btn_width = btn_width * 3.0 + btn_gap * 2.0;
-            let btn_start_x = content_rect.min.x + (content_width - total_btn_width) / 2.0;
+            // Calculate button positions (two buttons side by side, centered)
+            let total_btns_width = btn_width * 2.0 + btn_gap;
+            let btns_start_x = content_rect.min.x + (content_width - total_btns_width) / 2.0;
 
-            // Determine if buttons should be disabled
-            // Kill is disabled if there's a pending kill confirmation for this session
-            let kill_pending = pending_kill
-                .as_ref()
-                .map(|p| p.session_id == session_id)
-                .unwrap_or(false);
-
-            // Kill button (red)
-            let kill_btn_rect = Rect::from_min_size(
-                egui::pos2(btn_start_x, btn_y),
+            // Left button: Stop (for running) or Resume (for interrupted)
+            let left_btn_rect = Rect::from_min_size(
+                egui::pos2(btns_start_x, btn_y),
                 egui::vec2(btn_width, btn_height),
             );
-            let kill_btn_id = egui::Id::new(format!("kill_btn_{}", session_id));
-            let kill_response = ui.interact(kill_btn_rect, kill_btn_id, Sense::click());
+            let left_btn_id = egui::Id::new(format!(
+                "{}_btn_{}",
+                if is_interrupted { "resume" } else { "stop" },
+                session_id
+            ));
+            let left_response = ui.interact(left_btn_rect, left_btn_id, Sense::click());
 
-            let kill_bg_color = if kill_pending {
-                colors::SURFACE_HOVER
-            } else if kill_response.hovered() {
+            // Button colors based on action type
+            let (btn_color, btn_text) = if is_interrupted {
+                (colors::ACCENT, "Resume")
+            } else {
+                (colors::STATUS_ERROR, "Stop")
+            };
+
+            let left_bg_color = if left_response.hovered() {
                 Color32::from_rgba_unmultiplied(
-                    colors::STATUS_ERROR.r(),
-                    colors::STATUS_ERROR.g(),
-                    colors::STATUS_ERROR.b(),
-                    ((alpha as f32) * 0.8) as u8,
+                    btn_color.r(),
+                    btn_color.g(),
+                    btn_color.b(),
+                    (alpha as f32 * 0.3) as u8,
                 )
             } else {
                 Color32::from_rgba_unmultiplied(
-                    colors::STATUS_ERROR.r(),
-                    colors::STATUS_ERROR.g(),
-                    colors::STATUS_ERROR.b(),
+                    colors::SURFACE_HOVER.r(),
+                    colors::SURFACE_HOVER.g(),
+                    colors::SURFACE_HOVER.b(),
                     alpha,
                 )
             };
 
             painter.rect(
-                kill_btn_rect,
+                left_btn_rect,
                 Rounding::same(rounding::BUTTON),
-                kill_bg_color,
-                Stroke::NONE,
+                left_bg_color,
+                Stroke::new(
+                    1.0,
+                    Color32::from_rgba_unmultiplied(
+                        btn_color.r(),
+                        btn_color.g(),
+                        btn_color.b(),
+                        alpha,
+                    ),
+                ),
             );
 
-            let kill_text_color = if kill_pending {
-                Color32::from_rgba_unmultiplied(
-                    colors::TEXT_DISABLED.r(),
-                    colors::TEXT_DISABLED.g(),
-                    colors::TEXT_DISABLED.b(),
-                    alpha,
-                )
-            } else {
-                Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
-            };
-
-            let kill_galley = painter.layout_no_wrap(
-                "Kill".to_string(),
+            let left_galley = painter.layout_no_wrap(
+                btn_text.to_string(),
                 typography::font(FontSize::Caption, FontWeight::Medium),
-                kill_text_color,
+                Color32::from_rgba_unmultiplied(btn_color.r(), btn_color.g(), btn_color.b(), alpha),
             );
-            let kill_text_pos = egui::pos2(
-                kill_btn_rect.center().x - kill_galley.rect.width() / 2.0,
-                kill_btn_rect.center().y - kill_galley.rect.height() / 2.0,
+            let left_text_pos = egui::pos2(
+                left_btn_rect.center().x - left_galley.rect.width() / 2.0,
+                left_btn_rect.center().y - left_galley.rect.height() / 2.0,
             );
-            painter.galley(kill_text_pos, kill_galley, Color32::TRANSPARENT);
+            painter.galley(left_text_pos, left_galley, Color32::TRANSPARENT);
 
-            // Pause/Resume button - toggles based on paused state
-            // US-008: Shows "Resume" when paused, "Pause" when running
-            let pause_btn_rect = Rect::from_min_size(
-                egui::pos2(btn_start_x + btn_width + btn_gap, btn_y),
-                egui::vec2(btn_width, btn_height),
-            );
-            let pause_btn_id = egui::Id::new(format!("pause_btn_{}", session_id));
-            let pause_response = ui.interact(pause_btn_rect, pause_btn_id, Sense::click());
-
-            // Determine button text based on paused state and action feedback
-            let pause_btn_text = if let Some(feedback) = action_feedback {
-                match feedback.action_type {
-                    ActionType::Pausing => "Pausing...",
-                    ActionType::Resuming => "Resuming...",
-                    ActionType::Killing => {
-                        if is_paused {
-                            "Resume"
-                        } else {
-                            "Pause"
-                        }
-                    }
-                }
-            } else if is_paused {
-                "Resume"
-            } else {
-                "Pause"
-            };
-
-            // Use different color when paused (green for resume)
-            let pause_base_color = if is_paused {
-                colors::STATUS_SUCCESS
-            } else {
-                colors::ACCENT
-            };
-
-            let pause_bg_color = if pause_response.hovered() {
-                Color32::from_rgba_unmultiplied(
-                    pause_base_color.r(),
-                    pause_base_color.g(),
-                    pause_base_color.b(),
-                    ((alpha as f32) * 0.8) as u8,
-                )
-            } else {
-                Color32::from_rgba_unmultiplied(
-                    pause_base_color.r(),
-                    pause_base_color.g(),
-                    pause_base_color.b(),
-                    alpha,
-                )
-            };
-
-            painter.rect(
-                pause_btn_rect,
-                Rounding::same(rounding::BUTTON),
-                pause_bg_color,
-                Stroke::NONE,
-            );
-
-            let pause_galley = painter.layout_no_wrap(
-                pause_btn_text.to_string(),
-                typography::font(FontSize::Caption, FontWeight::Medium),
-                Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
-            );
-            let pause_text_pos = egui::pos2(
-                pause_btn_rect.center().x - pause_galley.rect.width() / 2.0,
-                pause_btn_rect.center().y - pause_galley.rect.height() / 2.0,
-            );
-            painter.galley(pause_text_pos, pause_galley, Color32::TRANSPARENT);
-
-            // View Details button
+            // Details button (right)
             let details_btn_rect = Rect::from_min_size(
-                egui::pos2(btn_start_x + (btn_width + btn_gap) * 2.0, btn_y),
+                egui::pos2(btns_start_x + btn_width + btn_gap, btn_y),
                 egui::vec2(btn_width, btn_height),
             );
             let details_btn_id = egui::Id::new(format!("details_btn_{}", session_id));
@@ -8264,11 +7590,12 @@ impl Autom8App {
             painter.galley(details_text_pos, details_galley, Color32::TRANSPARENT);
 
             // Handle button clicks
-            if kill_response.clicked() && !kill_pending {
-                actions.kill_clicked = true;
-            }
-            if pause_response.clicked() {
-                actions.pause_clicked = true;
+            if left_response.clicked() {
+                if is_interrupted {
+                    actions.resume_clicked = true;
+                } else {
+                    actions.stop_clicked = true;
+                }
             }
             if details_response.clicked() {
                 actions.details_clicked = true;
@@ -11866,6 +11193,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             machine_state: Some(MachineState::RunningClaude),
             current_story: None,
@@ -11886,6 +11214,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: true, // Running
+                pause_requested: false,
             },
             machine_state: Some(MachineState::RunningClaude),
             current_story: None,
@@ -11906,6 +11235,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             machine_state: Some(MachineState::Idle),
             current_story: None,
@@ -11926,6 +11256,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             machine_state: Some(MachineState::Completed),
             current_story: None,
@@ -11960,6 +11291,7 @@ mod tests {
                     created_at: chrono::Utc::now(),
                     last_active_at: chrono::Utc::now(),
                     is_running: false,
+                    pause_requested: false,
                 },
                 machine_state: Some(state.clone()),
                 current_story: None,
@@ -11985,6 +11317,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             machine_state: None, // No machine state
             current_story: None,
@@ -12537,6 +11870,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active_at: chrono::Utc::now(),
             is_running: false,
+            pause_requested: false,
         };
 
         // Test session with is_running = false (any machine_state) - should be cleanable
@@ -12687,6 +12021,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active_at: chrono::Utc::now(),
             is_running: true,
+            pause_requested: false,
         };
 
         let sessions = vec![SessionStatus {
@@ -12743,6 +12078,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active_at: chrono::Utc::now(),
             is_running: true, // Still marked as running but stale
+            pause_requested: false,
         };
 
         let sessions = vec![SessionStatus {
@@ -12779,6 +12115,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active_at: chrono::Utc::now(),
             is_running: false,
+            pause_requested: false,
         };
 
         // Current session gets →
@@ -12855,6 +12192,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running,
+                pause_requested: false,
             };
             SessionStatus {
                 metadata,
@@ -14562,95 +13900,11 @@ mod tests {
     }
 
     #[test]
-    fn test_us005_pending_kill_operation_new() {
-        // Test PendingKillOperation creation
-        let pending = PendingKillOperation::new(
-            "session-123".to_string(),
-            "my-project".to_string(),
-            "feature/test".to_string(),
-        );
-
-        assert_eq!(pending.session_id, "session-123");
-        assert_eq!(pending.project_name, "my-project");
-        assert_eq!(pending.branch_name, "feature/test");
-    }
-
-    #[test]
-    fn test_us005_pending_kill_operation_title() {
-        // Acceptance criteria: Kill button shows confirmation before executing
-        let pending = PendingKillOperation::new(
-            "session-123".to_string(),
-            "my-project".to_string(),
-            "feature/test".to_string(),
-        );
-
-        assert_eq!(pending.title(), "Kill Process");
-    }
-
-    #[test]
-    fn test_us005_pending_kill_operation_message() {
-        // Acceptance criteria: Kill button shows confirmation before executing
-        let pending = PendingKillOperation::new(
-            "session-123".to_string(),
-            "my-project".to_string(),
-            "feature/test".to_string(),
-        );
-
-        let message = pending.message();
-
-        // Message should contain project name
-        assert!(
-            message.contains("my-project"),
-            "Message should contain project name"
-        );
-
-        // Message should contain branch name
-        assert!(
-            message.contains("feature/test"),
-            "Message should contain branch name"
-        );
-
-        // US-008: Message should warn that action cannot be undone
-        assert!(
-            message.contains("cannot be undone"),
-            "Message should warn that action cannot be undone"
-        );
-    }
-
-    #[test]
-    fn test_us005_pending_kill_confirmation_state() {
-        // Test that pending_kill_confirmation can be set
-        let mut app = Autom8App::new();
-
-        assert!(
-            app.pending_kill_confirmation.is_none(),
-            "Should start with no pending kill confirmation"
-        );
-
-        // Set pending kill confirmation
-        app.pending_kill_confirmation = Some(PendingKillOperation::new(
-            "session-test".to_string(),
-            "test-project".to_string(),
-            "main".to_string(),
-        ));
-
-        assert!(app.pending_kill_confirmation.is_some());
-        match &app.pending_kill_confirmation {
-            Some(pending) => {
-                assert_eq!(pending.session_id, "session-test");
-            }
-            None => panic!("Expected pending kill confirmation"),
-        }
-    }
-
-    #[test]
     fn test_us005_session_card_actions_default() {
         // Test SessionCardActions default state
         let actions = SessionCardActions::default();
 
         assert!(!actions.toggle_expanded);
-        assert!(!actions.kill_clicked);
-        assert!(!actions.pause_clicked);
         assert!(!actions.details_clicked);
     }
 
@@ -14690,10 +13944,6 @@ mod tests {
         assert!(
             CARD_ACTION_BUTTON_WIDTH >= 60.0,
             "Buttons should be wide enough for labels"
-        );
-        assert!(
-            CARD_ACTION_BUTTON_GAP >= 4.0,
-            "Buttons should have some spacing"
         );
     }
 
@@ -14853,10 +14103,6 @@ mod tests {
             DETAIL_MODAL_BUTTON_HEIGHT >= 28.0,
             "Buttons should be tall enough to tap"
         );
-        assert!(
-            DETAIL_MODAL_BUTTON_GAP >= 8.0,
-            "Button gap should be reasonable"
-        );
     }
 
     #[test]
@@ -14912,237 +14158,5 @@ mod tests {
         // Should use minimums
         assert_eq!(modal_width, DETAIL_MODAL_MIN_WIDTH);
         assert_eq!(modal_height, DETAIL_MODAL_MIN_HEIGHT);
-    }
-
-    // ========================================================================
-    // US-008 Process Control Tests: Kill/Pause/Resume Actions
-    // ========================================================================
-
-    #[test]
-    fn test_us008_action_type_display_text() {
-        // Test ActionType display text
-        assert_eq!(ActionType::Killing.display_text(), "Killing...");
-        assert_eq!(ActionType::Pausing.display_text(), "Pausing...");
-        assert_eq!(ActionType::Resuming.display_text(), "Resuming...");
-    }
-
-    #[test]
-    fn test_us008_action_feedback_new() {
-        // Test ActionFeedback creation
-        let feedback = ActionFeedback::new(ActionType::Killing);
-        assert_eq!(feedback.action_type, ActionType::Killing);
-        // Just created, should not be expired
-        assert!(!feedback.is_expired());
-    }
-
-    #[test]
-    fn test_us008_process_control_error_new() {
-        // Test ProcessControlError creation
-        let error = ProcessControlError::new("Test error message");
-        assert_eq!(error.message, "Test error message");
-        // Just created, should not be expired
-        assert!(!error.is_expired());
-    }
-
-    #[test]
-    fn test_us008_paused_sessions_state() {
-        // Test that paused_sessions HashSet is properly initialized
-        let app = Autom8App::new();
-        assert!(
-            app.paused_sessions.is_empty(),
-            "Should start with no paused sessions"
-        );
-    }
-
-    #[test]
-    fn test_us008_pending_action_feedback_state() {
-        // Test that pending_action_feedback HashMap is properly initialized
-        let app = Autom8App::new();
-        assert!(
-            app.pending_action_feedback.is_empty(),
-            "Should start with no action feedback"
-        );
-    }
-
-    #[test]
-    fn test_us008_process_control_error_state() {
-        // Test that process_control_error is properly initialized
-        let app = Autom8App::new();
-        assert!(
-            app.process_control_error.is_none(),
-            "Should start with no process control error"
-        );
-    }
-
-    #[test]
-    fn test_us008_is_session_paused_false_by_default() {
-        // Test is_session_paused returns false for unknown sessions
-        let app = Autom8App::new();
-        assert!(
-            !app.is_session_paused("unknown-session"),
-            "Unknown session should not be paused"
-        );
-    }
-
-    #[test]
-    fn test_us008_paused_sessions_tracking() {
-        // Test paused sessions can be tracked
-        let mut app = Autom8App::new();
-
-        // Initially not paused
-        assert!(!app.is_session_paused("test-session"));
-
-        // Mark as paused
-        app.paused_sessions.insert("test-session".to_string());
-        assert!(app.is_session_paused("test-session"));
-
-        // Mark as resumed (remove from set)
-        app.paused_sessions.remove("test-session");
-        assert!(!app.is_session_paused("test-session"));
-    }
-
-    #[test]
-    fn test_us008_action_feedback_tracking() {
-        // Test action feedback can be tracked
-        let mut app = Autom8App::new();
-
-        // Add feedback
-        app.pending_action_feedback.insert(
-            "test-session".to_string(),
-            ActionFeedback::new(ActionType::Pausing),
-        );
-
-        assert!(app.pending_action_feedback.contains_key("test-session"));
-        let feedback = app.pending_action_feedback.get("test-session").unwrap();
-        assert_eq!(feedback.action_type, ActionType::Pausing);
-    }
-
-    #[test]
-    fn test_us008_process_control_error_tracking() {
-        // Test process control error can be tracked
-        let mut app = Autom8App::new();
-
-        // Set error
-        app.process_control_error = Some(ProcessControlError::new("Test error"));
-
-        assert!(app.process_control_error.is_some());
-        assert_eq!(
-            app.process_control_error.as_ref().unwrap().message,
-            "Test error"
-        );
-
-        // Clear error
-        app.process_control_error = None;
-        assert!(app.process_control_error.is_none());
-    }
-
-    #[test]
-    fn test_us008_kill_confirmation_dialog_message() {
-        // Test that kill confirmation dialog has correct message format
-        let pending = PendingKillOperation::new(
-            "session-123".to_string(),
-            "my-project".to_string(),
-            "feature/test".to_string(),
-        );
-
-        let message = pending.message();
-
-        // Should mention "cannot be undone" per acceptance criteria
-        assert!(
-            message.contains("cannot be undone"),
-            "Kill confirmation should warn that action cannot be undone"
-        );
-
-        // Should include project name
-        assert!(
-            message.contains("my-project"),
-            "Message should contain project name"
-        );
-
-        // Should include branch name
-        assert!(
-            message.contains("feature/test"),
-            "Message should contain branch name"
-        );
-    }
-
-    #[test]
-    fn test_us008_action_feedback_duration_constant() {
-        // Verify feedback duration constant is reasonable
-        assert!(
-            ActionFeedback::FEEDBACK_DURATION_MS >= 100,
-            "Feedback should be visible for at least 100ms"
-        );
-        assert!(
-            ActionFeedback::FEEDBACK_DURATION_MS <= 2000,
-            "Feedback should not persist too long (< 2s)"
-        );
-    }
-
-    #[test]
-    fn test_us008_process_control_error_duration_constant() {
-        // Verify error display duration constant is reasonable
-        assert!(
-            ProcessControlError::ERROR_DISPLAY_DURATION_MS >= 2000,
-            "Error should be visible for at least 2 seconds"
-        );
-        assert!(
-            ProcessControlError::ERROR_DISPLAY_DURATION_MS <= 10000,
-            "Error should not persist too long (< 10s)"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_us008_kill_process_no_pid() {
-        // Test kill_process returns Ok(false) when no session with PID exists
-        let mut app = Autom8App::new();
-
-        // No sessions exist, so no PID to kill
-        let result = app.kill_process("nonexistent-session");
-        assert!(result.is_ok());
-        assert!(!result.unwrap()); // false = no process to kill
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_us008_pause_process_no_pid() {
-        // Test pause_process returns Ok(false) when no session with PID exists
-        let mut app = Autom8App::new();
-
-        // No sessions exist, so no PID to pause
-        let result = app.pause_process("nonexistent-session");
-        assert!(result.is_ok());
-        assert!(!result.unwrap()); // false = no process to pause
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_us008_resume_process_no_pid() {
-        // Test resume_process returns Ok(false) when no session with PID exists
-        let mut app = Autom8App::new();
-
-        // No sessions exist, so no PID to resume
-        let result = app.resume_process("nonexistent-session");
-        assert!(result.is_ok());
-        assert!(!result.unwrap()); // false = no process to resume
-    }
-
-    #[test]
-    fn test_us008_clear_expired_feedback_empty() {
-        // Test clear_expired_feedback handles empty map gracefully
-        let mut app = Autom8App::new();
-        // Should not panic
-        app.clear_expired_feedback();
-        assert!(app.pending_action_feedback.is_empty());
-    }
-
-    #[test]
-    fn test_us008_clear_expired_errors_none() {
-        // Test clear_expired_errors handles None error gracefully
-        let mut app = Autom8App::new();
-        // Should not panic
-        app.clear_expired_errors();
-        assert!(app.process_control_error.is_none());
     }
 }

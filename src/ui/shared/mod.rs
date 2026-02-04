@@ -354,8 +354,19 @@ fn load_sessions(
 
         // Process each session
         for metadata in project_sessions {
-            // Skip non-running sessions
-            if !metadata.is_running {
+            // Include running sessions and interrupted sessions (for resume)
+            // We need to check the actual state to determine if interrupted
+            let should_include = if metadata.is_running {
+                true
+            } else {
+                // Check if this is an interrupted session that can be resumed
+                sm.get_session(&metadata.session_id)
+                    .and_then(|session_sm| session_sm.load_current().ok().flatten())
+                    .map(|state| state.status == RunStatus::Interrupted)
+                    .unwrap_or(false)
+            };
+
+            if !should_include {
                 continue;
             }
 
@@ -534,6 +545,25 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
     Ok(history)
 }
 
+/// Request a pause for a specific session (called by GUI).
+///
+/// This sets `pause_requested: true` in the session's metadata file,
+/// which the runner will detect and handle gracefully at the next safe checkpoint.
+///
+/// # Arguments
+/// * `project_name` - The project name
+/// * `session_id` - The session ID (e.g., "main" or a worktree hash)
+///
+/// # Returns
+/// * `Result<()>` - Ok if the pause was requested successfully
+pub fn request_session_pause(project_name: &str, session_id: &str) -> Result<()> {
+    let sm = StateManager::for_project(project_name)?;
+    if let Some(session_sm) = sm.get_session(session_id) {
+        session_sm.request_pause()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,6 +643,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -640,6 +671,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -667,6 +699,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -694,6 +727,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: false,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -725,6 +759,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -755,6 +790,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             run: None,
             progress: None,
@@ -797,6 +833,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             run: None,
             progress: None,
