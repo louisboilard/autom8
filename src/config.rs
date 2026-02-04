@@ -556,6 +556,7 @@ pub fn get_effective_config() -> Result<Config> {
 /// Subdirectory names within a project config directory
 const SPEC_SUBDIR: &str = "spec";
 const RUNS_SUBDIR: &str = "runs";
+const SESSIONS_SUBDIR: &str = "sessions";
 
 /// Get the autom8 config directory path (~/.config/autom8/).
 ///
@@ -824,37 +825,77 @@ impl ProjectTreeInfo {
 /// Projects are sorted alphabetically by name.
 pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
     use crate::spec::Spec;
-    use crate::state::StateManager;
+    use crate::state::{RunState, RunStatus, SessionMetadata};
 
     let projects = list_projects()?;
     let mut tree_info = Vec::new();
 
     for project_name in projects {
-        let sm = StateManager::for_project(&project_name)?;
+        let project_dir = project_config_dir_for(&project_name)?;
 
-        // Check for active run
-        let run_state = sm.load_current().ok().flatten();
-        let has_active_run = run_state
-            .as_ref()
-            .map(|s| s.status == crate::state::RunStatus::Running)
-            .unwrap_or(false);
-        let run_status = run_state.as_ref().map(|s| s.status);
+        // Check for active run by scanning all session metadata files directly
+        // This avoids spawning git subprocess that StateManager::for_project() does
+        let sessions_dir = project_dir.join(SESSIONS_SUBDIR);
+        let mut has_active_run = false;
+        let mut run_status: Option<RunStatus> = None;
+        let mut active_run_started_at: Option<chrono::DateTime<chrono::Utc>> = None;
 
-        // Count specs and incomplete specs
-        let specs = sm.list_specs().unwrap_or_default();
+        if sessions_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&sessions_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let session_path = entry.path();
+                    if !session_path.is_dir() {
+                        continue;
+                    }
+
+                    // Check metadata.json for is_running flag
+                    let metadata_path = session_path.join("metadata.json");
+                    if let Ok(content) = fs::read_to_string(&metadata_path) {
+                        if let Ok(metadata) = serde_json::from_str::<SessionMetadata>(&content) {
+                            if metadata.is_running {
+                                // Also load state.json to get the RunStatus
+                                let state_path = session_path.join("state.json");
+                                if let Ok(state_content) = fs::read_to_string(&state_path) {
+                                    if let Ok(state) =
+                                        serde_json::from_str::<RunState>(&state_content)
+                                    {
+                                        if state.status == RunStatus::Running {
+                                            has_active_run = true;
+                                            run_status = Some(state.status);
+                                            active_run_started_at = Some(state.started_at);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Count specs and incomplete specs by reading spec directory directly
+        let spec_dir = project_dir.join(SPEC_SUBDIR);
+        let mut specs: Vec<PathBuf> = Vec::new();
         let mut incomplete_count = 0;
 
-        for spec_path in &specs {
-            if let Ok(spec) = Spec::load(spec_path) {
-                if spec.is_incomplete() {
-                    incomplete_count += 1;
+        if spec_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&spec_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "json") {
+                        specs.push(path.clone());
+                        if let Ok(spec) = Spec::load(&path) {
+                            if spec.is_incomplete() {
+                                incomplete_count += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // Count spec files (markdown specs)
-        let project_dir = project_config_dir_for(&project_name)?;
-        let spec_dir = project_dir.join(SPEC_SUBDIR);
         let spec_md_count = if spec_dir.exists() {
             fs::read_dir(&spec_dir)
                 .map(|entries| {
@@ -871,8 +912,26 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
             0
         };
 
-        // Get archived runs (already sorted by date, most recent first)
-        let archived_runs = sm.list_archived().unwrap_or_default();
+        // Get archived runs by reading runs directory directly
+        let runs_dir = project_dir.join(RUNS_SUBDIR);
+        let mut archived_runs: Vec<RunState> = Vec::new();
+
+        if runs_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&runs_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "json") {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            if let Ok(state) = serde_json::from_str::<RunState>(&content) {
+                                archived_runs.push(state);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Sort by start date, newest first
+        archived_runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         let runs_count = archived_runs.len();
 
         // Determine last run date from archived runs or current run.
@@ -880,18 +939,12 @@ pub fn list_projects_tree() -> Result<Vec<ProjectTreeInfo>> {
         // For completed runs: use finished_at (shows when it finished), falling back to started_at.
         let last_run_date = if has_active_run {
             // Active run: show when it started
-            run_state.as_ref().map(|s| s.started_at)
+            active_run_started_at
         } else {
-            // No active run: check current state first (may be completed but not archived yet)
-            run_state
-                .as_ref()
-                .and_then(|s| s.finished_at.or(Some(s.started_at)))
-                .or_else(|| {
-                    // Fall back to most recent archived run
-                    archived_runs
-                        .first()
-                        .and_then(|r| r.finished_at.or(Some(r.started_at)))
-                })
+            // No active run: fall back to most recent archived run
+            archived_runs
+                .first()
+                .and_then(|r| r.finished_at.or(Some(r.started_at)))
         };
 
         tree_info.push(ProjectTreeInfo {
