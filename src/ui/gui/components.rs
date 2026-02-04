@@ -1138,5 +1138,4 @@ mod tests {
         assert_ne!(success_bg, error_bg);
         assert_ne!(running_bg, error_bg);
     }
-
 }
