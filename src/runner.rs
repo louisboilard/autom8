@@ -1,6 +1,6 @@
 use crate::claude::{
     run_corrector, run_for_commit, run_for_spec_generation, run_reviewer, ClaudeOutcome,
-    ClaudeRunner, ClaudeStoryResult, CommitResult, CorrectorResult, ReviewResult,
+    ClaudeRunner, ClaudeStoryResult, CommitOutcome, CorrectorOutcome, ReviewOutcome,
 };
 use crate::config::get_effective_config;
 use crate::display::{BannerColor, StoryResult};
@@ -14,9 +14,10 @@ use crate::output::{
     print_max_review_iterations, print_phase_banner, print_phase_footer, print_pr_already_exists,
     print_pr_skipped, print_pr_success, print_pr_updated, print_proceeding_to_implementation,
     print_project_info, print_resuming_interrupted, print_review_passed, print_reviewing,
-    print_run_summary, print_skip_review, print_spec_generated, print_spec_loaded,
-    print_state_transition, print_story_complete, print_tasks_progress, print_worktree_context,
-    print_worktree_created, print_worktree_reused, BOLD, CYAN, GRAY, RESET, YELLOW,
+    print_run_completed, print_run_summary, print_skip_review, print_spec_generated,
+    print_spec_loaded, print_state_transition, print_story_complete, print_tasks_progress,
+    print_worktree_context, print_worktree_created, print_worktree_reused, BOLD, CYAN, GRAY, RESET,
+    YELLOW,
 };
 use crate::progress::{
     AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
@@ -602,12 +603,24 @@ impl Runner {
                 || ClaudeSpinner::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 |callback| run_reviewer(spec, review_iter, MAX_REVIEW_ITERATIONS, callback),
                 |res| match res {
-                    Ok(ReviewResult::Pass) => Outcome::success("No issues found"),
-                    Ok(ReviewResult::IssuesFound) => Outcome::success("Issues found"),
-                    Ok(ReviewResult::Error(e)) => Outcome::failure(e.to_string()),
+                    Ok(r) => {
+                        let tokens = r.usage.as_ref().map(|u| u.total_tokens());
+                        match &r.outcome {
+                            ReviewOutcome::Pass => {
+                                Outcome::success("No issues found").with_optional_tokens(tokens)
+                            }
+                            ReviewOutcome::IssuesFound => {
+                                Outcome::success("Issues found").with_optional_tokens(tokens)
+                            }
+                            ReviewOutcome::Error(e) => Outcome::failure(e.to_string()),
+                        }
+                    }
                     Err(e) => Outcome::failure(e.to_string()),
                 },
             )?;
+
+            // Capture usage from review into "Final Review" phase (US-005)
+            state.capture_usage("Final Review", review_result.usage.clone());
 
             // Print bottom border to close the output frame
             print_phase_footer(BannerColor::Cyan);
@@ -624,17 +637,19 @@ impl Runner {
             );
             println!();
 
-            match review_result {
-                ReviewResult::Pass => {
+            match review_result.outcome {
+                ReviewOutcome::Pass => {
                     // Delete autom8_review.md if it exists
                     let review_path = std::path::Path::new("autom8_review.md");
                     if review_path.exists() {
                         let _ = fs::remove_file(review_path);
                     }
+                    // Save state with captured review usage before exiting (US-005)
+                    self.state_manager.save(state)?;
                     print_review_passed();
                     return Ok(()); // Exit review loop, proceed to commit
                 }
-                ReviewResult::IssuesFound => {
+                ReviewOutcome::IssuesFound => {
                     // Transition to Correcting state
                     print_state_transition(MachineState::Reviewing, MachineState::Correcting);
                     state.transition_to(MachineState::Correcting);
@@ -656,11 +671,23 @@ impl Runner {
                         || ClaudeSpinner::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         |callback| run_corrector(spec, review_iter, callback),
                         |res| match res {
-                            Ok(CorrectorResult::Complete) => Outcome::success("Issues addressed"),
-                            Ok(CorrectorResult::Error(e)) => Outcome::failure(e.to_string()),
+                            Ok(r) => {
+                                let tokens = r.usage.as_ref().map(|u| u.total_tokens());
+                                match &r.outcome {
+                                    CorrectorOutcome::Complete => {
+                                        Outcome::success("Issues addressed")
+                                            .with_optional_tokens(tokens)
+                                    }
+                                    CorrectorOutcome::Error(e) => Outcome::failure(e.to_string()),
+                                }
+                            }
                             Err(e) => Outcome::failure(e.to_string()),
                         },
                     )?;
+
+                    // Capture usage from correction into "Final Review" phase (US-005)
+                    // This accumulates with the review usage since both are part of the review loop
+                    state.capture_usage("Final Review", corrector_result.usage.clone());
 
                     // Print bottom border to close the output frame
                     print_phase_footer(BannerColor::Yellow);
@@ -677,12 +704,14 @@ impl Runner {
                     );
                     println!();
 
-                    match corrector_result {
-                        CorrectorResult::Complete => {
+                    match corrector_result.outcome {
+                        CorrectorOutcome::Complete => {
                             // Increment review iteration and loop back to Reviewing
                             state.review_iteration += 1;
+                            // Save state with captured corrector usage (US-005)
+                            self.state_manager.save(state)?;
                         }
-                        CorrectorResult::Error(e) => {
+                        CorrectorOutcome::Error(e) => {
                             let iteration = state.iteration;
                             let results = story_results;
                             return Err(self.handle_fatal_error(
@@ -697,7 +726,7 @@ impl Runner {
                         }
                     }
                 }
-                ReviewResult::Error(e) => {
+                ReviewOutcome::Error(e) => {
                     let iteration = state.iteration;
                     let results = story_results;
                     return Err(self.handle_fatal_error(
@@ -758,12 +787,25 @@ impl Runner {
             ClaudeSpinner::new_for_commit,
             |callback| run_for_commit(spec, callback),
             |res| match res {
-                Ok(CommitResult::Success(hash)) => Outcome::success(hash.clone()),
-                Ok(CommitResult::NothingToCommit) => Outcome::success("Nothing to commit"),
-                Ok(CommitResult::Error(e)) => Outcome::failure(e.to_string()),
+                Ok(r) => {
+                    let tokens = r.usage.as_ref().map(|u| u.total_tokens());
+                    match &r.outcome {
+                        CommitOutcome::Success(hash) => {
+                            Outcome::success(hash.clone()).with_optional_tokens(tokens)
+                        }
+                        CommitOutcome::NothingToCommit => {
+                            Outcome::success("Nothing to commit").with_optional_tokens(tokens)
+                        }
+                        CommitOutcome::Error(e) => Outcome::failure(e.to_string()),
+                    }
+                }
                 Err(e) => Outcome::failure(e.to_string()),
             },
         )?;
+
+        // Capture usage from commit into "PR & Commit" phase (US-005)
+        state.capture_usage("PR & Commit", commit_result.usage.clone());
+        self.state_manager.save(state)?;
 
         // Print bottom border to close the output frame
         print_phase_footer(BannerColor::Cyan);
@@ -772,14 +814,14 @@ impl Runner {
         print_breadcrumb_trail(breadcrumb);
 
         // Track whether commits were made for PR creation
-        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+        let commits_were_made = matches!(&commit_result.outcome, CommitOutcome::Success(_));
 
-        match commit_result {
-            CommitResult::Success(hash) => {
+        match &commit_result.outcome {
+            CommitOutcome::Success(hash) => {
                 print_info(&format!("Changes committed successfully ({})", hash))
             }
-            CommitResult::NothingToCommit => print_info("Nothing to commit"),
-            CommitResult::Error(e) => {
+            CommitOutcome::NothingToCommit => print_info("Nothing to commit"),
+            CommitOutcome::Error(e) => {
                 print_error_panel(
                     "Commit Failed",
                     &e.message,
@@ -891,6 +933,12 @@ impl Runner {
         self.flush_live(MachineState::Completed);
         self.state_manager.save(state)?;
         print_summary_fn(state.iteration, story_results)?;
+
+        // Print final run completion message with total tokens (US-007)
+        let duration_secs = state.run_duration_secs();
+        let total_tokens = state.total_usage.as_ref().map(|u| u.total_tokens());
+        print_run_completed(duration_secs, total_tokens);
+
         self.archive_and_cleanup(state)?;
         Ok(LoopAction::Break)
     }
@@ -975,7 +1023,10 @@ impl Runner {
                 )
             },
             |res| match res {
-                Ok(_) => Outcome::success("Implementation done"),
+                Ok(result) => {
+                    let tokens = result.usage.as_ref().map(|u| u.total_tokens());
+                    Outcome::success("Implementation done").with_optional_tokens(tokens)
+                }
                 Err(e) => Outcome::failure(e.to_string()),
             },
         );
@@ -985,45 +1036,63 @@ impl Runner {
                 outcome: ClaudeOutcome::AllStoriesComplete,
                 work_summary,
                 full_output,
-            }) => self.handle_all_stories_complete_from_story(
-                state,
-                spec,
-                spec_json_path,
-                story,
-                breadcrumb,
-                story_results,
-                work_summary,
-                &full_output,
-                print_summary_fn,
-            ),
+                usage,
+            }) => {
+                // Capture usage from story implementation (US-005)
+                state.capture_usage(&story.id, usage.clone());
+                state.set_iteration_usage(usage);
+                self.handle_all_stories_complete_from_story(
+                    state,
+                    spec,
+                    spec_json_path,
+                    story,
+                    breadcrumb,
+                    story_results,
+                    work_summary,
+                    &full_output,
+                    print_summary_fn,
+                )
+            }
             Ok(ClaudeStoryResult {
                 outcome: ClaudeOutcome::IterationComplete,
                 work_summary,
                 full_output,
-            }) => self.handle_iteration_complete(
-                state,
-                spec_json_path,
-                story,
-                breadcrumb,
-                story_results,
-                work_summary,
-                &full_output,
-            ),
+                usage,
+            }) => {
+                // Capture usage from story implementation (US-005)
+                state.capture_usage(&story.id, usage.clone());
+                state.set_iteration_usage(usage);
+                self.handle_iteration_complete(
+                    state,
+                    spec_json_path,
+                    story,
+                    breadcrumb,
+                    story_results,
+                    work_summary,
+                    &full_output,
+                )
+            }
             Ok(ClaudeStoryResult {
                 outcome: ClaudeOutcome::Error(error_info),
+                usage,
                 ..
-            }) => self.handle_story_error(
-                state,
-                story,
-                story_results,
-                story_start,
-                &error_info.message,
-                "Claude Process Failed",
-                &error_info.message,
-                error_info.exit_code,
-                error_info.stderr.as_deref(),
-                print_summary_fn,
-            ),
+            }) => {
+                // Capture usage even on error (partial usage before failure) (US-005)
+                state.capture_usage(&story.id, usage.clone());
+                state.set_iteration_usage(usage);
+                self.handle_story_error(
+                    state,
+                    story,
+                    story_results,
+                    story_start,
+                    &error_info.message,
+                    "Claude Process Failed",
+                    &error_info.message,
+                    error_info.exit_code,
+                    error_info.stderr.as_deref(),
+                    print_summary_fn,
+                )
+            }
             Err(e) => self.handle_story_error(
                 state,
                 story,
@@ -1118,6 +1187,12 @@ impl Runner {
         self.flush_live(MachineState::Completed);
         self.state_manager.save(state)?;
         print_summary_fn(state.iteration, story_results)?;
+
+        // Print final run completion message with total tokens (US-007)
+        let run_duration = state.run_duration_secs();
+        let total_tokens = state.total_usage.as_ref().map(|u| u.total_tokens());
+        print_run_completed(run_duration, total_tokens);
+
         self.archive_and_cleanup(state)?;
         Ok(LoopAction::Break)
     }
@@ -1244,22 +1319,29 @@ impl Runner {
         print_generating_spec();
 
         // Run Claude to generate spec JSON with progress display
-        let spec = match with_progress_display(
+        let spec_result = match with_progress_display(
             self.verbose,
             VerboseTimer::new_for_spec,
             ClaudeSpinner::new_for_spec,
             |callback| run_for_spec_generation(&spec_content, &spec_json_path, callback),
             |res| match res {
-                Ok(_) => Outcome::success("Spec generated"),
+                Ok(r) => {
+                    let tokens = r.usage.as_ref().map(|u| u.total_tokens());
+                    Outcome::success("Spec generated").with_optional_tokens(tokens)
+                }
                 Err(e) => Outcome::failure(e.to_string()),
             },
         ) {
-            Ok(spec) => spec,
+            Ok(result) => result,
             Err(e) => {
                 print_error_panel("Spec Generation Failed", &e.to_string(), None, None);
                 return Err(e);
             }
         };
+        let spec = spec_result.spec;
+
+        // Capture usage from spec generation into "Planning" phase (US-005)
+        state.capture_usage("Planning", spec_result.usage);
 
         print_spec_generated(&spec, &spec_json_path);
 
@@ -1709,6 +1791,7 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::CommitResult;
     use crate::config::Config;
 
     #[test]
@@ -1929,9 +2012,12 @@ mod tests {
 
     #[test]
     fn test_commits_were_made_detection_success() {
-        // Test that CommitResult::Success is properly detected as commits_were_made = true
-        let commit_result = CommitResult::Success("abc123".to_string());
-        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+        // Test that CommitOutcome::Success is properly detected as commits_were_made = true
+        let commit_result = CommitResult {
+            outcome: CommitOutcome::Success("abc123".to_string()),
+            usage: None,
+        };
+        let commits_were_made = matches!(&commit_result.outcome, CommitOutcome::Success(_));
         assert!(
             commits_were_made,
             "Success should indicate commits were made"
@@ -1940,9 +2026,12 @@ mod tests {
 
     #[test]
     fn test_commits_were_made_detection_nothing_to_commit() {
-        // Test that CommitResult::NothingToCommit is properly detected as commits_were_made = false
-        let commit_result = CommitResult::NothingToCommit;
-        let commits_were_made = matches!(&commit_result, CommitResult::Success(_));
+        // Test that CommitOutcome::NothingToCommit is properly detected as commits_were_made = false
+        let commit_result = CommitResult {
+            outcome: CommitOutcome::NothingToCommit,
+            usage: None,
+        };
+        let commits_were_made = matches!(&commit_result.outcome, CommitOutcome::Success(_));
         assert!(
             !commits_were_made,
             "NothingToCommit should indicate no commits were made"
