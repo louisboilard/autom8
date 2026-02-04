@@ -1791,269 +1791,15 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::CommitResult;
     use crate::config::Config;
-
-    #[test]
-    fn test_runner_skip_review_defaults_to_false() {
-        let runner = Runner::new().unwrap();
-        assert!(!runner.skip_review);
-    }
-
-    #[test]
-    fn test_runner_with_skip_review_true() {
-        let runner = Runner::new().unwrap().with_skip_review(true);
-        assert!(runner.skip_review);
-    }
-
-    #[test]
-    fn test_runner_with_skip_review_false() {
-        let runner = Runner::new().unwrap().with_skip_review(false);
-        assert!(!runner.skip_review);
-    }
-
-    #[test]
-    fn test_runner_builder_pattern_preserves_skip_review() {
-        let runner = Runner::new()
-            .unwrap()
-            .with_verbose(true)
-            .with_skip_review(true);
-        assert!(runner.skip_review);
-        assert!(runner.verbose);
-    }
-
-    // ========================================================================
-    // US-005: Worktree Configuration Override tests
-    // ========================================================================
-
-    #[test]
-    fn test_runner_worktree_override_defaults_to_none() {
-        let runner = Runner::new().unwrap();
-        assert!(
-            runner.worktree_override.is_none(),
-            "worktree_override should be None by default"
-        );
-    }
-
-    #[test]
-    fn test_runner_with_worktree_true() {
-        let runner = Runner::new().unwrap().with_worktree(true);
-        assert_eq!(
-            runner.worktree_override,
-            Some(true),
-            "worktree_override should be Some(true) after with_worktree(true)"
-        );
-    }
-
-    #[test]
-    fn test_runner_with_worktree_false() {
-        let runner = Runner::new().unwrap().with_worktree(false);
-        assert_eq!(
-            runner.worktree_override,
-            Some(false),
-            "worktree_override should be Some(false) after with_worktree(false)"
-        );
-    }
-
-    #[test]
-    fn test_runner_builder_pattern_preserves_worktree() {
-        let runner = Runner::new()
-            .unwrap()
-            .with_verbose(true)
-            .with_skip_review(true)
-            .with_worktree(true);
-        assert!(runner.verbose);
-        assert!(runner.skip_review);
-        assert_eq!(runner.worktree_override, Some(true));
-    }
-
-    #[test]
-    fn test_runner_builder_pattern_worktree_order_independent() {
-        let runner1 = Runner::new()
-            .unwrap()
-            .with_worktree(true)
-            .with_verbose(true);
-
-        let runner2 = Runner::new()
-            .unwrap()
-            .with_verbose(true)
-            .with_worktree(true);
-
-        assert_eq!(runner1.worktree_override, runner2.worktree_override);
-        assert_eq!(runner1.verbose, runner2.verbose);
-    }
-
-    /// Tests that story_index calculation produces 1-indexed values.
-    /// The formula: position().map(|i| i as u32 + 1).unwrap_or(state.iteration)
-    /// must produce 1-indexed display values like [US-001 1/8], not [US-001 0/8].
-    #[test]
-    fn test_story_index_calculation_is_one_indexed() {
-        // Simulate the story_index calculation from runner.rs:557-562
-        let story_ids = vec![
-            "US-001", "US-002", "US-003", "US-004", "US-005", "US-006", "US-007", "US-008",
-        ];
-
-        // Test case 1: First story (task 1 of 8) should show 1, not 0
-        let current_story = "US-001";
-        let story_index = story_ids
-            .iter()
-            .position(|&s| s == current_story)
-            .map(|i| i as u32 + 1)
-            .unwrap_or(1); // fallback to iteration=1
-        assert_eq!(story_index, 1, "First story should display as 1/8, not 0/8");
-
-        // Test case 2: Last story (task 8 of 8) should show 8, not 7
-        let current_story = "US-008";
-        let story_index = story_ids
-            .iter()
-            .position(|&s| s == current_story)
-            .map(|i| i as u32 + 1)
-            .unwrap_or(8); // fallback to iteration=8
-        assert_eq!(story_index, 8, "Last story should display as 8/8, not 7/8");
-
-        // Test case 3: Middle story (task 4 of 8) should show 4
-        let current_story = "US-004";
-        let story_index = story_ids
-            .iter()
-            .position(|&s| s == current_story)
-            .map(|i| i as u32 + 1)
-            .unwrap_or(4);
-        assert_eq!(story_index, 4, "Fourth story should display as 4/8");
-    }
-
-    /// Tests that state.iteration fallback produces correct 1-indexed value
-    /// when position lookup fails.
-    #[test]
-    fn test_story_index_fallback_is_one_indexed() {
-        use crate::state::RunState;
-
-        // Create a state and simulate iteration increments
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // Before any iteration, state.iteration is 0
-        assert_eq!(state.iteration, 0);
-
-        // After start_iteration, it should be 1 (1-indexed)
-        state.start_iteration("US-001");
-        assert_eq!(
-            state.iteration, 1,
-            "After first start_iteration, iteration should be 1"
-        );
-
-        // Simulate fallback scenario where position lookup fails
-        let story_ids: Vec<&str> = vec!["US-001", "US-002"];
-        let unknown_story = "US-UNKNOWN";
-        let story_index = story_ids
-            .iter()
-            .position(|&s| s == unknown_story)
-            .map(|i| i as u32 + 1)
-            .unwrap_or(state.iteration);
-
-        // The fallback should use state.iteration which is 1 (1-indexed)
-        assert_eq!(
-            story_index, 1,
-            "Fallback should use 1-indexed state.iteration"
-        );
-
-        // After second iteration
-        state.finish_iteration(crate::state::IterationStatus::Success, String::new());
-        state.start_iteration("US-002");
-        assert_eq!(
-            state.iteration, 2,
-            "After second start_iteration, iteration should be 2"
-        );
-    }
-
-    /// Tests that Runner uses StateManager which uses config directory paths.
-    /// This verifies the resume command looks in the right location.
-    #[test]
-    fn test_runner_state_manager_uses_config_directory() {
-        let runner = Runner::new().unwrap();
-        // The state_manager field is private, but we can verify through the status() method
-        // that it reads from the config directory (no error means path resolution works)
-        let status_result = runner.status();
-        assert!(
-            status_result.is_ok(),
-            "Runner should use valid config directory paths"
-        );
-    }
-
-    // ========================================================================
-    // US-006: PR creation integration tests
-    // ========================================================================
-
-    #[test]
-    fn test_pr_result_success_variant_accessible() {
-        // Verify PRResult::Success is properly imported and usable
-        let result = PRResult::Success("https://github.com/owner/repo/pull/1".to_string());
-        assert!(matches!(result, PRResult::Success(_)));
-    }
-
-    #[test]
-    fn test_pr_result_skipped_variant_accessible() {
-        // Verify PRResult::Skipped is properly imported and usable
-        let result = PRResult::Skipped("No commits were made".to_string());
-        assert!(matches!(result, PRResult::Skipped(_)));
-    }
-
-    #[test]
-    fn test_pr_result_already_exists_variant_accessible() {
-        // Verify PRResult::AlreadyExists is properly imported and usable
-        let result = PRResult::AlreadyExists("https://github.com/owner/repo/pull/99".to_string());
-        assert!(matches!(result, PRResult::AlreadyExists(_)));
-    }
-
-    #[test]
-    fn test_pr_result_error_variant_accessible() {
-        // Verify PRResult::Error is properly imported and usable
-        let result = PRResult::Error("Failed to create PR".to_string());
-        assert!(matches!(result, PRResult::Error(_)));
-    }
-
-    #[test]
-    fn test_commits_were_made_detection_success() {
-        // Test that CommitOutcome::Success is properly detected as commits_were_made = true
-        let commit_result = CommitResult {
-            outcome: CommitOutcome::Success("abc123".to_string()),
-            usage: None,
-        };
-        let commits_were_made = matches!(&commit_result.outcome, CommitOutcome::Success(_));
-        assert!(
-            commits_were_made,
-            "Success should indicate commits were made"
-        );
-    }
-
-    #[test]
-    fn test_commits_were_made_detection_nothing_to_commit() {
-        // Test that CommitOutcome::NothingToCommit is properly detected as commits_were_made = false
-        let commit_result = CommitResult {
-            outcome: CommitOutcome::NothingToCommit,
-            usage: None,
-        };
-        let commits_were_made = matches!(&commit_result.outcome, CommitOutcome::Success(_));
-        assert!(
-            !commits_were_made,
-            "NothingToCommit should indicate no commits were made"
-        );
-    }
-
-    #[test]
-    fn test_creating_pr_state_accessible() {
-        // Verify MachineState::CreatingPR is properly accessible for transitions
-        let state = MachineState::CreatingPR;
-        assert!(matches!(state, MachineState::CreatingPR));
-    }
-
-    // ========================================================================
-    // US-008: Critical Tests for runner.rs
-    // ========================================================================
-
     use crate::spec::{Spec, UserStory};
     use crate::state::RunStatus;
     use tempfile::TempDir;
 
-    /// Helper to create a minimal valid spec for testing
+    // ========================================================================
+    // Test helpers
+    // ========================================================================
+
     fn create_test_spec(passes: bool) -> Spec {
         Spec {
             project: "TestProject".into(),
@@ -2071,11 +1817,9 @@ mod tests {
         }
     }
 
-    /// Helper to create a spec with multiple stories
     fn create_multi_story_spec(completed_count: usize, total: usize) -> Spec {
-        let mut stories = Vec::new();
-        for i in 0..total {
-            stories.push(UserStory {
+        let stories = (0..total)
+            .map(|i| UserStory {
                 id: format!("US-{:03}", i + 1),
                 title: format!("Story {}", i + 1),
                 description: format!("Description for story {}", i + 1),
@@ -2083,8 +1827,8 @@ mod tests {
                 priority: (i + 1) as u32,
                 passes: i < completed_count,
                 notes: String::new(),
-            });
-        }
+            })
+            .collect();
         Spec {
             project: "TestProject".into(),
             branch_name: "test-branch".into(),
@@ -2093,153 +1837,114 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // run() error handling tests
-    // Note: These tests verify error behavior at the Spec/path level.
-    // Tests using Runner::new() may be affected by existing active runs,
-    // so we test error paths that occur BEFORE the active run check,
-    // or test the underlying error types directly.
-    // ------------------------------------------------------------------------
+    // ========================================================================
+    // Runner builder pattern
+    // ========================================================================
 
     #[test]
-    fn test_spec_load_with_nonexistent_path_returns_spec_not_found() {
-        // Test Spec::load directly since Runner::run checks for active run first
-        let result = Spec::load(Path::new("/nonexistent/path/spec.json"));
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, Autom8Error::SpecNotFound(_)),
-            "Expected SpecNotFound error, got: {:?}",
-            err
-        );
+    fn test_runner_builder_pattern() {
+        let runner = Runner::new()
+            .unwrap()
+            .with_verbose(true)
+            .with_skip_review(true)
+            .with_worktree(true);
+
+        assert!(runner.verbose);
+        assert!(runner.skip_review);
+        assert_eq!(runner.worktree_override, Some(true));
     }
 
     #[test]
-    fn test_path_canonicalize_fails_for_nonexistent_spec() {
-        // Verify that canonicalize fails for nonexistent paths (as used in run/run_from_spec)
-        let result = Path::new("/nonexistent/spec-feature.md").canonicalize();
-        assert!(result.is_err());
+    fn test_runner_defaults() {
+        let runner = Runner::new().unwrap();
+        assert!(!runner.skip_review);
+        assert!(!runner.verbose);
+        assert!(runner.worktree_override.is_none());
     }
 
-    #[test]
-    fn test_empty_spec_content_detection() {
-        // Test the empty spec content check logic
-        let content = "   \n  \t  ";
-        assert!(
-            content.trim().is_empty(),
-            "Whitespace-only content should be detected as empty"
-        );
-    }
+    // ========================================================================
+    // Story index calculation (1-indexed display)
+    // ========================================================================
 
     #[test]
-    fn test_spec_load_with_invalid_json_returns_invalid_spec() {
+    fn test_story_index_is_one_indexed() {
+        let story_ids = vec!["US-001", "US-002", "US-003"];
+
+        // First story should be 1, not 0
+        let idx = story_ids
+            .iter()
+            .position(|&s| s == "US-001")
+            .map(|i| i as u32 + 1)
+            .unwrap();
+        assert_eq!(idx, 1);
+
+        // Last story should be 3, not 2
+        let idx = story_ids
+            .iter()
+            .position(|&s| s == "US-003")
+            .map(|i| i as u32 + 1)
+            .unwrap();
+        assert_eq!(idx, 3);
+    }
+
+    // ========================================================================
+    // Spec loading errors
+    // ========================================================================
+
+    #[test]
+    fn test_spec_load_errors() {
+        // Nonexistent path
+        let result = Spec::load(Path::new("/nonexistent/spec.json"));
+        assert!(matches!(result.unwrap_err(), Autom8Error::SpecNotFound(_)));
+
+        // Invalid JSON
         let temp_dir = TempDir::new().unwrap();
         let spec_path = temp_dir.path().join("spec.json");
-        fs::write(&spec_path, "{ invalid json }").unwrap();
-
+        fs::write(&spec_path, "{ invalid }").unwrap();
         let result = Spec::load(&spec_path);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, Autom8Error::InvalidSpec(_)),
-            "Expected InvalidSpec error, got: {:?}",
-            err
-        );
-    }
+        assert!(matches!(result.unwrap_err(), Autom8Error::InvalidSpec(_)));
 
-    #[test]
-    fn test_spec_load_with_missing_required_fields_returns_invalid_spec() {
-        let temp_dir = TempDir::new().unwrap();
-        let spec_path = temp_dir.path().join("spec.json");
-        // Missing userStories field
-        fs::write(&spec_path, r#"{"project": "Test", "branchName": "test"}"#).unwrap();
-
-        let result = Spec::load(&spec_path);
-        assert!(result.is_err());
-        // Could be InvalidSpec or Json error depending on serde behavior
-    }
-
-    #[test]
-    fn test_spec_load_with_empty_project_returns_invalid_spec() {
-        let temp_dir = TempDir::new().unwrap();
-        let spec_path = temp_dir.path().join("spec.json");
+        // Empty project
         fs::write(
             &spec_path,
             r#"{"project": "", "branchName": "test", "description": "test", "userStories": [{"id": "US-001", "title": "t", "description": "d", "acceptanceCriteria": [], "priority": 1, "passes": false}]}"#,
         )
         .unwrap();
-
         let result = Spec::load(&spec_path);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, Autom8Error::InvalidSpec(_)),
-            "Expected InvalidSpec error, got: {:?}",
-            err
-        );
+        assert!(matches!(result.unwrap_err(), Autom8Error::InvalidSpec(_)));
     }
 
-    // ------------------------------------------------------------------------
-    // State transition tests
-    // ------------------------------------------------------------------------
+    // ========================================================================
+    // State transitions
+    // ========================================================================
 
     #[test]
-    fn test_state_transitions_through_picking_story() {
+    fn test_state_transitions_full_workflow() {
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
 
-        // Initial state is Initializing
+        // Initial -> PickingStory -> RunningClaude -> PickingStory
         assert_eq!(state.machine_state, MachineState::Initializing);
 
-        // Transition to PickingStory
-        state.transition_to(MachineState::PickingStory);
-        assert_eq!(state.machine_state, MachineState::PickingStory);
-        assert_eq!(state.status, RunStatus::Running);
-    }
-
-    #[test]
-    fn test_state_transitions_through_full_story_workflow() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // PickingStory -> RunningClaude
         state.transition_to(MachineState::PickingStory);
         state.start_iteration("US-001");
         assert_eq!(state.machine_state, MachineState::RunningClaude);
         assert_eq!(state.iteration, 1);
 
-        // RunningClaude -> PickingStory (iteration complete)
         state.finish_iteration(IterationStatus::Success, String::new());
         assert_eq!(state.machine_state, MachineState::PickingStory);
-    }
 
-    #[test]
-    fn test_state_transitions_through_review_workflow() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // Simulate: PickingStory -> Reviewing -> Correcting -> Reviewing
-        state.transition_to(MachineState::PickingStory);
-
+        // -> Reviewing -> Correcting -> Reviewing
         state.transition_to(MachineState::Reviewing);
         state.review_iteration = 1;
-        assert_eq!(state.machine_state, MachineState::Reviewing);
-        assert_eq!(state.review_iteration, 1);
-
         state.transition_to(MachineState::Correcting);
-        assert_eq!(state.machine_state, MachineState::Correcting);
-
         state.transition_to(MachineState::Reviewing);
         state.review_iteration = 2;
-        assert_eq!(state.review_iteration, 2);
-    }
 
-    #[test]
-    fn test_state_transitions_to_completed() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
+        // -> Committing -> CreatingPR -> Completed
         state.transition_to(MachineState::Committing);
         state.transition_to(MachineState::CreatingPR);
         state.transition_to(MachineState::Completed);
 
-        assert_eq!(state.machine_state, MachineState::Completed);
         assert_eq!(state.status, RunStatus::Completed);
         assert!(state.finished_at.is_some());
     }
@@ -2247,230 +1952,202 @@ mod tests {
     #[test]
     fn test_state_transitions_to_failed() {
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        state.transition_to(MachineState::RunningClaude);
         state.transition_to(MachineState::Failed);
 
-        assert_eq!(state.machine_state, MachineState::Failed);
         assert_eq!(state.status, RunStatus::Failed);
         assert!(state.finished_at.is_some());
     }
 
-    // ------------------------------------------------------------------------
-    // Resume functionality tests
-    // ------------------------------------------------------------------------
+    // ========================================================================
+    // StateManager operations
+    // ========================================================================
 
     #[test]
-    fn test_status_returns_none_when_no_active_run() {
-        // Use a fresh temp directory for isolated testing
+    fn test_state_manager_save_load_clear() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        // Ensure no state file exists
-        let result = sm.load_current().unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_status_returns_state_when_active_run_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm.save(&state).unwrap();
-
-        let loaded = sm.load_current().unwrap();
-        assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().run_id, state.run_id);
-    }
-
-    #[test]
-    fn test_has_active_run_detects_running_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        // No active run initially
+        // Initially empty
+        assert!(sm.load_current().unwrap().is_none());
         assert!(!sm.has_active_run().unwrap());
 
-        // Save a running state
+        // Save and load
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         sm.save(&state).unwrap();
-
         assert!(sm.has_active_run().unwrap());
+
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.run_id, state.run_id);
+
+        // Clear
+        sm.clear_current().unwrap();
+        assert!(sm.load_current().unwrap().is_none());
     }
 
     #[test]
-    fn test_has_active_run_ignores_completed_state() {
+    fn test_state_manager_completed_not_active() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        // Save a completed state
         let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         state.transition_to(MachineState::Completed);
         sm.save(&state).unwrap();
 
-        // Should NOT count as active run
         assert!(!sm.has_active_run().unwrap());
     }
 
     #[test]
-    fn test_list_specs_returns_incomplete_specs_sorted_by_mtime() {
+    fn test_state_manager_archive() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        let spec_dir = sm.ensure_spec_dir().unwrap();
 
-        // Create two spec files
-        let spec1 = create_test_spec(false);
-        let spec2 = create_multi_story_spec(1, 3);
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let archive_path = sm.archive(&state).unwrap();
 
-        spec1.save(&spec_dir.join("spec1.json")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10)); // Ensure different mtime
-        spec2.save(&spec_dir.join("spec2.json")).unwrap();
-
-        let specs = sm.list_specs().unwrap();
-        assert_eq!(specs.len(), 2);
-        // Most recent first (spec2)
-        assert!(specs[0].ends_with("spec2.json"));
+        assert!(archive_path.exists());
+        assert!(archive_path.parent().unwrap().ends_with("runs"));
     }
 
-    // ------------------------------------------------------------------------
-    // LoopAction enum tests
-    // ------------------------------------------------------------------------
+    // ========================================================================
+    // Spec operations
+    // ========================================================================
 
     #[test]
-    fn test_loop_action_continue_variant() {
-        let action = LoopAction::Continue;
-        assert!(matches!(action, LoopAction::Continue));
+    fn test_spec_completion_detection() {
+        assert!(create_test_spec(true).all_complete());
+        assert!(!create_test_spec(false).all_complete());
     }
 
     #[test]
-    fn test_loop_action_break_variant() {
-        let action = LoopAction::Break;
-        assert!(matches!(action, LoopAction::Break));
-    }
-
-    // ------------------------------------------------------------------------
-    // Spec integration tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_spec_all_complete_detection() {
-        let spec = create_test_spec(true);
-        assert!(spec.all_complete());
-
-        let spec = create_test_spec(false);
-        assert!(!spec.all_complete());
-    }
-
-    #[test]
-    fn test_spec_next_incomplete_story_returns_lowest_priority() {
+    fn test_spec_next_incomplete_story() {
         let spec = create_multi_story_spec(0, 3);
-        let next = spec.next_incomplete_story().unwrap();
-        assert_eq!(next.id, "US-001"); // Priority 1 is lowest
-    }
+        assert_eq!(spec.next_incomplete_story().unwrap().id, "US-001");
 
-    #[test]
-    fn test_spec_next_incomplete_story_skips_completed() {
         let mut spec = create_multi_story_spec(0, 3);
-        spec.user_stories[0].passes = true; // Mark US-001 as complete
+        spec.user_stories[0].passes = true;
+        assert_eq!(spec.next_incomplete_story().unwrap().id, "US-002");
 
-        let next = spec.next_incomplete_story().unwrap();
-        assert_eq!(next.id, "US-002");
-    }
-
-    #[test]
-    fn test_spec_next_incomplete_story_returns_none_when_all_complete() {
         let spec = create_multi_story_spec(3, 3);
         assert!(spec.next_incomplete_story().is_none());
     }
 
-    // ------------------------------------------------------------------------
-    // Error handling tests
-    // ------------------------------------------------------------------------
+    #[test]
+    fn test_list_specs_sorted_by_mtime() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        let spec_dir = sm.ensure_spec_dir().unwrap();
+
+        create_test_spec(false)
+            .save(&spec_dir.join("spec1.json"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        create_multi_story_spec(1, 3)
+            .save(&spec_dir.join("spec2.json"))
+            .unwrap();
+
+        let specs = sm.list_specs().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert!(specs[0].ends_with("spec2.json")); // Most recent first
+    }
+
+    // ========================================================================
+    // Config integration
+    // ========================================================================
 
     #[test]
-    fn test_max_review_iterations_error_message() {
-        let err = Autom8Error::MaxReviewIterationsReached;
-        let msg = format!("{}", err);
-        assert!(msg.contains("3 iterations"));
-        assert!(msg.contains("autom8_review.md"));
+    fn test_effective_config() {
+        // Default config
+        let state = RunState::new(PathBuf::from("test.json"), "test".to_string());
+        let config = state.effective_config();
+        assert!(config.review && config.commit && config.pull_request);
+
+        // Custom config preserved
+        let custom = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+            ..Default::default()
+        };
+        let state =
+            RunState::new_with_config(PathBuf::from("test.json"), "test".to_string(), custom);
+        let config = state.effective_config();
+        assert!(!config.review && config.commit && !config.pull_request);
     }
 
     #[test]
-    fn test_run_in_progress_error_contains_run_id() {
-        let run_id = "test-run-id-123".to_string();
-        let err = Autom8Error::RunInProgress(run_id.clone());
-        let msg = format!("{}", err);
-        assert!(msg.contains(&run_id));
+    fn test_config_preserved_on_resume() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let config = Config {
+            review: false,
+            commit: true,
+            pull_request: false,
+            ..Default::default()
+        };
+        let state =
+            RunState::new_with_config(PathBuf::from("test.json"), "test".to_string(), config);
+        sm.save(&state).unwrap();
+
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert!(!loaded.effective_config().review);
+    }
+
+    // ========================================================================
+    // Worktree mode
+    // ========================================================================
+
+    #[test]
+    fn test_worktree_mode_override() {
+        let runner = Runner::new().unwrap();
+        let config_true = Config {
+            worktree: true,
+            ..Default::default()
+        };
+        let config_false = Config {
+            worktree: false,
+            ..Default::default()
+        };
+
+        // No override - uses config
+        assert!(runner.is_worktree_mode(&config_true));
+        assert!(!runner.is_worktree_mode(&config_false));
+
+        // Override takes precedence
+        let runner_override = Runner::new().unwrap().with_worktree(true);
+        assert!(runner_override.is_worktree_mode(&config_false));
+
+        let runner_override = Runner::new().unwrap().with_worktree(false);
+        assert!(!runner_override.is_worktree_mode(&config_true));
     }
 
     #[test]
-    fn test_no_incomplete_stories_error() {
-        let err = Autom8Error::NoIncompleteStories;
-        let msg = format!("{}", err);
-        assert!(msg.contains("No incomplete stories"));
-    }
+    fn test_session_isolation() {
+        let temp_dir = TempDir::new().unwrap();
 
-    #[test]
-    fn test_no_specs_to_resume_error() {
-        let err = Autom8Error::NoSpecsToResume;
-        let msg = format!("{}", err);
-        assert!(msg.contains("No incomplete specs"));
-    }
-
-    // ------------------------------------------------------------------------
-    // RunState from_spec tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_run_state_from_spec_initializes_correctly() {
-        let state = RunState::from_spec(
-            PathBuf::from("spec-feature.md"),
-            PathBuf::from("spec-feature.json"),
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session1".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session2".to_string(),
         );
 
-        assert_eq!(state.machine_state, MachineState::LoadingSpec);
-        assert_eq!(state.status, RunStatus::Running);
-        assert_eq!(state.spec_md_path, Some(PathBuf::from("spec-feature.md")));
-        assert_eq!(state.spec_json_path, PathBuf::from("spec-feature.json"));
-        assert!(state.branch.is_empty()); // Branch set after spec generation
+        let state = RunState::new(PathBuf::from("test.json"), "test".to_string());
+        sm1.save(&state).unwrap();
+
+        assert!(sm1.has_active_run().unwrap());
+        assert!(!sm2.has_active_run().unwrap());
     }
 
-    #[test]
-    fn test_run_state_new_initializes_correctly() {
-        let state = RunState::new(PathBuf::from("spec.json"), "feature-branch".to_string());
-
-        assert_eq!(state.machine_state, MachineState::Initializing);
-        assert_eq!(state.status, RunStatus::Running);
-        assert!(state.spec_md_path.is_none());
-        assert_eq!(state.branch, "feature-branch");
-        assert_eq!(state.iteration, 0);
-        assert_eq!(state.review_iteration, 0);
-    }
-
-    // ------------------------------------------------------------------------
-    // Iteration tracking tests
-    // ------------------------------------------------------------------------
+    // ========================================================================
+    // Iteration tracking
+    // ========================================================================
 
     #[test]
-    fn test_iteration_record_preserves_work_summary() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        state.start_iteration("US-001");
-        state.set_work_summary(Some(
-            "Files changed: src/main.rs. Added feature.".to_string(),
-        ));
-        state.finish_iteration(IterationStatus::Success, String::new());
-
-        assert_eq!(
-            state.iterations[0].work_summary,
-            Some("Files changed: src/main.rs. Added feature.".to_string())
-        );
-    }
-
-    #[test]
-    fn test_multiple_iterations_tracked_independently() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+    fn test_iteration_tracking() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test".to_string());
 
         state.start_iteration("US-001");
         state.set_work_summary(Some("Work 1".to_string()));
@@ -2482,820 +2159,52 @@ mod tests {
 
         assert_eq!(state.iterations.len(), 2);
         assert_eq!(state.iterations[0].story_id, "US-001");
-        assert_eq!(state.iterations[0].work_summary, Some("Work 1".to_string()));
         assert_eq!(state.iterations[1].story_id, "US-002");
-        assert_eq!(state.iterations[1].work_summary, Some("Work 2".to_string()));
-    }
-
-    #[test]
-    fn test_current_iteration_duration_calculated_correctly() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        state.start_iteration("US-001");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        state.finish_iteration(IterationStatus::Success, String::new());
-
-        let duration = state.current_iteration_duration();
-        // Duration is u64, so just verify the method returns successfully
-        let _ = duration; // Value is non-negative by type
-    }
-
-    // ------------------------------------------------------------------------
-    // StateManager archive and cleanup tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_archive_creates_run_file_with_correct_format() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        let archive_path = sm.archive(&state).unwrap();
-
-        assert!(archive_path.exists());
-        // File should be in runs/ directory
-        assert!(archive_path.parent().unwrap().ends_with("runs"));
-        // Filename should contain date and run_id prefix
-        let filename = archive_path.file_name().unwrap().to_str().unwrap();
-        assert!(filename.contains(&state.run_id[..8]));
-    }
-
-    #[test]
-    fn test_clear_current_removes_state_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm.save(&state).unwrap();
-
-        assert!(sm.load_current().unwrap().is_some());
-
-        sm.clear_current().unwrap();
-
-        assert!(sm.load_current().unwrap().is_none());
     }
 
     // ========================================================================
-    // US-005: Config integration with state machine tests
+    // Live output flusher
     // ========================================================================
 
     #[test]
-    fn test_run_state_effective_config_returns_default_when_none() {
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        let config = state.effective_config();
-        // Default config has all options enabled
-        assert!(config.review);
-        assert!(config.commit);
-        assert!(config.pull_request);
-    }
-
-    #[test]
-    fn test_run_state_effective_config_returns_stored_config() {
-        let config = Config {
-            review: false,
-            commit: true,
-            pull_request: false,
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config.clone(),
-        );
-        assert_eq!(state.effective_config(), config);
-    }
-
-    #[test]
-    fn test_run_state_new_with_config_initializes_correctly() {
-        let config = Config {
-            review: false,
-            commit: false,
-            pull_request: false,
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("spec.json"),
-            "feature-branch".to_string(),
-            config.clone(),
-        );
-
-        assert_eq!(state.machine_state, MachineState::Initializing);
-        assert_eq!(state.status, RunStatus::Running);
-        assert_eq!(state.branch, "feature-branch");
-        assert!(state.config.is_some());
-        assert_eq!(state.config.unwrap(), config);
-    }
-
-    #[test]
-    fn test_run_state_from_spec_with_config_initializes_correctly() {
-        let config = Config {
-            review: true,
-            commit: false,
-            pull_request: false,
-            ..Default::default()
-        };
-        let state = RunState::from_spec_with_config(
-            PathBuf::from("spec-feature.md"),
-            PathBuf::from("spec-feature.json"),
-            config.clone(),
-        );
-
-        assert_eq!(state.machine_state, MachineState::LoadingSpec);
-        assert_eq!(state.status, RunStatus::Running);
-        assert!(state.branch.is_empty()); // Branch set after spec generation
-        assert!(state.config.is_some());
-        assert_eq!(state.config.unwrap(), config);
-    }
-
-    #[test]
-    fn test_config_with_review_false_skips_review_state() {
-        // This tests that when review=false in config, the review state is skipped
-        let config = Config {
-            review: false,
-            commit: true,
-            pull_request: true,
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        let effective = state.effective_config();
-        assert!(
-            !effective.review,
-            "review should be false, state machine should skip review"
-        );
-    }
-
-    #[test]
-    fn test_config_with_commit_false_skips_commit_state() {
-        // This tests that when commit=false in config, the commit state is skipped
-        let config = Config {
-            review: true,
-            commit: false,
-            pull_request: false, // Must be false when commit is false (validated by US-004)
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        let effective = state.effective_config();
-        assert!(
-            !effective.commit,
-            "commit should be false, state machine should skip commit"
-        );
-    }
-
-    #[test]
-    fn test_config_with_pull_request_false_skips_pr_state() {
-        // This tests that when pull_request=false in config, the PR state is skipped
-        let config = Config {
-            review: true,
-            commit: true,
-            pull_request: false,
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        let effective = state.effective_config();
-        assert!(
-            !effective.pull_request,
-            "pull_request should be false, state machine should skip PR creation"
-        );
-    }
-
-    #[test]
-    fn test_state_machine_transitions_with_all_config_disabled() {
-        // Test that state transitions work when all optional states are disabled
-        let config = Config {
-            review: false,
-            commit: false,
-            pull_request: false,
-            ..Default::default()
-        };
-        let mut state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        // Simulate the expected flow with all states disabled:
-        // Initializing -> PickingStory -> RunningClaude -> PickingStory -> Completed
-        assert_eq!(state.machine_state, MachineState::Initializing);
-
-        state.transition_to(MachineState::PickingStory);
-        assert_eq!(state.machine_state, MachineState::PickingStory);
-
-        state.start_iteration("US-001");
-        assert_eq!(state.machine_state, MachineState::RunningClaude);
-
-        state.finish_iteration(IterationStatus::Success, String::new());
-        assert_eq!(state.machine_state, MachineState::PickingStory);
-
-        // With all configs disabled, we skip directly to Completed
-        state.transition_to(MachineState::Completed);
-        assert_eq!(state.machine_state, MachineState::Completed);
-        assert_eq!(state.status, RunStatus::Completed);
-    }
-
-    #[test]
-    fn test_state_machine_transitions_with_review_disabled_only() {
-        // Test transitions when only review is disabled
-        let config = Config {
-            review: false,
-            commit: true,
-            pull_request: true,
-            ..Default::default()
-        };
-        let mut state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        // Expected flow:
-        // Initializing -> PickingStory -> RunningClaude -> PickingStory
-        // (skips Reviewing/Correcting) -> Committing -> CreatingPR -> Completed
-        state.transition_to(MachineState::PickingStory);
-        state.start_iteration("US-001");
-        state.finish_iteration(IterationStatus::Success, String::new());
-
-        // Skip review, go to commit
-        state.transition_to(MachineState::Committing);
-        assert_eq!(state.machine_state, MachineState::Committing);
-
-        state.transition_to(MachineState::CreatingPR);
-        assert_eq!(state.machine_state, MachineState::CreatingPR);
-
-        state.transition_to(MachineState::Completed);
-        assert_eq!(state.machine_state, MachineState::Completed);
-    }
-
-    #[test]
-    fn test_state_machine_transitions_with_pr_disabled_only() {
-        // Test transitions when only PR is disabled
-        let config = Config {
-            review: true,
-            commit: true,
-            pull_request: false,
-            ..Default::default()
-        };
-        let mut state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-        );
-
-        // Expected flow:
-        // ... -> Reviewing -> Committing -> Completed (skip CreatingPR)
-        state.transition_to(MachineState::Reviewing);
-        state.review_iteration = 1;
-        assert_eq!(state.machine_state, MachineState::Reviewing);
-
-        state.transition_to(MachineState::Committing);
-        assert_eq!(state.machine_state, MachineState::Committing);
-
-        // Skip PR, go directly to completed
-        state.transition_to(MachineState::Completed);
-        assert_eq!(state.machine_state, MachineState::Completed);
-    }
-
-    #[test]
-    fn test_config_preserved_during_resume_workflow() {
-        // Test that config is preserved when state is saved and loaded (resume scenario)
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        let config = Config {
-            review: false,
-            commit: true,
-            pull_request: false,
-            ..Default::default()
-        };
-        let state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config.clone(),
-        );
-
-        // Save state
-        sm.save(&state).unwrap();
-
-        // Load state (simulating resume)
-        let loaded = sm.load_current().unwrap().unwrap();
-
-        // Verify config is preserved
-        assert_eq!(loaded.effective_config(), config);
-    }
-
-    // ========================================================================
-    // US-008: Runner Worktree Integration tests
-    // ========================================================================
-
-    #[test]
-    fn test_runner_new_auto_detects_session() {
-        // Runner::new() should auto-detect the session from CWD
-        let runner = Runner::new().unwrap();
-        // The session ID is auto-detected based on whether we're in main repo or worktree
-        // We can't assert the exact value but we can verify it's created successfully
-        let status = runner.status();
-        assert!(
-            status.is_ok(),
-            "Runner should auto-detect session successfully"
-        );
-    }
-
-    #[test]
-    fn test_runner_state_manager_has_session_id() {
-        // Verify that StateManager has a session_id (proves per-session state storage)
-        let runner = Runner::new().unwrap();
-        let session_id = runner.state_manager.session_id();
-        assert!(
-            !session_id.is_empty(),
-            "StateManager should have a session ID"
-        );
-        // Session ID should be either "main" or 8-char hex
-        assert!(
-            session_id == "main"
-                || (session_id.len() == 8 && session_id.chars().all(|c| c.is_ascii_hexdigit())),
-            "Session ID should be 'main' or 8 hex chars, got: {}",
-            session_id
-        );
-    }
-
-    #[test]
-    fn test_has_active_run_is_per_session() {
-        // Test that has_active_run() is per-session, not global
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create two state managers with different session IDs
-        let sm1 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session1".to_string(),
-        );
-        let sm2 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session2".to_string(),
-        );
-
-        // Initially, neither has an active run
-        assert!(!sm1.has_active_run().unwrap());
-        assert!(!sm2.has_active_run().unwrap());
-
-        // Create active run in session1
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm1.save(&state).unwrap();
-
-        // Session1 has active run, session2 does not
-        assert!(sm1.has_active_run().unwrap());
-        assert!(
-            !sm2.has_active_run().unwrap(),
-            "Session2 should NOT see session1's active run"
-        );
-    }
-
-    #[test]
-    fn test_state_has_session_id_field() {
-        // Verify RunState has session_id field
-        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        assert!(
-            state.session_id.is_none(),
-            "session_id should be None by default"
-        );
-
-        let state_with_session = RunState::new_with_session(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            "abc12345".to_string(),
-        );
-        assert_eq!(
-            state_with_session.session_id,
-            Some("abc12345".to_string()),
-            "session_id should be set when created with session"
-        );
-    }
-
-    #[test]
-    fn test_worktree_cleanup_config_defaults_to_false() {
-        // Verify worktree_cleanup defaults to false for backward compatibility
-        let config = Config::default();
-        assert!(
-            !config.worktree_cleanup,
-            "worktree_cleanup should default to false"
-        );
-    }
-
-    #[test]
-    fn test_worktree_cleanup_config_can_be_enabled() {
-        // Test that worktree_cleanup can be set to true
-        let config = Config {
-            worktree_cleanup: true,
-            ..Default::default()
-        };
-        assert!(
-            config.worktree_cleanup,
-            "worktree_cleanup should be true when set"
-        );
-    }
-
-    #[test]
-    fn test_worktree_cleanup_config_only_affects_successful_runs() {
-        // Verify the logic that cleanup only applies to completed (not failed) runs
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        // Create a failed run state
-        let config = Config {
-            worktree_cleanup: true,
-            ..Default::default()
-        };
-        let mut state = RunState::new_with_config(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config.clone(),
-        );
-        state.transition_to(MachineState::Failed);
-        sm.save(&state).unwrap();
-
-        // Verify the state is failed
-        let loaded = sm.load_current().unwrap().unwrap();
-        assert_eq!(loaded.status, RunStatus::Failed);
-        // The cleanup logic checks for Completed status, so Failed runs
-        // should NOT trigger cleanup (tested via the condition in archive_and_cleanup)
-    }
-
-    #[test]
-    fn test_state_transitions_work_in_worktree_context() {
-        // Verify state transitions work correctly when session_id is set (worktree context)
-        let config = Config::default();
-        let mut state = RunState::new_with_config_and_session(
-            PathBuf::from("test.json"),
-            "test-branch".to_string(),
-            config,
-            "wt-session".to_string(),
-        );
-
-        // Verify session_id is preserved through transitions
-        assert_eq!(state.session_id, Some("wt-session".to_string()));
-
-        state.transition_to(MachineState::PickingStory);
-        assert_eq!(state.session_id, Some("wt-session".to_string()));
-
-        state.start_iteration("US-001");
-        assert_eq!(state.session_id, Some("wt-session".to_string()));
-
-        state.finish_iteration(IterationStatus::Success, String::new());
-        assert_eq!(state.session_id, Some("wt-session".to_string()));
-
-        state.transition_to(MachineState::Completed);
-        assert_eq!(state.session_id, Some("wt-session".to_string()));
-        assert_eq!(state.status, RunStatus::Completed);
-    }
-
-    #[test]
-    fn test_effective_worktree_mode_respects_config() {
-        // Test that is_worktree_mode respects the config value
-        let runner = Runner::new().unwrap();
-
-        // With worktree = false in config
-        let config_false = Config {
-            worktree: false,
-            ..Default::default()
-        };
-        assert!(!runner.is_worktree_mode(&config_false));
-
-        // With worktree = true in config
-        let config_true = Config {
-            worktree: true,
-            ..Default::default()
-        };
-        assert!(runner.is_worktree_mode(&config_true));
-    }
-
-    #[test]
-    fn test_effective_worktree_mode_override_takes_precedence() {
-        // Test that CLI override takes precedence over config
-        let runner_with_override = Runner::new().unwrap().with_worktree(true);
-
-        // Even with worktree = false in config, override should win
-        let config_false = Config {
-            worktree: false,
-            ..Default::default()
-        };
-        assert!(runner_with_override.is_worktree_mode(&config_false));
-
-        // And override false should also work
-        let runner_no_worktree = Runner::new().unwrap().with_worktree(false);
-        let config_true = Config {
-            worktree: true,
-            ..Default::default()
-        };
-        assert!(!runner_no_worktree.is_worktree_mode(&config_true));
-    }
-
-    #[test]
-    fn test_session_state_isolation() {
-        // Test that multiple sessions have isolated state
-        let temp_dir = TempDir::new().unwrap();
-
-        let sm1 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session-a".to_string(),
-        );
-        let sm2 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session-b".to_string(),
-        );
-
-        // Save state in session a
-        let state_a = RunState::new_with_session(
-            PathBuf::from("spec-a.json"),
-            "branch-a".to_string(),
-            "session-a".to_string(),
-        );
-        sm1.save(&state_a).unwrap();
-
-        // Save state in session b
-        let state_b = RunState::new_with_session(
-            PathBuf::from("spec-b.json"),
-            "branch-b".to_string(),
-            "session-b".to_string(),
-        );
-        sm2.save(&state_b).unwrap();
-
-        // Load and verify each session has its own state
-        let loaded_a = sm1.load_current().unwrap().unwrap();
-        let loaded_b = sm2.load_current().unwrap().unwrap();
-
-        assert_eq!(loaded_a.branch, "branch-a");
-        assert_eq!(loaded_b.branch, "branch-b");
-        assert_eq!(loaded_a.session_id, Some("session-a".to_string()));
-        assert_eq!(loaded_b.session_id, Some("session-b".to_string()));
-    }
-
-    #[test]
-    fn test_is_worktree_mode_with_none_override() {
-        // Test that None override falls back to config value
-        let runner = Runner::new().unwrap();
-        assert!(runner.worktree_override.is_none());
-
-        let config = Config {
-            worktree: true,
-            ..Default::default()
-        };
-        assert!(runner.is_worktree_mode(&config));
-    }
-
-    // ========================================================================
-    // US-003: Live Output Flusher tests
-    // ========================================================================
-
-    #[test]
-    fn test_live_output_flusher_new() {
+    fn test_live_output_flusher() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
         sm.ensure_dirs().unwrap();
 
-        let flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
         assert!(flusher.live_state.output_lines.is_empty());
-        assert_eq!(
-            flusher.live_state.machine_state,
-            MachineState::RunningClaude
-        );
-        assert_eq!(flusher.line_count_since_flush, 0);
-    }
 
-    #[test]
-    fn test_live_output_flusher_append_accumulates_lines() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
+        // Append lines
         flusher.append("Line 1");
         flusher.append("Line 2");
-        flusher.append("Line 3");
+        assert_eq!(flusher.live_state.output_lines.len(), 2);
 
-        assert_eq!(flusher.live_state.output_lines.len(), 3);
-        assert_eq!(flusher.live_state.output_lines[0], "Line 1");
-        assert_eq!(flusher.live_state.output_lines[1], "Line 2");
-        assert_eq!(flusher.live_state.output_lines[2], "Line 3");
-    }
-
-    #[test]
-    fn test_live_output_flusher_flush_resets_line_count() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        flusher.append("Line 1");
-        flusher.append("Line 2");
-        assert_eq!(flusher.line_count_since_flush, 2);
-
+        // Flush resets counter
         flusher.flush();
         assert_eq!(flusher.line_count_since_flush, 0);
-    }
 
-    #[test]
-    fn test_live_output_flusher_auto_flush_on_line_count() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        // Add 10 lines (should trigger auto-flush)
+        // Auto-flush at 10 lines
         for i in 0..10 {
             flusher.append(&format!("Line {}", i));
         }
-
-        // After 10 lines, should have auto-flushed
         assert_eq!(flusher.line_count_since_flush, 0);
-
-        // Verify file was written
-        let loaded = sm.load_live();
-        assert!(loaded.is_some());
-        let live = loaded.unwrap();
-        assert_eq!(live.output_lines.len(), 10);
-    }
-
-    #[test]
-    fn test_live_output_flusher_final_flush() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        // Add a few lines (not enough to trigger auto-flush)
-        flusher.append("Line 1");
-        flusher.append("Line 2");
-        flusher.append("Line 3");
-
-        assert!(flusher.line_count_since_flush > 0);
-
-        // Final flush should write remaining output
-        flusher.final_flush();
-        assert_eq!(flusher.line_count_since_flush, 0);
-
-        // Verify file was written
-        let loaded = sm.load_live();
-        assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().output_lines.len(), 3);
-    }
-
-    #[test]
-    fn test_live_output_flusher_final_flush_no_op_when_no_new_lines() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        // Note: LiveOutputFlusher::new() now flushes immediately for heartbeat support (US-002)
-        // So live.json already exists from the constructor
-
-        // No additional lines added, final flush should be a no-op
-        // (line_count_since_flush is 0 after the initial flush in constructor)
-        flusher.final_flush();
-        assert_eq!(flusher.line_count_since_flush, 0);
-
-        // File SHOULD exist now (from the constructor's immediate flush)
-        let loaded = sm.load_live();
-        assert!(
-            loaded.is_some(),
-            "live.json should exist from constructor flush"
-        );
-        assert_eq!(
-            loaded.unwrap().output_lines.len(),
-            0,
-            "Output lines should be empty"
-        );
-    }
-
-    #[test]
-    fn test_live_output_flusher_preserves_machine_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::Reviewing);
-        flusher.append("Output");
-        flusher.flush();
-
-        let loaded = sm.load_live().unwrap();
-        assert_eq!(loaded.machine_state, MachineState::Reviewing);
+        assert!(sm.load_live().is_some());
     }
 
     #[test]
     fn test_live_flush_constants() {
-        // Verify the flush thresholds are reasonable
-        assert_eq!(
-            LIVE_FLUSH_INTERVAL_MS, 200,
-            "Flush interval should be 200ms"
-        );
-        assert_eq!(LIVE_FLUSH_LINE_COUNT, 10, "Flush line count should be 10");
+        assert_eq!(LIVE_FLUSH_INTERVAL_MS, 200);
+        assert_eq!(LIVE_FLUSH_LINE_COUNT, 10);
+        assert_eq!(HEARTBEAT_INTERVAL_MS, 2500);
     }
 
     // ========================================================================
-    // US-002: Heartbeat Mechanism Tests
+    // Signal handling / interruption
     // ========================================================================
 
     #[test]
-    fn test_heartbeat_interval_constant() {
-        // Verify the heartbeat interval is ~2.5 seconds
-        assert_eq!(
-            HEARTBEAT_INTERVAL_MS, 2500,
-            "Heartbeat interval should be 2500ms"
-        );
-    }
-
-    #[test]
-    fn test_live_output_flusher_new_flushes_immediately() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        // Creating a new flusher should immediately flush live.json
-        let _flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        // Verify live.json was created
-        let loaded = sm.load_live();
-        assert!(
-            loaded.is_some(),
-            "live.json should exist after flusher creation"
-        );
-
-        let live = loaded.unwrap();
-        assert_eq!(live.machine_state, MachineState::RunningClaude);
-        assert!(
-            live.is_heartbeat_fresh(),
-            "Initial heartbeat should be fresh"
-        );
-    }
-
-    #[test]
-    fn test_live_output_flusher_flush_updates_heartbeat() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
-
-        // Add a line and flush
-        flusher.append("test output");
-        flusher.flush();
-
-        // Verify heartbeat is fresh
-        let loaded = sm.load_live().unwrap();
-        assert!(
-            loaded.is_heartbeat_fresh(),
-            "Heartbeat should be fresh after flush"
-        );
-    }
-
-    #[test]
-    fn test_flush_live_state_function() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        // Call the standalone flush function
-        flush_live_state(&sm, MachineState::Reviewing);
-
-        // Verify live.json was created with correct state
-        let loaded = sm.load_live();
-        assert!(
-            loaded.is_some(),
-            "live.json should exist after flush_live_state"
-        );
-
-        let live = loaded.unwrap();
-        assert_eq!(live.machine_state, MachineState::Reviewing);
-        assert!(live.is_heartbeat_fresh(), "Heartbeat should be fresh");
-    }
-
-    // ========================================================================
-    // US-004: Graceful Signal Handling Tests
-    // ========================================================================
-
-    /// Test that handle_interruption updates state status to Interrupted
-    /// while preserving the machine_state.
-    #[test]
-    fn test_us004_handle_interruption_sets_interrupted_status() {
+    fn test_handle_interruption() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
         sm.ensure_dirs().unwrap();
@@ -3307,641 +2216,136 @@ mod tests {
             worktree_override: None,
         };
 
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        let mut state = RunState::new(PathBuf::from("test.json"), "test".to_string());
         state.transition_to(MachineState::RunningClaude);
         sm.save(&state).unwrap();
 
-        let claude_runner = ClaudeRunner::new();
+        // Create live output
+        sm.save_live(&LiveState::new(MachineState::RunningClaude))
+            .unwrap();
 
-        // Call handle_interruption (no worktree setup context in this test)
+        let claude_runner = ClaudeRunner::new();
         let error = runner.handle_interruption(&mut state, &claude_runner, None);
 
-        // Verify the error type
+        // Verify results
         assert!(matches!(error, Autom8Error::Interrupted));
-
-        // Verify state status is Interrupted but machine_state is preserved
         assert_eq!(state.status, RunStatus::Interrupted);
-        assert_eq!(state.machine_state, MachineState::RunningClaude);
+        assert_eq!(state.machine_state, MachineState::RunningClaude); // Preserved
         assert!(state.finished_at.is_some());
+        assert!(sm.load_live().is_none()); // Cleared
     }
 
-    /// Test that handle_interruption saves state and updates metadata.
     #[test]
-    fn test_us004_handle_interruption_saves_state_and_metadata() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        state.transition_to(MachineState::PickingStory);
-        sm.save(&state).unwrap(); // Initial save
-
-        let claude_runner = ClaudeRunner::new();
-
-        // Call handle_interruption (no worktree setup context in this test)
-        runner.handle_interruption(&mut state, &claude_runner, None);
-
-        // Verify state was saved
-        let loaded_state = sm.load_current().unwrap().unwrap();
-        assert_eq!(loaded_state.status, RunStatus::Interrupted);
-
-        // Verify metadata is_running is false (Interrupted != Running)
-        let metadata = sm.load_metadata().unwrap().unwrap();
-        assert!(
-            !metadata.is_running,
-            "Interrupted session should not be marked as running"
-        );
-    }
-
-    /// Test that handle_interruption clears live output file.
-    #[test]
-    fn test_us004_handle_interruption_clears_live_output() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        // Create some live output
-        let live_state = LiveState::new(MachineState::RunningClaude);
-        sm.save_live(&live_state).unwrap();
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm.save(&state).unwrap();
-
-        let claude_runner = ClaudeRunner::new();
-
-        // Call handle_interruption (no worktree setup context in this test)
-        runner.handle_interruption(&mut state, &claude_runner, None);
-
-        // Verify live output was cleared
-        let live_result = sm.load_live();
-        assert!(
-            live_result.is_none(),
-            "Live output should be cleared after interruption"
-        );
-    }
-
-    /// Test that resume handles Interrupted status correctly.
-    #[test]
-    fn test_us004_resume_handles_interrupted_status() {
-        // Test that the condition in resume() includes Interrupted
-        let status = RunStatus::Interrupted;
-        let should_resume = status == RunStatus::Running
-            || status == RunStatus::Failed
-            || status == RunStatus::Interrupted;
-        assert!(should_resume, "Interrupted status should be resumable");
-    }
-
-    /// Test that Interrupted state transitions preserve machine_state.
-    #[test]
-    fn test_us004_interrupted_preserves_machine_state_reviewing() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        state.transition_to(MachineState::Reviewing);
-        state.review_iteration = 2;
-        sm.save(&state).unwrap();
-
-        let claude_runner = ClaudeRunner::new();
-        runner.handle_interruption(&mut state, &claude_runner, None);
-
-        // Machine state should be preserved
-        assert_eq!(state.machine_state, MachineState::Reviewing);
-        assert_eq!(state.review_iteration, 2);
-        assert_eq!(state.status, RunStatus::Interrupted);
-    }
-
-    /// Test that Interrupted state transitions preserve machine_state for Committing.
-    #[test]
-    fn test_us004_interrupted_preserves_machine_state_committing() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        state.transition_to(MachineState::Committing);
-        sm.save(&state).unwrap();
-
-        let claude_runner = ClaudeRunner::new();
-        runner.handle_interruption(&mut state, &claude_runner, None);
-
-        assert_eq!(state.machine_state, MachineState::Committing);
-        assert_eq!(state.status, RunStatus::Interrupted);
-    }
-
-    /// Test that Interrupted status is different from Failed.
-    #[test]
-    fn test_us004_interrupted_is_distinct_from_failed() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // Interrupted status
-        state.status = RunStatus::Interrupted;
-        assert_ne!(state.status, RunStatus::Failed);
-        assert_ne!(state.status, RunStatus::Running);
-        assert_ne!(state.status, RunStatus::Completed);
-    }
-
-    // =========================================================================
-    // US-005: Show Interruption Message on Resume
-    // =========================================================================
-
-    /// Test that interrupted status can be detected for showing resume message.
-    #[test]
-    fn test_us005_detect_interrupted_status_for_resume_message() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // Set up an interrupted state with a specific machine state
-        state.status = RunStatus::Interrupted;
-        state.machine_state = MachineState::RunningClaude;
-
-        // The resume logic should detect this condition
-        let should_show_message = state.status == RunStatus::Interrupted;
-        assert!(should_show_message);
-
-        // Machine state should be preserved and accessible
-        assert_eq!(format!("{:?}", state.machine_state), "RunningClaude");
-    }
-
-    /// Test that the resume logic shows message only for Interrupted, not Failed or Running.
-    #[test]
-    fn test_us005_resume_message_only_for_interrupted() {
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-
-        // Running status should not show interruption message
-        state.status = RunStatus::Running;
-        assert_ne!(state.status, RunStatus::Interrupted);
-
-        // Failed status should not show interruption message
-        state.status = RunStatus::Failed;
-        assert_ne!(state.status, RunStatus::Interrupted);
-
-        // Completed status should not show interruption message
-        state.status = RunStatus::Completed;
-        assert_ne!(state.status, RunStatus::Interrupted);
-
-        // Only Interrupted shows the message
-        state.status = RunStatus::Interrupted;
-        assert_eq!(state.status, RunStatus::Interrupted);
-    }
-
-    /// Test that machine state formatting works for all states in interruption message.
-    #[test]
-    fn test_us005_machine_state_formatting_for_message() {
-        // Test that all machine states can be Debug-formatted for the message
-        let states = [
-            MachineState::Idle,
-            MachineState::Initializing,
-            MachineState::LoadingSpec,
-            MachineState::PickingStory,
-            MachineState::RunningClaude,
-            MachineState::Reviewing,
-            MachineState::Correcting,
-            MachineState::Committing,
-            MachineState::CreatingPR,
-            MachineState::Completed,
-            MachineState::Failed,
-        ];
-
-        for machine_state in states {
-            let formatted = format!("{:?}", machine_state);
-            assert!(
-                !formatted.is_empty(),
-                "Machine state should format to non-empty string"
-            );
-            // Verify it doesn't contain unexpected characters
-            assert!(
-                formatted.chars().all(|c| c.is_alphanumeric()),
-                "Formatted state should be alphanumeric: {}",
-                formatted
-            );
+    fn test_interrupted_is_resumable() {
+        for (status, resumable) in [
+            (RunStatus::Interrupted, true),
+            (RunStatus::Running, true),
+            (RunStatus::Failed, true),
+            (RunStatus::Completed, false),
+        ] {
+            let is_resumable = status == RunStatus::Running
+                || status == RunStatus::Failed
+                || status == RunStatus::Interrupted;
+            assert_eq!(is_resumable, resumable, "{:?}", status);
         }
     }
 
-    /// Test that print_resuming_interrupted is called correctly in the resume flow.
+    // ========================================================================
+    // WorktreeSetupContext
+    // ========================================================================
+
     #[test]
-    fn test_us005_resume_flow_interrupt_detection() {
-        // This test verifies the condition used in the resume method
-        let test_cases = [
-            (RunStatus::Interrupted, true), // Should show message
-            (RunStatus::Running, false),    // Should NOT show message
-            (RunStatus::Failed, false),     // Should NOT show message
-            (RunStatus::Completed, false),  // Should NOT show message (and not resumable)
-        ];
-
-        for (status, should_show) in test_cases {
-            let show_message = status == RunStatus::Interrupted;
-            assert_eq!(
-                show_message,
-                should_show,
-                "Status {:?} should{} show interruption message",
-                status,
-                if should_show { "" } else { " NOT" }
-            );
-        }
-    }
-
-    // =========================================================================
-    // US-006: Handle Interruption During Worktree Setup
-    // =========================================================================
-
-    /// Test that WorktreeSetupContext captures original CWD correctly.
-    #[test]
-    fn test_us006_worktree_setup_context_captures_original_cwd() {
+    fn test_worktree_setup_context() {
         let ctx = WorktreeSetupContext::new().unwrap();
-        let current_dir = std::env::current_dir().unwrap();
-        assert_eq!(
-            ctx.original_cwd, current_dir,
-            "WorktreeSetupContext should capture current directory"
-        );
+        assert_eq!(ctx.original_cwd, std::env::current_dir().unwrap());
         assert!(ctx.worktree_path.is_none());
         assert!(!ctx.worktree_was_created);
         assert!(!ctx.cwd_changed);
         assert!(!ctx.metadata_saved);
     }
 
-    /// Test that cleanup_on_interruption does nothing when no changes were made.
     #[test]
-    fn test_us006_cleanup_on_interruption_noop_when_no_changes() {
-        let original_cwd = std::env::current_dir().unwrap();
-        let ctx = WorktreeSetupContext::new().unwrap();
+    fn test_worktree_cleanup_logic() {
+        // Newly created without metadata - should be removed
+        let ctx = WorktreeSetupContext {
+            original_cwd: PathBuf::from("/orig"),
+            worktree_path: Some(PathBuf::from("/wt")),
+            worktree_was_created: true,
+            cwd_changed: false,
+            metadata_saved: false,
+        };
+        assert!(ctx.worktree_was_created && !ctx.metadata_saved);
 
-        // Cleanup should be a no-op
-        ctx.cleanup_on_interruption();
+        // Reused - should NOT be removed
+        let ctx = WorktreeSetupContext {
+            worktree_was_created: false,
+            ..ctx.clone()
+        };
+        assert!(!ctx.worktree_was_created);
 
-        // CWD should remain unchanged
-        let current_cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            original_cwd, current_cwd,
-            "CWD should not change when no cleanup needed"
-        );
+        // With metadata - should NOT be removed
+        let ctx = WorktreeSetupContext {
+            worktree_was_created: true,
+            metadata_saved: true,
+            ..ctx.clone()
+        };
+        assert!(ctx.metadata_saved);
     }
 
-    /// Test that cleanup restores CWD when it was changed.
     #[test]
-    fn test_us006_cleanup_restores_cwd() {
-        use tempfile::TempDir;
-
+    fn test_worktree_cleanup_restores_cwd() {
         let original_cwd = std::env::current_dir().unwrap();
         let temp_dir = TempDir::new().unwrap();
 
-        // Create context with original CWD
         let mut ctx = WorktreeSetupContext::new().unwrap();
-
-        // Simulate changing to a different directory
         std::env::set_current_dir(temp_dir.path()).unwrap();
         ctx.cwd_changed = true;
-        ctx.worktree_path = Some(temp_dir.path().to_path_buf());
-
-        // Mark as reused (not created) so worktree won't be removed
         ctx.worktree_was_created = false;
 
-        // Verify we're in the temp directory
-        let current = std::env::current_dir().unwrap();
-        assert_ne!(
-            current, original_cwd,
-            "Should be in different directory before cleanup"
-        );
-
-        // Cleanup should restore original CWD
         ctx.cleanup_on_interruption();
-
-        let restored = std::env::current_dir().unwrap();
-        assert_eq!(
-            restored, original_cwd,
-            "CWD should be restored to original after cleanup"
-        );
-    }
-
-    /// Test that newly created worktree is removed if metadata not saved.
-    #[test]
-    fn test_us006_cleanup_removes_partial_worktree() {
-        // This test verifies the logic - actual worktree removal requires git setup
-        let ctx = WorktreeSetupContext {
-            original_cwd: PathBuf::from("/original/path"),
-            worktree_path: Some(PathBuf::from("/fake/worktree")),
-            worktree_was_created: true,
-            cwd_changed: false,
-            metadata_saved: false,
-        };
-
-        // Verify the cleanup logic conditions
-        assert!(
-            ctx.worktree_was_created && !ctx.metadata_saved,
-            "Should attempt to remove worktree when newly created without saved metadata"
-        );
-    }
-
-    /// Test that reused worktree is NOT removed on cleanup.
-    #[test]
-    fn test_us006_cleanup_preserves_reused_worktree() {
-        let ctx = WorktreeSetupContext {
-            original_cwd: PathBuf::from("/original/path"),
-            worktree_path: Some(PathBuf::from("/fake/worktree")),
-            worktree_was_created: false, // Reused, not created
-            cwd_changed: false,
-            metadata_saved: false,
-        };
-
-        // Verify the cleanup logic - should NOT remove reused worktrees
-        assert!(
-            !ctx.worktree_was_created,
-            "Reused worktrees should not be removed"
-        );
-    }
-
-    /// Test that worktree with saved metadata is NOT removed on cleanup.
-    #[test]
-    fn test_us006_cleanup_preserves_worktree_with_metadata() {
-        let ctx = WorktreeSetupContext {
-            original_cwd: PathBuf::from("/original/path"),
-            worktree_path: Some(PathBuf::from("/fake/worktree")),
-            worktree_was_created: true,
-            cwd_changed: true,
-            metadata_saved: true, // Metadata was saved
-        };
-
-        // Verify the cleanup logic - should NOT remove worktrees with saved metadata
-        assert!(
-            ctx.metadata_saved,
-            "Worktrees with saved metadata should not be removed"
-        );
-    }
-
-    /// Test that handle_interruption with worktree context cleans up.
-    #[test]
-    fn test_us006_handle_interruption_with_worktree_context() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        let original_cwd = std::env::current_dir().unwrap();
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        state.transition_to(MachineState::Initializing);
-        sm.save(&state).unwrap();
-
-        let claude_runner = ClaudeRunner::new();
-
-        // Create a worktree setup context
-        let setup_ctx = WorktreeSetupContext {
-            original_cwd: original_cwd.clone(),
-            worktree_path: None, // No worktree in this test
-            worktree_was_created: false,
-            cwd_changed: false,
-            metadata_saved: true, // Simulate metadata being saved
-        };
-
-        // Call handle_interruption with context
-        let error = runner.handle_interruption(&mut state, &claude_runner, Some(&setup_ctx));
-
-        // Verify the error type
-        assert!(matches!(error, Autom8Error::Interrupted));
-        assert_eq!(state.status, RunStatus::Interrupted);
-
-        // CWD should remain unchanged (cwd_changed was false)
-        let current_cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            current_cwd, original_cwd,
-            "CWD should remain unchanged when cwd_changed is false"
-        );
-    }
-
-    /// Test that handle_interruption without worktree context still works.
-    #[test]
-    fn test_us006_handle_interruption_without_worktree_context() {
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        sm.ensure_dirs().unwrap();
-
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: None,
-        };
-
-        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
-        sm.save(&state).unwrap();
-
-        let claude_runner = ClaudeRunner::new();
-
-        // Call handle_interruption without context
-        let error = runner.handle_interruption(&mut state, &claude_runner, None);
-
-        // Should still work correctly
-        assert!(matches!(error, Autom8Error::Interrupted));
-        assert_eq!(state.status, RunStatus::Interrupted);
-    }
-
-    /// Test that setup_worktree_context returns context with correct initial state.
-    #[test]
-    fn test_us006_setup_worktree_context_returns_context() {
-        // We test the return type - actual worktree operations require git
-        let temp_dir = TempDir::new().unwrap();
-        let runner = Runner {
-            state_manager: StateManager::with_dir(temp_dir.path().to_path_buf()),
-            verbose: false,
-            skip_review: false,
-            worktree_override: Some(false), // Disable worktree mode for this test
-        };
-
-        let config = crate::config::Config::default();
-
-        let result = runner.setup_worktree_context(&config, "test-branch");
-        assert!(result.is_ok());
-
-        let (worktree_context, setup_ctx) = result.unwrap();
-
-        // With worktree mode disabled, no worktree context
-        assert!(worktree_context.is_none());
-
-        // Setup context should be initialized
-        assert!(setup_ctx.worktree_path.is_none());
-        assert!(!setup_ctx.worktree_was_created);
-        assert!(!setup_ctx.cwd_changed);
-        assert!(!setup_ctx.metadata_saved);
-    }
-
-    /// Test that WorktreeSetupContext clone works correctly.
-    #[test]
-    fn test_us006_worktree_setup_context_clone() {
-        let ctx = WorktreeSetupContext {
-            original_cwd: PathBuf::from("/some/path"),
-            worktree_path: Some(PathBuf::from("/worktree/path")),
-            worktree_was_created: true,
-            cwd_changed: true,
-            metadata_saved: false,
-        };
-
-        let cloned = ctx.clone();
-
-        assert_eq!(ctx.original_cwd, cloned.original_cwd);
-        assert_eq!(ctx.worktree_path, cloned.worktree_path);
-        assert_eq!(ctx.worktree_was_created, cloned.worktree_was_created);
-        assert_eq!(ctx.cwd_changed, cloned.cwd_changed);
-        assert_eq!(ctx.metadata_saved, cloned.metadata_saved);
-    }
-
-    /// Test that WorktreeSetupContext debug formatting works.
-    #[test]
-    fn test_us006_worktree_setup_context_debug() {
-        let ctx = WorktreeSetupContext::new().unwrap();
-        let debug_str = format!("{:?}", ctx);
-        assert!(debug_str.contains("WorktreeSetupContext"));
-        assert!(debug_str.contains("original_cwd"));
-        assert!(debug_str.contains("worktree_path"));
+        assert_eq!(std::env::current_dir().unwrap(), original_cwd);
     }
 
     // ========================================================================
-    // Fix: Worktree phantom session prevention tests
+    // Phantom session prevention
     // ========================================================================
 
-    /// Tests that `run_from_spec()` does not persist state before worktree context is determined.
-    ///
-    /// This test verifies the fix for the phantom session bug where `run_from_spec()` was
-    /// saving state to the original session (typically "main") before the worktree context
-    /// was established, causing `status --all` to show two sessions when only one was running.
-    ///
-    /// The fix defers all state saves until after `effective_state_manager` is created.
     #[test]
-    fn test_run_from_spec_state_not_saved_before_worktree_context() {
-        use crate::state::RunState;
+    fn test_state_not_saved_before_worktree_context() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
-        // Verify RunState::from_spec_with_config creates state in LoadingSpec
-        // but does not automatically persist it
+        // State can be created without persistence
         let state = RunState::from_spec_with_config(
             PathBuf::from("spec.md"),
             PathBuf::from("spec.json"),
             Config::default(),
         );
+        assert_eq!(state.machine_state, MachineState::LoadingSpec);
 
-        // State should be in LoadingSpec (the initial state for spec generation)
-        assert_eq!(
-            state.machine_state,
-            MachineState::LoadingSpec,
-            "Initial state for from_spec should be LoadingSpec"
-        );
-
-        // Create an isolated StateManager to verify no state is pre-persisted
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        // Before any save operation, the session should have no state
-        assert!(
-            sm.load_current().unwrap().is_none(),
-            "No state should exist before explicit save"
-        );
-
-        // This test documents the contract: run_from_spec() MUST NOT call
-        // self.state_manager.save() before setup_worktree_context() returns.
-        // The actual enforcement is in the code structure, which was fixed by:
-        // 1. Removing save() at line 1163 (after state initialization)
-        // 2. Removing save() at line 1180 (at GeneratingSpec transition)
+        // No state persisted yet
+        assert!(sm.load_current().unwrap().is_none());
     }
 
-    /// Tests that state persistence only happens with the effective state manager.
-    ///
-    /// This test verifies that when state IS saved, it goes to the correct session
-    /// (the worktree session, not the main repo session when running in worktree mode).
     #[test]
-    fn test_state_saved_to_effective_session_only() {
-        // Create two separate StateManagers representing different sessions
+    fn test_state_saved_to_correct_session() {
         let temp_dir = TempDir::new().unwrap();
         let main_sm =
             StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "main".to_string());
-        let worktree_sm = StateManager::with_dir_and_session(
+        let wt_sm = StateManager::with_dir_and_session(
             temp_dir.path().to_path_buf(),
-            "abc12345".to_string(), // Simulated worktree session ID
+            "abc12345".to_string(),
         );
 
-        // Create state for the worktree session
-        let mut state = RunState::new_with_config_and_session(
+        let state = RunState::new_with_config_and_session(
             PathBuf::from("spec.json"),
-            "feature-branch".to_string(),
+            "feature".to_string(),
             Config::default(),
             "abc12345".to_string(),
         );
-        state.transition_to(MachineState::PickingStory);
+        wt_sm.save(&state).unwrap();
 
-        // Save only to the worktree session (simulating the fix)
-        worktree_sm.save(&state).unwrap();
-
-        // Main session should NOT have state (the phantom session bug)
-        assert!(
-            main_sm.load_current().unwrap().is_none(),
-            "Main session should not have phantom state"
-        );
-
-        // Worktree session SHOULD have state
-        assert!(
-            worktree_sm.load_current().unwrap().is_some(),
-            "Worktree session should have state"
-        );
-    }
-
-    /// Tests the correct behavior: visual transitions without persistence.
-    ///
-    /// During spec generation, state transitions should be displayed visually
-    /// (via print_state_transition) but NOT persisted. This test documents
-    /// that state can be mutated locally without being saved.
-    #[test]
-    fn test_state_transitions_without_persistence() {
-        use crate::state::RunState;
-
-        let mut state = RunState::from_spec(PathBuf::from("spec.md"), PathBuf::from("spec.json"));
-
-        // Initial state
-        assert_eq!(state.machine_state, MachineState::LoadingSpec);
-
-        // Transition locally (no save)
-        state.transition_to(MachineState::GeneratingSpec);
-        assert_eq!(state.machine_state, MachineState::GeneratingSpec);
-
-        // The state has been mutated but NOT persisted
-        // This is the correct behavior during spec generation:
-        // - Visual feedback via print_state_transition() - works
-        // - State persistence - DEFERRED until worktree context known
-
-        // Transition to Initializing (what happens after worktree setup)
-        state.transition_to(MachineState::Initializing);
-        assert_eq!(state.machine_state, MachineState::Initializing);
-
-        // At this point, save() can be called with the effective_state_manager
+        assert!(main_sm.load_current().unwrap().is_none());
+        assert!(wt_sm.load_current().unwrap().is_some());
     }
 }

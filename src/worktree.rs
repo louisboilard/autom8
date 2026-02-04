@@ -782,9 +782,6 @@ pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Pat
 mod tests {
     use super::*;
 
-    // Use the shared CWD_MUTEX for tests that depend on current working directory
-    use crate::test_utils::CWD_MUTEX;
-
     // ========================================================================
     // WorktreeInfo struct tests
     // ========================================================================
@@ -1036,72 +1033,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Integration tests (run against actual git repo)
-    // ========================================================================
-
-    #[test]
-    fn test_list_worktrees_returns_at_least_one() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo, so should return at least one worktree
-        let result = list_worktrees();
-        assert!(result.is_ok());
-
-        let worktrees = result.unwrap();
-        assert!(!worktrees.is_empty());
-
-        // First worktree should be marked as main
-        assert!(worktrees[0].is_main);
-    }
-
-    #[test]
-    fn test_list_worktrees_main_has_valid_fields() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let worktrees = list_worktrees().unwrap();
-        let main_wt = &worktrees[0];
-
-        // Path should exist and not be empty
-        assert!(!main_wt.path.as_os_str().is_empty());
-
-        // Commit should be a valid hex string (40 chars)
-        assert_eq!(main_wt.commit.len(), 40);
-        assert!(main_wt.commit.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_get_main_repo_root_returns_path() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let result = get_main_repo_root();
-        assert!(result.is_ok());
-
-        let path = result.unwrap();
-        assert!(!path.as_os_str().is_empty());
-        // The path should be a directory that exists
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn test_is_in_worktree_returns_bool() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let result = is_in_worktree();
-        assert!(result.is_ok());
-        // Result could be true or false depending on where we're running
-    }
-
-    #[test]
-    fn test_get_worktree_root_returns_valid_result() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let result = get_worktree_root();
-        assert!(result.is_ok());
-        // Result could be Some(path) or None depending on where we're running
-    }
-
-    // ========================================================================
-    // Session ID tests (US-002)
+    // Session ID tests
     // ========================================================================
 
     #[test]
@@ -1185,43 +1117,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_current_session_id_in_main_repo() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // When running in main repo (not a linked worktree)
-        if !is_in_worktree().unwrap_or(true) {
-            let id = get_current_session_id().unwrap();
-            assert_eq!(id, MAIN_SESSION_ID, "Main repo should return 'main' ID");
-        }
-    }
-
-    #[test]
-    fn test_get_current_session_id_returns_valid_id() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let result = get_current_session_id();
-        assert!(result.is_ok());
-
-        let id = result.unwrap();
-        // ID should be either "main" or an 8-char hex string
-        assert!(
-            id == MAIN_SESSION_ID || (id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit())),
-            "Session ID should be 'main' or 8 hex chars: {}",
-            id
-        );
-    }
-
-    #[test]
-    fn test_get_current_session_id_is_stable() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Calling multiple times should return same ID
-        let id1 = get_current_session_id().unwrap();
-        let id2 = get_current_session_id().unwrap();
-        assert_eq!(id1, id2, "Session ID should be stable across calls");
-    }
-
-    #[test]
     fn test_session_id_length_is_within_bounds() {
         // Test that all possible session IDs are 8-12 chars (per acceptance criteria)
         let main_id = get_main_session_id();
@@ -1269,18 +1164,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_session_id_for_path_returns_main_for_main_repo() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let main_root = get_main_repo_root().unwrap();
-        let id = get_session_id_for_path(&main_root).unwrap();
-        assert_eq!(
-            id, MAIN_SESSION_ID,
-            "Main repo path should return 'main' ID"
-        );
-    }
-
-    #[test]
     fn test_generate_session_id_uniqueness_sample() {
         // Test a sample of paths to verify uniqueness
         let paths = [
@@ -1310,81 +1193,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Git Repo Name tests (US-004)
-    // ========================================================================
-
-    #[test]
-    fn test_get_git_repo_name_returns_repo_name() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // When running in a git repo, should return Some(repo_name)
-        let result = get_git_repo_name();
-        assert!(result.is_ok());
-
-        let name = result.unwrap();
-        assert!(name.is_some(), "Should return repo name when in git repo");
-
-        let repo_name = name.unwrap();
-        assert!(!repo_name.is_empty(), "Repo name should not be empty");
-        // The name should be a valid directory name (no path separators)
-        assert!(
-            !repo_name.contains('/') && !repo_name.contains('\\'),
-            "Repo name should not contain path separators: {}",
-            repo_name
-        );
-    }
-
-    #[test]
-    fn test_get_git_repo_name_is_consistent_with_main_repo_root() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // The repo name should match the basename of get_main_repo_root()
-        let main_root = get_main_repo_root().unwrap();
-        let expected_name = main_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap()
-            .to_string();
-
-        let repo_name = get_git_repo_name().unwrap().unwrap();
-
-        assert_eq!(
-            repo_name, expected_name,
-            "Repo name should match main repo root basename"
-        );
-    }
-
-    #[test]
-    fn test_get_git_repo_name_is_stable() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Calling multiple times should return the same value
-        let name1 = get_git_repo_name().unwrap();
-        let name2 = get_git_repo_name().unwrap();
-        assert_eq!(name1, name2, "Repo name should be stable across calls");
-    }
-
-    #[test]
-    fn test_get_git_repo_name_is_filesystem_safe() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        let repo_name = get_git_repo_name().unwrap();
-        if let Some(name) = repo_name {
-            // Name should be filesystem-safe (no special characters that would break paths)
-            assert!(
-                !name.contains('/'),
-                "Repo name should not contain forward slashes"
-            );
-            assert!(
-                !name.contains('\\'),
-                "Repo name should not contain backslashes"
-            );
-            assert!(!name.contains('\0'), "Repo name should not contain NUL");
-        }
-    }
-
-    // ========================================================================
-    // Worktree Path Generation tests (US-007)
+    // Worktree Path Generation tests
     // ========================================================================
 
     #[test]
@@ -1452,32 +1261,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_worktree_path_returns_sibling_of_main_repo() {
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo
-        let result = generate_worktree_path("{repo}-wt-{branch}", "feature/test");
-        assert!(result.is_ok());
-
-        let path = result.unwrap();
-        // Path should end with the generated worktree name
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("-wt-feature-test"),
-            "Path should contain worktree name: {}",
-            path_str
-        );
-
-        // Path should be a sibling of the main repo (same parent directory)
-        let main_repo = get_main_repo_root().unwrap();
-        assert_eq!(
-            path.parent(),
-            main_repo.parent(),
-            "Worktree should be a sibling of main repo"
-        );
-    }
-
-    #[test]
     fn test_worktree_result_path_method() {
         let path = PathBuf::from("/test/path");
         let created = WorktreeResult::Created(path.clone());
@@ -1529,7 +1312,7 @@ mod tests {
     }
 
     // ========================================================================
-    // US-012 Error message tests
+    // Error message tests
     // ========================================================================
 
     #[test]

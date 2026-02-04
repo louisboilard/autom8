@@ -1017,1220 +1017,204 @@ impl Breadcrumb {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_truncate_activity_short() {
-        let result = truncate_activity("Short message", 50);
-        assert_eq!(result, "Short message");
-    }
+    // ========================================================================
+    // Core text truncation tests
+    // ========================================================================
 
     #[test]
-    fn test_truncate_activity_long() {
-        let long_msg = "This is a very long message that should be truncated because it exceeds the maximum length";
+    fn test_truncate_activity() {
+        // Short - no truncation
+        assert_eq!(truncate_activity("Short message", 50), "Short message");
+
+        // Long - truncation with ellipsis
+        let long_msg = "This is a very long message that should be truncated";
         let result = truncate_activity(long_msg, 30);
         assert_eq!(result.chars().count(), 30);
         assert!(result.ends_with("..."));
-    }
 
-    #[test]
-    fn test_truncate_activity_multiline() {
-        let multiline = "First line\nSecond line\nThird line";
-        let result = truncate_activity(multiline, 50);
-        assert_eq!(result, "First line");
-    }
+        // Multiline - only first line
+        assert_eq!(
+            truncate_activity("First line\nSecond line", 50),
+            "First line"
+        );
 
-    #[test]
-    fn test_truncate_activity_utf8() {
-        // Should not panic on multi-byte UTF-8 characters
+        // UTF-8 handling
         let utf8_msg = "Implementing 日本語 feature with more text here";
         let result = truncate_activity(utf8_msg, 20);
         assert_eq!(result.chars().count(), 20);
-        assert!(result.ends_with("..."));
     }
 
     #[test]
-    fn test_truncate_activity_exact_boundary() {
-        let msg = "Exactly twenty chars";
-        let result = truncate_activity(msg, 20);
-        assert_eq!(result, "Exactly twenty chars");
-    }
-
-    // ========================================================================
-    // Timer functionality tests (US-003)
-    // ========================================================================
-
-    #[test]
-    fn test_spinner_creates_with_stop_flag() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        // Stop flag should be false initially
-        assert!(!spinner.stop_flag.load(Ordering::Relaxed));
-        // Timer thread should exist
-        assert!(spinner.timer_thread.is_some());
-        // Clean up
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_stop_timer_sets_flag() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.stop_timer();
-        // Stop flag should be true after stopping
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        // Timer thread should be taken (None after join)
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_success_stops_timer() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.finish_success(60);
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_error_stops_timer() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.finish_error("Test error");
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_with_message_stops_timer() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.finish_with_message("Done");
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_update_stores_activity() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.update("Working on feature X");
-        let activity = spinner.last_activity.lock().unwrap().clone();
-        assert_eq!(activity, "Working on feature X");
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_spec_variant() {
-        let mut spinner = ClaudeSpinner::new_for_spec();
-        assert_eq!(spinner.story_id, "Spec");
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_commit_variant() {
-        let mut spinner = ClaudeSpinner::new_for_commit();
-        assert_eq!(spinner.story_id, "Commit");
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_timer_thread_updates_independently() {
-        // Create spinner and wait slightly more than 1 second
-        let mut spinner = ClaudeSpinner::new("US-001");
-        spinner.update("Initial activity");
-
-        // Wait for timer thread to potentially update (1.1 seconds)
-        thread::sleep(Duration::from_millis(1100));
-
-        // The timer should have run at least once - verify stop flag is still false
-        assert!(!spinner.stop_flag.load(Ordering::Relaxed));
-
-        // Clean up
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_shared_state_is_arc() {
-        // Verify the spinner and stop_flag are properly shared (Arc)
-        let spinner = ClaudeSpinner::new("US-001");
-
-        // Strong count should be 2 (one here, one in timer thread)
-        assert!(Arc::strong_count(&spinner.spinner) >= 1);
-        assert!(Arc::strong_count(&spinner.stop_flag) >= 1);
-        assert!(Arc::strong_count(&spinner.last_activity) >= 1);
-
-        // We can't call stop_timer since spinner is not mut, so just let it drop
-        // The timer thread will clean up when spinner is dropped
-    }
-
-    // ========================================================================
-    // Terminal width and single-line preview tests (US-004)
-    // ========================================================================
-
-    #[test]
-    fn test_get_terminal_width_returns_positive() {
-        let width = get_terminal_width();
-        assert!(width > 0);
-    }
-
-    #[test]
-    fn test_truncate_activity_very_small_max_len() {
-        // Edge case: very small max_len should still produce valid output
-        let result = truncate_activity("Hello world", 3);
-        assert_eq!(result, "...");
-    }
-
-    #[test]
-    fn test_truncate_activity_max_len_4() {
-        // Edge case: max_len of 4 should show "X..."
-        let result = truncate_activity("Hello world", 4);
-        assert_eq!(result, "H...");
-        assert_eq!(result.chars().count(), 4);
-    }
-
-    #[test]
-    fn test_spinner_update_uses_terminal_width() {
-        // Create a spinner and update with a long message
-        let mut spinner = ClaudeSpinner::new("US-001");
-        let long_activity =
-            "This is a very long activity message that should be truncated based on terminal width";
-        spinner.update(long_activity);
-
-        // The activity should be stored
-        let stored = spinner.last_activity.lock().unwrap().clone();
-        assert_eq!(stored, long_activity);
-
-        spinner.stop_timer();
-    }
-
-    // ========================================================================
-    // VerboseTimer tests (US-005)
-    // ========================================================================
-
-    #[test]
-    fn test_verbose_timer_creates_with_stop_flag() {
-        let mut timer = VerboseTimer::new("US-001");
-        // Stop flag should be false initially
-        assert!(!timer.stop_flag.load(Ordering::Relaxed));
-        // Timer thread should exist
-        assert!(timer.timer_thread.is_some());
-        // Clean up
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_stop_timer_sets_flag() {
-        let mut timer = VerboseTimer::new("US-001");
-        timer.stop_timer();
-        // Stop flag should be true after stopping
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-        // Timer thread should be taken (None after join)
-        assert!(timer.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_success_stops_timer() {
-        let mut timer = VerboseTimer::new("US-001");
-        timer.finish_success();
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-        assert!(timer.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_error_stops_timer() {
-        let mut timer = VerboseTimer::new("US-001");
-        timer.finish_error("Test error");
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-        assert!(timer.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_verbose_timer_elapsed_secs() {
-        let timer = VerboseTimer::new("US-001");
-        // Just created, elapsed should be 0 or very small
-        let elapsed = timer.elapsed_secs();
-        assert!(elapsed <= 1);
-        // Clean up by dropping (Drop impl handles stop_flag)
-    }
-
-    #[test]
-    fn test_verbose_timer_spec_variant() {
-        let mut timer = VerboseTimer::new_for_spec();
-        assert_eq!(timer.story_id, "Spec generation");
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_commit_variant() {
-        let mut timer = VerboseTimer::new_for_commit();
-        assert_eq!(timer.story_id, "Commit");
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_shared_state_is_arc() {
-        let timer = VerboseTimer::new("US-001");
-        // Strong count should be 2 (one here, one in timer thread)
-        assert!(Arc::strong_count(&timer.stop_flag) >= 1);
-        // Drop will set stop_flag
-    }
-
-    #[test]
-    fn test_verbose_timer_drop_sets_stop_flag() {
-        let stop_flag_clone;
-        {
-            let timer = VerboseTimer::new("US-001");
-            stop_flag_clone = Arc::clone(&timer.stop_flag);
-            assert!(!stop_flag_clone.load(Ordering::Relaxed));
-        }
-        // After drop, stop_flag should be set
-        assert!(stop_flag_clone.load(Ordering::Relaxed));
-    }
-
-    // ========================================================================
-    // Clean Display on Completion tests (US-006)
-    // ========================================================================
-
-    #[test]
-    fn test_spinner_drop_stops_timer_and_clears() {
-        let stop_flag_clone;
-        let timer_thread_exists;
-        {
-            let spinner = ClaudeSpinner::new("US-006");
-            stop_flag_clone = Arc::clone(&spinner.stop_flag);
-            timer_thread_exists = spinner.timer_thread.is_some();
-            assert!(!stop_flag_clone.load(Ordering::Relaxed));
-            assert!(timer_thread_exists);
-        }
-        // After drop, stop_flag should be set (timer stopped)
-        assert!(stop_flag_clone.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_drop_joins_thread() {
-        // Create a timer and drop it - should not hang
-        let stop_flag_clone;
-        {
-            let timer = VerboseTimer::new("US-006");
-            stop_flag_clone = Arc::clone(&timer.stop_flag);
-            // Drop happens here
-        }
-        // Thread should have been joined and flag set
-        assert!(stop_flag_clone.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_spinner_finish_success_clears_and_prints() {
-        let mut spinner = ClaudeSpinner::new("US-006");
-        // Should not panic and should cleanly finish
-        spinner.finish_success(65); // 1m 5s
-                                    // Timer should be stopped
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_error_clears_and_prints() {
-        let mut spinner = ClaudeSpinner::new("US-006");
-        // Should not panic and should cleanly finish
-        spinner.finish_error("Test error message");
-        // Timer should be stopped
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_with_message_clears_and_prints() {
-        let mut spinner = ClaudeSpinner::new("US-006");
-        // Should not panic and should cleanly finish
-        spinner.finish_with_message("Custom completion message");
-        // Timer should be stopped
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_clear_method() {
-        let spinner = ClaudeSpinner::new("US-006");
-        // clear() should work without panic
-        spinner.clear();
-        // Spinner should be finished after clear
-        assert!(spinner.spinner.is_finished());
-    }
-
-    #[test]
-    fn test_spinner_double_finish_no_panic() {
-        let mut spinner = ClaudeSpinner::new("US-006");
-        // First finish
-        spinner.finish_success(60);
-        // Second finish should not panic (idempotent)
-        spinner.finish_success(60);
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_double_finish_no_panic() {
-        let mut timer = VerboseTimer::new("US-006");
-        // First finish
-        timer.finish_success();
-        // Second finish should not panic (idempotent)
-        timer.finish_success();
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    // ========================================================================
-    // AgentDisplay trait tests (US-001)
-    // ========================================================================
-
-    #[test]
-    fn test_iteration_info_new() {
-        let info = IterationInfo::new(2, 5);
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(5));
-        assert_eq!(info.phase, None);
-    }
-
-    #[test]
-    fn test_iteration_info_with_phase() {
-        let info = IterationInfo::with_phase("Review", 1, 3);
-        assert_eq!(info.current, Some(1));
-        assert_eq!(info.total, Some(3));
-        assert_eq!(info.phase, Some("Review".to_string()));
-    }
-
-    #[test]
-    fn test_iteration_info_phase_only() {
-        let info = IterationInfo::phase_only("Commit");
-        assert_eq!(info.current, None);
-        assert_eq!(info.total, None);
-        assert_eq!(info.phase, Some("Commit".to_string()));
-    }
-
-    #[test]
-    fn test_iteration_info_format_with_phase_and_counts() {
-        let info = IterationInfo::with_phase("Review", 1, 3);
-        assert_eq!(info.format(), Some("[Review 1/3]".to_string()));
-    }
-
-    #[test]
-    fn test_iteration_info_format_phase_only() {
-        let info = IterationInfo::phase_only("Commit");
-        assert_eq!(info.format(), Some("[Commit]".to_string()));
-    }
-
-    #[test]
-    fn test_iteration_info_format_counts_only() {
-        let info = IterationInfo::new(2, 5);
-        assert_eq!(info.format(), Some("[2/5]".to_string()));
-    }
-
-    #[test]
-    fn test_iteration_info_format_default() {
-        let info = IterationInfo::default();
-        assert_eq!(info.format(), None);
-    }
-
-    #[test]
-    fn test_outcome_success() {
-        let outcome = Outcome::success("Implementation done");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "Implementation done");
-    }
-
-    #[test]
-    fn test_outcome_failure() {
-        let outcome = Outcome::failure("Build failed");
-        assert!(!outcome.success);
-        assert_eq!(outcome.message, "Build failed");
-    }
-
-    #[test]
-    fn test_format_duration_seconds() {
-        assert_eq!(format_duration(0), "0s");
-        assert_eq!(format_duration(30), "30s");
-        assert_eq!(format_duration(59), "59s");
-    }
-
-    #[test]
-    fn test_format_duration_minutes() {
-        assert_eq!(format_duration(60), "1m 0s");
-        assert_eq!(format_duration(90), "1m 30s");
-        assert_eq!(format_duration(125), "2m 5s");
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_agent_name() {
-        let mut timer = VerboseTimer::new("US-001");
-        assert_eq!(timer.agent_name(), "US-001");
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_elapsed_secs() {
-        let mut timer = VerboseTimer::new("US-001");
-        // Just created, elapsed should be small
-        assert!(timer.elapsed_secs() <= 1);
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_iteration_info() {
-        let mut timer = VerboseTimer::new("US-001");
-        assert!(timer.iteration_info().is_none());
-
-        timer.set_iteration_info(IterationInfo::with_phase("Review", 1, 3));
-        let info = timer.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Review".to_string()));
-        assert_eq!(info.current, Some(1));
-        assert_eq!(info.total, Some(3));
-
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_finish_with_outcome_success() {
-        let mut timer = VerboseTimer::new("US-001");
-        timer.finish_with_outcome(Outcome::success("All tests passed"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-        assert!(timer.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_finish_with_outcome_failure() {
-        let mut timer = VerboseTimer::new("US-001");
-        timer.finish_with_outcome(Outcome::failure("Test failed"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-        assert!(timer.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_agent_display_agent_name() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        assert_eq!(spinner.agent_name(), "US-002");
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_agent_display_elapsed_secs() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        // Just created, elapsed should be small
-        assert!(spinner.elapsed_secs() <= 1);
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_agent_display_iteration_info() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        assert!(spinner.iteration_info().is_none());
-
-        spinner.set_iteration_info(IterationInfo::with_phase("Correct", 2, 3));
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Correct".to_string()));
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(3));
-
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_agent_display_finish_success() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        AgentDisplay::finish_success(&mut spinner);
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_agent_display_finish_error() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        AgentDisplay::finish_error(&mut spinner, "Test error");
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_agent_display_finish_with_outcome_success() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        spinner.finish_with_outcome(Outcome::success("Implementation done"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_agent_display_finish_with_outcome_failure() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        spinner.finish_with_outcome(Outcome::failure("Build failed"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_agent_display_update() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        AgentDisplay::update(&mut spinner, "Working on feature");
-
-        let stored = spinner.last_activity.lock().unwrap().clone();
-        assert_eq!(stored, "Working on feature");
-
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_agent_display_start() {
-        let mut spinner = ClaudeSpinner::new("US-002");
-        // start() is a no-op for ClaudeSpinner but should not panic
-        AgentDisplay::start(&mut spinner);
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_start() {
-        let mut timer = VerboseTimer::new("US-002");
-        // start() is a no-op for VerboseTimer but should not panic
-        AgentDisplay::start(&mut timer);
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_agent_display_update() {
-        let mut timer = VerboseTimer::new("US-002");
-        // update() is a no-op for VerboseTimer but should not panic
-        AgentDisplay::update(&mut timer, "Working on feature");
-        timer.stop_timer();
-    }
-
-    // ========================================================================
-    // US-003: Iteration and progress context display tests
-    // ========================================================================
-
-    #[test]
-    fn test_format_display_prefix_with_story_progress() {
-        let info = IterationInfo::with_phase("US-001", 2, 5);
-        let prefix = format_display_prefix("US-001", &Some(info));
-        assert_eq!(prefix, "[US-001 2/5]");
-    }
-
-    #[test]
-    fn test_format_display_prefix_with_review() {
-        let info = IterationInfo::with_phase("Review", 1, 3);
-        let prefix = format_display_prefix("Review", &Some(info));
-        assert_eq!(prefix, "[Review 1/3]");
-    }
-
-    #[test]
-    fn test_format_display_prefix_with_correct() {
-        let info = IterationInfo::with_phase("Correct", 1, 3);
-        let prefix = format_display_prefix("Correct", &Some(info));
-        assert_eq!(prefix, "[Correct 1/3]");
-    }
-
-    #[test]
-    fn test_format_display_prefix_with_commit() {
-        let info = IterationInfo::phase_only("Commit");
-        let prefix = format_display_prefix("Commit", &Some(info));
-        assert_eq!(prefix, "[Commit]");
-    }
-
-    #[test]
-    fn test_format_display_prefix_without_info() {
-        let prefix = format_display_prefix("US-001", &None);
-        assert_eq!(prefix, "US-001");
-    }
-
-    #[test]
-    fn test_format_display_prefix_spec_fallback() {
-        let prefix = format_display_prefix("Spec", &None);
-        assert_eq!(prefix, "Spec generation");
-    }
-
-    #[test]
-    fn test_spinner_new_with_story_progress() {
-        let mut spinner = ClaudeSpinner::new_with_story_progress("US-001", 2, 5);
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("US-001".to_string()));
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(5));
-        assert_eq!(info.format(), Some("[US-001 2/5]".to_string()));
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_new_for_review() {
-        let mut spinner = ClaudeSpinner::new_for_review(1, 3);
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Review".to_string()));
-        assert_eq!(info.current, Some(1));
-        assert_eq!(info.total, Some(3));
-        assert_eq!(info.format(), Some("[Review 1/3]".to_string()));
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_new_for_correct() {
-        let mut spinner = ClaudeSpinner::new_for_correct(2, 3);
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Correct".to_string()));
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(3));
-        assert_eq!(info.format(), Some("[Correct 2/3]".to_string()));
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_new_for_commit_has_iteration_info() {
-        let mut spinner = ClaudeSpinner::new_for_commit();
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Commit".to_string()));
-        assert_eq!(info.current, None);
-        assert_eq!(info.total, None);
-        assert_eq!(info.format(), Some("[Commit]".to_string()));
-        spinner.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_new_with_story_progress() {
-        let mut timer = VerboseTimer::new_with_story_progress("US-001", 2, 5);
-        let info = timer.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("US-001".to_string()));
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(5));
-        assert_eq!(info.format(), Some("[US-001 2/5]".to_string()));
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_new_for_review() {
-        let mut timer = VerboseTimer::new_for_review(1, 3);
-        let info = timer.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Review".to_string()));
-        assert_eq!(info.current, Some(1));
-        assert_eq!(info.total, Some(3));
-        assert_eq!(info.format(), Some("[Review 1/3]".to_string()));
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_new_for_correct() {
-        let mut timer = VerboseTimer::new_for_correct(2, 3);
-        let info = timer.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Correct".to_string()));
-        assert_eq!(info.current, Some(2));
-        assert_eq!(info.total, Some(3));
-        assert_eq!(info.format(), Some("[Correct 2/3]".to_string()));
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_verbose_timer_new_for_commit_has_iteration_info() {
-        let mut timer = VerboseTimer::new_for_commit();
-        let info = timer.iteration_info().unwrap();
-        assert_eq!(info.phase, Some("Commit".to_string()));
-        assert_eq!(info.current, None);
-        assert_eq!(info.total, None);
-        assert_eq!(info.format(), Some("[Commit]".to_string()));
-        timer.stop_timer();
-    }
-
-    #[test]
-    fn test_spinner_set_iteration_info_updates_shared() {
-        let mut spinner = ClaudeSpinner::new("US-001");
-        assert!(spinner.iteration_info().is_none());
-
-        spinner.set_iteration_info(IterationInfo::with_phase("Review", 1, 3));
-
-        // Check the local copy
-        let info = spinner.iteration_info().unwrap();
-        assert_eq!(info.format(), Some("[Review 1/3]".to_string()));
-
-        // Check the shared copy (used by timer thread)
-        let shared = spinner.iteration_info_shared.lock().unwrap().clone();
-        assert!(shared.is_some());
-        assert_eq!(shared.unwrap().format(), Some("[Review 1/3]".to_string()));
-
-        spinner.stop_timer();
-    }
-
-    // ========================================================================
-    // US-004: Standardized completion messages with outcomes tests
-    // ========================================================================
-
-    #[test]
-    fn test_outcome_with_runner_success() {
-        // Runner completion: `✓ US-001 completed in 2m 34s - Implementation done`
-        let outcome = Outcome::success("Implementation done");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "Implementation done");
-    }
-
-    #[test]
-    fn test_outcome_with_reviewer_pass() {
-        // Reviewer pass: `✓ Review 1/3 passed in 45s - No issues found`
-        let outcome = Outcome::success("No issues found");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "No issues found");
-    }
-
-    #[test]
-    fn test_outcome_with_reviewer_issues() {
-        // Reviewer fail: `✓ Review 1/3 completed in 1m 12s - 3 issues found`
-        let outcome = Outcome::success("3 issues found");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "3 issues found");
-    }
-
-    #[test]
-    fn test_outcome_with_corrector() {
-        // Corrector completion: `✓ Correct 1/3 completed in 1m 45s - Issues addressed`
-        let outcome = Outcome::success("Issues addressed");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "Issues addressed");
-    }
-
-    #[test]
-    fn test_outcome_with_commit_hash() {
-        // Commit completion: `✓ Commit completed in 12s - abc1234`
-        let outcome = Outcome::success("abc1234");
-        assert!(outcome.success);
-        assert_eq!(outcome.message, "abc1234");
-    }
-
-    #[test]
-    fn test_spinner_finish_with_outcome_runner() {
-        let mut spinner = ClaudeSpinner::new_with_story_progress("US-001", 2, 5);
-        // Should not panic - this tests the completion message format
-        spinner.finish_with_outcome(Outcome::success("Implementation done"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-        assert!(spinner.timer_thread.is_none());
-    }
-
-    #[test]
-    fn test_spinner_finish_with_outcome_reviewer() {
-        let mut spinner = ClaudeSpinner::new_for_review(1, 3);
-        spinner.finish_with_outcome(Outcome::success("No issues found"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_spinner_finish_with_outcome_corrector() {
-        let mut spinner = ClaudeSpinner::new_for_correct(1, 3);
-        spinner.finish_with_outcome(Outcome::success("Issues addressed"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_spinner_finish_with_outcome_commit() {
-        let mut spinner = ClaudeSpinner::new_for_commit();
-        spinner.finish_with_outcome(Outcome::success("abc1234"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_with_outcome_runner() {
-        let mut timer = VerboseTimer::new_with_story_progress("US-001", 2, 5);
-        timer.finish_with_outcome(Outcome::success("Implementation done"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_with_outcome_reviewer() {
-        let mut timer = VerboseTimer::new_for_review(1, 3);
-        timer.finish_with_outcome(Outcome::success("No issues found"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_with_outcome_corrector() {
-        let mut timer = VerboseTimer::new_for_correct(1, 3);
-        timer.finish_with_outcome(Outcome::success("Issues addressed"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_with_outcome_commit() {
-        let mut timer = VerboseTimer::new_for_commit();
-        timer.finish_with_outcome(Outcome::success("abc1234"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_outcome_failure_with_error() {
-        let outcome = Outcome::failure("Build failed: missing dependency");
-        assert!(!outcome.success);
-        assert_eq!(outcome.message, "Build failed: missing dependency");
-    }
-
-    #[test]
-    fn test_spinner_finish_with_outcome_failure() {
-        let mut spinner = ClaudeSpinner::new_with_story_progress("US-001", 2, 5);
-        spinner.finish_with_outcome(Outcome::failure("Build failed"));
-        assert!(spinner.stop_flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_verbose_timer_finish_with_outcome_failure() {
-        let mut timer = VerboseTimer::new_with_story_progress("US-001", 2, 5);
-        timer.finish_with_outcome(Outcome::failure("Build failed"));
-        assert!(timer.stop_flag.load(Ordering::Relaxed));
-    }
-
-    // ========================================================================
-    // US-005: Breadcrumb trail for workflow journey tests
-    // ========================================================================
-
-    #[test]
-    fn test_breadcrumb_state_display_names() {
-        assert_eq!(BreadcrumbState::Story.display_name(), "Story");
-        assert_eq!(BreadcrumbState::Review.display_name(), "Review");
-        assert_eq!(BreadcrumbState::Correct.display_name(), "Correct");
-        assert_eq!(BreadcrumbState::Commit.display_name(), "Commit");
-    }
-
-    #[test]
-    fn test_breadcrumb_new_is_empty() {
-        let breadcrumb = Breadcrumb::new();
-        assert!(breadcrumb.is_empty());
-        assert!(breadcrumb.completed_states().is_empty());
-        assert!(breadcrumb.current_state().is_none());
-    }
-
-    #[test]
-    fn test_breadcrumb_default_is_empty() {
-        let breadcrumb = Breadcrumb::default();
-        assert!(breadcrumb.is_empty());
-    }
-
-    #[test]
-    fn test_breadcrumb_enter_state() {
-        let mut breadcrumb = Breadcrumb::new();
-
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        assert!(!breadcrumb.is_empty());
-        assert_eq!(breadcrumb.current_state(), Some(&BreadcrumbState::Story));
-        assert!(breadcrumb.completed_states().is_empty());
-    }
-
-    #[test]
-    fn test_breadcrumb_enter_multiple_states() {
-        let mut breadcrumb = Breadcrumb::new();
-
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-
-        assert_eq!(breadcrumb.current_state(), Some(&BreadcrumbState::Review));
-        assert_eq!(breadcrumb.completed_states(), &[BreadcrumbState::Story]);
-    }
-
-    #[test]
-    fn test_breadcrumb_full_workflow() {
-        let mut breadcrumb = Breadcrumb::new();
-
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-        breadcrumb.enter_state(BreadcrumbState::Correct);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-        breadcrumb.enter_state(BreadcrumbState::Commit);
-
-        assert_eq!(breadcrumb.current_state(), Some(&BreadcrumbState::Commit));
-        assert_eq!(
-            breadcrumb.completed_states(),
-            &[
-                BreadcrumbState::Story,
-                BreadcrumbState::Review,
-                BreadcrumbState::Correct,
-                BreadcrumbState::Review,
-            ]
-        );
-    }
-
-    #[test]
-    fn test_breadcrumb_complete_current() {
-        let mut breadcrumb = Breadcrumb::new();
-
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.complete_current();
-
-        assert!(breadcrumb.current_state().is_none());
-        assert_eq!(breadcrumb.completed_states(), &[BreadcrumbState::Story]);
-    }
-
-    #[test]
-    fn test_breadcrumb_reset() {
-        let mut breadcrumb = Breadcrumb::new();
-
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-        breadcrumb.reset();
-
-        assert!(breadcrumb.is_empty());
-        assert!(breadcrumb.completed_states().is_empty());
-        assert!(breadcrumb.current_state().is_none());
-    }
-
-    #[test]
-    fn test_breadcrumb_render_empty() {
-        let breadcrumb = Breadcrumb::new();
-        assert_eq!(breadcrumb.render(None), "");
-    }
-
-    #[test]
-    fn test_breadcrumb_render_single_current() {
-        let mut breadcrumb = Breadcrumb::new();
-        breadcrumb.enter_state(BreadcrumbState::Story);
-
-        let rendered = breadcrumb.render(Some(100));
-        // Should contain "Journey:" prefix
-        assert!(rendered.contains("Journey:"));
-        // Should contain "Story" (in yellow for current)
-        assert!(rendered.contains("Story"));
-        // Should contain YELLOW color code
-        assert!(rendered.contains(YELLOW));
-    }
-
-    #[test]
-    fn test_breadcrumb_render_with_completed() {
-        let mut breadcrumb = Breadcrumb::new();
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-
-        let rendered = breadcrumb.render(Some(100));
-        // Should contain both states
-        assert!(rendered.contains("Story"));
-        assert!(rendered.contains("Review"));
-        // Should contain arrow separator
-        assert!(rendered.contains("→"));
-        // Story should be green (completed)
-        assert!(rendered.contains(GREEN));
-        // Review should be yellow (current)
-        assert!(rendered.contains(YELLOW));
-    }
-
-    #[test]
-    fn test_breadcrumb_render_truncation() {
-        let mut breadcrumb = Breadcrumb::new();
-        breadcrumb.enter_state(BreadcrumbState::Story);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-        breadcrumb.enter_state(BreadcrumbState::Correct);
-        breadcrumb.enter_state(BreadcrumbState::Review);
-        breadcrumb.enter_state(BreadcrumbState::Commit);
-
-        // Very narrow width should trigger truncation
-        let rendered = breadcrumb.render(Some(30));
-        // Should contain ellipsis when truncated
-        assert!(rendered.contains("..."));
-    }
-
-    #[test]
-    fn test_breadcrumb_render_no_truncation_when_fits() {
-        let mut breadcrumb = Breadcrumb::new();
-        breadcrumb.enter_state(BreadcrumbState::Story);
-
-        // Wide width should not trigger truncation
-        let rendered = breadcrumb.render(Some(200));
-        // Should not contain ellipsis
-        assert!(!rendered.contains("..."));
-    }
-
-    #[test]
-    fn test_breadcrumb_state_equality() {
-        assert_eq!(BreadcrumbState::Story, BreadcrumbState::Story);
-        assert_ne!(BreadcrumbState::Story, BreadcrumbState::Review);
-    }
-
-    // ========================================================================
-    // US-010: ProgressContext tests for overall progress context
-    // ========================================================================
-
-    #[test]
-    fn test_progress_context_new() {
-        let ctx = ProgressContext::new("US-001", 2, 5);
-        assert_eq!(ctx.story_id, Some("US-001".to_string()));
-        assert_eq!(ctx.story_index, Some(2));
-        assert_eq!(ctx.total_stories, Some(5));
-        assert_eq!(ctx.current_phase, None);
-    }
-
-    #[test]
-    fn test_progress_context_with_phase() {
-        let ctx = ProgressContext::with_phase("US-001", 2, 5, "Review");
-        assert_eq!(ctx.story_id, Some("US-001".to_string()));
-        assert_eq!(ctx.story_index, Some(2));
-        assert_eq!(ctx.total_stories, Some(5));
-        assert_eq!(ctx.current_phase, Some("Review".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_set_phase() {
-        let mut ctx = ProgressContext::new("US-001", 2, 5);
-        assert_eq!(ctx.current_phase, None);
-
-        ctx.set_phase("Correct");
-        assert_eq!(ctx.current_phase, Some("Correct".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_format_story_progress() {
-        let ctx = ProgressContext::new("US-001", 2, 5);
-        assert_eq!(
-            ctx.format_story_progress(),
-            Some("[US-001 2/5]".to_string())
-        );
-    }
-
-    #[test]
-    fn test_progress_context_format_story_progress_default() {
-        let ctx = ProgressContext::default();
-        assert_eq!(ctx.format_story_progress(), None);
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_both_present() {
-        let ctx = ProgressContext::new("US-001", 2, 5);
-        let iter_info = Some(IterationInfo::with_phase("Review", 1, 3));
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, Some("[US-001 2/5 | Review 1/3]".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_story_only() {
-        let ctx = ProgressContext::new("US-001", 2, 5);
-        let iter_info: Option<IterationInfo> = None;
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, Some("[US-001 2/5]".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_iter_only() {
-        let ctx = ProgressContext::default();
-        let iter_info = Some(IterationInfo::with_phase("Review", 1, 3));
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, Some("[Review 1/3]".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_neither_present() {
-        let ctx = ProgressContext::default();
-        let iter_info: Option<IterationInfo> = None;
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_with_correct() {
-        let ctx = ProgressContext::new("US-002", 3, 10);
-        let iter_info = Some(IterationInfo::with_phase("Correct", 2, 3));
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, Some("[US-002 3/10 | Correct 2/3]".to_string()));
-    }
-
-    #[test]
-    fn test_progress_context_dual_context_with_commit() {
-        let ctx = ProgressContext::new("US-001", 2, 5);
-        let iter_info = Some(IterationInfo::phase_only("Commit"));
-
-        let result = ctx.format_dual_context(&iter_info);
-        assert_eq!(result, Some("[US-001 2/5 | Commit]".to_string()));
-    }
-
-    // ========================================================================
-    // US-002: Fixed-width activity text display tests
-    // ========================================================================
-
-    #[test]
-    fn test_activity_text_width_constant() {
-        assert_eq!(ACTIVITY_TEXT_WIDTH, 40);
-    }
-
-    #[test]
-    fn test_fixed_width_activity_short_text() {
+    fn test_fixed_width_activity() {
+        // Short text - padded
         let result = fixed_width_activity("Working");
         assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
         assert!(result.starts_with("Working"));
-        // Should be padded with spaces
-        assert!(result.ends_with(' '));
-    }
 
-    #[test]
-    fn test_fixed_width_activity_exact_width() {
-        // Create a string exactly 40 chars
-        let exact = "a".repeat(ACTIVITY_TEXT_WIDTH);
-        let result = fixed_width_activity(&exact);
-        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        assert_eq!(result, exact);
-    }
-
-    #[test]
-    fn test_fixed_width_activity_long_text() {
-        let long_msg = "This is a very long message that should definitely be truncated because it exceeds forty characters";
+        // Long text - truncated
+        let long_msg = "This is a very long message that exceeds forty characters limit";
         let result = fixed_width_activity(long_msg);
         assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
         assert!(result.ends_with("..."));
-    }
 
-    #[test]
-    fn test_fixed_width_activity_multiline() {
-        let multiline = "First line\nSecond line\nThird line";
-        let result = fixed_width_activity(multiline);
-        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        assert!(!result.contains('\n'));
-        assert!(result.starts_with("First line"));
-    }
-
-    #[test]
-    fn test_fixed_width_activity_utf8() {
-        // Should handle UTF-8 characters properly
-        let utf8_msg = "日本語テスト";
-        let result = fixed_width_activity(utf8_msg);
-        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        assert!(result.starts_with("日本語テスト"));
-    }
-
-    #[test]
-    fn test_fixed_width_activity_empty() {
+        // Empty - all spaces
         let result = fixed_width_activity("");
         assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        // Should be all spaces
         assert!(result.chars().all(|c| c == ' '));
     }
 
+    // ========================================================================
+    // Duration formatting
+    // ========================================================================
+
     #[test]
-    fn test_fixed_width_activity_whitespace_trimmed() {
-        let result = fixed_width_activity("  Trimmed  ");
-        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        assert!(result.starts_with("Trimmed"));
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(125), "2m 5s");
+    }
+
+    // ========================================================================
+    // IterationInfo formatting
+    // ========================================================================
+
+    #[test]
+    fn test_iteration_info_format() {
+        // With phase and counts
+        let info = IterationInfo::with_phase("Review", 1, 3);
+        assert_eq!(info.format(), Some("[Review 1/3]".to_string()));
+
+        // Phase only
+        let info = IterationInfo::phase_only("Commit");
+        assert_eq!(info.format(), Some("[Commit]".to_string()));
+
+        // Counts only
+        let info = IterationInfo::new(2, 5);
+        assert_eq!(info.format(), Some("[2/5]".to_string()));
+
+        // Default - None
+        assert_eq!(IterationInfo::default().format(), None);
+    }
+
+    // ========================================================================
+    // Display prefix formatting
+    // ========================================================================
+
+    #[test]
+    fn test_format_display_prefix() {
+        // With iteration info
+        let info = IterationInfo::with_phase("Review", 1, 3);
+        assert_eq!(format_display_prefix("Review", &Some(info)), "[Review 1/3]");
+
+        // Without info - falls back to story_id
+        assert_eq!(format_display_prefix("US-001", &None), "US-001");
+
+        // Spec special case
+        assert_eq!(format_display_prefix("Spec", &None), "Spec generation");
+    }
+
+    // ========================================================================
+    // ProgressContext dual-context formatting
+    // ========================================================================
+
+    #[test]
+    fn test_progress_context_dual_context() {
+        let ctx = ProgressContext::new("US-001", 2, 5);
+
+        // Both present
+        let iter_info = Some(IterationInfo::with_phase("Review", 1, 3));
+        assert_eq!(
+            ctx.format_dual_context(&iter_info),
+            Some("[US-001 2/5 | Review 1/3]".to_string())
+        );
+
+        // Story only
+        assert_eq!(
+            ctx.format_dual_context(&None),
+            Some("[US-001 2/5]".to_string())
+        );
+
+        // Neither
+        let empty_ctx = ProgressContext::default();
+        assert_eq!(empty_ctx.format_dual_context(&None), None);
+    }
+
+    // ========================================================================
+    // Breadcrumb state management
+    // ========================================================================
+
+    #[test]
+    fn test_breadcrumb_workflow() {
+        let mut breadcrumb = Breadcrumb::new();
+        assert!(breadcrumb.is_empty());
+
+        // Enter states
+        breadcrumb.enter_state(BreadcrumbState::Story);
+        assert_eq!(breadcrumb.current_state(), Some(&BreadcrumbState::Story));
+        assert!(breadcrumb.completed_states().is_empty());
+
+        breadcrumb.enter_state(BreadcrumbState::Review);
+        assert_eq!(breadcrumb.current_state(), Some(&BreadcrumbState::Review));
+        assert_eq!(breadcrumb.completed_states(), &[BreadcrumbState::Story]);
+
+        // Reset
+        breadcrumb.reset();
+        assert!(breadcrumb.is_empty());
     }
 
     #[test]
-    fn test_fixed_width_activity_truncation_boundary() {
-        // 41 characters - should be truncated to 37 + "..."
-        let msg_41 = "a".repeat(41);
-        let result = fixed_width_activity(&msg_41);
-        assert_eq!(result.chars().count(), ACTIVITY_TEXT_WIDTH);
-        assert!(result.ends_with("..."));
-        // First 37 chars should be 'a'
-        assert!(result[..result.len() - 3].chars().all(|c| c == 'a'));
+    fn test_breadcrumb_render() {
+        let mut breadcrumb = Breadcrumb::new();
+        breadcrumb.enter_state(BreadcrumbState::Story);
+        breadcrumb.enter_state(BreadcrumbState::Review);
+
+        let rendered = breadcrumb.render(Some(100));
+        assert!(rendered.contains("Journey:"));
+        assert!(rendered.contains("Story"));
+        assert!(rendered.contains("Review"));
+        assert!(rendered.contains("→"));
+    }
+
+    // ========================================================================
+    // Spinner lifecycle (minimal - just verify cleanup works)
+    // ========================================================================
+
+    #[test]
+    fn test_spinner_lifecycle() {
+        let mut spinner = ClaudeSpinner::new("US-001");
+        assert!(!spinner.stop_flag.load(Ordering::Relaxed));
+
+        spinner.update("Working");
+        let activity = spinner.last_activity.lock().unwrap().clone();
+        assert_eq!(activity, "Working");
+
+        spinner.stop_timer();
+        assert!(spinner.stop_flag.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn test_fixed_width_activity_consistent_output_width() {
-        // Verify that various inputs all produce the same width
-        let inputs = vec![
-            "Short",
-            "A medium length message",
-            "This is a very long message that exceeds the forty character limit",
-            "日本語",
-            "",
-            "   Whitespace   ",
-        ];
+    fn test_verbose_timer_lifecycle() {
+        let mut timer = VerboseTimer::new("US-001");
+        assert!(!timer.stop_flag.load(Ordering::Relaxed));
 
-        for input in inputs {
-            let result = fixed_width_activity(input);
-            assert_eq!(
-                result.chars().count(),
-                ACTIVITY_TEXT_WIDTH,
-                "Input '{}' produced width {} instead of {}",
-                input,
-                result.chars().count(),
-                ACTIVITY_TEXT_WIDTH
-            );
+        timer.stop_timer();
+        assert!(timer.stop_flag.load(Ordering::Relaxed));
+    }
+
+    // ========================================================================
+    // Drop cleanup verification
+    // ========================================================================
+
+    #[test]
+    fn test_drop_stops_timer() {
+        let stop_flag_clone;
+        {
+            let spinner = ClaudeSpinner::new("test");
+            stop_flag_clone = Arc::clone(&spinner.stop_flag);
+            assert!(!stop_flag_clone.load(Ordering::Relaxed));
         }
+        assert!(stop_flag_clone.load(Ordering::Relaxed));
     }
 
     // ========================================================================

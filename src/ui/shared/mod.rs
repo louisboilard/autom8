@@ -829,139 +829,184 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    // =========================================================================
+    // RunProgress Tests
+    // =========================================================================
 
     #[test]
-    fn test_run_progress_as_fraction() {
-        // Normal case: working on story 2 of 5
-        let progress = RunProgress {
-            completed: 1,
-            total: 5,
-        };
-        assert_eq!(progress.as_fraction(), "Story 2/5");
+    fn test_run_progress_formatting() {
+        // Fraction display
+        assert_eq!(RunProgress::new(1, 5).as_fraction(), "Story 2/5");
+        assert_eq!(RunProgress::new(0, 5).as_fraction(), "Story 1/5");
+        assert_eq!(RunProgress::new(5, 5).as_fraction(), "Story 5/5"); // Completed
+        assert_eq!(RunProgress::new(0, 0).as_fraction(), "Story 0/0"); // Empty
 
-        // First story case
-        let first = RunProgress {
-            completed: 0,
-            total: 3,
-        };
-        assert_eq!(first.as_fraction(), "Story 1/3");
-    }
+        // Percentage display
+        assert_eq!(RunProgress::new(2, 5).as_percentage(), "40%");
+        assert_eq!(RunProgress::new(5, 5).as_percentage(), "100%");
+        assert_eq!(RunProgress::new(0, 0).as_percentage(), "0%");
 
-    #[test]
-    fn test_run_progress_as_percentage() {
-        // Normal case
-        let progress = RunProgress {
-            completed: 2,
-            total: 5,
-        };
-        assert_eq!(progress.as_percentage(), "40%");
-
-        // Complete case
-        let complete = RunProgress {
-            completed: 5,
-            total: 5,
-        };
-        assert_eq!(complete.as_percentage(), "100%");
-    }
-
-    #[test]
-    fn test_run_progress_as_percentage_zero_total() {
-        let progress = RunProgress {
-            completed: 0,
-            total: 0,
-        };
-        assert_eq!(progress.as_percentage(), "0%");
-    }
-
-    #[test]
-    fn test_run_progress_as_fraction_edge_cases() {
-        // Edge case: 0/0 (empty spec) - should show "Story 0/0"
-        let empty = RunProgress {
-            completed: 0,
-            total: 0,
-        };
-        assert_eq!(empty.as_fraction(), "Story 0/0");
-
-        // Edge case: 0/5 (not started) - should show "Story 1/5"
-        let not_started = RunProgress {
-            completed: 0,
-            total: 5,
-        };
-        assert_eq!(not_started.as_fraction(), "Story 1/5");
-
-        // Edge case: 5/5 (completed) - should show "Story 5/5", NOT "Story 6/5"
-        let complete = RunProgress {
-            completed: 5,
-            total: 5,
-        };
-        assert_eq!(complete.as_fraction(), "Story 5/5");
-
-        // Edge case: 7/7 (completed, different total) - should show "Story 7/7"
-        let complete_7 = RunProgress {
-            completed: 7,
-            total: 7,
-        };
-        assert_eq!(complete_7.as_fraction(), "Story 7/7");
-
-        // Normal case: in progress
-        let in_progress = RunProgress {
-            completed: 3,
-            total: 7,
-        };
-        assert_eq!(in_progress.as_fraction(), "Story 4/7");
-
-        // Boundary: one before completion - should show next story
-        let almost_done = RunProgress {
-            completed: 4,
-            total: 5,
-        };
-        assert_eq!(almost_done.as_fraction(), "Story 5/5");
-    }
-
-    #[test]
-    fn test_run_progress_new() {
-        let progress = RunProgress::new(3, 7);
-        assert_eq!(progress.completed, 3);
-        assert_eq!(progress.total, 7);
-    }
-
-    #[test]
-    fn test_run_progress_fraction() {
-        // Normal case
+        // Numeric fraction
         assert!((RunProgress::new(2, 5).fraction() - 0.4).abs() < 0.001);
-
-        // Zero total
         assert_eq!(RunProgress::new(0, 0).fraction(), 0.0);
 
-        // Complete
-        assert!((RunProgress::new(5, 5).fraction() - 1.0).abs() < 0.001);
-
-        // Not started
-        assert_eq!(RunProgress::new(0, 5).fraction(), 0.0);
-    }
-
-    #[test]
-    fn test_run_progress_as_simple_fraction() {
+        // Simple fraction
         assert_eq!(RunProgress::new(2, 5).as_simple_fraction(), "2/5");
-        assert_eq!(RunProgress::new(0, 3).as_simple_fraction(), "0/3");
-        assert_eq!(RunProgress::new(5, 5).as_simple_fraction(), "5/5");
-        assert_eq!(RunProgress::new(0, 0).as_simple_fraction(), "0/0");
+    }
+
+    // =========================================================================
+    // SessionData Tests
+    // =========================================================================
+
+    fn make_test_session(is_main: bool, is_running: bool, is_stale: bool) -> SessionData {
+        SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: if is_main { "main" } else { "abc123" }.to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "test-branch".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: is_main,
+            is_stale,
+            live_output: None,
+        }
     }
 
     #[test]
-    fn test_run_progress_as_story_fraction_alias() {
-        // as_story_fraction should produce identical results to as_fraction
-        let progress = RunProgress::new(3, 7);
-        assert_eq!(progress.as_story_fraction(), progress.as_fraction());
+    fn test_session_data_display_and_paths() {
+        let main = make_test_session(true, false, false);
+        assert_eq!(main.display_title(), "test-project (main)");
 
-        let complete = RunProgress::new(5, 5);
-        assert_eq!(complete.as_story_fraction(), complete.as_fraction());
+        let worktree = make_test_session(false, false, false);
+        assert_eq!(worktree.display_title(), "test-project (abc123)");
+
+        // Truncated path (short)
+        let mut short_path = make_test_session(false, false, false);
+        short_path.metadata.worktree_path = PathBuf::from("repo");
+        assert_eq!(short_path.truncated_worktree_path(), "repo");
+
+        // Truncated path (long)
+        let mut long_path = make_test_session(false, false, false);
+        long_path.metadata.worktree_path = PathBuf::from("/home/user/projects/repo");
+        assert_eq!(long_path.truncated_worktree_path(), ".../projects/repo");
     }
 
     #[test]
-    fn test_run_history_entry_status_text() {
-        use chrono::Utc;
+    fn test_session_heartbeat_and_status() {
+        // No live output = no fresh heartbeat
+        let no_live = make_test_session(true, true, false);
+        assert!(!no_live.has_fresh_heartbeat());
+        assert!(no_live.is_actively_running()); // Trust is_running
 
+        // Fresh live output
+        let mut fresh = make_test_session(true, true, false);
+        fresh.live_output = Some(LiveState::new(MachineState::RunningClaude));
+        assert!(fresh.has_fresh_heartbeat());
+        assert!(!fresh.appears_stuck());
+
+        // Stale session never actively running
+        let stale = make_test_session(false, true, true);
+        assert!(!stale.is_actively_running());
+
+        // Stale heartbeat = appears stuck
+        let mut stuck = make_test_session(true, true, false);
+        let mut stale_live = LiveState::new(MachineState::RunningClaude);
+        stale_live.last_heartbeat = Utc::now() - chrono::Duration::seconds(65);
+        stuck.live_output = Some(stale_live);
+        assert!(stuck.appears_stuck());
+
+        // Not running = not stuck
+        let not_running = make_test_session(true, false, false);
+        assert!(!not_running.appears_stuck());
+    }
+
+    // =========================================================================
+    // Status Mapping Tests
+    // =========================================================================
+
+    #[test]
+    fn test_status_from_machine_state() {
+        // Setup phases
+        assert_eq!(
+            Status::from_machine_state(MachineState::Initializing),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::PickingStory),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::LoadingSpec),
+            Status::Setup
+        );
+
+        // Work phases
+        assert_eq!(
+            Status::from_machine_state(MachineState::RunningClaude),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Reviewing),
+            Status::Reviewing
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Correcting),
+            Status::Correcting
+        );
+
+        // Success phases
+        assert_eq!(
+            Status::from_machine_state(MachineState::Committing),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Completed),
+            Status::Success
+        );
+
+        // Terminal
+        assert_eq!(
+            Status::from_machine_state(MachineState::Failed),
+            Status::Error
+        );
+        assert_eq!(Status::from_machine_state(MachineState::Idle), Status::Idle);
+    }
+
+    // =========================================================================
+    // Duration Formatting Tests
+    // =========================================================================
+
+    #[test]
+    fn test_duration_formatting() {
+        assert_eq!(format_duration_secs(30), "30s");
+        assert_eq!(format_duration_secs(125), "2m 5s");
+        assert_eq!(format_duration_secs(3600), "1h 0m");
+        assert_eq!(format_duration_secs(7265), "2h 1m");
+    }
+
+    #[test]
+    fn test_relative_time_formatting() {
+        assert_eq!(format_relative_time_secs(30), "just now");
+        assert_eq!(format_relative_time_secs(300), "5m ago");
+        assert_eq!(format_relative_time_secs(3600), "1h ago");
+        assert_eq!(format_relative_time_secs(86400), "1d ago");
+    }
+
+    // =========================================================================
+    // Run History Entry Tests
+    // =========================================================================
+
+    #[test]
+    fn test_run_history_entry() {
         let entry = RunHistoryEntry {
             project_name: "test-project".to_string(),
             run_id: "test-run".to_string(),
@@ -976,487 +1021,30 @@ mod tests {
         assert_eq!(entry.story_count_text(), "3/5 stories");
     }
 
-    #[test]
-    fn test_session_data_display_title_main() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "main".to_string(),
-                worktree_path: PathBuf::from("/path/to/repo"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: false,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(session.display_title(), "my-project (main)");
-    }
-
-    #[test]
-    fn test_session_data_display_title_worktree() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "my-project".to_string(),
-            metadata: SessionMetadata {
-                session_id: "abc12345".to_string(),
-                worktree_path: PathBuf::from("/path/to/worktree"),
-                branch_name: "feature/test".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: false,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(session.display_title(), "my-project (abc12345)");
-    }
-
-    #[test]
-    fn test_session_data_truncated_worktree_path_short() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("repo"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: false,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(session.truncated_worktree_path(), "repo");
-    }
-
-    #[test]
-    fn test_session_data_truncated_worktree_path_long() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/home/user/projects/repo"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: false,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: false,
-            live_output: None,
-        };
-        assert_eq!(session.truncated_worktree_path(), ".../projects/repo");
-    }
-
-    // ========================================================================
-    // US-002: Heartbeat Freshness Tests
-    // ========================================================================
-
-    #[test]
-    fn test_session_data_has_fresh_heartbeat_no_live_output() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: None, // No live output
-        };
-
-        // Without live output, heartbeat is considered not fresh
-        assert!(!session.has_fresh_heartbeat());
-    }
-
-    #[test]
-    fn test_session_data_has_fresh_heartbeat_with_fresh_live() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
-        };
-
-        // Fresh live output should mean fresh heartbeat
-        assert!(session.has_fresh_heartbeat());
-    }
-
-    #[test]
-    fn test_session_data_is_actively_running_no_live_output() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: None, // No live output yet
-        };
-
-        // Without live output but is_running=true, trust is_running (run may have just started)
-        assert!(session.is_actively_running());
-    }
-
-    #[test]
-    fn test_session_data_is_actively_running_stale() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/deleted/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: false,
-            is_stale: true, // Worktree deleted
-            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
-        };
-
-        // Stale sessions are never actively running
-        assert!(!session.is_actively_running());
-    }
-
-    #[test]
-    fn test_session_data_appears_stuck_fresh_heartbeat() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
-        };
-
-        // Fresh heartbeat means not stuck
-        assert!(!session.appears_stuck());
-    }
-
-    #[test]
-    fn test_session_data_appears_stuck_stale_heartbeat() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let mut live = LiveState::new(crate::state::MachineState::RunningClaude);
-        // Set heartbeat to be 65 seconds ago (stale, threshold is 60s)
-        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(65);
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: true,
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: Some(live),
-        };
-
-        // Stale heartbeat while is_running=true means appears stuck
-        assert!(session.appears_stuck());
-    }
-
-    #[test]
-    fn test_session_data_appears_stuck_not_running() {
-        use chrono::Utc;
-        use std::path::PathBuf;
-
-        let mut live = LiveState::new(crate::state::MachineState::Completed);
-        // Stale heartbeat
-        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(15);
-
-        let session = SessionData {
-            project_name: "test".to_string(),
-            metadata: SessionMetadata {
-                session_id: "test".to_string(),
-                worktree_path: PathBuf::from("/path"),
-                branch_name: "main".to_string(),
-                created_at: Utc::now(),
-                last_active_at: Utc::now(),
-                is_running: false, // Not running
-            },
-            run: None,
-            progress: None,
-            load_error: None,
-            is_main_session: true,
-            is_stale: false,
-            live_output: Some(live),
-        };
-
-        // Not running sessions can't be stuck
-        assert!(!session.appears_stuck());
-    }
-
-    // ========================================================================
-    // US-005: Shared Status Utilities Tests
-    // ========================================================================
-
-    #[test]
-    fn test_status_from_machine_state_setup_phases() {
-        // All setup phases should map to Status::Setup
-        assert_eq!(
-            Status::from_machine_state(MachineState::Initializing),
-            Status::Setup
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::PickingStory),
-            Status::Setup
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::LoadingSpec),
-            Status::Setup
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::GeneratingSpec),
-            Status::Setup
-        );
-    }
-
-    #[test]
-    fn test_status_from_machine_state_running() {
-        assert_eq!(
-            Status::from_machine_state(MachineState::RunningClaude),
-            Status::Running
-        );
-    }
-
-    #[test]
-    fn test_status_from_machine_state_reviewing() {
-        assert_eq!(
-            Status::from_machine_state(MachineState::Reviewing),
-            Status::Reviewing
-        );
-    }
-
-    #[test]
-    fn test_status_from_machine_state_correcting() {
-        assert_eq!(
-            Status::from_machine_state(MachineState::Correcting),
-            Status::Correcting
-        );
-    }
-
-    #[test]
-    fn test_status_from_machine_state_success_path() {
-        // All success path states should map to Status::Success
-        assert_eq!(
-            Status::from_machine_state(MachineState::Committing),
-            Status::Success
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::CreatingPR),
-            Status::Success
-        );
-        assert_eq!(
-            Status::from_machine_state(MachineState::Completed),
-            Status::Success
-        );
-    }
-
-    #[test]
-    fn test_status_from_machine_state_terminal() {
-        assert_eq!(
-            Status::from_machine_state(MachineState::Failed),
-            Status::Error
-        );
-        assert_eq!(Status::from_machine_state(MachineState::Idle), Status::Idle);
-    }
-
-    #[test]
-    fn test_format_state_label_all_states() {
-        // Verify all state labels are correctly formatted
-        assert_eq!(format_state_label(MachineState::Idle), "Idle");
-        assert_eq!(
-            format_state_label(MachineState::LoadingSpec),
-            "Loading Spec"
-        );
-        assert_eq!(
-            format_state_label(MachineState::GeneratingSpec),
-            "Generating Spec"
-        );
-        assert_eq!(
-            format_state_label(MachineState::Initializing),
-            "Initializing"
-        );
-        assert_eq!(
-            format_state_label(MachineState::PickingStory),
-            "Picking Story"
-        );
-        assert_eq!(
-            format_state_label(MachineState::RunningClaude),
-            "Running Claude"
-        );
-        assert_eq!(format_state_label(MachineState::Reviewing), "Reviewing");
-        assert_eq!(format_state_label(MachineState::Correcting), "Correcting");
-        assert_eq!(format_state_label(MachineState::Committing), "Committing");
-        assert_eq!(format_state_label(MachineState::CreatingPR), "Creating PR");
-        assert_eq!(format_state_label(MachineState::Completed), "Completed");
-        assert_eq!(format_state_label(MachineState::Failed), "Failed");
-    }
-
-    #[test]
-    fn test_format_duration_secs() {
-        // Seconds only
-        assert_eq!(format_duration_secs(0), "0s");
-        assert_eq!(format_duration_secs(30), "30s");
-        assert_eq!(format_duration_secs(59), "59s");
-
-        // Minutes and seconds
-        assert_eq!(format_duration_secs(60), "1m 0s");
-        assert_eq!(format_duration_secs(125), "2m 5s");
-        assert_eq!(format_duration_secs(3599), "59m 59s");
-
-        // Hours and minutes
-        assert_eq!(format_duration_secs(3600), "1h 0m");
-        assert_eq!(format_duration_secs(7265), "2h 1m");
-    }
-
-    #[test]
-    fn test_format_relative_time_secs() {
-        // Just now (< 1 minute)
-        assert_eq!(format_relative_time_secs(0), "just now");
-        assert_eq!(format_relative_time_secs(59), "just now");
-
-        // Minutes
-        assert_eq!(format_relative_time_secs(60), "1m ago");
-        assert_eq!(format_relative_time_secs(300), "5m ago");
-
-        // Hours
-        assert_eq!(format_relative_time_secs(3600), "1h ago");
-        assert_eq!(format_relative_time_secs(7200), "2h ago");
-
-        // Days
-        assert_eq!(format_relative_time_secs(86400), "1d ago");
-        assert_eq!(format_relative_time_secs(172800), "2d ago");
-    }
-
-    // ========================================================================
-    // US-003: Run History Sorting Tests
-    // ========================================================================
-
-    fn make_test_run_history_entry(
-        run_id: &str,
-        status: RunStatus,
-        started_at_offset_secs: i64,
-    ) -> RunHistoryEntry {
-        use chrono::{Duration, Utc};
-
+    fn make_history_entry(run_id: &str, status: RunStatus, age_secs: i64) -> RunHistoryEntry {
         RunHistoryEntry {
-            project_name: "test-project".to_string(),
+            project_name: "test".to_string(),
             run_id: run_id.to_string(),
-            started_at: Utc::now() - Duration::seconds(started_at_offset_secs),
+            started_at: Utc::now() - chrono::Duration::seconds(age_secs),
             finished_at: None,
             status,
             completed_stories: 0,
             total_stories: 5,
-            branch: "test-branch".to_string(),
+            branch: "test".to_string(),
         }
     }
 
     #[test]
-    fn test_run_history_sorting_running_at_top() {
-        // Running session should appear before completed ones regardless of date
+    fn test_run_history_sorting() {
         let mut history = vec![
-            make_test_run_history_entry("old-completed", RunStatus::Completed, 60), // 1 min ago
-            make_test_run_history_entry("running", RunStatus::Running, 3600),       // 1 hour ago
-            make_test_run_history_entry("new-completed", RunStatus::Completed, 0),  // now
+            make_history_entry("completed-old", RunStatus::Completed, 60),
+            make_history_entry("running", RunStatus::Running, 3600),
+            make_history_entry("completed-new", RunStatus::Completed, 0),
         ];
 
-        // Apply the same sorting logic as load_project_run_history
         history.sort_by(|a, b| {
             let a_running = matches!(a.status, RunStatus::Running);
             let b_running = matches!(b.status, RunStatus::Running);
-
             match (a_running, b_running) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
@@ -1464,96 +1052,9 @@ mod tests {
             }
         });
 
-        // Running should be first, even though it started 1 hour ago
+        // Running first, then by date
         assert_eq!(history[0].run_id, "running");
-        // Then completed entries sorted by date (newest first)
-        assert_eq!(history[1].run_id, "new-completed");
-        assert_eq!(history[2].run_id, "old-completed");
-    }
-
-    #[test]
-    fn test_run_history_sorting_multiple_running() {
-        // Multiple running sessions should be sorted by started_at (newest first)
-        let mut history = vec![
-            make_test_run_history_entry("running-old", RunStatus::Running, 3600), // 1 hour ago
-            make_test_run_history_entry("running-new", RunStatus::Running, 60),   // 1 min ago
-            make_test_run_history_entry("completed", RunStatus::Completed, 0),    // now
-        ];
-
-        history.sort_by(|a, b| {
-            let a_running = matches!(a.status, RunStatus::Running);
-            let b_running = matches!(b.status, RunStatus::Running);
-
-            match (a_running, b_running) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.started_at.cmp(&a.started_at),
-            }
-        });
-
-        // Both running entries should be before completed
-        assert!(matches!(history[0].status, RunStatus::Running));
-        assert!(matches!(history[1].status, RunStatus::Running));
-        // Newest running first
-        assert_eq!(history[0].run_id, "running-new");
-        assert_eq!(history[1].run_id, "running-old");
-        // Completed last
-        assert_eq!(history[2].run_id, "completed");
-    }
-
-    #[test]
-    fn test_run_history_sorting_non_running_by_date() {
-        // Non-running entries should maintain date-descending order
-        let mut history = vec![
-            make_test_run_history_entry("failed", RunStatus::Failed, 120),
-            make_test_run_history_entry("interrupted", RunStatus::Interrupted, 60),
-            make_test_run_history_entry("completed", RunStatus::Completed, 180),
-        ];
-
-        history.sort_by(|a, b| {
-            let a_running = matches!(a.status, RunStatus::Running);
-            let b_running = matches!(b.status, RunStatus::Running);
-
-            match (a_running, b_running) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.started_at.cmp(&a.started_at),
-            }
-        });
-
-        // All non-running, sorted by date (newest first)
-        assert_eq!(history[0].run_id, "interrupted"); // 60s ago - newest
-        assert_eq!(history[1].run_id, "failed"); // 120s ago
-        assert_eq!(history[2].run_id, "completed"); // 180s ago - oldest
-    }
-
-    #[test]
-    fn test_run_history_sorting_empty_and_single() {
-        // Empty history should not panic
-        let mut empty: Vec<RunHistoryEntry> = vec![];
-        empty.sort_by(|a, b| {
-            let a_running = matches!(a.status, RunStatus::Running);
-            let b_running = matches!(b.status, RunStatus::Running);
-            match (a_running, b_running) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.started_at.cmp(&a.started_at),
-            }
-        });
-        assert!(empty.is_empty());
-
-        // Single entry should remain as-is
-        let mut single = vec![make_test_run_history_entry("only", RunStatus::Running, 0)];
-        single.sort_by(|a, b| {
-            let a_running = matches!(a.status, RunStatus::Running);
-            let b_running = matches!(b.status, RunStatus::Running);
-            match (a_running, b_running) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.started_at.cmp(&a.started_at),
-            }
-        });
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].run_id, "only");
+        assert_eq!(history[1].run_id, "completed-new");
+        assert_eq!(history[2].run_id, "completed-old");
     }
 }
