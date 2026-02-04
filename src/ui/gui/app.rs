@@ -7159,138 +7159,136 @@ impl Autom8App {
                         // In side-by-side mode, use horizontal layout with panels filling available height
                         if use_stacked_layout {
                             // === STACKED LAYOUT (Vertical) ===
-                            // Wrap both panels in a vertical scroll area
-                            egui::ScrollArea::vertical()
-                                .id_salt(format!("stacked_scroll_{}", session.metadata.session_id))
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    // Fixed heights for stacked mode panels
-                                    let stacked_output_height = 300.0;
-                                    let stacked_stories_height = 200.0;
-                                    let stacked_summaries_height = 120.0;
+                            // Each section scrolls independently - no outer scroll wrapper
 
-                                    // === OUTPUT PANEL (Stacked) ===
-                                    ui.vertical(|ui| {
-                                        ui.set_width(output_panel_width);
+                            // Calculate responsive heights for stacked layout
+                            // Output takes ~50% of available height, remaining split 70/30
+                            let panel_height = available_panel_height;
+                            let section_gap = spacing::MD;
+                            let header_height =
+                                typography::line_height(FontSize::Body) + spacing::SM;
 
-                                        // Section header
-                                        ui.label(
-                                            egui::RichText::new("Output")
-                                                .font(typography::font(
-                                                    FontSize::Body,
-                                                    FontWeight::Medium,
-                                                ))
-                                                .color(colors::TEXT_SECONDARY),
-                                        );
+                            // Three sections with headers plus two gaps between them
+                            let total_overhead = header_height * 3.0 + section_gap * 2.0;
+                            let available_for_content = panel_height - total_overhead;
 
-                                        ui.add_space(spacing::SM);
+                            // Output gets ~50%, remaining 50% split 70/30 for Stories/Summaries
+                            let output_portion = available_for_content * 0.5;
+                            let remaining_portion = available_for_content * 0.5;
 
+                            let stacked_output_height = output_portion.max(250.0);
+                            let stacked_stories_height = (remaining_portion * 0.7).max(150.0);
+                            let stacked_summaries_height = (remaining_portion * 0.3).max(100.0);
+
+                            // === OUTPUT PANEL (Stacked) ===
+                            ui.vertical(|ui| {
+                                ui.set_width(output_panel_width);
+
+                                // Section header
+                                ui.label(
+                                    egui::RichText::new("Output")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(colors::TEXT_SECONDARY),
+                                );
+
+                                ui.add_space(spacing::SM);
+
+                                egui::Frame::none()
+                                    .fill(colors::SURFACE_HOVER)
+                                    .rounding(rounding::CARD)
+                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                    .show(ui, |ui| {
+                                        ui.set_min_height(stacked_output_height);
+                                        ui.set_max_height(stacked_output_height);
+                                        ui.set_width(output_panel_width - spacing::MD * 2.0);
+
+                                        egui::ScrollArea::vertical()
+                                            .id_salt(format!(
+                                                "stacked_output_{}",
+                                                session.metadata.session_id
+                                            ))
+                                            .auto_shrink([false, false])
+                                            .stick_to_bottom(true)
+                                            .show(ui, |ui| {
+                                                let output_source = get_output_for_session(session);
+                                                Self::render_output_content(ui, &output_source);
+                                            });
+                                    });
+                            });
+
+                            // Gap between stacked panels
+                            ui.add_space(panel_gap);
+
+                            // === DETAIL SECTIONS (Stacked) ===
+                            ui.vertical(|ui| {
+                                ui.set_width(details_panel_width);
+
+                                // Load data once for display
+                                let story_items = load_story_items(session);
+                                let work_summaries = load_work_summaries(session);
+
+                                // === Stories Section (Collapsible) ===
+                                CollapsibleSection::new("stories", "Stories")
+                                    .default_expanded(true)
+                                    .show(ui, &mut self.section_collapsed_state, |ui| {
                                         egui::Frame::none()
                                             .fill(colors::SURFACE_HOVER)
                                             .rounding(rounding::CARD)
                                             .inner_margin(egui::Margin::same(spacing::MD))
                                             .show(ui, |ui| {
-                                                ui.set_min_height(stacked_output_height);
-                                                ui.set_max_height(stacked_output_height);
-                                                ui.set_width(output_panel_width - spacing::MD * 2.0);
+                                                ui.set_min_height(stacked_stories_height);
+                                                ui.set_max_height(stacked_stories_height);
+                                                ui.set_width(
+                                                    details_panel_width - spacing::MD * 2.0,
+                                                );
 
                                                 egui::ScrollArea::vertical()
                                                     .id_salt(format!(
-                                                        "stacked_output_{}",
+                                                        "stacked_stories_{}",
                                                         session.metadata.session_id
                                                     ))
                                                     .auto_shrink([false, false])
-                                                    .stick_to_bottom(true)
                                                     .show(ui, |ui| {
-                                                        let output_source =
-                                                            get_output_for_session(session);
-                                                        Self::render_output_content(
+                                                        Self::render_story_items_content(
                                                             ui,
-                                                            &output_source,
+                                                            &story_items,
                                                         );
                                                     });
                                             });
                                     });
 
-                                    // Gap between stacked panels
-                                    ui.add_space(panel_gap);
+                                ui.add_space(section_gap);
 
-                                    // === DETAIL SECTIONS (Stacked) ===
-                                    ui.vertical(|ui| {
-                                        ui.set_width(details_panel_width);
+                                // === Work Summaries Section (Collapsible) ===
+                                CollapsibleSection::new("work_summaries", "Work Summaries")
+                                    .default_expanded(true)
+                                    .show(ui, &mut self.section_collapsed_state, |ui| {
+                                        egui::Frame::none()
+                                            .fill(colors::SURFACE_HOVER)
+                                            .rounding(rounding::CARD)
+                                            .inner_margin(egui::Margin::same(spacing::MD))
+                                            .show(ui, |ui| {
+                                                ui.set_min_height(stacked_summaries_height);
+                                                ui.set_max_height(stacked_summaries_height);
+                                                ui.set_width(
+                                                    details_panel_width - spacing::MD * 2.0,
+                                                );
 
-                                        // Load data once for display
-                                        let story_items = load_story_items(session);
-                                        let work_summaries = load_work_summaries(session);
-
-                                        let section_gap = spacing::MD;
-
-                                        // === Stories Section (Collapsible) ===
-                                        CollapsibleSection::new("stories", "Stories")
-                                            .default_expanded(true)
-                                            .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                egui::Frame::none()
-                                                    .fill(colors::SURFACE_HOVER)
-                                                    .rounding(rounding::CARD)
-                                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt(format!(
+                                                        "stacked_summaries_{}",
+                                                        session.metadata.session_id
+                                                    ))
+                                                    .auto_shrink([false, false])
                                                     .show(ui, |ui| {
-                                                        ui.set_min_height(stacked_stories_height);
-                                                        ui.set_max_height(stacked_stories_height);
-                                                        ui.set_width(
-                                                            details_panel_width - spacing::MD * 2.0,
+                                                        Self::render_work_summaries_content(
+                                                            ui,
+                                                            &work_summaries,
                                                         );
-
-                                                        egui::ScrollArea::vertical()
-                                                            .id_salt(format!(
-                                                                "stacked_stories_{}",
-                                                                session.metadata.session_id
-                                                            ))
-                                                            .auto_shrink([false, false])
-                                                            .show(ui, |ui| {
-                                                                Self::render_story_items_content(
-                                                                    ui,
-                                                                    &story_items,
-                                                                );
-                                                            });
-                                                    });
-                                            });
-
-                                        ui.add_space(section_gap);
-
-                                        // === Work Summaries Section (Collapsible) ===
-                                        CollapsibleSection::new("work_summaries", "Work Summaries")
-                                            .default_expanded(true)
-                                            .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                egui::Frame::none()
-                                                    .fill(colors::SURFACE_HOVER)
-                                                    .rounding(rounding::CARD)
-                                                    .inner_margin(egui::Margin::same(spacing::MD))
-                                                    .show(ui, |ui| {
-                                                        ui.set_min_height(stacked_summaries_height);
-                                                        ui.set_max_height(stacked_summaries_height);
-                                                        ui.set_width(
-                                                            details_panel_width - spacing::MD * 2.0,
-                                                        );
-
-                                                        egui::ScrollArea::vertical()
-                                                            .id_salt(format!(
-                                                                "stacked_summaries_{}",
-                                                                session.metadata.session_id
-                                                            ))
-                                                            .auto_shrink([false, false])
-                                                            .show(ui, |ui| {
-                                                                Self::render_work_summaries_content(
-                                                                    ui,
-                                                                    &work_summaries,
-                                                                );
-                                                            });
                                                     });
                                             });
                                     });
-
-                                    // Bottom padding
-                                    ui.add_space(content_padding);
-                                });
+                            });
                         } else {
                             // === SIDE-BY-SIDE LAYOUT (Horizontal) ===
                             let panel_height = available_panel_height;
@@ -7322,8 +7320,8 @@ impl Autom8App {
                                         .rounding(rounding::CARD)
                                         .inner_margin(egui::Margin::same(spacing::MD))
                                         .show(ui, |ui| {
-                                            ui.set_min_height(output_card_height);
-                                            ui.set_max_height(output_card_height);
+                                            // Fill available height with minimum 200px for usability
+                                            ui.set_min_height(output_card_height.max(200.0));
                                             ui.set_width(output_panel_width - spacing::MD * 2.0);
 
                                             egui::ScrollArea::vertical()
@@ -7347,98 +7345,92 @@ impl Autom8App {
                                 // === RIGHT PANEL: Detail sections with outer scroll ===
                                 // Outer scroll area allows scrolling the entire right panel
                                 // when Stories + Work Summaries together exceed panel height.
-                                // Inner scroll areas handle long content within each section.
+                                // Each section has its own independent scroll area.
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(details_panel_width, panel_height),
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_salt(format!(
-                                                "sidebyside_right_outer_{}",
-                                                session.metadata.session_id
-                                            ))
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.set_width(details_panel_width);
+                                        ui.set_width(details_panel_width);
 
-                                                // Load data once for display
-                                                let story_items = load_story_items(session);
-                                                let work_summaries = load_work_summaries(session);
+                                        // Load data once for display
+                                        let story_items = load_story_items(session);
+                                        let work_summaries = load_work_summaries(session);
 
-                                                // Fixed section card heights - these don't need to fill
-                                                // available space since we have an outer scroll
-                                                // Stories gets more height than Work Summaries per acceptance criteria
-                                                let stories_card_height = 200.0;
-                                                let summaries_card_height = 120.0;
-                                                let section_gap = spacing::MD;
+                                        // Calculate available height for sections
+                                        // Account for section headers and gaps
+                                        let section_gap = spacing::MD;
+                                        let header_height =
+                                            typography::line_height(FontSize::Body) + spacing::SM;
+                                        let total_overhead = header_height * 2.0 + section_gap;
+                                        let available_for_sections = panel_height - total_overhead;
 
-                                                // === Stories Section (Collapsible) ===
-                                                CollapsibleSection::new("stories", "Stories")
-                                                    .default_expanded(true)
-                                                    .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                        egui::Frame::none()
-                                                            .fill(colors::SURFACE_HOVER)
-                                                            .rounding(rounding::CARD)
-                                                            .inner_margin(egui::Margin::same(
-                                                                spacing::MD,
+                                        // 70%/30% split with minimum heights
+                                        let stories_card_height =
+                                            (available_for_sections * 0.7).max(150.0);
+                                        let summaries_card_height =
+                                            (available_for_sections * 0.3).max(100.0);
+
+                                        // === Stories Section (Collapsible) ===
+                                        CollapsibleSection::new("stories", "Stories")
+                                            .default_expanded(true)
+                                            .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                egui::Frame::none()
+                                                    .fill(colors::SURFACE_HOVER)
+                                                    .rounding(rounding::CARD)
+                                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(stories_card_height);
+                                                        ui.set_max_height(stories_card_height);
+                                                        ui.set_width(
+                                                            details_panel_width - spacing::MD * 2.0,
+                                                        );
+
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt(format!(
+                                                                "sidebyside_stories_{}",
+                                                                session.metadata.session_id
                                                             ))
+                                                            .auto_shrink([false, false])
                                                             .show(ui, |ui| {
-                                                                ui.set_min_height(stories_card_height);
-                                                                ui.set_max_height(stories_card_height);
-                                                                ui.set_width(
-                                                                    details_panel_width - spacing::MD * 2.0,
+                                                                Self::render_story_items_content(
+                                                                    ui,
+                                                                    &story_items,
                                                                 );
-
-                                                                egui::ScrollArea::vertical()
-                                                                    .id_salt(format!(
-                                                                        "sidebyside_stories_{}",
-                                                                        session.metadata.session_id
-                                                                    ))
-                                                                    .auto_shrink([false, false])
-                                                                    .show(ui, |ui| {
-                                                                        Self::render_story_items_content(
-                                                                            ui,
-                                                                            &story_items,
-                                                                        );
-                                                                    });
                                                             });
                                                     });
+                                            });
 
-                                                // Gap between sections
-                                                ui.add_space(section_gap);
+                                        // Gap between sections
+                                        ui.add_space(section_gap);
 
-                                                // === Work Summaries Section (Collapsible) ===
-                                                CollapsibleSection::new(
-                                                    "work_summaries",
-                                                    "Work Summaries",
-                                                )
-                                                .default_expanded(true)
-                                                .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                    egui::Frame::none()
-                                                        .fill(colors::SURFACE_HOVER)
-                                                        .rounding(rounding::CARD)
-                                                        .inner_margin(egui::Margin::same(spacing::MD))
-                                                        .show(ui, |ui| {
-                                                            ui.set_min_height(summaries_card_height);
-                                                            ui.set_max_height(summaries_card_height);
-                                                            ui.set_width(
-                                                                details_panel_width - spacing::MD * 2.0,
-                                                            );
+                                        // === Work Summaries Section (Collapsible) ===
+                                        CollapsibleSection::new("work_summaries", "Work Summaries")
+                                            .default_expanded(true)
+                                            .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                egui::Frame::none()
+                                                    .fill(colors::SURFACE_HOVER)
+                                                    .rounding(rounding::CARD)
+                                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(summaries_card_height);
+                                                        ui.set_max_height(summaries_card_height);
+                                                        ui.set_width(
+                                                            details_panel_width - spacing::MD * 2.0,
+                                                        );
 
-                                                            egui::ScrollArea::vertical()
-                                                                .id_salt(format!(
-                                                                    "sidebyside_summaries_{}",
-                                                                    session.metadata.session_id
-                                                                ))
-                                                                .auto_shrink([false, false])
-                                                                .show(ui, |ui| {
-                                                                    Self::render_work_summaries_content(
-                                                                        ui,
-                                                                        &work_summaries,
-                                                                    );
-                                                                });
-                                                        });
-                                                });
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt(format!(
+                                                                "sidebyside_summaries_{}",
+                                                                session.metadata.session_id
+                                                            ))
+                                                            .auto_shrink([false, false])
+                                                            .show(ui, |ui| {
+                                                                Self::render_work_summaries_content(
+                                                                    ui,
+                                                                    &work_summaries,
+                                                                );
+                                                            });
+                                                    });
                                             });
                                     },
                                 );
