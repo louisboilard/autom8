@@ -10,7 +10,8 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 // Import and re-export shared types and functions for backward compatibility
 use crate::ui::shared::format_state_label;
 pub use crate::ui::shared::{
-    format_duration, format_duration_secs, format_relative_time, format_relative_time_secs, Status,
+    format_duration, format_duration_secs, format_relative_time, format_relative_time_secs,
+    RunProgress, Status,
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Vec2};
 
@@ -180,50 +181,9 @@ pub fn badge_background_color(status_color: Color32) -> Color32 {
 // Progress Components
 // ============================================================================
 
-/// Progress information for displaying story completion.
-#[derive(Debug, Clone, Copy)]
-pub struct Progress {
-    /// Number of completed items.
-    pub completed: usize,
-    /// Total number of items.
-    pub total: usize,
-}
-
-impl Progress {
-    /// Create a new Progress instance.
-    pub fn new(completed: usize, total: usize) -> Self {
-        Self { completed, total }
-    }
-
-    /// Calculate the progress as a fraction between 0.0 and 1.0.
-    pub fn fraction(&self) -> f32 {
-        if self.total == 0 {
-            0.0
-        } else {
-            (self.completed as f32) / (self.total as f32)
-        }
-    }
-
-    /// Format progress as a fraction string (e.g., "Story 2/5").
-    /// The current story number is completed + 1 (1-indexed).
-    pub fn as_story_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
-    }
-
-    /// Format progress as a simple fraction (e.g., "2/5").
-    pub fn as_fraction(&self) -> String {
-        format!("{}/{}", self.completed, self.total)
-    }
-
-    /// Format progress as a percentage (e.g., "40%").
-    pub fn as_percentage(&self) -> String {
-        if self.total == 0 {
-            return "0%".to_string();
-        }
-        let pct = (self.completed * 100) / self.total;
-        format!("{}%", pct)
-    }
-}
+// NOTE: Progress information is now provided by the shared `RunProgress` struct
+// from `crate::ui::shared`. It is re-exported above for backward compatibility.
+// The `ProgressBar` component below uses `RunProgress` for its data source.
 
 /// A visual progress bar component.
 #[derive(Debug, Clone)]
@@ -252,8 +212,8 @@ impl ProgressBar {
         }
     }
 
-    /// Create a progress bar from a Progress struct.
-    pub fn from_progress(progress: &Progress) -> Self {
+    /// Create a progress bar from a RunProgress struct.
+    pub fn from_progress(progress: &RunProgress) -> Self {
         Self::new(progress.fraction())
     }
 
@@ -716,31 +676,17 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Progress Tests
+    // ProgressBar Tests (RunProgress tests are in ui::shared::tests)
     // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_progress() {
-        // Fraction calculation
-        assert!((Progress::new(2, 5).fraction() - 0.4).abs() < 0.001);
-        assert_eq!(Progress::new(0, 0).fraction(), 0.0);
-        assert!((Progress::new(5, 5).fraction() - 1.0).abs() < 0.001);
-
-        // Formatting
-        assert_eq!(Progress::new(1, 5).as_story_fraction(), "Story 2/5");
-        assert_eq!(Progress::new(0, 3).as_story_fraction(), "Story 1/3");
-        assert_eq!(Progress::new(2, 5).as_fraction(), "2/5");
-        assert_eq!(Progress::new(2, 4).as_percentage(), "50%");
-        assert_eq!(Progress::new(0, 0).as_percentage(), "0%");
-        assert_eq!(Progress::new(5, 5).as_percentage(), "100%");
-    }
 
     #[test]
     fn test_progress_bar() {
         assert!((ProgressBar::new(0.5).progress() - 0.5).abs() < 0.001);
         assert_eq!(ProgressBar::new(-0.5).progress(), 0.0); // Clamps low
         assert_eq!(ProgressBar::new(1.5).progress(), 1.0); // Clamps high
-        assert!((ProgressBar::from_progress(&Progress::new(3, 10)).progress() - 0.3).abs() < 0.001);
+        assert!(
+            (ProgressBar::from_progress(&RunProgress::new(3, 10)).progress() - 0.3).abs() < 0.001
+        );
     }
 
     // Duration and relative time formatting tests are in ui::shared::tests.

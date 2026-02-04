@@ -181,7 +181,10 @@ pub fn format_relative_time_secs(total_secs: u64) -> String {
 // ============================================================================
 
 /// Progress information for a run.
-#[derive(Debug, Clone)]
+///
+/// This is the canonical progress struct used by both GUI and TUI.
+/// It provides methods for calculating and formatting progress values.
+#[derive(Debug, Clone, Copy)]
 pub struct RunProgress {
     /// Number of completed stories.
     pub completed: usize,
@@ -190,9 +193,40 @@ pub struct RunProgress {
 }
 
 impl RunProgress {
-    /// Format progress as a fraction string (e.g., "Story 2/5").
+    /// Create a new RunProgress instance.
+    pub fn new(completed: usize, total: usize) -> Self {
+        Self { completed, total }
+    }
+
+    /// Calculate the progress as a fraction between 0.0 and 1.0.
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.completed as f32) / (self.total as f32)
+        }
+    }
+
+    /// Format progress as a story fraction string (e.g., "Story 2/5").
+    /// The current story number is completed + 1 (1-indexed), but capped at total
+    /// to avoid displaying impossible values like "Story 8/7" at completion.
     pub fn as_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
+        let current = if self.completed < self.total {
+            self.completed + 1
+        } else {
+            self.total
+        };
+        format!("Story {}/{}", current, self.total)
+    }
+
+    /// Alias for `as_fraction()` for clarity when the story context is explicit.
+    pub fn as_story_fraction(&self) -> String {
+        self.as_fraction()
+    }
+
+    /// Format progress as a simple fraction (e.g., "2/5").
+    pub fn as_simple_fraction(&self) -> String {
+        format!("{}/{}", self.completed, self.total)
     }
 
     /// Format progress as a percentage (e.g., "40%").
@@ -782,6 +816,91 @@ mod tests {
             total: 0,
         };
         assert_eq!(progress.as_percentage(), "0%");
+    }
+
+    #[test]
+    fn test_run_progress_as_fraction_edge_cases() {
+        // Edge case: 0/0 (empty spec) - should show "Story 0/0"
+        let empty = RunProgress {
+            completed: 0,
+            total: 0,
+        };
+        assert_eq!(empty.as_fraction(), "Story 0/0");
+
+        // Edge case: 0/5 (not started) - should show "Story 1/5"
+        let not_started = RunProgress {
+            completed: 0,
+            total: 5,
+        };
+        assert_eq!(not_started.as_fraction(), "Story 1/5");
+
+        // Edge case: 5/5 (completed) - should show "Story 5/5", NOT "Story 6/5"
+        let complete = RunProgress {
+            completed: 5,
+            total: 5,
+        };
+        assert_eq!(complete.as_fraction(), "Story 5/5");
+
+        // Edge case: 7/7 (completed, different total) - should show "Story 7/7"
+        let complete_7 = RunProgress {
+            completed: 7,
+            total: 7,
+        };
+        assert_eq!(complete_7.as_fraction(), "Story 7/7");
+
+        // Normal case: in progress
+        let in_progress = RunProgress {
+            completed: 3,
+            total: 7,
+        };
+        assert_eq!(in_progress.as_fraction(), "Story 4/7");
+
+        // Boundary: one before completion - should show next story
+        let almost_done = RunProgress {
+            completed: 4,
+            total: 5,
+        };
+        assert_eq!(almost_done.as_fraction(), "Story 5/5");
+    }
+
+    #[test]
+    fn test_run_progress_new() {
+        let progress = RunProgress::new(3, 7);
+        assert_eq!(progress.completed, 3);
+        assert_eq!(progress.total, 7);
+    }
+
+    #[test]
+    fn test_run_progress_fraction() {
+        // Normal case
+        assert!((RunProgress::new(2, 5).fraction() - 0.4).abs() < 0.001);
+
+        // Zero total
+        assert_eq!(RunProgress::new(0, 0).fraction(), 0.0);
+
+        // Complete
+        assert!((RunProgress::new(5, 5).fraction() - 1.0).abs() < 0.001);
+
+        // Not started
+        assert_eq!(RunProgress::new(0, 5).fraction(), 0.0);
+    }
+
+    #[test]
+    fn test_run_progress_as_simple_fraction() {
+        assert_eq!(RunProgress::new(2, 5).as_simple_fraction(), "2/5");
+        assert_eq!(RunProgress::new(0, 3).as_simple_fraction(), "0/3");
+        assert_eq!(RunProgress::new(5, 5).as_simple_fraction(), "5/5");
+        assert_eq!(RunProgress::new(0, 0).as_simple_fraction(), "0/0");
+    }
+
+    #[test]
+    fn test_run_progress_as_story_fraction_alias() {
+        // as_story_fraction should produce identical results to as_fraction
+        let progress = RunProgress::new(3, 7);
+        assert_eq!(progress.as_story_fraction(), progress.as_fraction());
+
+        let complete = RunProgress::new(5, 5);
+        assert_eq!(complete.as_story_fraction(), complete.as_fraction());
     }
 
     #[test]
