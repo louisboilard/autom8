@@ -1677,6 +1677,8 @@ mod tests {
             is_main_session: is_main,
             is_stale: false,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         }
     }
 
@@ -4230,6 +4232,8 @@ mod tests {
             is_main_session: is_main,
             is_stale,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         }
     }
 

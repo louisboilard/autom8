@@ -7,6 +7,7 @@
 
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
+use crate::process::ProcessMetrics;
 use crate::spec::Spec;
 use crate::state::{
     IterationStatus, LiveState, RunState, RunStatus, SessionMetadata, StateManager,
@@ -80,6 +81,13 @@ pub struct SessionData {
     pub is_stale: bool,
     /// Live output state for streaming Claude output (from live.json).
     pub live_output: Option<LiveState>,
+    /// Process resource metrics (CPU, memory) for the running Claude process.
+    /// None if the process is not running or metrics are unavailable.
+    /// Populated by the GUI's ProcessMonitor tracking.
+    pub process_metrics: Option<ProcessMetrics>,
+    /// The PID of the running Claude process (if known).
+    /// Used for process control (kill, pause) and resource monitoring.
+    pub pid: Option<u32>,
 }
 
 impl SessionData {
@@ -368,6 +376,8 @@ fn load_sessions(
                     is_main_session,
                     is_stale: true,
                     live_output: None,
+                    process_metrics: None,
+                    pid: None,
                 });
                 continue;
             }
@@ -395,6 +405,9 @@ fn load_sessions(
                 })
             });
 
+            // Extract PID from live state (if available)
+            let pid = live_output.as_ref().and_then(|live| live.pid);
+
             sessions.push(SessionData {
                 project_name: project_name.clone(),
                 metadata,
@@ -404,6 +417,8 @@ fn load_sessions(
                 is_main_session,
                 is_stale: false,
                 live_output,
+                process_metrics: None,
+                pid,
             });
         }
     }
@@ -605,6 +620,8 @@ mod tests {
             is_main_session: true,
             is_stale: false,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         };
         assert_eq!(session.display_title(), "my-project (main)");
     }
@@ -630,6 +647,8 @@ mod tests {
             is_main_session: false,
             is_stale: false,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         };
         assert_eq!(session.display_title(), "my-project (abc12345)");
     }
@@ -655,6 +674,8 @@ mod tests {
             is_main_session: false,
             is_stale: false,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         };
         assert_eq!(session.truncated_worktree_path(), "repo");
     }
@@ -680,7 +701,113 @@ mod tests {
             is_main_session: false,
             is_stale: false,
             live_output: None,
+            process_metrics: None,
+            pid: None,
         };
         assert_eq!(session.truncated_worktree_path(), ".../projects/repo");
+    }
+
+    // ========================================================================
+    // US-007: Process Metrics Tests
+    // ========================================================================
+
+    #[test]
+    fn test_session_data_process_metrics_none_by_default() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: None,
+            process_metrics: None,
+            pid: None,
+        };
+        assert!(session.process_metrics.is_none());
+        assert!(session.pid.is_none());
+    }
+
+    #[test]
+    fn test_session_data_with_process_metrics() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let metrics = ProcessMetrics::new(45.5, 104857600, 2.5);
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: None,
+            process_metrics: Some(metrics.clone()),
+            pid: Some(12345),
+        };
+
+        assert!(session.process_metrics.is_some());
+        let m = session.process_metrics.unwrap();
+        assert!((m.cpu_percent - 45.5).abs() < f32::EPSILON);
+        assert_eq!(m.memory_bytes, 104857600);
+        assert!((m.memory_percent - 2.5).abs() < f32::EPSILON);
+        assert_eq!(session.pid, Some(12345));
+    }
+
+    #[test]
+    fn test_session_data_pid_from_live_output() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        use crate::state::LiveState;
+
+        // Create a LiveState with a PID
+        let mut live = LiveState::new(crate::state::MachineState::RunningClaude);
+        live.set_pid(Some(67890));
+
+        // Simulate extracting PID from live_output (as done in load_sessions)
+        let pid = live.pid;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(live),
+            process_metrics: None,
+            pid,
+        };
+
+        assert_eq!(session.pid, Some(67890));
     }
 }
