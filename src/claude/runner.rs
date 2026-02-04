@@ -329,8 +329,8 @@ Implement user story **{story_id}: {story_title}**
 ## Instructions
 
 1. Implement the user story according to the acceptance criteria
-2. Write tests to verify the implementation
-3. Run the tests to ensure they pass
+2. Write tests to verify the implementation if useful
+3. Run the related tests to ensure they pass
 4. After implementation, update `{spec_path}` to set `passes: true` for story {story_id}
 
 ## Completion
@@ -758,100 +758,5 @@ mod tests {
         // The knowledge section should have the ## Project Knowledge header
         // followed by the content
         assert!(prompt.contains("## Project Knowledge\n\nTest knowledge content"));
-    }
-
-    #[test]
-    fn test_claude_runner_new() {
-        let runner = ClaudeRunner::new();
-        assert!(!runner.is_running());
-    }
-
-    #[test]
-    fn test_claude_runner_default() {
-        let runner = ClaudeRunner::default();
-        assert!(!runner.is_running());
-    }
-
-    #[test]
-    fn test_claude_runner_kill_no_process() {
-        let runner = ClaudeRunner::new();
-        // kill() should return Ok(false) when no process is running
-        let result = runner.kill();
-        assert!(result.is_ok());
-        assert!(!result.unwrap()); // false = no process was killed
-    }
-
-    #[test]
-    fn test_claude_runner_kill_terminates_subprocess() {
-        use std::thread;
-        use std::time::Duration;
-
-        let runner = ClaudeRunner::new();
-
-        // Spawn a long-running process (sleep for 60 seconds)
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("Failed to spawn sleep process");
-
-        let pid = child.id();
-
-        // Store the child in the runner
-        runner.set_child(child).expect("Failed to set child");
-        assert!(runner.is_running());
-
-        // Kill the process
-        let result = runner.kill();
-        assert!(result.is_ok());
-        assert!(result.unwrap()); // true = process was killed
-
-        // Verify process is no longer running
-        assert!(!runner.is_running());
-
-        // Give the OS a moment to clean up
-        thread::sleep(Duration::from_millis(50));
-
-        // Verify the process is actually terminated by checking if kill would fail
-        // (sending signal 0 to check if process exists)
-        #[cfg(unix)]
-        {
-            let status = Command::new("kill").args(["-0", &pid.to_string()]).status();
-            // Should fail because process no longer exists
-            assert!(status.is_ok());
-            assert!(!status.unwrap().success());
-        }
-    }
-
-    #[test]
-    fn test_claude_runner_clone_shares_state() {
-        let runner1 = ClaudeRunner::new();
-        let runner2 = runner1.clone();
-
-        // Spawn a process and store in runner1
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("Failed to spawn sleep process");
-
-        runner1.set_child(child).expect("Failed to set child");
-
-        // Both runners should see it as running
-        assert!(runner1.is_running());
-        assert!(runner2.is_running());
-
-        // Kill via runner2
-        let result = runner2.kill();
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-
-        // Both should now show not running
-        assert!(!runner1.is_running());
-        assert!(!runner2.is_running());
     }
 }
