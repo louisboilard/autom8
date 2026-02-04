@@ -854,6 +854,124 @@ mod tests {
         assert!(!SPEC_SKILL_PROMPT.contains("PRD"));
     }
 
+    // ========================================================================
+    // Spec skill prompt handoff protocol tests (US-001, US-003)
+    // ========================================================================
+
+    #[test]
+    fn spec_skill_prompt_contains_handoff_section() {
+        // US-001: Must have a "Handoff to Implementation" section
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Handoff to Implementation")
+                || SPEC_SKILL_PROMPT.contains("## Handoff"),
+            "SPEC_SKILL_PROMPT must contain a Handoff to Implementation section"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_instructs_confirm_save_with_path() {
+        // US-001: Prompt instructs Claude to confirm save with the file path
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Confirm the Save") || SPEC_SKILL_PROMPT.contains("confirm"),
+            "Should instruct Claude to confirm the save"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Spec saved to") || SPEC_SKILL_PROMPT.contains("saved to:"),
+            "Should include save confirmation message with path"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_asks_ready_for_implementation() {
+        // US-001: Prompt instructs Claude to ask if ready for autom8 implementation
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Ready for autom8")
+                || SPEC_SKILL_PROMPT.contains("start implementation"),
+            "Should ask if user is ready for autom8 to start implementation"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("[Y/n]") || SPEC_SKILL_PROMPT.contains("[y/n]"),
+            "Should include Y/n prompt indicator"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_specifies_confirmation_responses() {
+        // US-001: Prompt specifies acceptable confirmation responses
+        assert!(
+            SPEC_SKILL_PROMPT.contains("yes"),
+            "Should list 'yes' as acceptable confirmation"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("proceed") || SPEC_SKILL_PROMPT.contains("go"),
+            "Should list 'proceed' or 'go' as acceptable confirmation"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Enter") || SPEC_SKILL_PROMPT.contains("enter"),
+            "Should mention Enter key as acceptable confirmation"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_specifies_decline_responses() {
+        // US-001: Prompt specifies acceptable decline responses
+        assert!(
+            SPEC_SKILL_PROMPT.contains("no"),
+            "Should list 'no' as acceptable decline"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("not yet") || SPEC_SKILL_PROMPT.contains("wait"),
+            "Should list 'not yet' or 'wait' as acceptable decline"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_instructs_handoff_message() {
+        // US-001: Prompt instructs Claude to print handoff message before exiting
+        assert!(
+            SPEC_SKILL_PROMPT.contains("Handing off to autom8"),
+            "Should instruct Claude to print 'Handing off to autom8...' message"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_instructs_exit_command() {
+        // US-001, US-003: Prompt instructs Claude to exit via /exit on confirmation
+        assert!(
+            SPEC_SKILL_PROMPT.contains("/exit"),
+            "Should instruct Claude to use /exit command"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("type `/exit`")
+                || SPEC_SKILL_PROMPT.contains("Then type `/exit`"),
+            "Should explicitly instruct to type /exit to exit the session"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_instructs_continue_on_decline() {
+        // US-001: Prompt instructs Claude to continue refining on decline
+        assert!(
+            SPEC_SKILL_PROMPT.contains("What would you like to change")
+                || SPEC_SKILL_PROMPT.contains("refine"),
+            "Should ask what to change when user declines"
+        );
+        assert!(
+            SPEC_SKILL_PROMPT.contains("repeat") || SPEC_SKILL_PROMPT.contains("Step 1"),
+            "Should indicate re-asking after next save"
+        );
+    }
+
+    #[test]
+    fn spec_skill_prompt_mentions_autom8_in_handoff() {
+        // US-003: Prompt mentions autom8 in the handoff context
+        assert!(
+            SPEC_SKILL_PROMPT.contains("autom8 to start")
+                || SPEC_SKILL_PROMPT.contains("autom8 to detect"),
+            "Should mention autom8 in the handoff context"
+        );
+    }
+
     #[test]
     fn spec_json_prompt_uses_spec_terminology() {
         // Verify JSON conversion prompt uses "spec" terminology
