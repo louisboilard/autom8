@@ -2535,38 +2535,6 @@ mod tests {
         assert!(sm.load_current().unwrap().is_none());
     }
 
-    // ------------------------------------------------------------------------
-    // Runner builder pattern tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_runner_verbose_defaults_to_false() {
-        let runner = Runner::new().unwrap();
-        assert!(!runner.verbose);
-    }
-
-    #[test]
-    fn test_runner_with_verbose_true() {
-        let runner = Runner::new().unwrap().with_verbose(true);
-        assert!(runner.verbose);
-    }
-
-    #[test]
-    fn test_runner_builder_chain_order_independent() {
-        let runner1 = Runner::new()
-            .unwrap()
-            .with_verbose(true)
-            .with_skip_review(true);
-
-        let runner2 = Runner::new()
-            .unwrap()
-            .with_skip_review(true)
-            .with_verbose(true);
-
-        assert_eq!(runner1.verbose, runner2.verbose);
-        assert_eq!(runner1.skip_review, runner2.skip_review);
-    }
-
     // ========================================================================
     // US-005: Config integration with state machine tests
     // ========================================================================

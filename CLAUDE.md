@@ -52,27 +52,67 @@ Domain Logic
     ├→ Git (git.rs) - git operations
     ├→ GitHub (gh/) - PR management
     └→ Claude (claude/) - LLM integration
+
+UI Layer (ui/) - standalone monitoring interfaces
+    ├→ GUI (gui/) - Native desktop GUI using eframe/egui
+    ├→ TUI (tui/) - Terminal UI using ratatui
+    └→ Shared (shared/) - Common types and data loading
 ```
 
 ## Key Files and Modules
 
 | File/Module | LOC | Purpose |
 |-------------|-----|---------|
-| `main.rs` | ~1,150 | CLI entry point, command parsing (clap) |
-| `commands/` | ~1,100 | Command handlers (12 files: run, status, resume, clean, etc.) |
-| `runner.rs` | ~2,150 | Main orchestration loop, state transitions, worktree context |
-| `state.rs` | ~1,100 | State machine (12 states), session management, metadata |
-| `worktree.rs` | ~1,500 | Git worktree operations, session ID generation |
-| `claude/` | ~1,500 | Claude CLI integration (9 files: runner, stream, types, etc.) |
-| `gh/` | ~950 | GitHub CLI integration (7 files: pr, detection, context, etc.) |
-| `config.rs` | ~3,100 | TOML config, validation, defaults, worktree settings |
-| `output/` | ~2,500 | CLI formatting (9 files: banner, messages, status, etc.) |
+| `main.rs` | ~2,350 | CLI entry point, command parsing (clap) |
+| `commands/` | ~4,800 | Command handlers (14 files: run, status, resume, clean, etc.) |
+| `runner.rs` | ~3,900 | Main orchestration loop, state transitions, worktree context |
+| `state.rs` | ~4,450 | State machine (12 states), session management, metadata |
+| `worktree.rs` | ~1,650 | Git worktree operations, session ID generation |
+| `claude/` | ~3,400 | Claude CLI integration (9 files: runner, stream, types, etc.) |
+| `gh/` | ~1,850 | GitHub CLI integration (8 files: pr, detection, context, etc.) |
+| `config.rs` | ~3,650 | TOML config, validation, defaults, worktree settings |
+| `output/` | ~2,100 | CLI formatting (10 files: banner, messages, status, etc.) |
 | `progress.rs` | ~2,200 | Spinners, progress bars, breadcrumbs |
-| `display.rs` | ~940 | DisplayAdapter trait (strategy pattern) |
 | `spec.rs` | ~430 | Spec/UserStory structs, JSON serialization |
-| `git.rs` | ~810 | Git command wrappers |
-| `prompts.rs` | ~1,100 | Claude system prompts |
-| `tui/` | ~2,400 | Ratatui terminal UI |
+| `git.rs` | ~1,350 | Git command wrappers |
+| `prompts.rs` | ~1,250 | Claude system prompts |
+| `ui/` | ~24,050 | UI modules (see UI Directory Structure below) |
+
+### UI Directory Structure
+
+The `ui/` module provides standalone monitoring interfaces for viewing autom8 activity.
+
+```
+ui/
+├── mod.rs              (~15 LOC)   - Module exports
+├── gui/                (~17,830 LOC) - Native desktop GUI (eframe/egui)
+│   ├── app.rs          (~14,730 LOC) - Main app, session cards, views, state
+│   ├── components.rs   (~870 LOC)  - Reusable UI components, text truncation
+│   ├── config.rs       (~600 LOC)  - Config tab types and edit logic
+│   ├── modal.rs        (~590 LOC)  - Modal dialog component
+│   ├── theme.rs        (~490 LOC)  - Colors, spacing, shadows, visuals
+│   ├── typography.rs   (~290 LOC)  - Font sizes, weights, helpers
+│   └── animation.rs    (~260 LOC)  - Decorative particle animations
+├── tui/                (~4,700 LOC) - Terminal UI (ratatui/crossterm)
+│   ├── app.rs          (~4,560 LOC) - Main app, views, event loop
+│   └── views.rs        (~120 LOC)  - View enum definitions
+└── shared/             (~1,520 LOC) - Framework-agnostic shared logic
+    └── mod.rs          (~1,520 LOC) - Status types, data loading, formatting
+```
+
+**GUI (`gui/`)**: Native desktop application built with eframe/egui. Provides a warm, Claude-inspired aesthetic with session monitoring, run history, config editing, and project overview. Key features:
+- Session cards with output display (clipped viewport, text truncation)
+- Rising particle animations
+- Modal dialogs for confirmations
+- Responsive layout with sidebar navigation
+
+**TUI (`tui/`)**: Terminal-based interface using ratatui. Keyboard-navigable dashboard showing active runs, project list, and run history.
+
+**Shared (`shared/`)**: Common types and loading functions used by both GUI and TUI:
+- `Status` enum for semantic state mapping
+- `SessionData`, `ProjectData`, `RunHistoryEntry` types
+- `load_ui_data()`, `load_run_history()` functions
+- Time formatting utilities
 
 ## State Machine
 
@@ -209,6 +249,14 @@ cargo test runner::tests
 2. Implement in `CliDisplay` (add function to appropriate `output/` submodule)
 3. Implement in `TuiDisplay` (using `tui/app.rs`)
 
+### Adding GUI features
+1. Add shared types to `ui/shared/mod.rs` if needed by both GUI and TUI
+2. Update `ui/gui/app.rs` for main application logic
+3. Add reusable components to `ui/gui/components.rs`
+4. Add colors/spacing to `ui/gui/theme.rs`
+5. Add fonts to `ui/gui/typography.rs`
+6. For modal dialogs, use `ui/gui/modal.rs`
+
 ## File Locations
 
 - **Specs:** `~/.config/autom8/<project>/spec/spec-<feature>.json`
@@ -227,6 +275,8 @@ cargo test runner::tests
 - `thiserror` - error types
 - `indicatif` - progress/spinners
 - `ratatui`/`crossterm` - TUI
+- `eframe`/`egui`/`egui_extras` - GUI framework
+- `image` - image loading for GUI icons
 - `toml` - config parsing
 
 ## CI/CD
@@ -242,13 +292,15 @@ All checks must pass before merging PRs.
 1. **PR requires commit:** Config validation enforces `pull_request` requires `commit = true`
 2. **TUI thread safety:** TUI uses `Arc<Mutex<TuiApp>>` for cross-thread access
 3. **Output buffer limit:** TUI caps output at 1,000 lines to prevent memory growth
-4. **State persistence:** Config snapshot saved at run start; resumed runs use same settings
-5. **Branch handling:** Runner auto-creates/checkouts branches from spec's `branch_name`
-6. **Branch conflicts:** Two sessions cannot use the same branch simultaneously; autom8 detects this and errors early
-7. **Session identity:** In main repo, session ID is `"main"`; in worktrees, it's a hash of the path
-8. **Stale sessions:** If a worktree is manually deleted, its session becomes "stale" and won't block new runs
-9. **Project identity:** Project name is derived from git repo root, not CWD (ensures all worktrees share config)
-10. **State persistence ordering:** In `run()` and `run_from_spec()`, state must NOT be persisted until after worktree context is determined. Saving state before `effective_state_manager` is known creates phantom sessions. Visual transitions (`print_state_transition()`) are fine; only `save()` calls must be deferred.
+4. **GUI output clipping:** GUI uses hardware clipping (`painter.with_clip_rect()`) to constrain text within output display areas
+5. **GUI output priority:** GUI follows TUI pattern: fresh live output > iteration snippet > status (5-second freshness threshold)
+6. **State persistence:** Config snapshot saved at run start; resumed runs use same settings
+7. **Branch handling:** Runner auto-creates/checkouts branches from spec's `branch_name`
+8. **Branch conflicts:** Two sessions cannot use the same branch simultaneously; autom8 detects this and errors early
+9. **Session identity:** In main repo, session ID is `"main"`; in worktrees, it's a hash of the path
+10. **Stale sessions:** If a worktree is manually deleted, its session becomes "stale" and won't block new runs
+11. **Project identity:** Project name is derived from git repo root, not CWD (ensures all worktrees share config)
+12. **State persistence ordering:** In `run()` and `run_from_spec()`, state must NOT be persisted until after worktree context is determined. Saving state before `effective_state_manager` is known creates phantom sessions. Visual transitions (`print_state_transition()`) are fine; only `save()` calls must be deferred.
 
 ## Worktree Architecture
 
