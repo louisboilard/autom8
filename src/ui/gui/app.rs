@@ -24,10 +24,10 @@ use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Strok
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
-const DEFAULT_WIDTH: f32 = 840.0;
+const DEFAULT_WIDTH: f32 = 1200.0;
 
 /// Default window height in pixels.
-const DEFAULT_HEIGHT: f32 = 600.0;
+const DEFAULT_HEIGHT: f32 = 800.0;
 
 /// Minimum window width in pixels.
 const MIN_WIDTH: f32 = 400.0;
