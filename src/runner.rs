@@ -2243,8 +2243,9 @@ mod tests {
             (RunStatus::Failed, true),
             (RunStatus::Completed, false),
         ] {
-            let is_resumable =
-                status == RunStatus::Running || status == RunStatus::Failed || status == RunStatus::Interrupted;
+            let is_resumable = status == RunStatus::Running
+                || status == RunStatus::Failed
+                || status == RunStatus::Interrupted;
             assert_eq!(is_resumable, resumable, "{:?}", status);
         }
     }

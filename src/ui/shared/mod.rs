@@ -936,21 +936,48 @@ mod tests {
     #[test]
     fn test_status_from_machine_state() {
         // Setup phases
-        assert_eq!(Status::from_machine_state(MachineState::Initializing), Status::Setup);
-        assert_eq!(Status::from_machine_state(MachineState::PickingStory), Status::Setup);
-        assert_eq!(Status::from_machine_state(MachineState::LoadingSpec), Status::Setup);
+        assert_eq!(
+            Status::from_machine_state(MachineState::Initializing),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::PickingStory),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::LoadingSpec),
+            Status::Setup
+        );
 
         // Work phases
-        assert_eq!(Status::from_machine_state(MachineState::RunningClaude), Status::Running);
-        assert_eq!(Status::from_machine_state(MachineState::Reviewing), Status::Reviewing);
-        assert_eq!(Status::from_machine_state(MachineState::Correcting), Status::Correcting);
+        assert_eq!(
+            Status::from_machine_state(MachineState::RunningClaude),
+            Status::Running
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Reviewing),
+            Status::Reviewing
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Correcting),
+            Status::Correcting
+        );
 
         // Success phases
-        assert_eq!(Status::from_machine_state(MachineState::Committing), Status::Success);
-        assert_eq!(Status::from_machine_state(MachineState::Completed), Status::Success);
+        assert_eq!(
+            Status::from_machine_state(MachineState::Committing),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Completed),
+            Status::Success
+        );
 
         // Terminal
-        assert_eq!(Status::from_machine_state(MachineState::Failed), Status::Error);
+        assert_eq!(
+            Status::from_machine_state(MachineState::Failed),
+            Status::Error
+        );
         assert_eq!(Status::from_machine_state(MachineState::Idle), Status::Idle);
     }
 

@@ -1317,7 +1317,6 @@ impl StateManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1428,7 +1427,10 @@ mod tests {
         assert!(state.iterations[0].work_summary.is_none());
 
         state.set_work_summary(Some("Feature".to_string()));
-        assert_eq!(state.iterations[0].work_summary, Some("Feature".to_string()));
+        assert_eq!(
+            state.iterations[0].work_summary,
+            Some("Feature".to_string())
+        );
 
         state.set_work_summary(None);
         assert!(state.iterations[0].work_summary.is_none());
@@ -1450,7 +1452,12 @@ mod tests {
         let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
         sm.save(&state).unwrap();
 
-        assert!(temp_dir.path().join(SESSIONS_DIR).join(MAIN_SESSION_ID).join(STATE_FILE).exists());
+        assert!(temp_dir
+            .path()
+            .join(SESSIONS_DIR)
+            .join(MAIN_SESSION_ID)
+            .join(STATE_FILE)
+            .exists());
 
         let loaded = sm.load_current().unwrap().unwrap();
         assert_eq!(loaded.branch, "test-branch");
@@ -1493,11 +1500,25 @@ mod tests {
     fn test_session_isolation() {
         let temp_dir = TempDir::new().unwrap();
 
-        let sm1 = StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "session-a".to_string());
-        let sm2 = StateManager::with_dir_and_session(temp_dir.path().to_path_buf(), "session-b".to_string());
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-a".to_string(),
+        );
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-b".to_string(),
+        );
 
-        sm1.save(&RunState::new(PathBuf::from("a.json"), "branch-a".to_string())).unwrap();
-        sm2.save(&RunState::new(PathBuf::from("b.json"), "branch-b".to_string())).unwrap();
+        sm1.save(&RunState::new(
+            PathBuf::from("a.json"),
+            "branch-a".to_string(),
+        ))
+        .unwrap();
+        sm2.save(&RunState::new(
+            PathBuf::from("b.json"),
+            "branch-b".to_string(),
+        ))
+        .unwrap();
 
         assert_eq!(sm1.load_current().unwrap().unwrap().branch, "branch-a");
         assert_eq!(sm2.load_current().unwrap().unwrap().branch, "branch-b");
@@ -1568,10 +1589,17 @@ mod tests {
 
         let mut config = crate::config::Config::default();
         config.review = false;
-        let state = RunState::new_with_config(PathBuf::from("test.json"), "branch".to_string(), config);
+        let state =
+            RunState::new_with_config(PathBuf::from("test.json"), "branch".to_string(), config);
         sm.save(&state).unwrap();
 
-        assert!(!sm.load_current().unwrap().unwrap().effective_config().review);
+        assert!(
+            !sm.load_current()
+                .unwrap()
+                .unwrap()
+                .effective_config()
+                .review
+        );
     }
 
     #[test]
