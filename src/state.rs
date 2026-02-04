@@ -19,7 +19,8 @@ const SPEC_DIR: &str = "spec";
 
 /// Maximum number of output lines to keep in LiveState.
 /// Prevents unbounded memory growth during long Claude runs.
-const LIVE_STATE_MAX_LINES: usize = 50;
+/// 500 lines at ~100 chars average = ~50KB, which is acceptable for the GUI modal.
+const LIVE_STATE_MAX_LINES: usize = 500;
 
 /// Metadata about a session, stored separately from the full state.
 ///
@@ -69,34 +70,57 @@ pub struct SessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveState {
-    /// Recent output lines from Claude (max 50 lines, newest last)
+    /// Recent output lines from Claude (max 500 lines, newest last)
     pub output_lines: Vec<String>,
     /// When this live state was last updated
     pub updated_at: DateTime<Utc>,
     /// Current machine state
     pub machine_state: MachineState,
+    /// Quick access to output line count without loading all lines.
+    /// This allows efficient checks of output size without parsing the full Vec.
+    #[serde(default)]
+    pub output_line_count: usize,
+    /// PID of the currently running Claude process (if any).
+    /// Used by the GUI for process monitoring and control.
+    /// Set when Claude is spawned, cleared when it exits.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 impl LiveState {
     /// Create a new LiveState with the given machine state.
     pub fn new(machine_state: MachineState) -> Self {
         Self {
-            output_lines: Vec::new(),
+            output_lines: Vec::with_capacity(LIVE_STATE_MAX_LINES),
             updated_at: Utc::now(),
             machine_state,
+            output_line_count: 0,
+            pid: None,
         }
     }
 
-    /// Append a line to the output, keeping at most 50 lines.
-    /// Updates the `updated_at` timestamp.
+    /// Set the PID of the running Claude process.
+    pub fn set_pid(&mut self, pid: Option<u32>) {
+        self.pid = pid;
+    }
+
+    /// Append a line to the output, keeping at most 500 lines.
+    /// Updates the `updated_at` timestamp and `output_line_count`.
     pub fn append_line(&mut self, line: String) {
         self.output_lines.push(line);
-        // Keep only the last 50 lines
+        // Keep only the last 500 lines
         if self.output_lines.len() > LIVE_STATE_MAX_LINES {
             let excess = self.output_lines.len() - LIVE_STATE_MAX_LINES;
             self.output_lines.drain(0..excess);
         }
+        self.output_line_count = self.output_lines.len();
         self.updated_at = Utc::now();
+    }
+
+    /// Get the number of output lines without iterating over the Vec.
+    #[inline]
+    pub fn line_count(&self) -> usize {
+        self.output_line_count
     }
 }
 
@@ -4036,34 +4060,36 @@ src/lib.rs | Library module | [Config]
     }
 
     #[test]
-    fn test_live_state_max_50_lines() {
+    fn test_live_state_max_500_lines() {
         let mut live = LiveState::new(MachineState::RunningClaude);
 
-        // Add 60 lines
-        for i in 0..60 {
+        // Add 600 lines
+        for i in 0..600 {
             live.append_line(format!("Line {}", i));
         }
 
-        // Should only keep last 50 lines
-        assert_eq!(live.output_lines.len(), 50);
-        // First line should be "Line 10" (lines 0-9 were dropped)
-        assert_eq!(live.output_lines[0], "Line 10");
-        // Last line should be "Line 59"
-        assert_eq!(live.output_lines[49], "Line 59");
+        // Should only keep last 500 lines
+        assert_eq!(live.output_lines.len(), 500);
+        assert_eq!(live.output_line_count, 500);
+        // First line should be "Line 100" (lines 0-99 were dropped)
+        assert_eq!(live.output_lines[0], "Line 100");
+        // Last line should be "Line 599"
+        assert_eq!(live.output_lines[499], "Line 599");
     }
 
     #[test]
-    fn test_live_state_exactly_50_lines() {
+    fn test_live_state_exactly_500_lines() {
         let mut live = LiveState::new(MachineState::RunningClaude);
 
-        // Add exactly 50 lines
-        for i in 0..50 {
+        // Add exactly 500 lines
+        for i in 0..500 {
             live.append_line(format!("Line {}", i));
         }
 
-        assert_eq!(live.output_lines.len(), 50);
+        assert_eq!(live.output_lines.len(), 500);
+        assert_eq!(live.output_line_count, 500);
         assert_eq!(live.output_lines[0], "Line 0");
-        assert_eq!(live.output_lines[49], "Line 49");
+        assert_eq!(live.output_lines[499], "Line 499");
     }
 
     #[test]
@@ -4087,11 +4113,13 @@ src/lib.rs | Library module | [Config]
         assert!(json.contains("outputLines"));
         assert!(json.contains("updatedAt"));
         assert!(json.contains("machineState"));
+        assert!(json.contains("outputLineCount"));
 
         // Verify snake_case is NOT used
         assert!(!json.contains("output_lines"));
         assert!(!json.contains("updated_at"));
         assert!(!json.contains("machine_state"));
+        assert!(!json.contains("output_line_count"));
     }
 
     #[test]
@@ -4266,5 +4294,225 @@ src/lib.rs | Library module | [Config]
             let parsed: LiveState = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.machine_state, state);
         }
+    }
+
+    // Tests for US-004: Increased output history cap (50 -> 500 lines)
+    // ======================================================================
+
+    #[test]
+    fn test_live_state_output_line_count_field() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        assert_eq!(live.output_line_count, 0);
+        assert_eq!(live.line_count(), 0);
+
+        live.append_line("Line 1".to_string());
+        assert_eq!(live.output_line_count, 1);
+        assert_eq!(live.line_count(), 1);
+
+        live.append_line("Line 2".to_string());
+        assert_eq!(live.output_line_count, 2);
+        assert_eq!(live.line_count(), 2);
+    }
+
+    #[test]
+    fn test_live_state_line_count_after_truncation() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Add 600 lines (triggers truncation at 500)
+        for i in 0..600 {
+            live.append_line(format!("Line {}", i));
+        }
+
+        // Count should reflect actual lines after truncation
+        assert_eq!(live.output_line_count, 500);
+        assert_eq!(live.line_count(), 500);
+        assert_eq!(live.output_lines.len(), 500);
+    }
+
+    #[test]
+    fn test_live_state_backward_compatibility() {
+        // Simulate loading an old live.json without outputLineCount field
+        let old_json = r#"{
+            "outputLines": ["Line 1", "Line 2", "Line 3"],
+            "updatedAt": "2024-01-01T00:00:00Z",
+            "machineState": "running-claude"
+        }"#;
+
+        let parsed: LiveState = serde_json::from_str(old_json).unwrap();
+
+        // output_line_count defaults to 0 for backward compatibility
+        assert_eq!(parsed.output_line_count, 0);
+        // But we can still get the actual count from the vec
+        assert_eq!(parsed.output_lines.len(), 3);
+    }
+
+    #[test]
+    fn test_live_state_500_lines_file_size_reasonable() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Add 500 lines with ~100 chars each (realistic output)
+        for i in 0..500 {
+            // Create a line of approximately 100 characters
+            let line = format!(
+                "[2024-01-01T12:00:00Z] Processing item {:04}: This is a typical output line with some details about what's happening in the process",
+                i
+            );
+            live.append_line(line);
+        }
+
+        let json = serde_json::to_string(&live).unwrap();
+        let json_bytes = json.len();
+
+        // Verify file size is reasonable (~50KB max)
+        // With 500 lines at ~100 chars each, plus JSON overhead, should be well under 100KB
+        assert!(
+            json_bytes <= 100_000,
+            "JSON size {} bytes exceeds 100KB limit",
+            json_bytes
+        );
+
+        // Verify it's roughly in the expected range (~50KB for 500 lines at 100 chars)
+        assert!(
+            json_bytes >= 40_000,
+            "JSON size {} bytes seems too small for 500 lines",
+            json_bytes
+        );
+    }
+
+    #[test]
+    fn test_live_state_serialization_roundtrip_with_line_count() {
+        let mut live = LiveState::new(MachineState::Reviewing);
+        for i in 0..10 {
+            live.append_line(format!("Output line {}", i));
+        }
+
+        let json = serde_json::to_string(&live).unwrap();
+        let parsed: LiveState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.output_lines, live.output_lines);
+        assert_eq!(parsed.output_line_count, 10);
+        assert_eq!(parsed.machine_state, MachineState::Reviewing);
+    }
+
+    #[test]
+    fn test_live_state_preallocated_capacity() {
+        let live = LiveState::new(MachineState::RunningClaude);
+
+        // Verify the vector is preallocated with capacity for 500 lines
+        assert!(
+            live.output_lines.capacity() >= 500,
+            "Vec should be preallocated with capacity for 500 lines, got {}",
+            live.output_lines.capacity()
+        );
+    }
+
+    #[test]
+    fn test_state_manager_save_load_large_live_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut live = LiveState::new(MachineState::RunningClaude);
+
+        // Add 500 lines to test large payload
+        for i in 0..500 {
+            live.append_line(format!(
+                "Line {} - some additional content to make it realistic",
+                i
+            ));
+        }
+
+        sm.save_live(&live).unwrap();
+
+        let loaded = sm.load_live();
+        assert!(loaded.is_some(), "Should load saved large live state");
+
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.output_lines.len(), 500);
+        assert_eq!(loaded.output_line_count, 500);
+        assert_eq!(
+            loaded.output_lines[0],
+            "Line 0 - some additional content to make it realistic"
+        );
+        assert_eq!(
+            loaded.output_lines[499],
+            "Line 499 - some additional content to make it realistic"
+        );
+    }
+
+    // ========================================================================
+    // US-007: PID Tracking Tests
+    // ========================================================================
+
+    #[test]
+    fn test_live_state_pid_initially_none() {
+        let live = LiveState::new(MachineState::RunningClaude);
+        assert!(live.pid.is_none());
+    }
+
+    #[test]
+    fn test_live_state_set_pid() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.set_pid(Some(12345));
+        assert_eq!(live.pid, Some(12345));
+    }
+
+    #[test]
+    fn test_live_state_clear_pid() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.set_pid(Some(12345));
+        live.set_pid(None);
+        assert!(live.pid.is_none());
+    }
+
+    #[test]
+    fn test_live_state_pid_serialization_roundtrip() {
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.set_pid(Some(67890));
+        live.append_line("Output line".to_string());
+
+        // Serialize
+        let json = serde_json::to_string(&live).unwrap();
+
+        // Verify PID is in JSON
+        assert!(json.contains("67890"));
+
+        // Deserialize
+        let loaded: LiveState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.pid, Some(67890));
+    }
+
+    #[test]
+    fn test_live_state_pid_backward_compatibility() {
+        // Test that old live.json without pid field can still be loaded
+        let json = r#"{
+            "outputLines": ["Line 1", "Line 2"],
+            "updatedAt": "2024-01-01T00:00:00Z",
+            "machineState": "running-claude",
+            "outputLineCount": 2
+        }"#;
+
+        let loaded: LiveState = serde_json::from_str(json).unwrap();
+        assert!(
+            loaded.pid.is_none(),
+            "PID should default to None for old files"
+        );
+        assert_eq!(loaded.output_lines.len(), 2);
+    }
+
+    #[test]
+    fn test_live_state_pid_persisted_through_state_manager() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.set_pid(Some(99999));
+        live.append_line("Test output".to_string());
+
+        sm.save_live(&live).unwrap();
+
+        let loaded = sm.load_live().unwrap();
+        assert_eq!(loaded.pid, Some(99999));
     }
 }
