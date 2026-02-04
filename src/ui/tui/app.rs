@@ -6,9 +6,10 @@ use super::views::View;
 use crate::error::Result;
 use crate::state::{LiveState, MachineState, RunState};
 use crate::ui::shared::{
-    load_run_history, load_ui_data, ProjectData, RunHistoryEntry, RunHistoryOptions, SessionData,
+    format_duration, format_relative_time, format_state_label, load_run_history, load_ui_data,
+    ProjectData, RunHistoryEntry, RunHistoryOptions, SessionData, Status,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -33,15 +34,13 @@ use std::time::Duration;
 const COLOR_PRIMARY: Color = Color::Cyan;
 /// Green - success states
 const COLOR_SUCCESS: Color = Color::Green;
-/// Yellow - warning/in-progress states
+/// Yellow - warning/in-progress states (reviewing, general warnings)
 const COLOR_WARNING: Color = Color::Yellow;
 /// Red - error/failure states
 const COLOR_ERROR: Color = Color::Red;
-/// Blue - informational elements
-const COLOR_INFO: Color = Color::Blue;
-/// Gray - dimmed/secondary text
+/// Gray - dimmed/secondary text (idle, setup phases)
 const COLOR_DIM: Color = Color::DarkGray;
-/// Magenta - review/correction states
+/// Magenta - review/correction states (attention needed)
 const COLOR_REVIEW: Color = Color::Magenta;
 
 /// Result type for monitor operations.
@@ -81,76 +80,24 @@ impl From<crate::error::Autom8Error> for MonitorError {
 
 // Data types (RunProgress, ProjectData, SessionData, RunHistoryEntry) are imported
 // from crate::ui::shared.
+// Time formatting (format_duration, format_relative_time) and state labels
+// (format_state_label) are also imported from crate::ui::shared for consistency.
 
-/// Format a duration in seconds as a human-readable string (e.g., "5m 32s", "1h 5m")
-pub fn format_duration(started_at: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(started_at);
-    let total_secs = duration.num_seconds().max(0) as u64;
-
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
-/// Format a timestamp as a relative time string (e.g., "2h ago", "3d ago")
-pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(timestamp);
-    let total_secs = duration.num_seconds().max(0) as u64;
-
-    let minutes = total_secs / 60;
-    let hours = total_secs / 3600;
-    let days = total_secs / 86400;
-
-    if days > 0 {
-        format!("{}d ago", days)
-    } else if hours > 0 {
-        format!("{}h ago", hours)
-    } else if minutes > 0 {
-        format!("{}m ago", minutes)
-    } else {
-        "just now".to_string()
-    }
-}
-
-/// Format a machine state as a human-readable string
-fn format_state(state: MachineState) -> &'static str {
-    match state {
-        MachineState::Idle => "Idle",
-        MachineState::LoadingSpec => "Loading Spec",
-        MachineState::GeneratingSpec => "Generating Spec",
-        MachineState::Initializing => "Initializing",
-        MachineState::PickingStory => "Picking Story",
-        MachineState::RunningClaude => "Running Claude",
-        MachineState::Reviewing => "Reviewing",
-        MachineState::Correcting => "Correcting",
-        MachineState::Committing => "Committing",
-        MachineState::CreatingPR => "Creating PR",
-        MachineState::Completed => "Completed",
-        MachineState::Failed => "Failed",
-    }
-}
-
-/// Get a color for a machine state (consistent with output.rs branding)
+/// Get a color for a machine state using the shared Status enum.
+///
+/// This uses the shared Status enum to ensure consistent color mapping
+/// between GUI and TUI. The Status enum groups MachineState values into
+/// semantic categories, and we map those to terminal colors here.
 fn state_color(state: MachineState) -> Color {
-    match state {
-        MachineState::Idle => COLOR_DIM,
-        MachineState::LoadingSpec | MachineState::GeneratingSpec => COLOR_WARNING,
-        MachineState::Initializing | MachineState::PickingStory => COLOR_INFO,
-        MachineState::RunningClaude => COLOR_PRIMARY,
-        MachineState::Reviewing | MachineState::Correcting => COLOR_REVIEW,
-        MachineState::Committing | MachineState::CreatingPR => COLOR_SUCCESS,
-        MachineState::Completed => COLOR_SUCCESS,
-        MachineState::Failed => COLOR_ERROR,
+    match Status::from_machine_state(state) {
+        Status::Setup => COLOR_DIM,         // Gray - setup/initialization
+        Status::Running => COLOR_PRIMARY,   // Cyan - active implementation
+        Status::Reviewing => COLOR_WARNING, // Yellow/Amber - evaluation
+        Status::Correcting => COLOR_REVIEW, // Magenta - attention needed
+        Status::Success => COLOR_SUCCESS,   // Green - success path
+        Status::Warning => COLOR_WARNING,   // Yellow - general warnings
+        Status::Error => COLOR_ERROR,       // Red - failure
+        Status::Idle => COLOR_DIM,          // Gray - inactive
     }
 }
 
@@ -915,7 +862,20 @@ impl MonitorApp {
             .split(inner);
 
         // Header info
-        let state_str = format_state(run.machine_state);
+        // Check if session appears stuck (heartbeat is stale)
+        let appears_stuck = session.appears_stuck();
+
+        let state_str = if appears_stuck {
+            format!("{} (Not responding)", format_state_label(run.machine_state))
+        } else {
+            format_state_label(run.machine_state).to_string()
+        };
+        let state_color_value = if appears_stuck {
+            COLOR_WARNING
+        } else {
+            state_color(run.machine_state)
+        };
+
         let duration = format_duration(run.started_at);
         let story = run.current_story.as_deref().unwrap_or("N/A");
 
@@ -948,10 +908,7 @@ impl MonitorApp {
             ]),
             Line::from(vec![
                 Span::styled("State: ", Style::default().fg(COLOR_DIM)),
-                Span::styled(
-                    state_str,
-                    Style::default().fg(state_color(run.machine_state)),
-                ),
+                Span::styled(&state_str, Style::default().fg(state_color_value)),
             ]),
             Line::from(vec![
                 Span::styled("Story: ", Style::default().fg(COLOR_DIM)),
@@ -1035,7 +992,7 @@ impl MonitorApp {
             .split(inner);
 
         // Header info
-        let state_str = format_state(run.machine_state);
+        let state_str = format_state_label(run.machine_state);
         let duration = format_duration(run.started_at);
         let story = run.current_story.as_deref().unwrap_or("N/A");
 
@@ -1838,21 +1795,33 @@ mod tests {
 
     #[test]
     fn test_format_state_all_states() {
-        assert_eq!(format_state(MachineState::Idle), "Idle");
-        assert_eq!(format_state(MachineState::LoadingSpec), "Loading Spec");
+        assert_eq!(format_state_label(MachineState::Idle), "Idle");
         assert_eq!(
-            format_state(MachineState::GeneratingSpec),
+            format_state_label(MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_state_label(MachineState::GeneratingSpec),
             "Generating Spec"
         );
-        assert_eq!(format_state(MachineState::Initializing), "Initializing");
-        assert_eq!(format_state(MachineState::PickingStory), "Picking Story");
-        assert_eq!(format_state(MachineState::RunningClaude), "Running Claude");
-        assert_eq!(format_state(MachineState::Reviewing), "Reviewing");
-        assert_eq!(format_state(MachineState::Correcting), "Correcting");
-        assert_eq!(format_state(MachineState::Committing), "Committing");
-        assert_eq!(format_state(MachineState::CreatingPR), "Creating PR");
-        assert_eq!(format_state(MachineState::Completed), "Completed");
-        assert_eq!(format_state(MachineState::Failed), "Failed");
+        assert_eq!(
+            format_state_label(MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_state_label(MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_state_label(MachineState::RunningClaude),
+            "Running Claude"
+        );
+        assert_eq!(format_state_label(MachineState::Reviewing), "Reviewing");
+        assert_eq!(format_state_label(MachineState::Correcting), "Correcting");
+        assert_eq!(format_state_label(MachineState::Committing), "Committing");
+        assert_eq!(format_state_label(MachineState::CreatingPR), "Creating PR");
+        assert_eq!(format_state_label(MachineState::Completed), "Completed");
+        assert_eq!(format_state_label(MachineState::Failed), "Failed");
     }
 
     #[test]
@@ -2624,21 +2593,45 @@ mod tests {
         assert_eq!(COLOR_SUCCESS, Color::Green);
         assert_eq!(COLOR_WARNING, Color::Yellow);
         assert_eq!(COLOR_ERROR, Color::Red);
-        assert_eq!(COLOR_INFO, Color::Blue);
         assert_eq!(COLOR_DIM, Color::DarkGray);
         assert_eq!(COLOR_REVIEW, Color::Magenta);
     }
 
     #[test]
-    fn test_state_color_uses_consistent_colors() {
-        // Verify state colors use our defined constants
+    fn test_state_color_uses_shared_status_mapping() {
+        // Verify state colors use the shared Status enum for consistent mapping
+        // with the GUI. The Status enum groups states semantically:
+        // - Setup (gray): Initializing, PickingStory, LoadingSpec, GeneratingSpec
+        // - Running (cyan): RunningClaude
+        // - Reviewing (yellow): Reviewing
+        // - Correcting (magenta): Correcting
+        // - Success (green): Committing, CreatingPR, Completed
+        // - Error (red): Failed
+        // - Idle (gray): Idle
+
+        // Idle/Setup states -> gray
         assert_eq!(state_color(MachineState::Idle), COLOR_DIM);
+        assert_eq!(state_color(MachineState::Initializing), COLOR_DIM);
+        assert_eq!(state_color(MachineState::PickingStory), COLOR_DIM);
+        assert_eq!(state_color(MachineState::LoadingSpec), COLOR_DIM);
+        assert_eq!(state_color(MachineState::GeneratingSpec), COLOR_DIM);
+
+        // Running -> cyan (primary)
         assert_eq!(state_color(MachineState::RunningClaude), COLOR_PRIMARY);
+
+        // Reviewing -> yellow (warning)
+        assert_eq!(state_color(MachineState::Reviewing), COLOR_WARNING);
+
+        // Correcting -> magenta (review)
+        assert_eq!(state_color(MachineState::Correcting), COLOR_REVIEW);
+
+        // Success path -> green
+        assert_eq!(state_color(MachineState::Committing), COLOR_SUCCESS);
+        assert_eq!(state_color(MachineState::CreatingPR), COLOR_SUCCESS);
         assert_eq!(state_color(MachineState::Completed), COLOR_SUCCESS);
+
+        // Failed -> red
         assert_eq!(state_color(MachineState::Failed), COLOR_ERROR);
-        assert_eq!(state_color(MachineState::Reviewing), COLOR_REVIEW);
-        assert_eq!(state_color(MachineState::LoadingSpec), COLOR_WARNING);
-        assert_eq!(state_color(MachineState::Initializing), COLOR_INFO);
     }
 
     #[test]
@@ -2759,7 +2752,7 @@ mod tests {
             ("Error", COLOR_ERROR)
         } else if let Some(ref run) = project_with_error.active_run {
             (
-                format_state(run.machine_state),
+                format_state_label(run.machine_state),
                 state_color(run.machine_state),
             )
         } else {

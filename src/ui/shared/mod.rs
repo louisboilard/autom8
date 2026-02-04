@@ -10,18 +10,182 @@ use crate::error::Result;
 use crate::process::ProcessMetrics;
 use crate::spec::Spec;
 use crate::state::{
-    IterationStatus, LiveState, RunState, RunStatus, SessionMetadata, StateManager,
+    IterationStatus, LiveState, MachineState, RunState, RunStatus, SessionMetadata, StateManager,
 };
 use crate::worktree::MAIN_SESSION_ID;
+use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+// ============================================================================
+// Shared Status Types and Functions
+// ============================================================================
+
+/// Semantic status states for consistent status determination across UIs.
+///
+/// This enum represents the semantic meaning of a run's status, abstracting
+/// away the underlying MachineState details. Both GUI and TUI should use
+/// these states to ensure consistent behavior.
+///
+/// The status values are:
+/// - `Setup`: Gray - setup/initialization phases (Initializing, PickingStory, LoadingSpec, GeneratingSpec)
+/// - `Running`: Blue - active implementation work (RunningClaude)
+/// - `Reviewing`: Amber - evaluation phases (Reviewing)
+/// - `Correcting`: Orange - attention needed, fixes in progress (Correcting)
+/// - `Success`: Green - success path (Committing, CreatingPR, Completed)
+/// - `Error`: Red - failure states (Failed)
+/// - `Warning`: Amber - general warnings (e.g., stuck sessions)
+/// - `Idle`: Gray - inactive state (Idle)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// Setup/initialization state - displayed in gray.
+    Setup,
+    /// Active implementation work - displayed in blue.
+    Running,
+    /// Evaluation/review phase - displayed in amber.
+    Reviewing,
+    /// Attention needed, fixes in progress - displayed in orange.
+    Correcting,
+    /// Success path (committing, PR, completed) - displayed in green.
+    Success,
+    /// Warning/attention needed - displayed in amber.
+    Warning,
+    /// Error/failure state - displayed in red.
+    Error,
+    /// Idle/inactive state - displayed in gray.
+    Idle,
+}
+
+impl Status {
+    /// Convert a MachineState to the appropriate Status.
+    ///
+    /// Color mapping follows semantic meaning for state phases:
+    /// - Setup phases (Initializing, PickingStory, LoadingSpec, GeneratingSpec): Gray
+    /// - Active implementation (RunningClaude): Blue
+    /// - Evaluation phase (Reviewing): Amber
+    /// - Attention needed (Correcting): Orange
+    /// - Success path (Committing, CreatingPR, Completed): Green
+    /// - Failure (Failed): Red
+    /// - Inactive (Idle): Gray
+    pub fn from_machine_state(state: MachineState) -> Self {
+        match state {
+            // Setup phases - gray (preparation work)
+            MachineState::Initializing
+            | MachineState::PickingStory
+            | MachineState::LoadingSpec
+            | MachineState::GeneratingSpec => Status::Setup,
+
+            // Active implementation - blue
+            MachineState::RunningClaude => Status::Running,
+
+            // Evaluation phase - amber
+            MachineState::Reviewing => Status::Reviewing,
+
+            // Attention needed - orange
+            MachineState::Correcting => Status::Correcting,
+
+            // Success path - green
+            MachineState::Committing | MachineState::CreatingPR | MachineState::Completed => {
+                Status::Success
+            }
+
+            // Failure - red
+            MachineState::Failed => Status::Error,
+
+            // Inactive - gray
+            MachineState::Idle => Status::Idle,
+        }
+    }
+}
+
+/// Format a MachineState as a human-readable label.
+///
+/// This is the canonical state label formatting used by both GUI and TUI
+/// to ensure consistent state display across the application.
+pub fn format_state_label(state: MachineState) -> &'static str {
+    match state {
+        MachineState::Idle => "Idle",
+        MachineState::LoadingSpec => "Loading Spec",
+        MachineState::GeneratingSpec => "Generating Spec",
+        MachineState::Initializing => "Initializing",
+        MachineState::PickingStory => "Picking Story",
+        MachineState::RunningClaude => "Running Claude",
+        MachineState::Reviewing => "Reviewing",
+        MachineState::Correcting => "Correcting",
+        MachineState::Committing => "Committing",
+        MachineState::CreatingPR => "Creating PR",
+        MachineState::Completed => "Completed",
+        MachineState::Failed => "Failed",
+    }
+}
+
+/// Format a duration from a start time as a human-readable string.
+///
+/// Examples: "5s", "2m 30s", "1h 5m"
+///
+/// This is the canonical duration formatting used by both GUI and TUI.
+pub fn format_duration(started_at: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(started_at);
+    format_duration_secs(duration.num_seconds().max(0) as u64)
+}
+
+/// Format a duration in seconds as a human-readable string.
+///
+/// - Durations under 1 minute show only seconds
+/// - Durations between 1-60 minutes show minutes and seconds
+/// - Durations over 1 hour show hours and minutes (no seconds)
+pub fn format_duration_secs(total_secs: u64) -> String {
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+/// Format a timestamp as a relative time string.
+///
+/// Examples: "just now", "5m ago", "2h ago", "3d ago"
+///
+/// This is the canonical relative time formatting used by both GUI and TUI.
+pub fn format_relative_time(timestamp: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(timestamp);
+    format_relative_time_secs(duration.num_seconds().max(0) as u64)
+}
+
+/// Format a relative time from seconds ago.
+pub fn format_relative_time_secs(total_secs: u64) -> String {
+    let minutes = total_secs / 60;
+    let hours = total_secs / 3600;
+    let days = total_secs / 86400;
+
+    if days > 0 {
+        format!("{}d ago", days)
+    } else if hours > 0 {
+        format!("{}h ago", hours)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
+    } else {
+        "just now".to_string()
+    }
+}
 
 // ============================================================================
 // Shared Data Types
 // ============================================================================
 
 /// Progress information for a run.
-#[derive(Debug, Clone)]
+///
+/// This is the canonical progress struct used by both GUI and TUI.
+/// It provides methods for calculating and formatting progress values.
+#[derive(Debug, Clone, Copy)]
 pub struct RunProgress {
     /// Number of completed stories.
     pub completed: usize,
@@ -30,9 +194,40 @@ pub struct RunProgress {
 }
 
 impl RunProgress {
-    /// Format progress as a fraction string (e.g., "Story 2/5").
+    /// Create a new RunProgress instance.
+    pub fn new(completed: usize, total: usize) -> Self {
+        Self { completed, total }
+    }
+
+    /// Calculate the progress as a fraction between 0.0 and 1.0.
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.completed as f32) / (self.total as f32)
+        }
+    }
+
+    /// Format progress as a story fraction string (e.g., "Story 2/5").
+    /// The current story number is completed + 1 (1-indexed), but capped at total
+    /// to avoid displaying impossible values like "Story 8/7" at completion.
     pub fn as_fraction(&self) -> String {
-        format!("Story {}/{}", self.completed + 1, self.total)
+        let current = if self.completed < self.total {
+            self.completed + 1
+        } else {
+            self.total
+        };
+        format!("Story {}/{}", current, self.total)
+    }
+
+    /// Alias for `as_fraction()` for clarity when the story context is explicit.
+    pub fn as_story_fraction(&self) -> String {
+        self.as_fraction()
+    }
+
+    /// Format progress as a simple fraction (e.g., "2/5").
+    pub fn as_simple_fraction(&self) -> String {
+        format!("{}/{}", self.completed, self.total)
     }
 
     /// Format progress as a percentage (e.g., "40%").
@@ -99,6 +294,63 @@ impl SessionData {
         } else {
             format!("{} ({})", self.project_name, &self.metadata.session_id)
         }
+    }
+
+    /// Check if this session has a fresh heartbeat (run is actively progressing).
+    ///
+    /// A session is considered "alive" if:
+    /// - It has live output data AND
+    /// - The heartbeat is recent (< 10 seconds old)
+    ///
+    /// This is the authoritative check for whether a run is actively progressing.
+    /// The GUI/TUI should use this to determine if a run is truly active,
+    /// rather than just checking `is_running` from metadata.
+    pub fn has_fresh_heartbeat(&self) -> bool {
+        self.live_output
+            .as_ref()
+            .map(|live| live.is_heartbeat_fresh())
+            .unwrap_or(false)
+    }
+
+    /// Check if this session should be considered actively running.
+    ///
+    /// A session is actively running if:
+    /// - It's not stale (worktree exists) AND
+    /// - It's marked as running AND
+    /// - It either has a fresh heartbeat OR there's no live data yet (run just started)
+    ///
+    /// This provides a lenient check that accounts for runs that just started
+    /// and haven't written live.json yet.
+    pub fn is_actively_running(&self) -> bool {
+        if self.is_stale || !self.metadata.is_running {
+            return false;
+        }
+
+        // If we have live output, check the heartbeat
+        // If no live output yet, trust the is_running flag (run may have just started)
+        self.live_output
+            .as_ref()
+            .map(|live| live.is_heartbeat_fresh())
+            .unwrap_or(true) // Trust is_running if no live data yet
+    }
+
+    /// Check if this session appears to be stuck (marked as running but heartbeat is stale).
+    ///
+    /// This helps identify crashed or stuck runs that need user intervention.
+    /// Returns true if:
+    /// - Session is marked as running AND
+    /// - Live output exists AND
+    /// - Heartbeat is stale (> 10 seconds old)
+    pub fn appears_stuck(&self) -> bool {
+        if !self.metadata.is_running || self.is_stale {
+            return false;
+        }
+
+        // If we have live output and heartbeat is stale, session appears stuck
+        self.live_output
+            .as_ref()
+            .map(|live| !live.is_heartbeat_fresh())
+            .unwrap_or(false) // No live output = can't determine stuck state
     }
 
     /// Get a truncated worktree path for display (last 2 components).
@@ -582,6 +834,91 @@ mod tests {
     }
 
     #[test]
+    fn test_run_progress_as_fraction_edge_cases() {
+        // Edge case: 0/0 (empty spec) - should show "Story 0/0"
+        let empty = RunProgress {
+            completed: 0,
+            total: 0,
+        };
+        assert_eq!(empty.as_fraction(), "Story 0/0");
+
+        // Edge case: 0/5 (not started) - should show "Story 1/5"
+        let not_started = RunProgress {
+            completed: 0,
+            total: 5,
+        };
+        assert_eq!(not_started.as_fraction(), "Story 1/5");
+
+        // Edge case: 5/5 (completed) - should show "Story 5/5", NOT "Story 6/5"
+        let complete = RunProgress {
+            completed: 5,
+            total: 5,
+        };
+        assert_eq!(complete.as_fraction(), "Story 5/5");
+
+        // Edge case: 7/7 (completed, different total) - should show "Story 7/7"
+        let complete_7 = RunProgress {
+            completed: 7,
+            total: 7,
+        };
+        assert_eq!(complete_7.as_fraction(), "Story 7/7");
+
+        // Normal case: in progress
+        let in_progress = RunProgress {
+            completed: 3,
+            total: 7,
+        };
+        assert_eq!(in_progress.as_fraction(), "Story 4/7");
+
+        // Boundary: one before completion - should show next story
+        let almost_done = RunProgress {
+            completed: 4,
+            total: 5,
+        };
+        assert_eq!(almost_done.as_fraction(), "Story 5/5");
+    }
+
+    #[test]
+    fn test_run_progress_new() {
+        let progress = RunProgress::new(3, 7);
+        assert_eq!(progress.completed, 3);
+        assert_eq!(progress.total, 7);
+    }
+
+    #[test]
+    fn test_run_progress_fraction() {
+        // Normal case
+        assert!((RunProgress::new(2, 5).fraction() - 0.4).abs() < 0.001);
+
+        // Zero total
+        assert_eq!(RunProgress::new(0, 0).fraction(), 0.0);
+
+        // Complete
+        assert!((RunProgress::new(5, 5).fraction() - 1.0).abs() < 0.001);
+
+        // Not started
+        assert_eq!(RunProgress::new(0, 5).fraction(), 0.0);
+    }
+
+    #[test]
+    fn test_run_progress_as_simple_fraction() {
+        assert_eq!(RunProgress::new(2, 5).as_simple_fraction(), "2/5");
+        assert_eq!(RunProgress::new(0, 3).as_simple_fraction(), "0/3");
+        assert_eq!(RunProgress::new(5, 5).as_simple_fraction(), "5/5");
+        assert_eq!(RunProgress::new(0, 0).as_simple_fraction(), "0/0");
+    }
+
+    #[test]
+    fn test_run_progress_as_story_fraction_alias() {
+        // as_story_fraction should produce identical results to as_fraction
+        let progress = RunProgress::new(3, 7);
+        assert_eq!(progress.as_story_fraction(), progress.as_fraction());
+
+        let complete = RunProgress::new(5, 5);
+        assert_eq!(complete.as_story_fraction(), complete.as_fraction());
+    }
+
+    #[test]
     fn test_run_history_entry_status_text() {
         use chrono::Utc;
 
@@ -705,6 +1042,364 @@ mod tests {
             pid: None,
         };
         assert_eq!(session.truncated_worktree_path(), ".../projects/repo");
+    }
+
+    // ========================================================================
+    // US-002: Heartbeat Freshness Tests
+    // ========================================================================
+
+    #[test]
+    fn test_session_data_has_fresh_heartbeat_no_live_output() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: None, // No live output
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Without live output, heartbeat is considered not fresh
+        assert!(!session.has_fresh_heartbeat());
+    }
+
+    #[test]
+    fn test_session_data_has_fresh_heartbeat_with_fresh_live() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Fresh live output should mean fresh heartbeat
+        assert!(session.has_fresh_heartbeat());
+    }
+
+    #[test]
+    fn test_session_data_is_actively_running_no_live_output() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: None, // No live output yet
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Without live output but is_running=true, trust is_running (run may have just started)
+        assert!(session.is_actively_running());
+    }
+
+    #[test]
+    fn test_session_data_is_actively_running_stale() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/deleted/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: false,
+            is_stale: true, // Worktree deleted
+            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Stale sessions are never actively running
+        assert!(!session.is_actively_running());
+    }
+
+    #[test]
+    fn test_session_data_appears_stuck_fresh_heartbeat() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(LiveState::new(crate::state::MachineState::RunningClaude)),
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Fresh heartbeat means not stuck
+        assert!(!session.appears_stuck());
+    }
+
+    #[test]
+    fn test_session_data_appears_stuck_stale_heartbeat() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let mut live = LiveState::new(crate::state::MachineState::RunningClaude);
+        // Set heartbeat to be 65 seconds ago (stale, threshold is 60s)
+        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(65);
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: true,
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(live),
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Stale heartbeat while is_running=true means appears stuck
+        assert!(session.appears_stuck());
+    }
+
+    #[test]
+    fn test_session_data_appears_stuck_not_running() {
+        use chrono::Utc;
+        use std::path::PathBuf;
+
+        let mut live = LiveState::new(crate::state::MachineState::Completed);
+        // Stale heartbeat
+        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(15);
+
+        let session = SessionData {
+            project_name: "test".to_string(),
+            metadata: SessionMetadata {
+                session_id: "test".to_string(),
+                worktree_path: PathBuf::from("/path"),
+                branch_name: "main".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: false, // Not running
+            },
+            run: None,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output: Some(live),
+            process_metrics: None,
+            pid: None,
+        };
+
+        // Not running sessions can't be stuck
+        assert!(!session.appears_stuck());
+    }
+
+    // ========================================================================
+    // US-005: Shared Status Utilities Tests
+    // ========================================================================
+
+    #[test]
+    fn test_status_from_machine_state_setup_phases() {
+        // All setup phases should map to Status::Setup
+        assert_eq!(
+            Status::from_machine_state(MachineState::Initializing),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::PickingStory),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::LoadingSpec),
+            Status::Setup
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::GeneratingSpec),
+            Status::Setup
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_running() {
+        assert_eq!(
+            Status::from_machine_state(MachineState::RunningClaude),
+            Status::Running
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_reviewing() {
+        assert_eq!(
+            Status::from_machine_state(MachineState::Reviewing),
+            Status::Reviewing
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_correcting() {
+        assert_eq!(
+            Status::from_machine_state(MachineState::Correcting),
+            Status::Correcting
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_success_path() {
+        // All success path states should map to Status::Success
+        assert_eq!(
+            Status::from_machine_state(MachineState::Committing),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::CreatingPR),
+            Status::Success
+        );
+        assert_eq!(
+            Status::from_machine_state(MachineState::Completed),
+            Status::Success
+        );
+    }
+
+    #[test]
+    fn test_status_from_machine_state_terminal() {
+        assert_eq!(
+            Status::from_machine_state(MachineState::Failed),
+            Status::Error
+        );
+        assert_eq!(Status::from_machine_state(MachineState::Idle), Status::Idle);
+    }
+
+    #[test]
+    fn test_format_state_label_all_states() {
+        // Verify all state labels are correctly formatted
+        assert_eq!(format_state_label(MachineState::Idle), "Idle");
+        assert_eq!(
+            format_state_label(MachineState::LoadingSpec),
+            "Loading Spec"
+        );
+        assert_eq!(
+            format_state_label(MachineState::GeneratingSpec),
+            "Generating Spec"
+        );
+        assert_eq!(
+            format_state_label(MachineState::Initializing),
+            "Initializing"
+        );
+        assert_eq!(
+            format_state_label(MachineState::PickingStory),
+            "Picking Story"
+        );
+        assert_eq!(
+            format_state_label(MachineState::RunningClaude),
+            "Running Claude"
+        );
+        assert_eq!(format_state_label(MachineState::Reviewing), "Reviewing");
+        assert_eq!(format_state_label(MachineState::Correcting), "Correcting");
+        assert_eq!(format_state_label(MachineState::Committing), "Committing");
+        assert_eq!(format_state_label(MachineState::CreatingPR), "Creating PR");
+        assert_eq!(format_state_label(MachineState::Completed), "Completed");
+        assert_eq!(format_state_label(MachineState::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_format_duration_secs() {
+        // Seconds only
+        assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(30), "30s");
+        assert_eq!(format_duration_secs(59), "59s");
+
+        // Minutes and seconds
+        assert_eq!(format_duration_secs(60), "1m 0s");
+        assert_eq!(format_duration_secs(125), "2m 5s");
+        assert_eq!(format_duration_secs(3599), "59m 59s");
+
+        // Hours and minutes
+        assert_eq!(format_duration_secs(3600), "1h 0m");
+        assert_eq!(format_duration_secs(7265), "2h 1m");
+    }
+
+    #[test]
+    fn test_format_relative_time_secs() {
+        // Just now (< 1 minute)
+        assert_eq!(format_relative_time_secs(0), "just now");
+        assert_eq!(format_relative_time_secs(59), "just now");
+
+        // Minutes
+        assert_eq!(format_relative_time_secs(60), "1m ago");
+        assert_eq!(format_relative_time_secs(300), "5m ago");
+
+        // Hours
+        assert_eq!(format_relative_time_secs(3600), "1h ago");
+        assert_eq!(format_relative_time_secs(7200), "2h ago");
+
+        // Days
+        assert_eq!(format_relative_time_secs(86400), "1d ago");
+        assert_eq!(format_relative_time_secs(172800), "2d ago");
     }
 
     // ========================================================================
