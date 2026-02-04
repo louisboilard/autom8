@@ -3,11 +3,12 @@
 //! This module contains the eframe application setup and main window
 //! configuration for the autom8 GUI.
 
+use crate::claude::ClaudeUsage;
 use crate::error::{Autom8Error, Result};
-use crate::state::{MachineState, SessionStatus, StateManager};
+use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
-    strip_worktree_prefix, truncate_with_ellipsis, MAX_BRANCH_LENGTH,
+    strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection, MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -103,6 +104,15 @@ const SPLIT_DIVIDER_MARGIN: f32 = 12.0; // spacing::MD
 
 /// Minimum width for either panel in the split view.
 const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
+
+/// Breakpoint width below which the expanded session view switches from
+/// side-by-side panels to vertically stacked panels. This ensures content
+/// remains readable at narrow window widths.
+const RESPONSIVE_STACK_BREAKPOINT: f32 = 800.0;
+
+/// Minimum width for each panel in the expanded session view when
+/// in side-by-side layout. Prevents content from becoming unreadable.
+const EXPANDED_PANEL_MIN_WIDTH: f32 = 300.0;
 
 // ============================================================================
 // Sidebar Constants (Sidebar Navigation - US-003)
@@ -1816,6 +1826,249 @@ const TAB_CLOSE_PADDING: f32 = 4.0;
 /// Sized to fit the text tightly without extra vertical gaps.
 const CONTENT_TAB_BAR_HEIGHT: f32 = 32.0;
 
+// ============================================================================
+// Story Progress Types (US-002: Story Progress Timeline)
+// ============================================================================
+
+/// Status of a story in the story progress timeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StoryStatus {
+    /// Story has been completed successfully.
+    Completed,
+    /// Story is currently being worked on.
+    Active,
+    /// Story is pending (not yet started).
+    Pending,
+    /// Story failed during implementation.
+    Failed,
+}
+
+impl StoryStatus {
+    /// Returns the color for this story status.
+    fn color(self) -> Color32 {
+        match self {
+            StoryStatus::Completed => colors::STATUS_SUCCESS,
+            StoryStatus::Active => colors::STATUS_RUNNING,
+            StoryStatus::Pending => colors::TEXT_MUTED,
+            StoryStatus::Failed => colors::STATUS_ERROR,
+        }
+    }
+
+    /// Returns the background color for this story status.
+    fn background(self) -> Color32 {
+        match self {
+            StoryStatus::Completed => colors::STATUS_SUCCESS_BG,
+            StoryStatus::Active => colors::STATUS_RUNNING_BG,
+            StoryStatus::Pending => colors::SURFACE_HOVER,
+            StoryStatus::Failed => colors::STATUS_ERROR_BG,
+        }
+    }
+
+    /// Returns the status indicator text.
+    fn indicator(self) -> &'static str {
+        match self {
+            StoryStatus::Completed => "\u{2713}", // ✓ checkmark
+            StoryStatus::Active => "\u{25CF}",    // ● filled circle
+            StoryStatus::Pending => "\u{25CB}",   // ○ empty circle
+            StoryStatus::Failed => "\u{2717}",    // ✗ X mark
+        }
+    }
+}
+
+/// A story item for display in the story progress timeline.
+#[derive(Debug, Clone)]
+struct StoryItem {
+    /// Story ID (e.g., "US-001").
+    id: String,
+    /// Story title.
+    title: String,
+    /// Current status of the story.
+    status: StoryStatus,
+}
+
+/// Load story items from a session's cached user stories and run state.
+///
+/// Returns a list of story items ordered by status: Active first, then Completed,
+/// then Failed, then Pending. The current story is marked as Active, completed
+/// stories are marked based on the spec's `passes` field, and the rest are Pending.
+///
+/// This function uses cached user stories from `SessionData` to avoid file I/O
+/// on every render frame. The cache is populated during `load_ui_data()`.
+fn load_story_items(session: &SessionData) -> Vec<StoryItem> {
+    let Some(ref run) = session.run else {
+        return Vec::new();
+    };
+
+    // Use cached user stories instead of loading from disk
+    let Some(ref user_stories) = session.cached_user_stories else {
+        return Vec::new();
+    };
+
+    let current_story_id = run.current_story.as_deref();
+
+    // Build set of failed story IDs from iterations
+    let failed_stories: std::collections::HashSet<&str> = run
+        .iterations
+        .iter()
+        .filter(|iter| iter.status == IterationStatus::Failed)
+        .map(|iter| iter.story_id.as_str())
+        .collect();
+
+    // Build story items from cached user stories
+    let mut items: Vec<StoryItem> = user_stories
+        .iter()
+        .map(|story| {
+            let status = if Some(story.id.as_str()) == current_story_id {
+                StoryStatus::Active
+            } else if story.passes {
+                StoryStatus::Completed
+            } else if failed_stories.contains(story.id.as_str()) {
+                StoryStatus::Failed
+            } else {
+                StoryStatus::Pending
+            };
+
+            StoryItem {
+                id: story.id.clone(),
+                title: story.title.clone(),
+                status,
+            }
+        })
+        .collect();
+
+    // Sort: Active first, then by original priority (which is the order in spec)
+    // Actually, acceptance criteria says "most recent/current at the top"
+    // so we put active first, then completed (most recently), then pending
+    items.sort_by(|a, b| {
+        let order = |s: &StoryItem| match s.status {
+            StoryStatus::Active => 0,
+            StoryStatus::Completed => 1,
+            StoryStatus::Failed => 2,
+            StoryStatus::Pending => 3,
+        };
+        order(a).cmp(&order(b))
+    });
+
+    items
+}
+
+/// A work summary item for display in the work summaries section.
+#[derive(Debug, Clone)]
+struct WorkSummaryItem {
+    /// Iteration number (1-based).
+    iteration: u32,
+    /// Story ID this iteration worked on.
+    story_id: String,
+    /// The work summary text.
+    summary: String,
+}
+
+/// Load work summary items from a session's run state.
+///
+/// Returns a list of work summary items ordered by most recent first.
+/// Only includes iterations that have a work_summary.
+fn load_work_summaries(session: &SessionData) -> Vec<WorkSummaryItem> {
+    let Some(ref run) = session.run else {
+        return Vec::new();
+    };
+
+    // Filter to iterations with work summaries and map to WorkSummaryItem
+    let mut items: Vec<WorkSummaryItem> = run
+        .iterations
+        .iter()
+        .filter_map(|iter| {
+            iter.work_summary.as_ref().map(|summary| WorkSummaryItem {
+                iteration: iter.number,
+                story_id: iter.story_id.clone(),
+                summary: summary.clone(),
+            })
+        })
+        .collect();
+
+    // Sort by iteration number descending (most recent first)
+    items.sort_by(|a, b| b.iteration.cmp(&a.iteration));
+
+    items
+}
+
+/// Format a number with thousands separators (e.g., 1234567 -> "1,234,567").
+fn format_number_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+/// Token usage entry for a single phase.
+#[derive(Debug, Clone)]
+struct PhaseUsageEntry {
+    /// Phase name (e.g., "US-001", "Planning", "Final Review").
+    phase: String,
+    /// Usage data for this phase.
+    usage: ClaudeUsage,
+}
+
+/// Token usage data for display.
+#[derive(Debug, Clone)]
+struct TokenUsageData {
+    /// Total usage across all phases.
+    total: ClaudeUsage,
+    /// Per-phase breakdown.
+    phases: Vec<PhaseUsageEntry>,
+}
+
+/// Load token usage data from a session's run state.
+///
+/// Returns Some(TokenUsageData) if the session has usage data, None otherwise.
+fn load_token_usage(session: &SessionData) -> Option<TokenUsageData> {
+    let run = session.run.as_ref()?;
+    let total = run.total_usage.clone()?;
+
+    // Only return data if there are actual tokens used
+    if total.total_tokens() == 0 {
+        return None;
+    }
+
+    // Collect phase usage entries
+    let mut phases: Vec<PhaseUsageEntry> = run
+        .phase_usage
+        .iter()
+        .map(|(phase, usage)| PhaseUsageEntry {
+            phase: phase.clone(),
+            usage: usage.clone(),
+        })
+        .collect();
+
+    // Sort phases in a logical order: Planning first, then US-* in order, then others
+    phases.sort_by(|a, b| {
+        let order = |p: &str| -> (u8, u32) {
+            if p == "Planning" {
+                (0, 0)
+            } else if let Some(num) = p.strip_prefix("US-") {
+                if let Ok(n) = num.parse::<u32>() {
+                    (1, n)
+                } else {
+                    (2, 0)
+                }
+            } else if p == "Final Review" {
+                (3, 0)
+            } else if p == "PR & Commit" {
+                (4, 0)
+            } else {
+                (5, 0)
+            }
+        };
+        order(&a.phase).cmp(&order(&b.phase))
+    });
+
+    Some(TokenUsageData { total, phases })
+}
+
 /// The main GUI application state.
 ///
 /// This struct holds all UI state and loaded data, similar to the TUI's `MonitorApp`.
@@ -1957,6 +2210,14 @@ pub struct Autom8App {
     /// Cleanup result to display in a modal after operation completes.
     /// When Some, a result modal is displayed with the cleanup summary.
     pending_result_modal: Option<CleanupResult>,
+
+    // ========================================================================
+    // Detail Panel Section State (Active Runs Detail Panel - US-005)
+    // ========================================================================
+    /// Collapsed state for collapsible sections in the detail panel.
+    /// Maps section ID to collapsed state (true = collapsed, false = expanded).
+    /// State persists during the session but not across restarts.
+    section_collapsed_state: std::collections::HashMap<String, bool>,
 }
 
 impl Default for Autom8App {
@@ -2014,6 +2275,7 @@ impl Autom8App {
             command_tx,
             pending_clean_confirmation: None,
             pending_result_modal: None,
+            section_collapsed_state: std::collections::HashMap::new(),
         };
         // Initial data load
         app.refresh_data();
@@ -6736,13 +6998,27 @@ impl Autom8App {
     /// - Large output section filling remaining space
     ///
     /// Styled to match RunDetail view with Title-sized header and consistent padding.
-    fn render_expanded_session_view(&self, ui: &mut egui::Ui, session: &SessionData) {
+    fn render_expanded_session_view(&mut self, ui: &mut egui::Ui, session: &SessionData) {
         let available_width = ui.available_width();
         let available_height = ui.available_height();
 
         // Use the full available area with padding matching RunDetail style
         let content_padding = spacing::LG;
         let content_width = available_width - content_padding * 2.0;
+
+        // Determine if we should use stacked (vertical) or side-by-side (horizontal) layout
+        // Stack vertically when content area is too narrow for two readable panels
+        let panel_gap = spacing::LG; // Gap between panels
+        let use_stacked_layout = content_width < RESPONSIVE_STACK_BREAKPOINT;
+
+        // Calculate panel widths based on layout mode
+        let panel_width = if use_stacked_layout {
+            // In stacked mode, each panel gets the full content width
+            content_width
+        } else {
+            // In side-by-side mode, split 50/50 with gap, ensuring minimum width
+            ((content_width - panel_gap) / 2.0).max(EXPANDED_PANEL_MIN_WIDTH)
+        };
 
         ui.allocate_ui_with_layout(
             egui::vec2(available_width, available_height),
@@ -6892,67 +7168,603 @@ impl Autom8App {
 
                         ui.add_space(spacing::LG);
 
-                        // === OUTPUT SECTION ===
-                        // Section header
-                        ui.label(
-                            egui::RichText::new("Output")
-                                .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                .color(colors::TEXT_SECONDARY),
-                        );
+                        // === RESPONSIVE SPLIT PANEL LAYOUT ===
+                        // Calculate available space for panels
+                        let available_panel_height = ui.available_height() - content_padding;
 
-                        ui.add_space(spacing::SM);
+                        // In stacked mode, use a scrollable vertical layout with fixed-height sections
+                        // In side-by-side mode, use horizontal layout with panels filling available height
+                        if use_stacked_layout {
+                            // === STACKED LAYOUT (Vertical) ===
+                            // Wrap both panels in a vertical scroll area
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    // Fixed heights for stacked mode panels
+                                    let stacked_output_height = 300.0;
+                                    let stacked_section_height = 150.0;
 
-                        // Output area - fills remaining space with card-like styling
-                        let output_height = ui.available_height() - content_padding;
+                                    // === OUTPUT PANEL (Stacked) ===
+                                    ui.vertical(|ui| {
+                                        ui.set_width(panel_width);
 
-                        egui::Frame::none()
-                            .fill(colors::SURFACE_HOVER)
-                            .rounding(rounding::CARD)
-                            .inner_margin(egui::Margin::same(spacing::MD))
-                            .show(ui, |ui| {
-                                ui.set_min_height(output_height);
-                                ui.set_max_height(output_height);
+                                        // Section header
+                                        ui.label(
+                                            egui::RichText::new("Output")
+                                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                                .color(colors::TEXT_SECONDARY),
+                                        );
 
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        let output_source = get_output_for_session(session);
+                                        ui.add_space(spacing::SM);
 
-                                        // Use Small font (12px) to maximize visible lines
-                                        // This allows 30+ lines in typical window heights
-                                        match output_source {
-                                            OutputSource::Live(lines)
-                                            | OutputSource::Iteration(lines) => {
-                                                for line in lines {
-                                                    ui.label(
-                                                        egui::RichText::new(line.trim())
-                                                            .font(typography::mono(FontSize::Small))
-                                                            .color(colors::TEXT_SECONDARY),
-                                                    );
-                                                }
-                                            }
-                                            OutputSource::StatusMessage(message) => {
-                                                ui.label(
-                                                    egui::RichText::new(message)
-                                                        .font(typography::mono(FontSize::Small))
-                                                        .color(colors::TEXT_DISABLED),
-                                                );
-                                            }
-                                            OutputSource::NoData => {
-                                                ui.label(
-                                                    egui::RichText::new("No live output")
-                                                        .font(typography::mono(FontSize::Small))
-                                                        .color(colors::TEXT_DISABLED),
-                                                );
-                                            }
+                                        egui::Frame::none()
+                                            .fill(colors::SURFACE_HOVER)
+                                            .rounding(rounding::CARD)
+                                            .inner_margin(egui::Margin::same(spacing::MD))
+                                            .show(ui, |ui| {
+                                                ui.set_min_height(stacked_output_height);
+                                                ui.set_max_height(stacked_output_height);
+                                                ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                egui::ScrollArea::vertical()
+                                                    .auto_shrink([false, false])
+                                                    .stick_to_bottom(true)
+                                                    .show(ui, |ui| {
+                                                        let output_source = get_output_for_session(session);
+                                                        Self::render_output_content(ui, &output_source);
+                                                    });
+                                            });
+                                    });
+
+                                    // Gap between stacked panels
+                                    ui.add_space(panel_gap);
+
+                                    // === DETAIL SECTIONS (Stacked) ===
+                                    ui.vertical(|ui| {
+                                        ui.set_width(panel_width);
+
+                                        // Load data once for display
+                                        let story_items = load_story_items(session);
+                                        let work_summaries = load_work_summaries(session);
+                                        let token_usage = load_token_usage(session);
+
+                                        let section_gap = spacing::MD;
+
+                                        // === Stories Section (Collapsible) ===
+                                        CollapsibleSection::new("stories", "Stories")
+                                            .default_expanded(true)
+                                            .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                egui::Frame::none()
+                                                    .fill(colors::SURFACE_HOVER)
+                                                    .rounding(rounding::CARD)
+                                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(stacked_section_height);
+                                                        ui.set_max_height(stacked_section_height);
+                                                        ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                        egui::ScrollArea::vertical()
+                                                            .auto_shrink([false, false])
+                                                            .show(ui, |ui| {
+                                                                Self::render_story_items_content(ui, &story_items);
+                                                            });
+                                                    });
+                                            });
+
+                                        ui.add_space(section_gap);
+
+                                        // === Work Summaries Section (Collapsible) ===
+                                        CollapsibleSection::new("work_summaries", "Work Summaries")
+                                            .default_expanded(true)
+                                            .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                egui::Frame::none()
+                                                    .fill(colors::SURFACE_HOVER)
+                                                    .rounding(rounding::CARD)
+                                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(stacked_section_height);
+                                                        ui.set_max_height(stacked_section_height);
+                                                        ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                        egui::ScrollArea::vertical()
+                                                            .auto_shrink([false, false])
+                                                            .show(ui, |ui| {
+                                                                Self::render_work_summaries_content(ui, &work_summaries);
+                                                            });
+                                                    });
+                                            });
+
+                                        // === Token Usage Section (Collapsible) ===
+                                        if let Some(ref usage_data) = token_usage {
+                                            ui.add_space(section_gap);
+
+                                            CollapsibleSection::new("token_usage", "Token Usage")
+                                                .default_expanded(true)
+                                                .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(colors::SURFACE_HOVER)
+                                                        .rounding(rounding::CARD)
+                                                        .inner_margin(egui::Margin::same(spacing::MD))
+                                                        .show(ui, |ui| {
+                                                            ui.set_min_height(stacked_section_height);
+                                                            ui.set_max_height(stacked_section_height);
+                                                            ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                            egui::ScrollArea::vertical()
+                                                                .auto_shrink([false, false])
+                                                                .show(ui, |ui| {
+                                                                    Self::render_token_usage_content(ui, usage_data);
+                                                                });
+                                                        });
+                                                });
                                         }
                                     });
+
+                                    // Bottom padding
+                                    ui.add_space(content_padding);
+                                });
+                        } else {
+                            // === SIDE-BY-SIDE LAYOUT (Horizontal) ===
+                            let panel_height = available_panel_height;
+
+                            ui.horizontal(|ui| {
+                                // === LEFT PANEL: Output ===
+                                ui.vertical(|ui| {
+                                    ui.set_width(panel_width);
+
+                                    // Section header
+                                    ui.label(
+                                        egui::RichText::new("Output")
+                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                            .color(colors::TEXT_SECONDARY),
+                                    );
+
+                                    ui.add_space(spacing::SM);
+
+                                    // Output card - fills remaining panel height
+                                    let output_card_height = panel_height
+                                        - typography::line_height(FontSize::Body)
+                                        - spacing::SM;
+
+                                    egui::Frame::none()
+                                        .fill(colors::SURFACE_HOVER)
+                                        .rounding(rounding::CARD)
+                                        .inner_margin(egui::Margin::same(spacing::MD))
+                                        .show(ui, |ui| {
+                                            ui.set_min_height(output_card_height);
+                                            ui.set_max_height(output_card_height);
+                                            ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                            egui::ScrollArea::vertical()
+                                                .auto_shrink([false, false])
+                                                .stick_to_bottom(true)
+                                                .show(ui, |ui| {
+                                                    let output_source = get_output_for_session(session);
+                                                    Self::render_output_content(ui, &output_source);
+                                                });
+                                        });
+                                });
+
+                                // Gap between panels
+                                ui.add_space(panel_gap);
+
+                            // === RIGHT PANEL: Detail sections ===
+                            ui.vertical(|ui| {
+                                ui.set_width(panel_width);
+
+                                // Load data once for display
+                                let story_items = load_story_items(session);
+                                let work_summaries = load_work_summaries(session);
+                                let token_usage = load_token_usage(session);
+
+                                // Calculate heights for sections
+                                // Each section has: header + spacing + card
+                                let section_header_height =
+                                    typography::line_height(FontSize::Body) + spacing::SM;
+                                let section_gap = spacing::MD;
+
+                                // Determine number of sections (token usage may be hidden)
+                                let num_sections = if token_usage.is_some() { 3.0 } else { 2.0 };
+                                let num_gaps = if token_usage.is_some() { 2.0 } else { 1.0 };
+
+                                // Split remaining height evenly between sections
+                                let available_for_sections = panel_height
+                                    - section_header_height * num_sections
+                                    - section_gap * num_gaps;
+                                let section_card_height =
+                                    (available_for_sections / num_sections).max(60.0);
+
+                                // === Stories Section (Collapsible) ===
+                                CollapsibleSection::new("stories", "Stories")
+                                    .default_expanded(true)
+                                    .show(ui, &mut self.section_collapsed_state, |ui| {
+                                        egui::Frame::none()
+                                            .fill(colors::SURFACE_HOVER)
+                                            .rounding(rounding::CARD)
+                                            .inner_margin(egui::Margin::same(spacing::MD))
+                                            .show(ui, |ui| {
+                                                ui.set_min_height(section_card_height);
+                                                ui.set_max_height(section_card_height);
+                                                ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                egui::ScrollArea::vertical()
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        Self::render_story_items_content(ui, &story_items);
+                                                    });
+                                            });
+                                    });
+
+                                // Gap between sections
+                                ui.add_space(section_gap);
+
+                                // === Work Summaries Section (Collapsible) ===
+                                CollapsibleSection::new("work_summaries", "Work Summaries")
+                                    .default_expanded(true)
+                                    .show(ui, &mut self.section_collapsed_state, |ui| {
+                                        egui::Frame::none()
+                                            .fill(colors::SURFACE_HOVER)
+                                            .rounding(rounding::CARD)
+                                            .inner_margin(egui::Margin::same(spacing::MD))
+                                            .show(ui, |ui| {
+                                                ui.set_min_height(section_card_height);
+                                                ui.set_max_height(section_card_height);
+                                                ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                egui::ScrollArea::vertical()
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        Self::render_work_summaries_content(ui, &work_summaries);
+                                                    });
+                                            });
+                                    });
+
+                                // === Token Usage Section (Collapsible) ===
+                                if let Some(ref usage_data) = token_usage {
+                                    ui.add_space(section_gap);
+
+                                    CollapsibleSection::new("token_usage", "Token Usage")
+                                        .default_expanded(true)
+                                        .show(ui, &mut self.section_collapsed_state, |ui| {
+                                            egui::Frame::none()
+                                                .fill(colors::SURFACE_HOVER)
+                                                .rounding(rounding::CARD)
+                                                .inner_margin(egui::Margin::same(spacing::MD))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_height(section_card_height);
+                                                    ui.set_max_height(section_card_height);
+                                                    ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                    egui::ScrollArea::vertical()
+                                                        .auto_shrink([false, false])
+                                                        .show(ui, |ui| {
+                                                            Self::render_token_usage_content(ui, usage_data);
+                                                        });
+                                                });
+                                        });
+                                }
                             });
+                        });
+                        } // End of else block (side-by-side layout)
                     });
                 });
             },
         );
+    }
+
+    /// Render story items content (extracted for reuse in both layouts).
+    fn render_story_items_content(ui: &mut egui::Ui, story_items: &[StoryItem]) {
+        if story_items.is_empty() {
+            ui.label(
+                egui::RichText::new("No stories found")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_DISABLED),
+            );
+        } else {
+            for (index, story) in story_items.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(spacing::SM);
+                }
+
+                let is_active = story.status == StoryStatus::Active;
+
+                egui::Frame::none()
+                    .fill(story.status.background())
+                    .rounding(rounding::SMALL)
+                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(story.status.indicator())
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(story.status.color()),
+                            );
+
+                            ui.add_space(spacing::SM);
+
+                            let id_weight = if is_active {
+                                FontWeight::SemiBold
+                            } else {
+                                FontWeight::Medium
+                            };
+                            let id_color = if is_active {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_PRIMARY
+                            };
+                            ui.label(
+                                egui::RichText::new(&story.id)
+                                    .font(typography::font(FontSize::Small, id_weight))
+                                    .color(id_color),
+                            );
+                        });
+
+                        let title_weight = if is_active {
+                            FontWeight::Medium
+                        } else {
+                            FontWeight::Regular
+                        };
+                        let title_color = if is_active {
+                            colors::TEXT_PRIMARY
+                        } else {
+                            colors::TEXT_SECONDARY
+                        };
+                        ui.label(
+                            egui::RichText::new(&story.title)
+                                .font(typography::font(FontSize::Small, title_weight))
+                                .color(title_color),
+                        );
+                    });
+            }
+        }
+    }
+
+    /// Render work summaries content (extracted for reuse in both layouts).
+    fn render_work_summaries_content(ui: &mut egui::Ui, work_summaries: &[WorkSummaryItem]) {
+        if work_summaries.is_empty() {
+            ui.label(
+                egui::RichText::new("No summaries yet")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_DISABLED),
+            );
+        } else {
+            for (index, summary_item) in work_summaries.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(spacing::SM);
+                }
+
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(rounding::SMALL)
+                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Iteration {}",
+                                    summary_item.iteration
+                                ))
+                                .font(typography::font(FontSize::Small, FontWeight::SemiBold))
+                                .color(colors::TEXT_PRIMARY),
+                            );
+
+                            ui.add_space(spacing::SM);
+
+                            ui.label(
+                                egui::RichText::new(&summary_item.story_id)
+                                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        });
+
+                        ui.label(
+                            egui::RichText::new(&summary_item.summary)
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                    });
+            }
+        }
+    }
+
+    /// Render token usage content (extracted for reuse in both layouts).
+    fn render_token_usage_content(ui: &mut egui::Ui, usage_data: &TokenUsageData) {
+        // Total Usage Summary
+        egui::Frame::none()
+            .fill(colors::SURFACE)
+            .rounding(rounding::SMALL)
+            .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+            .show(ui, |ui| {
+                // Header: Total tokens
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Total")
+                            .font(typography::font(FontSize::Small, FontWeight::SemiBold))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_number_with_commas(
+                                usage_data.total.total_tokens(),
+                            ))
+                            .font(typography::font(FontSize::Small, FontWeight::SemiBold))
+                            .color(colors::ACCENT),
+                        );
+                    });
+                });
+
+                ui.add_space(spacing::XS);
+
+                // Input tokens
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("  Input")
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_number_with_commas(
+                                usage_data.total.input_tokens,
+                            ))
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                        );
+                    });
+                });
+
+                // Output tokens
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("  Output")
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_number_with_commas(
+                                usage_data.total.output_tokens,
+                            ))
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_SECONDARY),
+                        );
+                    });
+                });
+
+                // Cache read tokens (if non-zero)
+                if usage_data.total.cache_read_tokens > 0 {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("  Cache Read")
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format_number_with_commas(
+                                    usage_data.total.cache_read_tokens,
+                                ))
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+                }
+
+                // Cache creation tokens (if non-zero)
+                if usage_data.total.cache_creation_tokens > 0 {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("  Cache Creation")
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format_number_with_commas(
+                                    usage_data.total.cache_creation_tokens,
+                                ))
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+                }
+
+                // Thinking tokens (if non-zero)
+                if usage_data.total.thinking_tokens > 0 {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("  Thinking")
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format_number_with_commas(
+                                    usage_data.total.thinking_tokens,
+                                ))
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                            );
+                        });
+                    });
+                }
+            });
+
+        // Per-Phase Breakdown (only show if there are multiple phases)
+        if usage_data.phases.len() > 1 {
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("By Phase")
+                    .font(typography::font(FontSize::Small, FontWeight::Medium))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(spacing::XS);
+
+            for phase_entry in &usage_data.phases {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(rounding::SMALL)
+                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(&phase_entry.phase)
+                                    .font(typography::font(FontSize::Small, FontWeight::Medium))
+                                    .color(colors::TEXT_PRIMARY),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format_number_with_commas(
+                                            phase_entry.usage.total_tokens(),
+                                        ))
+                                        .font(typography::font(
+                                            FontSize::Small,
+                                            FontWeight::Regular,
+                                        ))
+                                        .color(colors::TEXT_SECONDARY),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(spacing::XS);
+            }
+        }
+    }
+
+    /// Render output content from an OutputSource (extracted for reuse in both layouts).
+    fn render_output_content(ui: &mut egui::Ui, output_source: &OutputSource) {
+        match output_source {
+            OutputSource::Live(lines) | OutputSource::Iteration(lines) => {
+                for line in lines {
+                    ui.label(
+                        egui::RichText::new(line.trim())
+                            .font(typography::mono(FontSize::Small))
+                            .color(colors::TEXT_SECONDARY),
+                    );
+                }
+            }
+            OutputSource::StatusMessage(message) => {
+                ui.label(
+                    egui::RichText::new(message)
+                        .font(typography::mono(FontSize::Small))
+                        .color(colors::TEXT_DISABLED),
+                );
+            }
+            OutputSource::NoData => {
+                ui.label(
+                    egui::RichText::new("No live output")
+                        .font(typography::mono(FontSize::Small))
+                        .color(colors::TEXT_DISABLED),
+                );
+            }
+        }
     }
 
     /// Render the empty state for Active Runs view.
@@ -7693,6 +8505,7 @@ mod tests {
             is_main_session: true,
             is_stale: false,
             live_output,
+            cached_user_stories: None,
         }
     }
 
@@ -7930,5 +8743,51 @@ mod tests {
             }
             other => panic!("Expected StatusMessage, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // format_number_with_commas Tests
+    // =========================================================================
+
+    #[test]
+    fn test_format_number_with_commas_zero() {
+        assert_eq!(format_number_with_commas(0), "0");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_small_numbers() {
+        assert_eq!(format_number_with_commas(1), "1");
+        assert_eq!(format_number_with_commas(12), "12");
+        assert_eq!(format_number_with_commas(123), "123");
+        assert_eq!(format_number_with_commas(999), "999");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_thousands() {
+        assert_eq!(format_number_with_commas(1000), "1,000");
+        assert_eq!(format_number_with_commas(1234), "1,234");
+        assert_eq!(format_number_with_commas(9999), "9,999");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_millions() {
+        assert_eq!(format_number_with_commas(1000000), "1,000,000");
+        assert_eq!(format_number_with_commas(1234567), "1,234,567");
+        assert_eq!(format_number_with_commas(9999999), "9,999,999");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_large_numbers() {
+        assert_eq!(format_number_with_commas(1000000000), "1,000,000,000");
+        assert_eq!(format_number_with_commas(123456789012), "123,456,789,012");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_boundary_values() {
+        // Test values at boundaries between thousand groups
+        assert_eq!(format_number_with_commas(100), "100");
+        assert_eq!(format_number_with_commas(1000), "1,000");
+        assert_eq!(format_number_with_commas(10000), "10,000");
+        assert_eq!(format_number_with_commas(100000), "100,000");
     }
 }
