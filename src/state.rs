@@ -88,7 +88,9 @@ pub struct LiveState {
 
 /// Threshold for considering a heartbeat "stale" (run likely dead).
 /// GUI/TUI should consider a run inactive if heartbeat is older than this.
-pub const HEARTBEAT_STALE_THRESHOLD_SECS: i64 = 10;
+/// Set to 60 seconds to account for periods where Claude is thinking without
+/// sending output, and for phases like Reviewing/Correcting that may take time.
+pub const HEARTBEAT_STALE_THRESHOLD_SECS: i64 = 60;
 
 impl LiveState {
     /// Create a new LiveState with the given machine state.
@@ -4377,22 +4379,22 @@ src/lib.rs | Library module | [Config]
     fn test_live_state_stale_heartbeat() {
         let mut live = LiveState::new(MachineState::RunningClaude);
 
-        // Set heartbeat to be older than the threshold (10 seconds)
-        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(15);
+        // Set heartbeat to be older than the threshold (60 seconds)
+        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(65);
 
         // Stale heartbeat should return false
         assert!(
             !live.is_heartbeat_fresh(),
-            "Heartbeat older than 10 seconds should be stale"
+            "Heartbeat older than 60 seconds should be stale"
         );
     }
 
     #[test]
     fn test_heartbeat_stale_threshold_constant() {
-        // Verify the threshold constant is 10 seconds
+        // Verify the threshold constant is 60 seconds
         assert_eq!(
-            HEARTBEAT_STALE_THRESHOLD_SECS, 10,
-            "Heartbeat threshold should be 10 seconds"
+            HEARTBEAT_STALE_THRESHOLD_SECS, 60,
+            "Heartbeat threshold should be 60 seconds"
         );
     }
 

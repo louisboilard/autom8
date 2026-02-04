@@ -1166,8 +1166,8 @@ mod tests {
         use std::path::PathBuf;
 
         let mut live = LiveState::new(crate::state::MachineState::RunningClaude);
-        // Set heartbeat to be 15 seconds ago (stale)
-        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(15);
+        // Set heartbeat to be 65 seconds ago (stale, threshold is 60s)
+        live.last_heartbeat = Utc::now() - chrono::Duration::seconds(65);
 
         let session = SessionData {
             project_name: "test".to_string(),

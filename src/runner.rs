@@ -592,10 +592,12 @@ impl Runner {
             print_phase_banner("REVIEWING", BannerColor::Cyan);
             print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
-            // Run reviewer with progress display
+            // Run reviewer with progress display and live output (for heartbeat updates)
             let review_iter = state.review_iteration;
-            let review_result = with_progress_display(
+            let review_result = with_progress_display_and_live(
                 self.verbose,
+                &self.state_manager,
+                MachineState::Reviewing,
                 || VerboseTimer::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 || ClaudeSpinner::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 |callback| run_reviewer(spec, review_iter, MAX_REVIEW_ITERATIONS, callback),
@@ -645,9 +647,11 @@ impl Runner {
                     print_phase_banner("CORRECTING", BannerColor::Yellow);
                     print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
-                    // Run corrector with progress display
-                    let corrector_result = with_progress_display(
+                    // Run corrector with progress display and live output (for heartbeat updates)
+                    let corrector_result = with_progress_display_and_live(
                         self.verbose,
+                        &self.state_manager,
+                        MachineState::Correcting,
                         || VerboseTimer::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         || ClaudeSpinner::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         |callback| run_corrector(spec, review_iter, callback),
@@ -745,9 +749,11 @@ impl Runner {
 
         print_phase_banner("COMMITTING", BannerColor::Cyan);
 
-        // Run commit with progress display
-        let commit_result = with_progress_display(
+        // Run commit with progress display and live output (for heartbeat updates)
+        let commit_result = with_progress_display_and_live(
             self.verbose,
+            &self.state_manager,
+            MachineState::Committing,
             VerboseTimer::new_for_commit,
             ClaudeSpinner::new_for_commit,
             |callback| run_for_commit(spec, callback),
