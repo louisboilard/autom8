@@ -316,6 +316,39 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Strip worktree-related prefixes from branch names for cleaner display.
+///
+/// This removes common prefixes that follow the worktree naming pattern:
+/// - `{project}-wt-` prefix (e.g., "autom8-wt-feature/foo" → "feature/foo")
+/// - `{project}-` prefix if followed by common branch prefixes
+///
+/// The project_name is used to identify project-specific prefixes.
+///
+/// # Examples
+/// ```
+/// use autom8::ui::gui::components::strip_worktree_prefix;
+///
+/// assert_eq!(strip_worktree_prefix("feature/login", "myproject"), "feature/login");
+/// assert_eq!(strip_worktree_prefix("myproject-wt-feature/login", "myproject"), "feature/login");
+/// ```
+pub fn strip_worktree_prefix(branch_name: &str, project_name: &str) -> String {
+    // Try to strip "{project}-wt-" prefix
+    let wt_prefix = format!("{}-wt-", project_name);
+    if let Some(stripped) = branch_name.strip_prefix(&wt_prefix) {
+        return stripped.to_string();
+    }
+
+    // Try lowercase version as well (case-insensitive matching)
+    let wt_prefix_lower = format!("{}-wt-", project_name.to_lowercase());
+    if branch_name.to_lowercase().starts_with(&wt_prefix_lower) {
+        // Return the original case for the rest of the branch name
+        return branch_name[wt_prefix_lower.len()..].to_string();
+    }
+
+    // Return unchanged if no prefix matched
+    branch_name.to_string()
+}
+
 /// Maximum characters for general text truncation.
 pub const MAX_TEXT_LENGTH: usize = 40;
 
