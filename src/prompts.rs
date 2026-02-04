@@ -103,7 +103,7 @@ Ready for autom8 to start implementation? [Y/n]
 
 **If the user confirms** (responds with: y, yes, yeah, go, proceed, ok, sure, yep, or just presses Enter):
 1. Print exactly: `Handing off to autom8...`
-2. Then type `/exit` to exit the session
+2. Then STOP responding. Do not output anything else. autom8 will automatically detect this message and take over.
 
 **If the user declines** (responds with: n, no, not yet, wait, hold on, changes, edit):
 1. Ask: "What would you like to change?"
@@ -112,7 +112,8 @@ Ready for autom8 to start implementation? [Y/n]
 
 ### Important Notes
 - Always complete the handoff protocol after saving
-- The `/exit` command ends the Claude session, which signals autom8 to detect the new spec
+- After printing the handoff message, you MUST stop responding completely - do not add any commentary, questions, or follow-up text
+- autom8 monitors for the exact phrase "Handing off to autom8..." and will automatically end this session when it sees it
 - Be responsive to user intent - if they seem ready to proceed, treat it as confirmation
 - If the response is ambiguous, ask for clarification
 
@@ -935,16 +936,16 @@ mod tests {
     }
 
     #[test]
-    fn spec_skill_prompt_instructs_exit_command() {
-        // US-001, US-003: Prompt instructs Claude to exit via /exit on confirmation
+    fn spec_skill_prompt_instructs_stop_after_handoff() {
+        // US-001, US-003: Prompt instructs Claude to stop responding after handoff message
         assert!(
-            SPEC_SKILL_PROMPT.contains("/exit"),
-            "Should instruct Claude to use /exit command"
+            SPEC_SKILL_PROMPT.contains("STOP responding"),
+            "Should instruct Claude to stop responding after handoff"
         );
         assert!(
-            SPEC_SKILL_PROMPT.contains("type `/exit`")
-                || SPEC_SKILL_PROMPT.contains("Then type `/exit`"),
-            "Should explicitly instruct to type /exit to exit the session"
+            SPEC_SKILL_PROMPT.contains("autom8 will automatically")
+                || SPEC_SKILL_PROMPT.contains("automatically detect"),
+            "Should mention autom8 automatic detection"
         );
     }
 

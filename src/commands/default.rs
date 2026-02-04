@@ -136,6 +136,10 @@ fn handle_existing_state(state: RunState, verbose: bool) -> Result<()> {
     }
 }
 
+/// The handoff signal that Claude outputs to indicate spec creation is complete.
+/// When detected in stdout, autom8 will automatically terminate the Claude session.
+const HANDOFF_SIGNAL: &str = "Handing off to autom8...";
+
 /// Start a new spec creation session.
 ///
 /// Spawns an interactive Claude session to help create a spec file.
@@ -150,7 +154,11 @@ fn handle_existing_state(state: RunState, verbose: bool) -> Result<()> {
 /// * `Ok(())` on success
 /// * `Err(Autom8Error)` if spec creation or implementation fails
 fn start_spec_creation(verbose: bool) -> Result<()> {
-    use std::process::Command;
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
 
     print_header();
 
@@ -174,107 +182,157 @@ fn start_spec_creation(verbose: bool) -> Result<()> {
     // Take a snapshot of existing spec files before spawning Claude
     let snapshot = SpecSnapshot::capture()?;
 
-    // Spawn interactive Claude session with the spec skill prompt
-    let status = Command::new("claude")
+    // Spawn interactive Claude session with piped stdout so we can detect the handoff signal
+    let mut child = Command::new("claude")
         .arg(prompts::SPEC_SKILL_PROMPT)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
+        .stdin(Stdio::inherit()) // User input passes through
+        .stdout(Stdio::piped()) // We capture stdout to detect handoff
+        .stderr(Stdio::inherit()) // Errors pass through
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Autom8Error::ClaudeError(
+                    "Claude CLI not found. Please install it from https://github.com/anthropics/claude-code".to_string()
+                )
+            } else {
+                Autom8Error::ClaudeError(format!("Failed to spawn Claude: {}", e))
+            }
+        })?;
 
-    match status {
-        Ok(exit_status) => {
-            if exit_status.success() {
-                println!();
-                println!("{GREEN}Claude session ended.{RESET}");
-                println!();
+    // Flag to signal when handoff is detected
+    let handoff_detected = Arc::new(AtomicBool::new(false));
+    let handoff_flag = Arc::clone(&handoff_detected);
 
-                // Detect new spec files created during the session
-                let new_files = snapshot.detect_new_files()?;
+    // Take ownership of stdout for the reader thread
+    let stdout = child.stdout.take().expect("stdout was piped");
 
-                match new_files.len() {
-                    0 => {
-                        print_error("No new spec files detected.");
-                        println!();
-                        println!("{BOLD}Possible causes:{RESET}");
-                        println!("  - Claude session ended before the spec was saved");
-                        println!("  - Spec was saved to an unexpected location");
-                        println!("  - Claude didn't follow the spec skill instructions");
-                        println!();
-                        println!("{BOLD}Suggestions:{RESET}");
-                        println!("  - Run {CYAN}autom8{RESET} again to start a fresh session");
-                        println!("  - Or use the manual workflow:");
-                        println!("      1. Run {CYAN}autom8 skill spec{RESET} to get the prompt");
-                        println!("      2. Start a Claude session and paste the prompt");
-                        println!("      3. Save the spec as {CYAN}spec-<feature>.md{RESET}");
-                        println!("      4. Run {CYAN}autom8{RESET} to implement");
-                        std::process::exit(1);
-                    }
-                    1 => {
-                        let spec_path = &new_files[0];
-                        println!("{GREEN}Detected new spec:{RESET} {}", spec_path.display());
-                        println!();
-                        println!("{BOLD}Proceeding to implementation...{RESET}");
-                        println!();
+    // Spawn a thread to read stdout, print it, and watch for the handoff signal
+    let reader_handle = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(text) => {
+                    // Print the line so the user sees Claude's output
+                    println!("{}", text);
 
-                        // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose);
-                        runner.run_from_spec(spec_path)
-                    }
-                    n => {
-                        println!("{YELLOW}Detected {} new spec files:{RESET}", n);
-                        println!();
-
-                        // Build options list with file paths
-                        let options: Vec<String> = new_files
-                            .iter()
-                            .enumerate()
-                            .map(|(i, file)| {
-                                let filename = file
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("spec.md");
-                                format!("{}. {}", i + 1, filename)
-                            })
-                            .collect();
-                        let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-
-                        let choice = prompt::select(
-                            "Which spec would you like to implement?",
-                            &option_refs,
-                            0,
-                        );
-
-                        let selected_spec = &new_files[choice];
-                        println!();
-                        println!("{GREEN}Selected:{RESET} {}", selected_spec.display());
-                        println!();
-                        println!("{BOLD}Proceeding to implementation...{RESET}");
-                        println!();
-
-                        // Create a new runner and run from the spec
-                        let runner = Runner::new()?.with_verbose(verbose);
-                        runner.run_from_spec(selected_spec)
+                    // Check for the handoff signal
+                    if text.contains(HANDOFF_SIGNAL) {
+                        handoff_flag.store(true, Ordering::SeqCst);
+                        // Continue reading briefly to flush any remaining output,
+                        // but the main thread will kill the process
+                        break;
                     }
                 }
-            } else {
-                Err(Autom8Error::ClaudeError(format!(
-                    "Claude exited with status: {}",
-                    exit_status
-                )))
+                Err(_) => break, // Pipe closed
             }
         }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Err(Autom8Error::ClaudeError(
-                    "Claude CLI not found. Please install it from https://github.com/anthropics/claude-code".to_string()
-                ))
-            } else {
-                Err(Autom8Error::ClaudeError(format!(
-                    "Failed to spawn Claude: {}",
-                    e
-                )))
+    });
+
+    // Wait for either: handoff detected, or Claude exits naturally
+    loop {
+        // Check if handoff was detected
+        if handoff_detected.load(Ordering::SeqCst) {
+            // Give a brief moment for any final output
+            thread::sleep(std::time::Duration::from_millis(100));
+
+            // Terminate the Claude process
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+
+        // Check if Claude exited on its own
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                // Process exited naturally
+                break;
             }
+            Ok(None) => {
+                // Still running, wait a bit before checking again
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Wait for the reader thread to finish
+    let _ = reader_handle.join();
+
+    // Check if this was a handoff or manual exit
+    let was_handoff = handoff_detected.load(Ordering::SeqCst);
+
+    if was_handoff {
+        println!();
+        println!("{GREEN}Handoff received.{RESET}");
+        println!();
+    } else {
+        println!();
+        println!("{GREEN}Claude session ended.{RESET}");
+        println!();
+    }
+
+    // Detect new spec files created during the session
+    let new_files = snapshot.detect_new_files()?;
+
+    match new_files.len() {
+        0 => {
+            print_error("No new spec files detected.");
+            println!();
+            println!("{BOLD}Possible causes:{RESET}");
+            println!("  - Claude session ended before the spec was saved");
+            println!("  - Spec was saved to an unexpected location");
+            println!("  - Claude didn't follow the spec skill instructions");
+            println!();
+            println!("{BOLD}Suggestions:{RESET}");
+            println!("  - Run {CYAN}autom8{RESET} again to start a fresh session");
+            println!("  - Or use the manual workflow:");
+            println!("      1. Run {CYAN}autom8 skill spec{RESET} to get the prompt");
+            println!("      2. Start a Claude session and paste the prompt");
+            println!("      3. Save the spec as {CYAN}spec-<feature>.md{RESET}");
+            println!("      4. Run {CYAN}autom8{RESET} to implement");
+            std::process::exit(1);
+        }
+        1 => {
+            let spec_path = &new_files[0];
+            println!("{GREEN}Detected new spec:{RESET} {}", spec_path.display());
+            println!();
+            println!("{BOLD}Proceeding to implementation...{RESET}");
+            println!();
+
+            // Create a new runner and run from the spec
+            let runner = Runner::new()?.with_verbose(verbose);
+            runner.run_from_spec(spec_path)
+        }
+        n => {
+            println!("{YELLOW}Detected {} new spec files:{RESET}", n);
+            println!();
+
+            // Build options list with file paths
+            let options: Vec<String> = new_files
+                .iter()
+                .enumerate()
+                .map(|(i, file)| {
+                    let filename = file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("spec.md");
+                    format!("{}. {}", i + 1, filename)
+                })
+                .collect();
+            let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+
+            let choice = prompt::select("Which spec would you like to implement?", &option_refs, 0);
+
+            let selected_spec = &new_files[choice];
+            println!();
+            println!("{GREEN}Selected:{RESET} {}", selected_spec.display());
+            println!();
+            println!("{BOLD}Proceeding to implementation...{RESET}");
+            println!();
+
+            // Create a new runner and run from the spec
+            let runner = Runner::new()?.with_verbose(verbose);
+            runner.run_from_spec(selected_spec)
         }
     }
 }
