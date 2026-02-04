@@ -1375,4 +1375,141 @@ mod tests {
         assert_eq!(format_relative_time_secs(86400), "1d ago");
         assert_eq!(format_relative_time_secs(172800), "2d ago");
     }
+
+    // ========================================================================
+    // US-003: Run History Sorting Tests
+    // ========================================================================
+
+    fn make_test_run_history_entry(
+        run_id: &str,
+        status: RunStatus,
+        started_at_offset_secs: i64,
+    ) -> RunHistoryEntry {
+        use chrono::{Duration, Utc};
+
+        RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run_id: run_id.to_string(),
+            started_at: Utc::now() - Duration::seconds(started_at_offset_secs),
+            finished_at: None,
+            status,
+            completed_stories: 0,
+            total_stories: 5,
+            branch: "test-branch".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_run_history_sorting_running_at_top() {
+        // Running session should appear before completed ones regardless of date
+        let mut history = vec![
+            make_test_run_history_entry("old-completed", RunStatus::Completed, 60), // 1 min ago
+            make_test_run_history_entry("running", RunStatus::Running, 3600),       // 1 hour ago
+            make_test_run_history_entry("new-completed", RunStatus::Completed, 0),  // now
+        ];
+
+        // Apply the same sorting logic as load_project_run_history
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // Running should be first, even though it started 1 hour ago
+        assert_eq!(history[0].run_id, "running");
+        // Then completed entries sorted by date (newest first)
+        assert_eq!(history[1].run_id, "new-completed");
+        assert_eq!(history[2].run_id, "old-completed");
+    }
+
+    #[test]
+    fn test_run_history_sorting_multiple_running() {
+        // Multiple running sessions should be sorted by started_at (newest first)
+        let mut history = vec![
+            make_test_run_history_entry("running-old", RunStatus::Running, 3600), // 1 hour ago
+            make_test_run_history_entry("running-new", RunStatus::Running, 60),   // 1 min ago
+            make_test_run_history_entry("completed", RunStatus::Completed, 0),    // now
+        ];
+
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // Both running entries should be before completed
+        assert!(matches!(history[0].status, RunStatus::Running));
+        assert!(matches!(history[1].status, RunStatus::Running));
+        // Newest running first
+        assert_eq!(history[0].run_id, "running-new");
+        assert_eq!(history[1].run_id, "running-old");
+        // Completed last
+        assert_eq!(history[2].run_id, "completed");
+    }
+
+    #[test]
+    fn test_run_history_sorting_non_running_by_date() {
+        // Non-running entries should maintain date-descending order
+        let mut history = vec![
+            make_test_run_history_entry("failed", RunStatus::Failed, 120),
+            make_test_run_history_entry("interrupted", RunStatus::Interrupted, 60),
+            make_test_run_history_entry("completed", RunStatus::Completed, 180),
+        ];
+
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // All non-running, sorted by date (newest first)
+        assert_eq!(history[0].run_id, "interrupted"); // 60s ago - newest
+        assert_eq!(history[1].run_id, "failed"); // 120s ago
+        assert_eq!(history[2].run_id, "completed"); // 180s ago - oldest
+    }
+
+    #[test]
+    fn test_run_history_sorting_empty_and_single() {
+        // Empty history should not panic
+        let mut empty: Vec<RunHistoryEntry> = vec![];
+        empty.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+        assert!(empty.is_empty());
+
+        // Single entry should remain as-is
+        let mut single = vec![make_test_run_history_entry("only", RunStatus::Running, 0)];
+        single.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].run_id, "only");
+    }
 }
