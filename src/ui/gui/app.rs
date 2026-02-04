@@ -20,7 +20,10 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
     load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
 };
-use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
+use eframe::egui::{
+    self, Color32, IconData, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2,
+};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default window width in pixels.
@@ -84,6 +87,11 @@ const CARD_MIN_HEIGHT: f32 = 320.0;
 /// Number of output lines to display in session cards.
 /// Increased for better monitoring of streaming output.
 const OUTPUT_LINES_TO_SHOW: usize = 12;
+
+/// Freshness threshold for live output in seconds.
+/// Live output older than this is considered stale and we fall back to iteration output.
+/// This matches the TUI's behavior for consistent user experience.
+const LIVE_OUTPUT_FRESHNESS_SECS: i64 = 5;
 
 /// Maximum number of columns in the grid layout (2x2 grid for 1/4 screen each).
 const MAX_GRID_COLUMNS: usize = 2;
@@ -157,6 +165,10 @@ const SIDEBAR_ACTIVE_INDICATOR_WIDTH: f32 = 3.0;
 
 /// Corner rounding for sidebar item backgrounds.
 const SIDEBAR_ITEM_ROUNDING: f32 = 6.0;
+
+/// Size of the sidebar mascot icon in pixels (US-005).
+/// Appropriately sized for the sidebar width while remaining decorative.
+const SIDEBAR_ICON_SIZE: f32 = 48.0;
 
 // ============================================================================
 // Context Menu Constants (Right-Click Context Menu - US-002)
@@ -257,6 +269,126 @@ fn calculate_context_menu_width(ctx: &egui::Context, items: &[ContextMenuItem]) 
         .fold(0.0_f32, |max, width| max.max(width));
 
     calculate_menu_width_from_text_width(max_text_width)
+}
+
+// ============================================================================
+// Output Display Helpers (US-002: Improve Output Display Update Mechanism)
+// ============================================================================
+
+/// Result of determining which output to display for a session.
+///
+/// This enum represents the source of output to display in the session card,
+/// providing clear semantics for the rendering code.
+#[derive(Debug, Clone, PartialEq)]
+enum OutputSource {
+    /// Fresh live output from Claude (within freshness threshold).
+    /// Contains the lines to display (already limited to OUTPUT_LINES_TO_SHOW).
+    Live(Vec<String>),
+    /// Archived iteration output (fallback when live output is stale).
+    /// Contains the lines to display (already limited to OUTPUT_LINES_TO_SHOW).
+    Iteration(Vec<String>),
+    /// Status message fallback when no output is available.
+    /// Contains a descriptive message based on the machine state.
+    StatusMessage(String),
+    /// Waiting for initial output (run just started).
+    Waiting,
+    /// No live output data available (session may not be actively running).
+    NoData,
+}
+
+/// Get the appropriate output to display for a session.
+///
+/// This function implements intelligent output source selection, matching
+/// the TUI's `get_output_snippet` behavior for consistent user experience.
+///
+/// ## Priority (matches TUI implementation):
+/// 1. **Fresh live output** - If `machine_state == RunningClaude` AND live output exists
+///    AND output is fresh (< 5 seconds old) AND `output_lines` is not empty
+/// 2. **Iteration output** - If the latest iteration has an `output_snippet`
+/// 3. **Status message** - Fallback based on the current machine state
+///
+/// ## Freshness Check:
+/// Live output is considered "fresh" if updated within `LIVE_OUTPUT_FRESHNESS_SECS` (5 seconds).
+/// This prevents showing stale output when Claude pauses or transitions between phases,
+/// providing a smoother experience without flickering or jarring transitions.
+///
+/// ## Arguments
+/// * `session` - The session data to get output for
+///
+/// ## Returns
+/// An `OutputSource` variant indicating which output to display and its content.
+fn get_output_for_session(session: &SessionData) -> OutputSource {
+    // Get the machine state (default to Idle if no run)
+    let machine_state = session
+        .run
+        .as_ref()
+        .map(|r| r.machine_state)
+        .unwrap_or(MachineState::Idle);
+
+    // Priority 1: Check for fresh live output when Claude is running
+    if machine_state == MachineState::RunningClaude {
+        if let Some(ref live) = session.live_output {
+            // Check if live output is fresh (within freshness threshold)
+            let age = chrono::Utc::now().signed_duration_since(live.updated_at);
+            if age.num_seconds() < LIVE_OUTPUT_FRESHNESS_SECS && !live.output_lines.is_empty() {
+                // Take last OUTPUT_LINES_TO_SHOW lines from live output
+                let take_count = OUTPUT_LINES_TO_SHOW.min(live.output_lines.len());
+                let start = live.output_lines.len().saturating_sub(take_count);
+                let lines: Vec<String> = live.output_lines[start..].to_vec();
+                return OutputSource::Live(lines);
+            }
+        }
+    }
+
+    // Priority 2: Get output from the current or last iteration
+    if let Some(ref run) = session.run {
+        if let Some(iter) = run.iterations.last() {
+            if !iter.output_snippet.is_empty() {
+                // Take last OUTPUT_LINES_TO_SHOW lines of output
+                let lines: Vec<String> = iter
+                    .output_snippet
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .take(OUTPUT_LINES_TO_SHOW)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|s| s.to_string())
+                    .collect();
+                return OutputSource::Iteration(lines);
+            }
+        }
+    }
+
+    // Priority 3: Fall back to status message based on machine state
+    // Handle special case where live output exists but is empty (waiting for first output)
+    if session.live_output.is_some() && machine_state == MachineState::RunningClaude {
+        return OutputSource::Waiting;
+    }
+
+    // If there's no live output at all, show NoData
+    if session.live_output.is_none() {
+        return OutputSource::NoData;
+    }
+
+    // Fall back to status message for other states
+    let message = match machine_state {
+        MachineState::Idle => "Waiting to start...",
+        MachineState::LoadingSpec => "Loading spec file...",
+        MachineState::GeneratingSpec => "Generating spec from markdown...",
+        MachineState::Initializing => "Initializing run...",
+        MachineState::PickingStory => "Selecting next story...",
+        MachineState::RunningClaude => "Claude is working...",
+        MachineState::Reviewing => "Reviewing changes...",
+        MachineState::Correcting => "Applying corrections...",
+        MachineState::Committing => "Committing changes...",
+        MachineState::CreatingPR => "Creating pull request...",
+        MachineState::Completed => "Run completed successfully!",
+        MachineState::Failed => "Run failed.",
+    };
+    OutputSource::StatusMessage(message.to_string())
 }
 
 /// Check if a session is resumable.
@@ -3806,9 +3938,24 @@ impl Autom8App {
                 self.set_active_tab(tab_id);
             }
 
-            // Fill remaining space, leaving room for animation
+            // Fill remaining space, leaving room for icon and animation
             let animation_height = 150.0;
-            ui.add_space(ui.available_height() - animation_height);
+            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::MD * 2.0; // Icon + vertical padding
+            ui.add_space(ui.available_height() - animation_height - icon_section_height);
+
+            // Decorative mascot icon (US-005)
+            // Centered between the tabs and the animation
+            ui.add_space(spacing::MD);
+            ui.horizontal(|ui| {
+                let sidebar_width = ui.available_width();
+                let icon_offset = (sidebar_width - SIDEBAR_ICON_SIZE) / 2.0;
+                ui.add_space(icon_offset);
+                ui.add(
+                    egui::Image::new(egui::include_image!("../../../assets/icon.png"))
+                        .fit_to_exact_size(egui::vec2(SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE)),
+                );
+            });
+            ui.add_space(spacing::MD);
 
             // Decorative animation at the bottom of sidebar
             // Uses full sidebar width, particles rise from bottom
@@ -6558,8 +6705,12 @@ impl Autom8App {
         }
 
         // ====================================================================
-        // OUTPUT SECTION: Last 5 lines of Claude output in monospace
+        // OUTPUT SECTION: Intelligent output display (US-002)
         // ====================================================================
+        // This section implements smart output source selection matching the TUI's
+        // behavior. Priority: 1) Fresh live output, 2) Iteration output, 3) Status message.
+        // See `get_output_for_session()` for detailed selection logic.
+
         // Draw a subtle separator line
         let separator_y = cursor_y;
         painter.line_segment(
@@ -6586,66 +6737,89 @@ impl Autom8App {
         let output_padding = 6.0; // Inner padding for output section
         let mut output_y = cursor_y + output_padding;
         let line_height = FontSize::Large.pixels() + 2.0;
-        // Adjust chars per line for larger font (approx 9.6px per char for Large mono)
-        let max_output_chars = ((content_width - output_padding * 2.0) / 9.6) as usize;
 
-        if let Some(ref live_output) = session.live_output {
-            // Get last OUTPUT_LINES_TO_SHOW lines
-            let lines: Vec<_> = live_output
-                .output_lines
-                .iter()
-                .rev()
-                .take(OUTPUT_LINES_TO_SHOW)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
+        // Calculate the inner content area for text (within the output section)
+        let text_area_width = content_width - output_padding * 2.0;
 
-            if lines.is_empty() {
-                // No output yet
-                let no_output_galley = painter.layout_no_wrap(
-                    "Waiting for output...".to_string(),
-                    typography::mono(FontSize::Large),
-                    colors::TEXT_DISABLED,
-                );
-                painter.galley(
-                    egui::pos2(content_rect.min.x + output_padding, output_y),
-                    no_output_galley,
-                    Color32::TRANSPARENT,
-                );
-            } else {
+        // Use a conservative character width estimate for monospace font at 16px
+        // Geist Mono at 16px is approximately 9.6px per character, but we use 10.0
+        // to be conservative and ensure text doesn't overflow
+        let char_width_estimate = 10.0;
+        let max_output_chars = (text_area_width / char_width_estimate).floor() as usize;
+
+        // Create a clipped painter that constrains all drawing to the output rect.
+        // This ensures no text can bleed outside the designated output area.
+        let clipped_painter = painter.with_clip_rect(output_rect);
+
+        // Calculate the maximum Y position where a line can start and still fit
+        let max_start_y = output_rect.max.y - output_padding - line_height;
+
+        // Get the appropriate output source using intelligent selection
+        let output_source = get_output_for_session(session);
+
+        // Render based on output source type
+        match output_source {
+            OutputSource::Live(lines) | OutputSource::Iteration(lines) => {
+                // Render output lines (same visual treatment for live and iteration output)
                 for line in lines {
+                    // Check if the line would fit BEFORE drawing (prevents partial lines)
+                    if output_y > max_start_y {
+                        break;
+                    }
+
                     let line_text = truncate_with_ellipsis(line.trim(), max_output_chars);
-                    let line_galley = painter.layout_no_wrap(
+                    let line_galley = clipped_painter.layout_no_wrap(
                         line_text,
                         typography::mono(FontSize::Large),
                         colors::TEXT_SECONDARY,
                     );
-                    painter.galley(
+                    clipped_painter.galley(
                         egui::pos2(content_rect.min.x + output_padding, output_y),
                         line_galley,
                         Color32::TRANSPARENT,
                     );
                     output_y += line_height;
-
-                    // Stop if we exceed the output area
-                    if output_y > content_rect.max.y - output_padding {
-                        break;
-                    }
                 }
             }
-        } else {
-            // No live output available
-            let no_output_galley = painter.layout_no_wrap(
-                "No live output".to_string(),
-                typography::mono(FontSize::Large),
-                colors::TEXT_DISABLED,
-            );
-            painter.galley(
-                egui::pos2(content_rect.min.x + output_padding, output_y),
-                no_output_galley,
-                Color32::TRANSPARENT,
-            );
+            OutputSource::StatusMessage(message) => {
+                // Render status message
+                let status_galley = clipped_painter.layout_no_wrap(
+                    message,
+                    typography::mono(FontSize::Large),
+                    colors::TEXT_DISABLED,
+                );
+                clipped_painter.galley(
+                    egui::pos2(content_rect.min.x + output_padding, output_y),
+                    status_galley,
+                    Color32::TRANSPARENT,
+                );
+            }
+            OutputSource::Waiting => {
+                // Render "waiting for output" message
+                let waiting_galley = clipped_painter.layout_no_wrap(
+                    "Waiting for output...".to_string(),
+                    typography::mono(FontSize::Large),
+                    colors::TEXT_DISABLED,
+                );
+                clipped_painter.galley(
+                    egui::pos2(content_rect.min.x + output_padding, output_y),
+                    waiting_galley,
+                    Color32::TRANSPARENT,
+                );
+            }
+            OutputSource::NoData => {
+                // Render "no live output" message
+                let no_output_galley = clipped_painter.layout_no_wrap(
+                    "No live output".to_string(),
+                    typography::mono(FontSize::Large),
+                    colors::TEXT_DISABLED,
+                );
+                clipped_painter.galley(
+                    egui::pos2(content_rect.min.x + output_padding, output_y),
+                    no_output_galley,
+                    Color32::TRANSPARENT,
+                );
+            }
         }
     }
 
@@ -7257,9 +7431,42 @@ impl Autom8App {
 // Viewport Configuration (Custom Title Bar - US-002)
 // ============================================================================
 
+/// Load the application window icon from the embedded PNG asset.
+///
+/// The icon is embedded at compile time from `assets/icon.png` and decoded
+/// to RGBA pixel data for use with the window manager.
+///
+/// # Returns
+///
+/// `IconData` containing the RGBA pixels and dimensions for the window icon.
+/// Returns empty `IconData` if the icon fails to load (graceful degradation).
+fn load_window_icon() -> IconData {
+    // Embed the icon PNG at compile time
+    let icon_bytes = include_bytes!("../../../assets/icon.png");
+
+    // Decode the PNG to RGBA pixels
+    match image::load_from_memory(icon_bytes) {
+        Ok(img) => {
+            let rgba_image = img.into_rgba8();
+            let (width, height) = rgba_image.dimensions();
+            let rgba = rgba_image.into_raw();
+            IconData {
+                rgba,
+                width,
+                height,
+            }
+        }
+        Err(_) => {
+            // Graceful degradation: return empty icon data
+            IconData::default()
+        }
+    }
+}
+
 /// Build the viewport configuration for the native window.
 ///
-/// Configures a custom title bar that blends with the app's background color.
+/// Configures a custom title bar that blends with the app's background color,
+/// and sets the application window icon (US-006).
 fn build_viewport() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_title("autom8")
@@ -7268,6 +7475,7 @@ fn build_viewport() -> egui::ViewportBuilder {
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)
+        .with_icon(Arc::new(load_window_icon()))
 }
 
 /// Launch the native GUI application.
@@ -7288,6 +7496,8 @@ pub fn run_gui() -> Result<()> {
         "autom8",
         options,
         Box::new(|cc| {
+            // Initialize image loaders for embedded images (US-005)
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             // Initialize custom typography (fonts and text styles)
             typography::init(&cc.egui_ctx);
             // Initialize theme (colors, visuals, and style)
