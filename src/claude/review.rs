@@ -10,20 +10,36 @@ use crate::error::{Autom8Error, Result};
 use crate::prompts::{CORRECTOR_PROMPT, REVIEWER_PROMPT};
 use crate::spec::Spec;
 
-use super::stream::extract_text_from_stream_line;
-use super::types::ClaudeErrorInfo;
+use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
+use super::types::{ClaudeErrorInfo, ClaudeUsage};
 
 const REVIEW_FILE: &str = "autom8_review.md";
 
+/// Result from running the reviewer.
+#[derive(Debug, Clone)]
+pub struct ReviewResult {
+    pub outcome: ReviewOutcome,
+    /// Token usage data from the Claude API response
+    pub usage: Option<ClaudeUsage>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum ReviewResult {
+pub enum ReviewOutcome {
     Pass,
     IssuesFound,
     Error(ClaudeErrorInfo),
 }
 
+/// Result from running the corrector.
+#[derive(Debug, Clone)]
+pub struct CorrectorResult {
+    pub outcome: CorrectorOutcome,
+    /// Token usage data from the Claude API response
+    pub usage: Option<ClaudeUsage>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum CorrectorResult {
+pub enum CorrectorOutcome {
     Complete,
     Error(ClaudeErrorInfo),
 }
@@ -68,12 +84,18 @@ where
         .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
 
     let reader = BufReader::new(stdout);
+    let mut usage: Option<ClaudeUsage> = None;
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
         if let Some(text) = extract_text_from_stream_line(&line) {
             on_output(&text);
+        }
+
+        // Try to extract usage from result events
+        if let Some(line_usage) = extract_usage_from_result_line(&line) {
+            usage = Some(line_usage);
         }
     }
 
@@ -93,23 +115,28 @@ where
                 Some(stderr_content)
             },
         );
-        return Ok(ReviewResult::Error(error_info));
+        return Ok(ReviewResult {
+            outcome: ReviewOutcome::Error(error_info),
+            usage,
+        });
     }
 
     // Check if autom8_review.md exists and has content
     let review_path = Path::new(REVIEW_FILE);
-    if review_path.exists() {
+    let outcome = if review_path.exists() {
         match std::fs::read_to_string(review_path) {
-            Ok(content) if !content.trim().is_empty() => Ok(ReviewResult::IssuesFound),
-            Ok(_) => Ok(ReviewResult::Pass),
-            Err(e) => Ok(ReviewResult::Error(ClaudeErrorInfo::new(format!(
+            Ok(content) if !content.trim().is_empty() => ReviewOutcome::IssuesFound,
+            Ok(_) => ReviewOutcome::Pass,
+            Err(e) => ReviewOutcome::Error(ClaudeErrorInfo::new(format!(
                 "Failed to read review file: {}",
                 e
-            )))),
+            ))),
         }
     } else {
-        Ok(ReviewResult::Pass)
-    }
+        ReviewOutcome::Pass
+    };
+
+    Ok(ReviewResult { outcome, usage })
 }
 
 /// Run the corrector agent to fix issues identified by the reviewer.
@@ -148,12 +175,18 @@ where
         .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdout".into()))?;
 
     let reader = BufReader::new(stdout);
+    let mut usage: Option<ClaudeUsage> = None;
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
         if let Some(text) = extract_text_from_stream_line(&line) {
             on_output(&text);
+        }
+
+        // Try to extract usage from result events
+        if let Some(line_usage) = extract_usage_from_result_line(&line) {
+            usage = Some(line_usage);
         }
     }
 
@@ -173,10 +206,16 @@ where
                 Some(stderr_content)
             },
         );
-        return Ok(CorrectorResult::Error(error_info));
+        return Ok(CorrectorResult {
+            outcome: CorrectorOutcome::Error(error_info),
+            usage,
+        });
     }
 
-    Ok(CorrectorResult::Complete)
+    Ok(CorrectorResult {
+        outcome: CorrectorOutcome::Complete,
+        usage,
+    })
 }
 
 fn build_reviewer_prompt(spec: &Spec, iteration: u32, max_iterations: u32) -> String {
@@ -239,29 +278,81 @@ mod tests {
     use crate::spec::UserStory;
 
     #[test]
-    fn test_review_result_variants() {
-        let pass = ReviewResult::Pass;
-        let issues = ReviewResult::IssuesFound;
-        let error = ReviewResult::Error(ClaudeErrorInfo::new("test error"));
+    fn test_review_outcome_variants() {
+        let pass = ReviewOutcome::Pass;
+        let issues = ReviewOutcome::IssuesFound;
+        let error = ReviewOutcome::Error(ClaudeErrorInfo::new("test error"));
 
-        assert_eq!(pass, ReviewResult::Pass);
-        assert_eq!(issues, ReviewResult::IssuesFound);
+        assert_eq!(pass, ReviewOutcome::Pass);
+        assert_eq!(issues, ReviewOutcome::IssuesFound);
         assert_eq!(
             error,
-            ReviewResult::Error(ClaudeErrorInfo::new("test error"))
+            ReviewOutcome::Error(ClaudeErrorInfo::new("test error"))
         );
     }
 
     #[test]
-    fn test_corrector_result_variants() {
-        let complete = CorrectorResult::Complete;
-        let error = CorrectorResult::Error(ClaudeErrorInfo::new("test error"));
+    fn test_review_result_with_usage() {
+        let usage = ClaudeUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        };
+        let result = ReviewResult {
+            outcome: ReviewOutcome::Pass,
+            usage: Some(usage.clone()),
+        };
+        assert!(matches!(result.outcome, ReviewOutcome::Pass));
+        assert!(result.usage.is_some());
+        assert_eq!(result.usage.unwrap().input_tokens, 100);
+    }
 
-        assert_eq!(complete, CorrectorResult::Complete);
+    #[test]
+    fn test_review_result_without_usage() {
+        let result = ReviewResult {
+            outcome: ReviewOutcome::IssuesFound,
+            usage: None,
+        };
+        assert!(matches!(result.outcome, ReviewOutcome::IssuesFound));
+        assert!(result.usage.is_none());
+    }
+
+    #[test]
+    fn test_corrector_outcome_variants() {
+        let complete = CorrectorOutcome::Complete;
+        let error = CorrectorOutcome::Error(ClaudeErrorInfo::new("test error"));
+
+        assert_eq!(complete, CorrectorOutcome::Complete);
         assert_eq!(
             error,
-            CorrectorResult::Error(ClaudeErrorInfo::new("test error"))
+            CorrectorOutcome::Error(ClaudeErrorInfo::new("test error"))
         );
+    }
+
+    #[test]
+    fn test_corrector_result_with_usage() {
+        let usage = ClaudeUsage {
+            input_tokens: 200,
+            output_tokens: 100,
+            ..Default::default()
+        };
+        let result = CorrectorResult {
+            outcome: CorrectorOutcome::Complete,
+            usage: Some(usage.clone()),
+        };
+        assert!(matches!(result.outcome, CorrectorOutcome::Complete));
+        assert!(result.usage.is_some());
+        assert_eq!(result.usage.unwrap().input_tokens, 200);
+    }
+
+    #[test]
+    fn test_corrector_result_without_usage() {
+        let result = CorrectorResult {
+            outcome: CorrectorOutcome::Complete,
+            usage: None,
+        };
+        assert!(matches!(result.outcome, CorrectorOutcome::Complete));
+        assert!(result.usage.is_none());
     }
 
     #[test]

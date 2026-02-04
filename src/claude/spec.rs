@@ -10,11 +10,25 @@ use crate::error::{Autom8Error, Result};
 use crate::prompts::{SPEC_JSON_CORRECTION_PROMPT, SPEC_JSON_PROMPT};
 use crate::spec::Spec;
 
-use super::stream::extract_text_from_stream_line;
-use super::types::ClaudeErrorInfo;
+use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
+use super::types::{ClaudeErrorInfo, ClaudeUsage};
 use super::utils::{extract_json, fix_json_syntax, truncate_json_preview};
 
 const MAX_JSON_RETRY_ATTEMPTS: u32 = 3;
+
+/// Result from spec generation.
+#[derive(Debug, Clone)]
+pub struct SpecGenerationResult {
+    pub spec: Spec,
+    /// Token usage data accumulated from all Claude API calls
+    pub usage: Option<ClaudeUsage>,
+}
+
+/// Internal result from a single Claude call for spec generation.
+struct ClaudeCallResult {
+    output: String,
+    usage: Option<ClaudeUsage>,
+}
 
 /// Run Claude to convert a spec-<feature>.md markdown file into spec-<feature>.json
 /// Implements retry logic (up to 3 attempts) when JSON parsing fails.
@@ -22,13 +36,27 @@ pub fn run_for_spec_generation<F>(
     spec_content: &str,
     output_path: &Path,
     mut on_output: F,
-) -> Result<Spec>
+) -> Result<SpecGenerationResult>
 where
     F: FnMut(&str),
 {
+    let mut total_usage: Option<ClaudeUsage> = None;
+
+    // Helper to accumulate usage
+    let mut accumulate_usage = |call_usage: Option<ClaudeUsage>| {
+        if let Some(usage) = call_usage {
+            match &mut total_usage {
+                Some(existing) => existing.add(&usage),
+                None => total_usage = Some(usage),
+            }
+        }
+    };
+
     // First attempt with the initial prompt
     let initial_prompt = SPEC_JSON_PROMPT.replace("{spec_content}", spec_content);
-    let mut full_output = run_claude_with_prompt(&initial_prompt, &mut on_output)?;
+    let call_result = run_claude_with_prompt(&initial_prompt, &mut on_output)?;
+    let mut full_output = call_result.output;
+    accumulate_usage(call_result.usage);
 
     // Try to get JSON either from response or from file if Claude wrote it directly
     let mut json_str = if let Some(json) = extract_json(&full_output) {
@@ -57,7 +85,10 @@ where
         match serde_json::from_str::<Spec>(&json_str) {
             Ok(spec) => {
                 spec.save(output_path)?;
-                return Ok(spec);
+                return Ok(SpecGenerationResult {
+                    spec,
+                    usage: total_usage,
+                });
             }
             Err(e) => {
                 last_error = Some(e);
@@ -80,7 +111,9 @@ where
                     .replace("{attempt}", &(attempt + 1).to_string())
                     .replace("{max_attempts}", &MAX_JSON_RETRY_ATTEMPTS.to_string());
 
-                full_output = run_claude_with_prompt(&correction_prompt, &mut on_output)?;
+                let call_result = run_claude_with_prompt(&correction_prompt, &mut on_output)?;
+                full_output = call_result.output;
+                accumulate_usage(call_result.usage);
 
                 if let Some(json) = extract_json(&full_output) {
                     json_str = json;
@@ -100,7 +133,10 @@ where
         Ok(spec) => {
             on_output("Programmatic fix succeeded!\n");
             spec.save(output_path)?;
-            Ok(spec)
+            Ok(SpecGenerationResult {
+                spec,
+                usage: total_usage,
+            })
         }
         Err(fallback_err) => {
             let agentic_error = last_error
@@ -121,8 +157,8 @@ where
     }
 }
 
-/// Helper function to run Claude with a given prompt and return the raw output.
-fn run_claude_with_prompt<F>(prompt: &str, mut on_output: F) -> Result<String>
+/// Helper function to run Claude with a given prompt and return the raw output and usage.
+fn run_claude_with_prompt<F>(prompt: &str, mut on_output: F) -> Result<ClaudeCallResult>
 where
     F: FnMut(&str),
 {
@@ -155,6 +191,7 @@ where
 
     let reader = BufReader::new(stdout);
     let mut full_output = String::new();
+    let mut usage: Option<ClaudeUsage> = None;
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
@@ -162,6 +199,11 @@ where
         if let Some(text) = extract_text_from_stream_line(&line) {
             on_output(&text);
             full_output.push_str(&text);
+        }
+
+        // Try to extract usage from result events
+        if let Some(line_usage) = extract_usage_from_result_line(&line) {
+            usage = Some(line_usage);
         }
     }
 
@@ -184,5 +226,8 @@ where
         return Err(Autom8Error::SpecGenerationFailed(error_info.message));
     }
 
-    Ok(full_output)
+    Ok(ClaudeCallResult {
+        output: full_output,
+        usage,
+    })
 }
