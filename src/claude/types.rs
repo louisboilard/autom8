@@ -3,6 +3,32 @@
 //! Defines error types, result enums, and outcome structures used
 //! throughout the Claude integration.
 
+use chrono::{DateTime, Utc};
+
+/// Holds metadata about a running Claude process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessInfo {
+    /// Process ID of the spawned Claude CLI subprocess
+    pub pid: u32,
+    /// Timestamp when the process was spawned
+    pub spawn_time: DateTime<Utc>,
+}
+
+impl ProcessInfo {
+    /// Creates a new ProcessInfo with the given PID and current timestamp.
+    pub fn new(pid: u32) -> Self {
+        Self {
+            pid,
+            spawn_time: Utc::now(),
+        }
+    }
+
+    /// Creates a new ProcessInfo with a specific timestamp (useful for testing).
+    pub fn with_timestamp(pid: u32, spawn_time: DateTime<Utc>) -> Self {
+        Self { pid, spawn_time }
+    }
+}
+
 /// Captures detailed error information from Claude process failures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeErrorInfo {
@@ -92,6 +118,48 @@ pub enum ClaudeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_process_info_new() {
+        let pid = 12345;
+        let before = Utc::now();
+        let info = ProcessInfo::new(pid);
+        let after = Utc::now();
+
+        assert_eq!(info.pid, pid);
+        assert!(info.spawn_time >= before);
+        assert!(info.spawn_time <= after);
+    }
+
+    #[test]
+    fn test_process_info_with_timestamp() {
+        let pid = 54321;
+        let timestamp = Utc::now();
+        let info = ProcessInfo::with_timestamp(pid, timestamp);
+
+        assert_eq!(info.pid, pid);
+        assert_eq!(info.spawn_time, timestamp);
+    }
+
+    #[test]
+    fn test_process_info_clone() {
+        let info = ProcessInfo::new(99999);
+        let cloned = info.clone();
+
+        assert_eq!(info.pid, cloned.pid);
+        assert_eq!(info.spawn_time, cloned.spawn_time);
+    }
+
+    #[test]
+    fn test_process_info_equality() {
+        let timestamp = Utc::now();
+        let info1 = ProcessInfo::with_timestamp(100, timestamp);
+        let info2 = ProcessInfo::with_timestamp(100, timestamp);
+        let info3 = ProcessInfo::with_timestamp(200, timestamp);
+
+        assert_eq!(info1, info2);
+        assert_ne!(info1, info3);
+    }
 
     #[test]
     fn test_claude_error_info_new() {

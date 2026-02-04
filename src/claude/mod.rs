@@ -30,7 +30,7 @@ pub use review::{run_corrector, run_reviewer, CorrectorResult, ReviewResult};
 pub use runner::{run_claude, ClaudeRunner};
 pub use spec::run_for_spec_generation;
 pub use stream::extract_text_from_stream_line;
-pub use types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeResult, ClaudeStoryResult};
+pub use types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeResult, ClaudeStoryResult, ProcessInfo};
 pub use utils::{
     build_knowledge_context, build_previous_context, extract_decisions, extract_files_context,
     extract_patterns, extract_work_summary, fix_json_syntax, Decision, FileContextEntry, Pattern,
