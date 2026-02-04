@@ -97,6 +97,13 @@ impl<'a> LiveOutputFlusher<'a> {
             self.flush();
         }
     }
+
+    /// Set the PID of the running Claude process and flush immediately.
+    /// This ensures the PID is available for the GUI monitor right away.
+    fn set_pid(&mut self, pid: Option<u32>) {
+        self.live_state.set_pid(pid);
+        self.flush();
+    }
 }
 
 /// Runs an operation with either a verbose timer or spinner display,
@@ -157,9 +164,11 @@ where
 /// * `create_spinner` - Factory function to create a ClaudeSpinner
 /// * `run_operation` - The operation to run, receiving a callback for progress updates
 /// * `map_outcome` - Maps the operation result to an Outcome for display
+/// * `claude_runner` - Optional reference to ClaudeRunner for PID tracking (US-007)
 ///
 /// # Returns
 /// The result of the operation, after the display has been finished with the appropriate outcome.
+#[allow(clippy::too_many_arguments)]
 fn with_progress_display_and_live<T, F, M>(
     verbose: bool,
     state_manager: &StateManager,
@@ -168,18 +177,30 @@ fn with_progress_display_and_live<T, F, M>(
     create_spinner: impl FnOnce() -> ClaudeSpinner,
     run_operation: F,
     map_outcome: M,
+    claude_runner: Option<&ClaudeRunner>,
 ) -> Result<T>
 where
     F: FnOnce(&mut dyn FnMut(&str)) -> Result<T>,
     M: FnOnce(&Result<T>) -> Outcome,
 {
     let mut live_flusher = LiveOutputFlusher::new(state_manager, machine_state);
+    // Track whether we've captured the PID yet
+    let mut pid_captured = false;
 
     let result = if verbose {
         let mut timer = create_timer();
         let result = run_operation(&mut |line| {
             print_claude_output(line);
             live_flusher.append(line);
+            // Capture PID on first output (Claude has started)
+            if !pid_captured {
+                if let Some(runner) = claude_runner {
+                    if let Some(pid) = runner.pid() {
+                        live_flusher.set_pid(Some(pid));
+                        pid_captured = true;
+                    }
+                }
+            }
         });
         let outcome = map_outcome(&result);
         timer.finish_with_outcome(outcome);
@@ -189,14 +210,26 @@ where
         let result = run_operation(&mut |line| {
             spinner.update(line);
             live_flusher.append(line);
+            // Capture PID on first output (Claude has started)
+            if !pid_captured {
+                if let Some(runner) = claude_runner {
+                    if let Some(pid) = runner.pid() {
+                        live_flusher.set_pid(Some(pid));
+                        pid_captured = true;
+                    }
+                }
+            }
         });
         let outcome = map_outcome(&result);
         spinner.finish_with_outcome(outcome);
         result
     };
 
-    // Ensure any remaining output is flushed
+    // Ensure any remaining output is flushed before clearing PID
     live_flusher.final_flush();
+
+    // Clear PID on completion (process has exited)
+    live_flusher.set_pid(None);
 
     result
 }
@@ -906,6 +939,7 @@ impl Runner {
 
         // Run Claude with progress display and live output streaming (US-003)
         // Use the provided ClaudeRunner so it can be killed on interrupt
+        // Pass claude_runner for PID tracking in live state (US-007)
         let result = with_progress_display_and_live(
             self.verbose,
             &self.state_manager,
@@ -926,6 +960,7 @@ impl Runner {
                 Ok(_) => Outcome::success("Implementation done"),
                 Err(e) => Outcome::failure(e.to_string()),
             },
+            Some(claude_runner),
         );
 
         match result {
@@ -3081,6 +3116,46 @@ mod tests {
             "Flush interval should be 200ms"
         );
         assert_eq!(LIVE_FLUSH_LINE_COUNT, 10, "Flush line count should be 10");
+    }
+
+    // ========================================================================
+    // US-007: PID Tracking in LiveState Tests
+    // ========================================================================
+
+    #[test]
+    fn test_live_output_flusher_set_pid() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Initially PID should be None
+        assert!(flusher.live_state.pid.is_none());
+
+        // Set a PID
+        flusher.set_pid(Some(12345));
+
+        // Load from disk to verify it was flushed
+        let loaded = sm.load_live().unwrap();
+        assert_eq!(loaded.pid, Some(12345));
+    }
+
+    #[test]
+    fn test_live_output_flusher_clear_pid_on_exit() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Set and then clear PID
+        flusher.set_pid(Some(12345));
+        flusher.set_pid(None);
+
+        // Load from disk to verify PID is cleared
+        let loaded = sm.load_live().unwrap();
+        assert!(loaded.pid.is_none());
     }
 
     // ========================================================================
