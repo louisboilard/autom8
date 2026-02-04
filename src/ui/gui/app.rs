@@ -5902,7 +5902,110 @@ impl Autom8App {
                     );
                     ui.end_row();
                 }
+
+                // Token usage section
+                ui.label(
+                    egui::RichText::new("Total Tokens:")
+                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                );
+                if let Some(ref usage) = run_state.total_usage {
+                    let total = Self::format_tokens(usage.total_tokens());
+                    let input = Self::format_tokens(usage.input_tokens);
+                    let output = Self::format_tokens(usage.output_tokens);
+                    ui.label(
+                        egui::RichText::new(format!("{} ({} in / {} out)", total, input, output))
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("N/A")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                }
+                ui.end_row();
+
+                // Cache stats (only if we have usage data)
+                if let Some(ref usage) = run_state.total_usage {
+                    if usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 {
+                        ui.label(
+                            egui::RichText::new("Cache:")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                        let cache_read = Self::format_tokens(usage.cache_read_tokens);
+                        let cache_created = Self::format_tokens(usage.cache_creation_tokens);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} read / {} created",
+                                cache_read, cache_created
+                            ))
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_PRIMARY),
+                        );
+                        ui.end_row();
+                    }
+
+                    // Model name
+                    if let Some(ref model) = usage.model {
+                        ui.label(
+                            egui::RichText::new("Model:")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+                        ui.label(
+                            egui::RichText::new(model)
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_PRIMARY),
+                        );
+                        ui.end_row();
+                    }
+                }
             });
+
+        // Pseudo-phase breakdown (only show phases that have usage data)
+        let pseudo_phases = ["Planning", "Final Review", "PR & Commit"];
+        let has_pseudo_phase_usage = pseudo_phases
+            .iter()
+            .any(|phase| run_state.phase_usage.contains_key(*phase));
+
+        if has_pseudo_phase_usage {
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Phase Breakdown")
+                    .font(typography::font(FontSize::Small, FontWeight::SemiBold))
+                    .color(colors::TEXT_SECONDARY),
+            );
+
+            ui.add_space(spacing::XS);
+
+            egui::Grid::new("phase_usage_grid")
+                .num_columns(2)
+                .spacing([spacing::LG, spacing::XS])
+                .show(ui, |ui| {
+                    for phase in pseudo_phases {
+                        if let Some(usage) = run_state.phase_usage.get(phase) {
+                            ui.label(
+                                egui::RichText::new(format!("{}:", phase))
+                                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                    .color(colors::TEXT_SECONDARY),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} tokens",
+                                    Self::format_tokens(usage.total_tokens())
+                                ))
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_PRIMARY),
+                            );
+                            ui.end_row();
+                        }
+                    }
+                });
+        }
     }
 
     /// Render a detailed card for a single story with all its iterations.
@@ -6053,21 +6156,48 @@ impl Autom8App {
                                         .color(colors::TEXT_MUTED),
                                 );
                             }
+
+                            // Token usage for this iteration (if available)
+                            if let Some(ref usage) = iter.usage {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "• {} tokens",
+                                        Self::format_tokens(usage.total_tokens())
+                                    ))
+                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
+                                );
+                            }
                         });
                     }
                 } else {
-                    // Single iteration - show duration
+                    // Single iteration - show duration and tokens
                     let iter = iterations[0];
+                    ui.add_space(spacing::XS);
+
+                    // Build the info string with duration and tokens
+                    let mut info_parts = Vec::new();
+
                     if let Some(finished) = iter.finished_at {
-                        ui.add_space(spacing::XS);
                         let duration = finished - iter.started_at;
+                        info_parts.push(format!(
+                            "Duration: {}",
+                            Self::format_duration_detailed(duration)
+                        ));
+                    }
+
+                    if let Some(ref usage) = iter.usage {
+                        info_parts.push(format!(
+                            "Tokens: {}",
+                            Self::format_tokens(usage.total_tokens())
+                        ));
+                    }
+
+                    if !info_parts.is_empty() {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Duration: {}",
-                                Self::format_duration_detailed(duration)
-                            ))
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_MUTED),
+                            egui::RichText::new(info_parts.join(" • "))
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
                         );
                     }
                 }
@@ -6104,6 +6234,19 @@ impl Autom8App {
         } else {
             format!("{}s", seconds)
         }
+    }
+
+    /// Format a token count with thousands separators (e.g., 1234567 -> "1,234,567").
+    fn format_tokens(tokens: u64) -> String {
+        let s = tokens.to_string();
+        let mut result = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                result.push(',');
+            }
+            result.push(c);
+        }
+        result.chars().rev().collect()
     }
 
     /// Render the Active Runs view.
@@ -7443,6 +7586,7 @@ mod tests {
             status: IterationStatus::Success,
             output_snippet: String::new(),
             work_summary: None,
+            usage: None,
         });
         run.iterations.push(IterationRecord {
             number: 2,
@@ -7452,6 +7596,7 @@ mod tests {
             status: IterationStatus::Failed,
             output_snippet: String::new(),
             work_summary: None,
+            usage: None,
         });
 
         let entry = RunHistoryEntry::from_run_state("test-project".to_string(), &run);
@@ -14006,5 +14151,45 @@ mod tests {
 
         let count = count_cleanable_specs(spec_dir, &active_specs);
         assert_eq!(count, 0, "All active specs should result in 0 cleanable");
+    }
+
+    // ======================================================================
+    // Tests for US-006: Token formatting in GUI run details
+    // ======================================================================
+
+    #[test]
+    fn test_us006_format_tokens_small_number() {
+        // US-006: Small numbers should not have separators
+        assert_eq!(Autom8App::format_tokens(0), "0");
+        assert_eq!(Autom8App::format_tokens(1), "1");
+        assert_eq!(Autom8App::format_tokens(12), "12");
+        assert_eq!(Autom8App::format_tokens(123), "123");
+        assert_eq!(Autom8App::format_tokens(999), "999");
+    }
+
+    #[test]
+    fn test_us006_format_tokens_thousands() {
+        // US-006: Numbers 1000+ should have thousands separator
+        assert_eq!(Autom8App::format_tokens(1_000), "1,000");
+        assert_eq!(Autom8App::format_tokens(1_234), "1,234");
+        assert_eq!(Autom8App::format_tokens(12_345), "12,345");
+        assert_eq!(Autom8App::format_tokens(123_456), "123,456");
+        assert_eq!(Autom8App::format_tokens(999_999), "999,999");
+    }
+
+    #[test]
+    fn test_us006_format_tokens_millions() {
+        // US-006: Million-scale numbers should have two separators
+        assert_eq!(Autom8App::format_tokens(1_000_000), "1,000,000");
+        assert_eq!(Autom8App::format_tokens(1_234_567), "1,234,567");
+        assert_eq!(Autom8App::format_tokens(12_345_678), "12,345,678");
+        assert_eq!(Autom8App::format_tokens(123_456_789), "123,456,789");
+    }
+
+    #[test]
+    fn test_us006_format_tokens_large_numbers() {
+        // US-006: Large numbers should format correctly
+        assert_eq!(Autom8App::format_tokens(1_000_000_000), "1,000,000,000");
+        assert_eq!(Autom8App::format_tokens(9_999_999_999), "9,999,999,999");
     }
 }
