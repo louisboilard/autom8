@@ -3500,4 +3500,141 @@ review = false
             }
         }
     }
+
+    // ========================================================================
+    // US-004: Last Run Time Accuracy Tests
+    // ========================================================================
+
+    /// Helper function to compute the most meaningful timestamp for a run.
+    /// This mirrors the logic in `list_projects_tree()` for testability.
+    fn compute_last_run_timestamp(
+        has_active_run: bool,
+        run_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        run_finished_at: Option<chrono::DateTime<chrono::Utc>>,
+        archived_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        archived_finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        if has_active_run {
+            // Active run: show when it started
+            run_started_at
+        } else {
+            // No active run: prefer finished_at over started_at
+            run_finished_at
+                .or(run_started_at)
+                .or(archived_finished_at)
+                .or(archived_started_at)
+        }
+    }
+
+    #[test]
+    fn test_us004_last_run_date_active_run_uses_started_at() {
+        use chrono::{Duration, Utc};
+
+        let started_at = Utc::now() - Duration::minutes(30);
+        let finished_at = None; // Active runs don't have finished_at
+
+        let result = compute_last_run_timestamp(
+            true,             // has_active_run
+            Some(started_at), // run_started_at
+            finished_at,      // run_finished_at
+            None,             // archived_started_at
+            None,             // archived_finished_at
+        );
+
+        assert_eq!(result, Some(started_at));
+    }
+
+    #[test]
+    fn test_us004_last_run_date_completed_run_uses_finished_at() {
+        use chrono::{Duration, Utc};
+
+        let started_at = Utc::now() - Duration::hours(2);
+        let finished_at = Utc::now() - Duration::minutes(30);
+
+        let result = compute_last_run_timestamp(
+            false,             // has_active_run (completed)
+            Some(started_at),  // run_started_at
+            Some(finished_at), // run_finished_at
+            None,              // archived_started_at
+            None,              // archived_finished_at
+        );
+
+        // Should use finished_at, not started_at
+        assert_eq!(result, Some(finished_at));
+    }
+
+    #[test]
+    fn test_us004_last_run_date_completed_run_fallback_to_started_at() {
+        use chrono::{Duration, Utc};
+
+        let started_at = Utc::now() - Duration::hours(2);
+        // finished_at is None (run may have been interrupted before completion)
+
+        let result = compute_last_run_timestamp(
+            false,            // has_active_run (completed)
+            Some(started_at), // run_started_at
+            None,             // run_finished_at (missing)
+            None,             // archived_started_at
+            None,             // archived_finished_at
+        );
+
+        // Should fall back to started_at when finished_at is missing
+        assert_eq!(result, Some(started_at));
+    }
+
+    #[test]
+    fn test_us004_last_run_date_archived_run_uses_finished_at() {
+        use chrono::{Duration, Utc};
+
+        let archived_started_at = Utc::now() - Duration::days(1);
+        let archived_finished_at = Utc::now() - Duration::hours(23);
+
+        let result = compute_last_run_timestamp(
+            false,                      // has_active_run
+            None,                       // run_started_at (no current run)
+            None,                       // run_finished_at
+            Some(archived_started_at),  // archived_started_at
+            Some(archived_finished_at), // archived_finished_at
+        );
+
+        // Should use archived finished_at
+        assert_eq!(result, Some(archived_finished_at));
+    }
+
+    #[test]
+    fn test_us004_last_run_date_no_runs_returns_none() {
+        let result = compute_last_run_timestamp(
+            false, // has_active_run
+            None,  // run_started_at
+            None,  // run_finished_at
+            None,  // archived_started_at
+            None,  // archived_finished_at
+        );
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_us004_last_run_date_prefers_current_over_archived() {
+        use chrono::{Duration, Utc};
+
+        // Current run is more recent but completed
+        let current_started_at = Utc::now() - Duration::hours(1);
+        let current_finished_at = Utc::now() - Duration::minutes(30);
+
+        // Older archived run
+        let archived_started_at = Utc::now() - Duration::days(7);
+        let archived_finished_at = Utc::now() - Duration::days(7) + Duration::hours(2);
+
+        let result = compute_last_run_timestamp(
+            false,                      // has_active_run
+            Some(current_started_at),   // run_started_at
+            Some(current_finished_at),  // run_finished_at
+            Some(archived_started_at),  // archived_started_at
+            Some(archived_finished_at), // archived_finished_at
+        );
+
+        // Should use current run's finished_at, not archived
+        assert_eq!(result, Some(current_finished_at));
+    }
 }
