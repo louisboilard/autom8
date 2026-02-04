@@ -324,9 +324,12 @@ fn get_output_for_session(session: &SessionData) -> OutputSource {
         }
     }
 
-    // Priority 2: Get output from the current or last iteration
+    // Priority 2: Get output from iterations (US-005: check all iterations, not just last)
+    // During state transitions or when a new iteration starts, the current iteration may
+    // have empty output. We fall back to previous iterations to prevent flickering.
     if let Some(ref run) = session.run {
-        if let Some(iter) = run.iterations.last() {
+        // Check iterations in reverse order (most recent first)
+        for iter in run.iterations.iter().rev() {
             if !iter.output_snippet.is_empty() {
                 // Take last OUTPUT_LINES_TO_SHOW lines of output
                 let lines: Vec<String> = iter
@@ -6619,62 +6622,71 @@ impl Autom8App {
     /// - Tabs persist after completion until manually closed
     /// - Closing all tabs returns to empty state
     fn render_active_runs(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            // Header section with consistent spacing
-            ui.label(
-                egui::RichText::new("Active Runs")
-                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
-                    .color(colors::TEXT_PRIMARY),
-            );
+        // US-002: Fill available height so detail view expands to use vertical space
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
 
-            ui.add_space(spacing::SM);
-
-            // US-003: Filter sessions to only those with open tabs
-            let visible_sessions: Vec<(usize, &SessionData)> = self
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| self.open_session_tabs.contains(&s.metadata.session_id))
-                .collect();
-
-            // Empty state if no sessions or all tabs closed
-            if visible_sessions.is_empty() {
-                self.render_empty_active_runs(ui);
-            } else {
-                // Ensure valid selection: auto-select first visible session if none selected
-                // or if current selection is not visible (US-005: robust to session order changes)
-                let current_selection_valid = self.selected_session_id.as_ref().is_some_and(|id| {
-                    visible_sessions
-                        .iter()
-                        .any(|(_, s)| s.metadata.session_id == *id)
-                });
-
-                if !current_selection_valid {
-                    // Select first visible session by ID
-                    self.selected_session_id = visible_sessions
-                        .first()
-                        .map(|(_, s)| s.metadata.session_id.clone());
-                }
-
-                // Render tab bar for session selection
-                self.render_active_session_tab_bar(ui);
+        ui.allocate_ui_with_layout(
+            egui::vec2(available_width, available_height),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                // Header section with consistent spacing
+                ui.label(
+                    egui::RichText::new("Active Runs")
+                        .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                        .color(colors::TEXT_PRIMARY),
+                );
 
                 ui.add_space(spacing::SM);
 
-                // Render expanded view for selected session (find by ID, robust to reordering)
-                if let Some(ref selected_id) = self.selected_session_id {
-                    if let Some(session) = self
-                        .sessions
-                        .iter()
-                        .find(|s| s.metadata.session_id == *selected_id)
-                    {
-                        // Clone session data to avoid borrow issues
-                        let session = session.clone();
-                        self.render_expanded_session_view(ui, &session);
+                // US-003: Filter sessions to only those with open tabs
+                let visible_sessions: Vec<(usize, &SessionData)> = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| self.open_session_tabs.contains(&s.metadata.session_id))
+                    .collect();
+
+                // Empty state if no sessions or all tabs closed
+                if visible_sessions.is_empty() {
+                    self.render_empty_active_runs(ui);
+                } else {
+                    // Ensure valid selection: auto-select first visible session if none selected
+                    // or if current selection is not visible (US-005: robust to session order changes)
+                    let current_selection_valid =
+                        self.selected_session_id.as_ref().is_some_and(|id| {
+                            visible_sessions
+                                .iter()
+                                .any(|(_, s)| s.metadata.session_id == *id)
+                        });
+
+                    if !current_selection_valid {
+                        // Select first visible session by ID
+                        self.selected_session_id = visible_sessions
+                            .first()
+                            .map(|(_, s)| s.metadata.session_id.clone());
+                    }
+
+                    // Render tab bar for session selection
+                    self.render_active_session_tab_bar(ui);
+
+                    ui.add_space(spacing::SM);
+
+                    // Render expanded view for selected session (find by ID, robust to reordering)
+                    if let Some(ref selected_id) = self.selected_session_id {
+                        if let Some(session) = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.metadata.session_id == *selected_id)
+                        {
+                            // Clone session data to avoid borrow issues
+                            let session = session.clone();
+                            self.render_expanded_session_view(ui, &session);
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Render the horizontal tab bar for active session selection.
@@ -6955,12 +6967,16 @@ impl Autom8App {
         let use_stacked_layout = content_width < RESPONSIVE_STACK_BREAKPOINT;
 
         // Calculate panel widths based on layout mode
-        let panel_width = if use_stacked_layout {
+        // Output panel gets 70% of width (primary focus), details panel gets 30%
+        let (output_panel_width, details_panel_width) = if use_stacked_layout {
             // In stacked mode, each panel gets the full content width
-            content_width
+            (content_width, content_width)
         } else {
-            // In side-by-side mode, split 50/50 with gap, ensuring minimum width
-            ((content_width - panel_gap) / 2.0).max(EXPANDED_PANEL_MIN_WIDTH)
+            // In side-by-side mode, split 70/30 with gap, ensuring minimum widths
+            let usable_width = content_width - panel_gap;
+            let output_width = (usable_width * 0.7).max(EXPANDED_PANEL_MIN_WIDTH);
+            let details_width = (usable_width * 0.3).max(EXPANDED_PANEL_MIN_WIDTH);
+            (output_width, details_width)
         };
 
         ui.allocate_ui_with_layout(
@@ -7145,15 +7161,17 @@ impl Autom8App {
                             // === STACKED LAYOUT (Vertical) ===
                             // Wrap both panels in a vertical scroll area
                             egui::ScrollArea::vertical()
+                                .id_salt(format!("stacked_scroll_{}", session.metadata.session_id))
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     // Fixed heights for stacked mode panels
                                     let stacked_output_height = 300.0;
-                                    let stacked_section_height = 150.0;
+                                    let stacked_stories_height = 200.0;
+                                    let stacked_summaries_height = 120.0;
 
                                     // === OUTPUT PANEL (Stacked) ===
                                     ui.vertical(|ui| {
-                                        ui.set_width(panel_width);
+                                        ui.set_width(output_panel_width);
 
                                         // Section header
                                         ui.label(
@@ -7174,9 +7192,13 @@ impl Autom8App {
                                             .show(ui, |ui| {
                                                 ui.set_min_height(stacked_output_height);
                                                 ui.set_max_height(stacked_output_height);
-                                                ui.set_width(panel_width - spacing::MD * 2.0);
+                                                ui.set_width(output_panel_width - spacing::MD * 2.0);
 
                                                 egui::ScrollArea::vertical()
+                                                    .id_salt(format!(
+                                                        "stacked_output_{}",
+                                                        session.metadata.session_id
+                                                    ))
                                                     .auto_shrink([false, false])
                                                     .stick_to_bottom(true)
                                                     .show(ui, |ui| {
@@ -7195,7 +7217,7 @@ impl Autom8App {
 
                                     // === DETAIL SECTIONS (Stacked) ===
                                     ui.vertical(|ui| {
-                                        ui.set_width(panel_width);
+                                        ui.set_width(details_panel_width);
 
                                         // Load data once for display
                                         let story_items = load_story_items(session);
@@ -7212,13 +7234,17 @@ impl Autom8App {
                                                     .rounding(rounding::CARD)
                                                     .inner_margin(egui::Margin::same(spacing::MD))
                                                     .show(ui, |ui| {
-                                                        ui.set_min_height(stacked_section_height);
-                                                        ui.set_max_height(stacked_section_height);
+                                                        ui.set_min_height(stacked_stories_height);
+                                                        ui.set_max_height(stacked_stories_height);
                                                         ui.set_width(
-                                                            panel_width - spacing::MD * 2.0,
+                                                            details_panel_width - spacing::MD * 2.0,
                                                         );
 
                                                         egui::ScrollArea::vertical()
+                                                            .id_salt(format!(
+                                                                "stacked_stories_{}",
+                                                                session.metadata.session_id
+                                                            ))
                                                             .auto_shrink([false, false])
                                                             .show(ui, |ui| {
                                                                 Self::render_story_items_content(
@@ -7240,13 +7266,17 @@ impl Autom8App {
                                                     .rounding(rounding::CARD)
                                                     .inner_margin(egui::Margin::same(spacing::MD))
                                                     .show(ui, |ui| {
-                                                        ui.set_min_height(stacked_section_height);
-                                                        ui.set_max_height(stacked_section_height);
+                                                        ui.set_min_height(stacked_summaries_height);
+                                                        ui.set_max_height(stacked_summaries_height);
                                                         ui.set_width(
-                                                            panel_width - spacing::MD * 2.0,
+                                                            details_panel_width - spacing::MD * 2.0,
                                                         );
 
                                                         egui::ScrollArea::vertical()
+                                                            .id_salt(format!(
+                                                                "stacked_summaries_{}",
+                                                                session.metadata.session_id
+                                                            ))
                                                             .auto_shrink([false, false])
                                                             .show(ui, |ui| {
                                                                 Self::render_work_summaries_content(
@@ -7268,7 +7298,7 @@ impl Autom8App {
                             ui.horizontal(|ui| {
                                 // === LEFT PANEL: Output ===
                                 ui.vertical(|ui| {
-                                    ui.set_width(panel_width);
+                                    ui.set_width(output_panel_width);
 
                                     // Section header
                                     ui.label(
@@ -7294,9 +7324,13 @@ impl Autom8App {
                                         .show(ui, |ui| {
                                             ui.set_min_height(output_card_height);
                                             ui.set_max_height(output_card_height);
-                                            ui.set_width(panel_width - spacing::MD * 2.0);
+                                            ui.set_width(output_panel_width - spacing::MD * 2.0);
 
                                             egui::ScrollArea::vertical()
+                                                .id_salt(format!(
+                                                    "sidebyside_output_{}",
+                                                    session.metadata.session_id
+                                                ))
                                                 .auto_shrink([false, false])
                                                 .stick_to_bottom(true)
                                                 .show(ui, |ui| {
@@ -7310,82 +7344,104 @@ impl Autom8App {
                                 // Gap between panels
                                 ui.add_space(panel_gap);
 
-                                // === RIGHT PANEL: Detail sections ===
-                                ui.vertical(|ui| {
-                                    ui.set_width(panel_width);
+                                // === RIGHT PANEL: Detail sections with outer scroll ===
+                                // Outer scroll area allows scrolling the entire right panel
+                                // when Stories + Work Summaries together exceed panel height.
+                                // Inner scroll areas handle long content within each section.
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(details_panel_width, panel_height),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt(format!(
+                                                "sidebyside_right_outer_{}",
+                                                session.metadata.session_id
+                                            ))
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                ui.set_width(details_panel_width);
 
-                                    // Load data once for display
-                                    let story_items = load_story_items(session);
-                                    let work_summaries = load_work_summaries(session);
+                                                // Load data once for display
+                                                let story_items = load_story_items(session);
+                                                let work_summaries = load_work_summaries(session);
 
-                                    // Calculate heights for sections
-                                    // Each section has: header + spacing + card
-                                    let section_header_height =
-                                        typography::line_height(FontSize::Body) + spacing::SM;
-                                    let section_gap = spacing::MD;
+                                                // Fixed section card heights - these don't need to fill
+                                                // available space since we have an outer scroll
+                                                // Stories gets more height than Work Summaries per acceptance criteria
+                                                let stories_card_height = 200.0;
+                                                let summaries_card_height = 120.0;
+                                                let section_gap = spacing::MD;
 
-                                    // Two sections: Stories and Work Summaries
-                                    let num_sections = 2.0;
-                                    let num_gaps = 1.0;
+                                                // === Stories Section (Collapsible) ===
+                                                CollapsibleSection::new("stories", "Stories")
+                                                    .default_expanded(true)
+                                                    .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                        egui::Frame::none()
+                                                            .fill(colors::SURFACE_HOVER)
+                                                            .rounding(rounding::CARD)
+                                                            .inner_margin(egui::Margin::same(
+                                                                spacing::MD,
+                                                            ))
+                                                            .show(ui, |ui| {
+                                                                ui.set_min_height(stories_card_height);
+                                                                ui.set_max_height(stories_card_height);
+                                                                ui.set_width(
+                                                                    details_panel_width - spacing::MD * 2.0,
+                                                                );
 
-                                    // Split remaining height evenly between sections
-                                    let available_for_sections = panel_height
-                                        - section_header_height * num_sections
-                                        - section_gap * num_gaps;
-                                    let section_card_height =
-                                        (available_for_sections / num_sections).max(60.0);
+                                                                egui::ScrollArea::vertical()
+                                                                    .id_salt(format!(
+                                                                        "sidebyside_stories_{}",
+                                                                        session.metadata.session_id
+                                                                    ))
+                                                                    .auto_shrink([false, false])
+                                                                    .show(ui, |ui| {
+                                                                        Self::render_story_items_content(
+                                                                            ui,
+                                                                            &story_items,
+                                                                        );
+                                                                    });
+                                                            });
+                                                    });
 
-                                    // === Stories Section (Collapsible) ===
-                                    CollapsibleSection::new("stories", "Stories")
-                                        .default_expanded(true)
-                                        .show(ui, &mut self.section_collapsed_state, |ui| {
-                                            egui::Frame::none()
-                                                .fill(colors::SURFACE_HOVER)
-                                                .rounding(rounding::CARD)
-                                                .inner_margin(egui::Margin::same(spacing::MD))
-                                                .show(ui, |ui| {
-                                                    ui.set_min_height(section_card_height);
-                                                    ui.set_max_height(section_card_height);
-                                                    ui.set_width(panel_width - spacing::MD * 2.0);
+                                                // Gap between sections
+                                                ui.add_space(section_gap);
 
-                                                    egui::ScrollArea::vertical()
-                                                        .auto_shrink([false, false])
+                                                // === Work Summaries Section (Collapsible) ===
+                                                CollapsibleSection::new(
+                                                    "work_summaries",
+                                                    "Work Summaries",
+                                                )
+                                                .default_expanded(true)
+                                                .show(ui, &mut self.section_collapsed_state, |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(colors::SURFACE_HOVER)
+                                                        .rounding(rounding::CARD)
+                                                        .inner_margin(egui::Margin::same(spacing::MD))
                                                         .show(ui, |ui| {
-                                                            Self::render_story_items_content(
-                                                                ui,
-                                                                &story_items,
+                                                            ui.set_min_height(summaries_card_height);
+                                                            ui.set_max_height(summaries_card_height);
+                                                            ui.set_width(
+                                                                details_panel_width - spacing::MD * 2.0,
                                                             );
+
+                                                            egui::ScrollArea::vertical()
+                                                                .id_salt(format!(
+                                                                    "sidebyside_summaries_{}",
+                                                                    session.metadata.session_id
+                                                                ))
+                                                                .auto_shrink([false, false])
+                                                                .show(ui, |ui| {
+                                                                    Self::render_work_summaries_content(
+                                                                        ui,
+                                                                        &work_summaries,
+                                                                    );
+                                                                });
                                                         });
                                                 });
-                                        });
-
-                                    // Gap between sections
-                                    ui.add_space(section_gap);
-
-                                    // === Work Summaries Section (Collapsible) ===
-                                    CollapsibleSection::new("work_summaries", "Work Summaries")
-                                        .default_expanded(true)
-                                        .show(ui, &mut self.section_collapsed_state, |ui| {
-                                            egui::Frame::none()
-                                                .fill(colors::SURFACE_HOVER)
-                                                .rounding(rounding::CARD)
-                                                .inner_margin(egui::Margin::same(spacing::MD))
-                                                .show(ui, |ui| {
-                                                    ui.set_min_height(section_card_height);
-                                                    ui.set_max_height(section_card_height);
-                                                    ui.set_width(panel_width - spacing::MD * 2.0);
-
-                                                    egui::ScrollArea::vertical()
-                                                        .auto_shrink([false, false])
-                                                        .show(ui, |ui| {
-                                                            Self::render_work_summaries_content(
-                                                                ui,
-                                                                &work_summaries,
-                                                            );
-                                                        });
-                                                });
-                                        });
-                                });
+                                            });
+                                    },
+                                );
                             });
                         } // End of else block (side-by-side layout)
                     });
@@ -8513,6 +8569,120 @@ mod tests {
                 assert_eq!(msg, "Waiting for output...");
             }
             other => panic!("Expected StatusMessage, got {:?}", other),
+        }
+    }
+
+    /// US-005: Tests that output persists across state transitions.
+    /// When transitioning from RunningClaude to Reviewing (or other states),
+    /// the previous iteration output should remain visible, not flicker to "Waiting for output...".
+    #[test]
+    fn test_output_persists_across_state_transitions() {
+        use crate::state::{IterationRecord, IterationStatus, LiveState};
+
+        // Scenario: Transitioning from RunningClaude to Reviewing
+        // - Previous iteration has output_snippet populated
+        // - Current iteration is starting (empty output_snippet)
+        // - Live output may be stale or empty
+        let mut run = make_test_run_state(MachineState::Reviewing);
+
+        // Previous iteration - completed with output
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: "Previous iteration completed\nImplemented feature X".to_string(),
+            work_summary: Some("Implemented feature X".to_string()),
+            usage: None,
+        });
+
+        // Live output exists but is stale (older than freshness threshold)
+        let mut live = LiveState::new(MachineState::RunningClaude);
+        live.updated_at = Utc::now() - chrono::Duration::seconds(10); // Stale
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+
+        // Should show previous iteration output, NOT "Reviewing changes..."
+        match output {
+            OutputSource::Iteration(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines
+                    .iter()
+                    .any(|l| l.contains("Previous iteration completed")));
+            }
+            OutputSource::StatusMessage(msg) => {
+                panic!(
+                    "Bug: Should have shown iteration output during state transition, not: {}",
+                    msg
+                );
+            }
+            other => panic!("Unexpected output source: {:?}", other),
+        }
+    }
+
+    /// US-005: Tests that when a new iteration starts with no output yet,
+    /// the previous iteration's output should be shown as fallback.
+    #[test]
+    fn test_previous_iteration_shown_when_current_has_no_output() {
+        use crate::state::{IterationRecord, IterationStatus, LiveState};
+
+        // Scenario: New iteration just started
+        // - Previous iteration has output
+        // - Current iteration is running but has no output yet
+        let mut run = make_test_run_state(MachineState::RunningClaude);
+
+        // Previous iteration - completed with output
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            status: IterationStatus::Success,
+            output_snippet: "First iteration output\nDid something useful".to_string(),
+            work_summary: Some("Did something useful".to_string()),
+            usage: None,
+        });
+
+        // Current iteration - just started, no output yet
+        run.iterations.push(IterationRecord {
+            number: 2,
+            story_id: "US-002".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            status: IterationStatus::Running,
+            output_snippet: String::new(), // No output yet
+            work_summary: None,
+            usage: None,
+        });
+
+        // Live output exists but empty (new invocation just started)
+        let live = LiveState {
+            output_lines: vec![], // Empty
+            updated_at: Utc::now(),
+            machine_state: MachineState::RunningClaude,
+            last_heartbeat: Utc::now(),
+        };
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+
+        // Should show previous iteration output as fallback
+        match output {
+            OutputSource::Iteration(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines.iter().any(|l| l.contains("First iteration output")));
+            }
+            OutputSource::StatusMessage(msg) => {
+                panic!(
+                    "Bug: Should have shown previous iteration output, not: {}",
+                    msg
+                );
+            }
+            other => panic!("Unexpected output source: {:?}", other),
         }
     }
 }
