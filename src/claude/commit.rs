@@ -10,11 +10,19 @@ use crate::git;
 use crate::prompts::COMMIT_PROMPT;
 use crate::spec::Spec;
 
-use super::stream::extract_text_from_stream_line;
-use super::types::ClaudeErrorInfo;
+use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
+use super::types::{ClaudeErrorInfo, ClaudeUsage};
+
+/// Result from running Claude for commit.
+#[derive(Debug, Clone)]
+pub struct CommitResult {
+    pub outcome: CommitOutcome,
+    /// Token usage data from the Claude API response
+    pub usage: Option<ClaudeUsage>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum CommitResult {
+pub enum CommitOutcome {
     /// Commit succeeded, with short commit hash
     Success(String),
     NothingToCommit,
@@ -72,6 +80,7 @@ where
     let reader = BufReader::new(stdout);
     let mut nothing_to_commit = false;
     let mut accumulated_text = String::new();
+    let mut usage: Option<ClaudeUsage> = None;
 
     for line in reader.lines() {
         let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
@@ -88,6 +97,11 @@ where
             {
                 nothing_to_commit = true;
             }
+        }
+
+        // Try to extract usage from result events
+        if let Some(line_usage) = extract_usage_from_result_line(&line) {
+            usage = Some(line_usage);
         }
     }
 
@@ -108,14 +122,19 @@ where
                 Some(stderr_content)
             },
         );
-        return Ok(CommitResult::Error(error_info));
+        return Ok(CommitResult {
+            outcome: CommitOutcome::Error(error_info),
+            usage,
+        });
     }
 
-    if nothing_to_commit {
-        Ok(CommitResult::NothingToCommit)
+    let outcome = if nothing_to_commit {
+        CommitOutcome::NothingToCommit
     } else {
         // Get the short commit hash after successful commit
         let commit_hash = git::latest_commit_short().unwrap_or_else(|_| "unknown".to_string());
-        Ok(CommitResult::Success(commit_hash))
-    }
+        CommitOutcome::Success(commit_hash)
+    };
+
+    Ok(CommitResult { outcome, usage })
 }

@@ -153,6 +153,8 @@ pub struct Outcome {
     pub success: bool,
     /// Brief description of the outcome (e.g., "3 issues found", "abc1234")
     pub message: String,
+    /// Optional token count to display (always shown if present, not gated by verbose)
+    pub tokens: Option<u64>,
 }
 
 impl Outcome {
@@ -161,6 +163,7 @@ impl Outcome {
         Self {
             success: true,
             message: message.into(),
+            tokens: None,
         }
     }
 
@@ -169,7 +172,20 @@ impl Outcome {
         Self {
             success: false,
             message: message.into(),
+            tokens: None,
         }
+    }
+
+    /// Add token count to this outcome
+    pub fn with_tokens(mut self, tokens: u64) -> Self {
+        self.tokens = Some(tokens);
+        self
+    }
+
+    /// Add optional token count to this outcome (no-op if None)
+    pub fn with_optional_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.tokens = tokens;
+        self
     }
 }
 
@@ -389,15 +405,21 @@ impl AgentDisplay for VerboseTimer {
         let duration = format_duration(elapsed.as_secs());
         let prefix = format_display_prefix(&self.story_id, &self.iteration_info);
 
+        // Build the token suffix if tokens are present
+        let token_suffix = outcome
+            .tokens
+            .map(|t| format!(" - {} tokens", format_tokens(t)))
+            .unwrap_or_default();
+
         if outcome.success {
             eprintln!(
-                "{GREEN}\u{2714} {} completed in {} - {}{RESET}",
-                prefix, duration, outcome.message
+                "{GREEN}\u{2714} {} completed in {} - {}{}{RESET}",
+                prefix, duration, outcome.message, token_suffix
             );
         } else {
             eprintln!(
-                "{RED}\u{2718} {} failed in {} - {}{RESET}",
-                prefix, duration, outcome.message
+                "{RED}\u{2718} {} failed in {} - {}{}{RESET}",
+                prefix, duration, outcome.message, token_suffix
             );
         }
     }
@@ -443,6 +465,20 @@ pub fn format_duration(secs: u64) -> String {
         let remaining_secs = secs % 60;
         format!("{}m {}s", mins, remaining_secs)
     }
+}
+
+/// Format token count with thousands separators (e.g., 1,234,567)
+pub fn format_tokens(tokens: u64) -> String {
+    let s = tokens.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let chars: Vec<char> = s.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(*c);
+    }
+    result
 }
 
 /// Format the display prefix based on story_id and iteration info
@@ -693,15 +729,21 @@ impl AgentDisplay for ClaudeSpinner {
         let prefix = format_display_prefix(&self.story_id, &self.iteration_info);
         self.spinner.finish_and_clear();
 
+        // Build the token suffix if tokens are present
+        let token_suffix = outcome
+            .tokens
+            .map(|t| format!(" - {} tokens", format_tokens(t)))
+            .unwrap_or_default();
+
         if outcome.success {
             println!(
-                "{GREEN}\u{2714} {} completed in {} - {}{RESET}",
-                prefix, duration, outcome.message
+                "{GREEN}\u{2714} {} completed in {} - {}{}{RESET}",
+                prefix, duration, outcome.message, token_suffix
             );
         } else {
             println!(
-                "{RED}\u{2718} {} failed in {} - {}{RESET}",
-                prefix, duration, outcome.message
+                "{RED}\u{2718} {} failed in {} - {}{}{RESET}",
+                prefix, duration, outcome.message, token_suffix
             );
         }
     }
@@ -2189,5 +2231,89 @@ mod tests {
                 ACTIVITY_TEXT_WIDTH
             );
         }
+    }
+
+    // ========================================================================
+    // US-007: Token formatting and display tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_tokens_zero() {
+        assert_eq!(format_tokens(0), "0");
+    }
+
+    #[test]
+    fn test_format_tokens_small() {
+        assert_eq!(format_tokens(1), "1");
+        assert_eq!(format_tokens(12), "12");
+        assert_eq!(format_tokens(123), "123");
+    }
+
+    #[test]
+    fn test_format_tokens_thousands() {
+        assert_eq!(format_tokens(1000), "1,000");
+        assert_eq!(format_tokens(1234), "1,234");
+        assert_eq!(format_tokens(12345), "12,345");
+        assert_eq!(format_tokens(123456), "123,456");
+    }
+
+    #[test]
+    fn test_format_tokens_millions() {
+        assert_eq!(format_tokens(1000000), "1,000,000");
+        assert_eq!(format_tokens(1234567), "1,234,567");
+        assert_eq!(format_tokens(12345678), "12,345,678");
+    }
+
+    #[test]
+    fn test_format_tokens_large() {
+        assert_eq!(format_tokens(123456789), "123,456,789");
+        assert_eq!(format_tokens(1234567890), "1,234,567,890");
+    }
+
+    #[test]
+    fn test_format_tokens_boundary_cases() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1000), "1,000");
+        assert_eq!(format_tokens(9999), "9,999");
+        assert_eq!(format_tokens(10000), "10,000");
+        assert_eq!(format_tokens(99999), "99,999");
+        assert_eq!(format_tokens(100000), "100,000");
+    }
+
+    #[test]
+    fn test_outcome_with_tokens() {
+        let outcome = Outcome::success("Done").with_tokens(45678);
+        assert!(outcome.success);
+        assert_eq!(outcome.message, "Done");
+        assert_eq!(outcome.tokens, Some(45678));
+    }
+
+    #[test]
+    fn test_outcome_with_optional_tokens_some() {
+        let outcome = Outcome::success("Done").with_optional_tokens(Some(12345));
+        assert_eq!(outcome.tokens, Some(12345));
+    }
+
+    #[test]
+    fn test_outcome_with_optional_tokens_none() {
+        let outcome = Outcome::success("Done").with_optional_tokens(None);
+        assert_eq!(outcome.tokens, None);
+    }
+
+    #[test]
+    fn test_outcome_default_no_tokens() {
+        let outcome = Outcome::success("Done");
+        assert_eq!(outcome.tokens, None);
+
+        let outcome_fail = Outcome::failure("Error");
+        assert_eq!(outcome_fail.tokens, None);
+    }
+
+    #[test]
+    fn test_outcome_failure_with_tokens() {
+        let outcome = Outcome::failure("Build failed").with_tokens(1000);
+        assert!(!outcome.success);
+        assert_eq!(outcome.message, "Build failed");
+        assert_eq!(outcome.tokens, Some(1000));
     }
 }

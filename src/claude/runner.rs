@@ -12,8 +12,8 @@ use crate::knowledge::ProjectKnowledge;
 use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
 
-use super::stream::extract_text_from_stream_line;
-use super::types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeStoryResult};
+use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
+use super::types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeStoryResult, ClaudeUsage};
 use super::utils::{build_knowledge_context, build_previous_context, extract_work_summary};
 
 const COMPLETION_SIGNAL: &str = "<promise>COMPLETE</promise>";
@@ -176,6 +176,7 @@ impl ClaudeRunner {
         let reader = BufReader::new(stdout);
         let mut found_complete = false;
         let mut accumulated_text = String::new();
+        let mut usage: Option<ClaudeUsage> = None;
 
         for line in reader.lines() {
             let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
@@ -189,6 +190,11 @@ impl ClaudeRunner {
                 {
                     found_complete = true;
                 }
+            }
+
+            // Try to extract usage from result events
+            if let Some(line_usage) = extract_usage_from_result_line(&line) {
+                usage = Some(line_usage);
             }
         }
 
@@ -231,6 +237,7 @@ impl ClaudeRunner {
             outcome,
             work_summary,
             full_output: accumulated_text,
+            usage,
         })
     }
 }

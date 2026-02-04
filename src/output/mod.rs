@@ -67,8 +67,8 @@ pub use pr_review::{
 pub use progress::{
     make_progress_bar, print_all_complete, print_breadcrumb_trail, print_full_progress,
     print_issues_found, print_max_review_iterations, print_review_passed, print_review_progress,
-    print_reviewing, print_run_summary, print_skip_review, print_story_complete,
-    print_tasks_progress, StoryResult,
+    print_reviewing, print_run_completed, print_run_summary, print_skip_review,
+    print_story_complete, print_tasks_progress, StoryResult,
 };
 pub use status::{
     print_branch_context_summary, print_commit_list, print_global_status, print_history_entry,
