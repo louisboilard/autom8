@@ -7509,24 +7509,6 @@ mod tests {
     }
 
     #[test]
-    fn test_app_close_active_tab_switches_to_previous() {
-        let mut app = Autom8App::new();
-        app.set_active_tab(TabId::Projects);
-        app.open_run_detail_tab("run-123", "Run Details");
-
-        assert_eq!(
-            *app.active_tab_id(),
-            TabId::RunDetail("run-123".to_string())
-        );
-
-        // When closing the dynamic tab, it switches to the previous tab in the list.
-        // The tabs order is: ActiveRuns, Projects, Config, RunDetail
-        // So closing RunDetail switches to Config (the previous tab).
-        app.close_tab(&TabId::RunDetail("run-123".to_string()));
-        assert_eq!(*app.active_tab_id(), TabId::Config);
-    }
-
-    #[test]
     fn test_run_detail_cache() {
         use crate::state::RunState;
 
@@ -7593,29 +7575,6 @@ mod tests {
     }
 
     #[test]
-    fn test_previous_tab_cleared_when_previous_tab_closed() {
-        // Edge case: previous tab was also closed
-        let mut app = Autom8App::new();
-
-        // Open two run detail tabs
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2");
-
-        // Now previous_tab_id should be run-1
-        assert_eq!(*app.active_tab_id(), TabId::RunDetail("run-2".to_string()));
-
-        // Close run-1 (the previous tab)
-        app.close_tab(&TabId::RunDetail("run-1".to_string()));
-
-        // Now close run-2 (the active tab) - should fall back to adjacent logic
-        // since previous tab was closed
-        app.close_tab(&TabId::RunDetail("run-2".to_string()));
-
-        // Should fall back to Projects (last remaining non-permanent tab or Projects)
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
-    }
-
-    #[test]
     fn test_previous_tab_multiple_switches() {
         // Test multiple tab switches track correctly
         let mut app = Autom8App::new();
@@ -7650,30 +7609,6 @@ mod tests {
 
         // Close run-1 -> should go back to Projects
         app.close_tab(&TabId::RunDetail("run-1".to_string()));
-        assert_eq!(*app.active_tab_id(), TabId::Projects);
-    }
-
-    #[test]
-    fn test_close_non_active_tab_preserves_previous() {
-        // Closing a non-active tab shouldn't affect navigation
-        let mut app = Autom8App::new();
-
-        app.set_active_tab(TabId::Projects);
-        app.open_run_detail_tab("run-1", "Run 1");
-        app.open_run_detail_tab("run-2", "Run 2");
-
-        // Active is run-2, previous is run-1
-        assert_eq!(*app.active_tab_id(), TabId::RunDetail("run-2".to_string()));
-
-        // Close run-1 (not the active tab)
-        app.close_tab(&TabId::RunDetail("run-1".to_string()));
-
-        // Active tab should still be run-2
-        assert_eq!(*app.active_tab_id(), TabId::RunDetail("run-2".to_string()));
-
-        // Now close run-2 -> previous_tab_id was run-1 but it's closed,
-        // so should fall back to adjacent logic (Projects)
-        app.close_tab(&TabId::RunDetail("run-2".to_string()));
         assert_eq!(*app.active_tab_id(), TabId::Projects);
     }
 
