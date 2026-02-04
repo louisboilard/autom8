@@ -102,8 +102,8 @@ Ready for autom8 to start implementation? [Y/n]
 ### Step 3: Handle the Response
 
 **If the user confirms** (responds with: y, yes, yeah, go, proceed, ok, sure, yep, or just presses Enter):
-1. Print exactly: `Handing off to autom8...`
-2. Then STOP responding. Do not output anything else. autom8 will automatically detect this message and take over.
+1. Print exactly this handoff marker on its own line: `<<AUTOM8_HANDOFF>>`
+2. Then STOP responding. Do not output anything else. autom8 will automatically detect this marker and take over.
 
 **If the user declines** (responds with: n, no, not yet, wait, hold on, changes, edit):
 1. Ask: "What would you like to change?"
@@ -112,8 +112,8 @@ Ready for autom8 to start implementation? [Y/n]
 
 ### Important Notes
 - Always complete the handoff protocol after saving
-- After printing the handoff message, you MUST stop responding completely - do not add any commentary, questions, or follow-up text
-- autom8 monitors for the exact phrase "Handing off to autom8..." and will automatically end this session when it sees it
+- After printing the handoff marker, you MUST stop responding completely - do not add any commentary, questions, or follow-up text
+- autom8 monitors for the exact marker `<<AUTOM8_HANDOFF>>` and will automatically end this session when it sees it
 - Be responsive to user intent - if they seem ready to proceed, treat it as confirmation
 - If the response is ambiguous, ask for clarification
 
@@ -928,16 +928,16 @@ mod tests {
 
     #[test]
     fn spec_skill_prompt_instructs_handoff_message() {
-        // US-001: Prompt instructs Claude to print handoff message before exiting
+        // US-001: Prompt instructs Claude to print handoff marker before exiting
         assert!(
-            SPEC_SKILL_PROMPT.contains("Handing off to autom8"),
-            "Should instruct Claude to print 'Handing off to autom8...' message"
+            SPEC_SKILL_PROMPT.contains("<<AUTOM8_HANDOFF>>"),
+            "Should instruct Claude to print '<<AUTOM8_HANDOFF>>' marker"
         );
     }
 
     #[test]
     fn spec_skill_prompt_instructs_stop_after_handoff() {
-        // US-001, US-003: Prompt instructs Claude to stop responding after handoff message
+        // US-001, US-003: Prompt instructs Claude to stop responding after handoff marker
         assert!(
             SPEC_SKILL_PROMPT.contains("STOP responding"),
             "Should instruct Claude to stop responding after handoff"

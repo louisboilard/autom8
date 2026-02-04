@@ -138,7 +138,8 @@ fn handle_existing_state(state: RunState, verbose: bool) -> Result<()> {
 
 /// The handoff signal that Claude outputs to indicate spec creation is complete.
 /// When detected in stdout, autom8 will automatically terminate the Claude session.
-const HANDOFF_SIGNAL: &str = "Handing off to autom8...";
+/// This uses a unique marker format to avoid matching the prompt instructions themselves.
+const HANDOFF_SIGNAL: &str = "<<AUTOM8_HANDOFF>>";
 
 /// Start a new spec creation session.
 ///
@@ -212,16 +213,17 @@ fn start_spec_creation(verbose: bool) -> Result<()> {
         for line in reader.lines() {
             match line {
                 Ok(text) => {
-                    // Print the line so the user sees Claude's output
-                    println!("{}", text);
-
-                    // Check for the handoff signal
+                    // Check for the handoff signal - don't print the marker itself
                     if text.contains(HANDOFF_SIGNAL) {
+                        // Print a user-friendly message instead of the raw marker
+                        println!();
+                        println!("Handing off to autom8...");
                         handoff_flag.store(true, Ordering::SeqCst);
-                        // Continue reading briefly to flush any remaining output,
-                        // but the main thread will kill the process
                         break;
                     }
+
+                    // Print the line so the user sees Claude's output
+                    println!("{}", text);
                 }
                 Err(_) => break, // Pipe closed
             }
@@ -263,7 +265,7 @@ fn start_spec_creation(verbose: bool) -> Result<()> {
 
     if was_handoff {
         println!();
-        println!("{GREEN}Handoff received.{RESET}");
+        println!("{GREEN}Handoff signal received. Taking over...{RESET}");
         println!();
     } else {
         println!();
