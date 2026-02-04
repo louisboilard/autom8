@@ -31,6 +31,7 @@ pub mod gh;
 pub mod git;
 pub mod knowledge;
 pub mod output;
+pub mod process;
 pub mod progress;
 pub mod prompt;
 pub mod prompts;
