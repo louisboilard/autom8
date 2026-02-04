@@ -1,4 +1,6 @@
-use crate::claude::{extract_decisions, extract_files_context, extract_patterns, FileContextEntry};
+use crate::claude::{
+    extract_decisions, extract_files_context, extract_patterns, ClaudeUsage, FileContextEntry,
+};
 use crate::config::{self, Config};
 use crate::error::Result;
 use crate::git;
@@ -6,6 +8,7 @@ use crate::knowledge::{Decision, FileChange, FileInfo, Pattern, ProjectKnowledge
 use crate::worktree::{get_current_session_id, MAIN_SESSION_ID};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -179,6 +182,9 @@ pub struct IterationRecord {
     /// Summary of what was accomplished in this iteration, for cross-task context
     #[serde(default)]
     pub work_summary: Option<String>,
+    /// Token usage data for this iteration
+    #[serde(default)]
+    pub usage: Option<ClaudeUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -222,6 +228,17 @@ pub struct RunState {
     /// Deterministic ID derived from worktree path (or "main" for main repo).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Total accumulated token usage across all phases of the run.
+    #[serde(default)]
+    pub total_usage: Option<ClaudeUsage>,
+    /// Token usage broken down by phase.
+    /// Keys are story IDs (e.g., "US-001") or pseudo-phase names:
+    /// - "Planning": spec generation
+    /// - "US-001", "US-002", etc.: user story implementation
+    /// - "Final Review": review iterations + corrections
+    /// - "PR & Commit": commit generation + PR creation
+    #[serde(default)]
+    pub phase_usage: HashMap<String, ClaudeUsage>,
 }
 
 impl RunState {
@@ -243,6 +260,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: None,
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -265,6 +284,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: None,
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -287,6 +308,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: Some(session_id),
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -314,6 +337,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: Some(session_id),
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -335,6 +360,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: None,
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -361,6 +388,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: None,
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -388,6 +417,8 @@ impl RunState {
             knowledge: ProjectKnowledge::default(),
             pre_story_commit: None,
             session_id: Some(session_id),
+            total_usage: None,
+            phase_usage: HashMap::new(),
         }
     }
 
@@ -425,6 +456,7 @@ impl RunState {
             status: IterationStatus::Running,
             output_snippet: String::new(),
             work_summary: None,
+            usage: None,
         });
     }
 
@@ -451,6 +483,14 @@ impl RunState {
         } else {
             0
         }
+    }
+
+    /// Get the total run duration in seconds.
+    ///
+    /// Returns the time between `started_at` and `finished_at` (or now if not finished).
+    pub fn run_duration_secs(&self) -> u64 {
+        let end = self.finished_at.unwrap_or_else(Utc::now);
+        (end - self.started_at).num_seconds().max(0) as u64
     }
 
     /// Capture the current HEAD commit before starting a story.
@@ -690,6 +730,43 @@ impl RunState {
 
         // Clear pre_story_commit after recording
         self.pre_story_commit = None;
+    }
+
+    /// Capture usage from a Claude call and add it to the appropriate phase.
+    ///
+    /// This method:
+    /// 1. Adds the usage to the specified phase in `phase_usage`
+    /// 2. Accumulates the usage into `total_usage`
+    ///
+    /// If usage is `None`, this is a no-op.
+    ///
+    /// # Arguments
+    /// * `phase_key` - The phase identifier (e.g., "Planning", "US-001", "Final Review", "PR & Commit")
+    /// * `usage` - The usage data from the Claude call, or None if not available
+    pub fn capture_usage(&mut self, phase_key: &str, usage: Option<ClaudeUsage>) {
+        if let Some(usage) = usage {
+            // Add to phase_usage
+            self.phase_usage
+                .entry(phase_key.to_string())
+                .and_modify(|existing| existing.add(&usage))
+                .or_insert(usage.clone());
+
+            // Accumulate into total_usage
+            match &mut self.total_usage {
+                Some(existing) => existing.add(&usage),
+                None => self.total_usage = Some(usage),
+            }
+        }
+    }
+
+    /// Set usage on the current (last) iteration.
+    ///
+    /// This stores the usage data in the IterationRecord for per-story tracking.
+    /// If usage is `None`, this is a no-op.
+    pub fn set_iteration_usage(&mut self, usage: Option<ClaudeUsage>) {
+        if let Some(iter) = self.iterations.last_mut() {
+            iter.usage = usage;
+        }
     }
 }
 
@@ -4447,5 +4524,462 @@ src/lib.rs | Library module | [Config]
 
         // The heartbeat itself should still be fresh (since the state was just created)
         assert!(live.is_heartbeat_fresh());
+    }
+
+    // Tests for token usage fields (US-004)
+
+    #[test]
+    fn test_iteration_record_usage_initialized_as_none() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        assert!(state.iterations[0].usage.is_none());
+    }
+
+    #[test]
+    fn test_iteration_record_usage_can_be_set() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        state.iterations[0].usage = Some(ClaudeUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_creation_tokens: 100,
+            thinking_tokens: 50,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+        });
+        assert!(state.iterations[0].usage.is_some());
+        assert_eq!(
+            state.iterations[0].usage.as_ref().unwrap().input_tokens,
+            1000
+        );
+    }
+
+    #[test]
+    fn test_iteration_record_backwards_compatible_without_usage() {
+        // Simulate a legacy state.json that doesn't have the usage field
+        let legacy_json = r#"{
+            "number": 1,
+            "story_id": "US-001",
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "status": "running",
+            "output_snippet": ""
+        }"#;
+
+        let record: IterationRecord = serde_json::from_str(legacy_json).unwrap();
+        assert!(record.usage.is_none());
+        assert_eq!(record.story_id, "US-001");
+    }
+
+    #[test]
+    fn test_run_state_total_usage_initialized_as_none() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.total_usage.is_none());
+    }
+
+    #[test]
+    fn test_run_state_phase_usage_initialized_empty() {
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        assert!(state.phase_usage.is_empty());
+    }
+
+    #[test]
+    fn test_run_state_total_usage_can_be_set() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.total_usage = Some(ClaudeUsage {
+            input_tokens: 5000,
+            output_tokens: 2500,
+            cache_read_tokens: 1000,
+            cache_creation_tokens: 500,
+            thinking_tokens: 250,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+        });
+        assert!(state.total_usage.is_some());
+        assert_eq!(state.total_usage.as_ref().unwrap().total_tokens(), 7500);
+    }
+
+    #[test]
+    fn test_run_state_phase_usage_can_be_populated() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // Add usage for various phases
+        state.phase_usage.insert(
+            "Planning".to_string(),
+            ClaudeUsage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+        );
+        state.phase_usage.insert(
+            "US-001".to_string(),
+            ClaudeUsage {
+                input_tokens: 2000,
+                output_tokens: 1000,
+                ..Default::default()
+            },
+        );
+        state.phase_usage.insert(
+            "Final Review".to_string(),
+            ClaudeUsage {
+                input_tokens: 500,
+                output_tokens: 250,
+                ..Default::default()
+            },
+        );
+        state.phase_usage.insert(
+            "PR & Commit".to_string(),
+            ClaudeUsage {
+                input_tokens: 300,
+                output_tokens: 150,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(state.phase_usage.len(), 4);
+        assert!(state.phase_usage.contains_key("Planning"));
+        assert!(state.phase_usage.contains_key("US-001"));
+        assert!(state.phase_usage.contains_key("Final Review"));
+        assert!(state.phase_usage.contains_key("PR & Commit"));
+    }
+
+    #[test]
+    fn test_run_state_backwards_compatible_without_usage_fields() {
+        // Simulate a legacy RunState JSON without total_usage and phase_usage fields
+        let legacy_json = r#"{
+            "run_id": "test-run-id",
+            "status": "running",
+            "machine_state": "running-claude",
+            "spec_json_path": "test.json",
+            "branch": "test-branch",
+            "current_story": "US-001",
+            "iteration": 1,
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": null,
+            "iterations": []
+        }"#;
+
+        let state: RunState = serde_json::from_str(legacy_json).unwrap();
+        assert!(state.total_usage.is_none());
+        assert!(state.phase_usage.is_empty());
+        assert_eq!(state.run_id, "test-run-id");
+        assert_eq!(state.branch, "test-branch");
+    }
+
+    #[test]
+    fn test_iteration_record_usage_serialization_roundtrip() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+        state.iterations[0].usage = Some(ClaudeUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_creation_tokens: 100,
+            thinking_tokens: 50,
+            model: Some("claude-sonnet-4-20250514".to_string()),
+        });
+
+        // Serialize
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"inputTokens\":1000"));
+        assert!(json.contains("\"outputTokens\":500"));
+
+        // Deserialize
+        let deserialized: RunState = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.iterations[0].usage.is_some());
+        let usage = deserialized.iterations[0].usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 200);
+        assert_eq!(usage.cache_creation_tokens, 100);
+        assert_eq!(usage.thinking_tokens, 50);
+        assert_eq!(usage.model, Some("claude-sonnet-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn test_run_state_usage_serialization_roundtrip() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.total_usage = Some(ClaudeUsage {
+            input_tokens: 5000,
+            output_tokens: 2500,
+            ..Default::default()
+        });
+        state.phase_usage.insert(
+            "US-001".to_string(),
+            ClaudeUsage {
+                input_tokens: 2000,
+                output_tokens: 1000,
+                ..Default::default()
+            },
+        );
+
+        // Serialize
+        let json = serde_json::to_string(&state).unwrap();
+        // RunState uses snake_case serialization (no rename_all attribute)
+        assert!(json.contains("\"total_usage\""));
+        assert!(json.contains("\"phase_usage\""));
+
+        // Deserialize
+        let deserialized: RunState = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.total_usage.is_some());
+        assert_eq!(
+            deserialized.total_usage.as_ref().unwrap().input_tokens,
+            5000
+        );
+        assert_eq!(deserialized.phase_usage.len(), 1);
+        assert!(deserialized.phase_usage.contains_key("US-001"));
+        assert_eq!(
+            deserialized.phase_usage.get("US-001").unwrap().input_tokens,
+            2000
+        );
+    }
+
+    #[test]
+    fn test_from_spec_constructors_initialize_usage_fields() {
+        let state = RunState::from_spec(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+        );
+        assert!(state.total_usage.is_none());
+        assert!(state.phase_usage.is_empty());
+
+        let state2 = RunState::from_spec_with_config(
+            PathBuf::from("spec-feature.md"),
+            PathBuf::from("spec-feature.json"),
+            Config::default(),
+        );
+        assert!(state2.total_usage.is_none());
+        assert!(state2.phase_usage.is_empty());
+    }
+
+    // ======================================================================
+    // Tests for US-005: capture_usage and set_iteration_usage methods
+    // ======================================================================
+
+    #[test]
+    fn test_capture_usage_first_call_initializes_totals() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let usage = ClaudeUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 10,
+            cache_creation_tokens: 5,
+            thinking_tokens: 3,
+            model: Some("claude-sonnet-4".to_string()),
+        };
+
+        state.capture_usage("Planning", Some(usage.clone()));
+
+        // total_usage should be set
+        assert!(state.total_usage.is_some());
+        let total = state.total_usage.as_ref().unwrap();
+        assert_eq!(total.input_tokens, 100);
+        assert_eq!(total.output_tokens, 50);
+        assert_eq!(total.cache_read_tokens, 10);
+
+        // phase_usage should have Planning entry
+        assert!(state.phase_usage.contains_key("Planning"));
+        let planning = state.phase_usage.get("Planning").unwrap();
+        assert_eq!(planning.input_tokens, 100);
+        assert_eq!(planning.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_capture_usage_accumulates_into_existing_phase() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        let usage1 = ClaudeUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            ..Default::default()
+        };
+        let usage2 = ClaudeUsage {
+            input_tokens: 200,
+            output_tokens: 100,
+            ..Default::default()
+        };
+
+        state.capture_usage("Final Review", Some(usage1));
+        state.capture_usage("Final Review", Some(usage2));
+
+        // Phase usage should be accumulated
+        let review = state.phase_usage.get("Final Review").unwrap();
+        assert_eq!(review.input_tokens, 300);
+        assert_eq!(review.output_tokens, 150);
+
+        // Total usage should also be accumulated
+        let total = state.total_usage.as_ref().unwrap();
+        assert_eq!(total.input_tokens, 300);
+        assert_eq!(total.output_tokens, 150);
+    }
+
+    #[test]
+    fn test_capture_usage_multiple_phases() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.capture_usage(
+            "Planning",
+            Some(ClaudeUsage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            }),
+        );
+        state.capture_usage(
+            "US-001",
+            Some(ClaudeUsage {
+                input_tokens: 2000,
+                output_tokens: 1000,
+                ..Default::default()
+            }),
+        );
+        state.capture_usage(
+            "US-002",
+            Some(ClaudeUsage {
+                input_tokens: 1500,
+                output_tokens: 750,
+                ..Default::default()
+            }),
+        );
+        state.capture_usage(
+            "Final Review",
+            Some(ClaudeUsage {
+                input_tokens: 500,
+                output_tokens: 250,
+                ..Default::default()
+            }),
+        );
+        state.capture_usage(
+            "PR & Commit",
+            Some(ClaudeUsage {
+                input_tokens: 300,
+                output_tokens: 150,
+                ..Default::default()
+            }),
+        );
+
+        // Verify all phases are tracked
+        assert_eq!(state.phase_usage.len(), 5);
+        assert_eq!(
+            state.phase_usage.get("Planning").unwrap().input_tokens,
+            1000
+        );
+        assert_eq!(state.phase_usage.get("US-001").unwrap().input_tokens, 2000);
+        assert_eq!(state.phase_usage.get("US-002").unwrap().input_tokens, 1500);
+        assert_eq!(
+            state.phase_usage.get("Final Review").unwrap().input_tokens,
+            500
+        );
+        assert_eq!(
+            state.phase_usage.get("PR & Commit").unwrap().input_tokens,
+            300
+        );
+
+        // Verify total is sum of all phases
+        let total = state.total_usage.as_ref().unwrap();
+        assert_eq!(total.input_tokens, 1000 + 2000 + 1500 + 500 + 300);
+        assert_eq!(total.output_tokens, 500 + 1000 + 750 + 250 + 150);
+    }
+
+    #[test]
+    fn test_capture_usage_with_none_is_noop() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.capture_usage("Planning", None);
+
+        // Should remain unset
+        assert!(state.total_usage.is_none());
+        assert!(state.phase_usage.is_empty());
+    }
+
+    #[test]
+    fn test_capture_usage_none_after_some_preserves_existing() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.capture_usage(
+            "Planning",
+            Some(ClaudeUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            }),
+        );
+
+        // Calling with None should not change anything
+        state.capture_usage("Planning", None);
+
+        assert_eq!(state.phase_usage.get("Planning").unwrap().input_tokens, 100);
+        assert_eq!(state.total_usage.as_ref().unwrap().input_tokens, 100);
+    }
+
+    #[test]
+    fn test_set_iteration_usage_sets_on_current_iteration() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        let usage = ClaudeUsage {
+            input_tokens: 500,
+            output_tokens: 250,
+            model: Some("claude-sonnet-4".to_string()),
+            ..Default::default()
+        };
+
+        state.set_iteration_usage(Some(usage.clone()));
+
+        assert!(state.iterations.last().unwrap().usage.is_some());
+        let iter_usage = state.iterations.last().unwrap().usage.as_ref().unwrap();
+        assert_eq!(iter_usage.input_tokens, 500);
+        assert_eq!(iter_usage.output_tokens, 250);
+    }
+
+    #[test]
+    fn test_set_iteration_usage_with_none_does_not_set() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.start_iteration("US-001");
+
+        state.set_iteration_usage(None);
+
+        assert!(state.iterations.last().unwrap().usage.is_none());
+    }
+
+    #[test]
+    fn test_set_iteration_usage_no_iteration_is_noop() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        // No iteration started, should not panic
+        state.set_iteration_usage(Some(ClaudeUsage {
+            input_tokens: 100,
+            ..Default::default()
+        }));
+
+        // No iterations exist
+        assert!(state.iterations.is_empty());
+    }
+
+    #[test]
+    fn test_capture_usage_preserves_model_from_first_call() {
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+
+        state.capture_usage(
+            "Planning",
+            Some(ClaudeUsage {
+                input_tokens: 100,
+                model: Some("claude-sonnet-4".to_string()),
+                ..Default::default()
+            }),
+        );
+        state.capture_usage(
+            "Planning",
+            Some(ClaudeUsage {
+                input_tokens: 200,
+                model: Some("claude-opus-4".to_string()),
+                ..Default::default()
+            }),
+        );
+
+        // Model should be preserved from first call (add() preserves existing model)
+        let planning = state.phase_usage.get("Planning").unwrap();
+        assert_eq!(planning.model, Some("claude-sonnet-4".to_string()));
     }
 }
