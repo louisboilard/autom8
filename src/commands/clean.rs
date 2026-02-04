@@ -1389,6 +1389,7 @@ mod tests {
             created_at: Utc::now(),
             last_active_at: Utc::now(),
             is_running: false,
+            pause_requested: false,
         };
 
         // Check if the worktree exists (should return false)

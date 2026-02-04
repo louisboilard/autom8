@@ -641,6 +641,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
             },
             machine_state,
             current_story: current_story.map(|s| s.to_string()),

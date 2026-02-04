@@ -1729,6 +1729,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active_at: chrono::Utc::now(),
             is_running: false,
+            pause_requested: false,
         };
 
         let _status = SessionStatus {

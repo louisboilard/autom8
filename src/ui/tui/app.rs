@@ -1624,6 +1624,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             run: Some(RunState::new(
                 PathBuf::from("test.json"),
@@ -4218,6 +4219,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 last_active_at: chrono::Utc::now(),
                 is_running: true,
+                pause_requested: false,
             },
             run: None,
             progress: None,

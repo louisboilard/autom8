@@ -235,6 +235,13 @@ where
                     }
                 }
             }
+            // Check for GUI pause request while Claude is running
+            // If pause requested, kill the runner (error will be handled by caller)
+            if state_manager.is_pause_requested() {
+                if let Some(runner) = claude_runner {
+                    let _ = runner.kill();
+                }
+            }
         });
         let outcome = map_outcome(&result);
         timer.finish_with_outcome(outcome);
@@ -251,6 +258,13 @@ where
                         live_flusher.set_pid(Some(pid));
                         pid_captured = true;
                     }
+                }
+            }
+            // Check for GUI pause request while Claude is running
+            // If pause requested, kill the runner (error will be handled by caller)
+            if state_manager.is_pause_requested() {
+                if let Some(runner) = claude_runner {
+                    let _ = runner.kill();
                 }
             }
         });
@@ -1062,18 +1076,26 @@ impl Runner {
                 error_info.stderr.as_deref(),
                 print_summary_fn,
             ),
-            Err(e) => self.handle_story_error(
-                state,
-                story,
-                story_results,
-                story_start,
-                &e.to_string(),
-                "Claude Error",
-                &e.to_string(),
-                None,
-                None,
-                print_summary_fn,
-            ),
+            Err(e) => {
+                // Check if this error was caused by a GUI pause request
+                // If so, treat as interruption rather than story error
+                if self.state_manager.is_pause_requested() {
+                    self.state_manager.clear_pause_request()?;
+                    return Err(Autom8Error::Interrupted);
+                }
+                self.handle_story_error(
+                    state,
+                    story,
+                    story_results,
+                    story_start,
+                    &e.to_string(),
+                    "Claude Error",
+                    &e.to_string(),
+                    None,
+                    None,
+                    print_summary_fn,
+                )
+            }
         }
     }
 
@@ -1506,6 +1528,16 @@ impl Runner {
                 ));
             }
 
+            // Check for GUI pause request at safe point
+            if self.state_manager.is_pause_requested() {
+                self.state_manager.clear_pause_request()?;
+                return Err(self.handle_interruption(
+                    &mut state,
+                    &claude_runner,
+                    Some(&worktree_setup_ctx),
+                ));
+            }
+
             // Reload spec to get latest passes state
             let spec = Spec::load(spec_json_path)?;
 
@@ -1549,7 +1581,7 @@ impl Runner {
 
             // Process the story iteration
             let story_start = Instant::now();
-            match self.handle_story_iteration(
+            let iteration_result = self.handle_story_iteration(
                 &mut state,
                 &spec,
                 spec_json_path,
@@ -1559,9 +1591,12 @@ impl Runner {
                 story_start,
                 &claude_runner,
                 &print_summary_fn,
-            )? {
-                LoopAction::Break => return Ok(()),
-                LoopAction::Continue => {
+            );
+
+            // Handle story iteration result
+            match iteration_result {
+                Ok(LoopAction::Break) => return Ok(()),
+                Ok(LoopAction::Continue) => {
                     // Check for shutdown after story iteration completes (US-004)
                     if signal_handler.is_shutdown_requested() {
                         return Err(self.handle_interruption(
@@ -1570,8 +1605,27 @@ impl Runner {
                             Some(&worktree_setup_ctx),
                         ));
                     }
+                    // Check for GUI pause request after story iteration completes
+                    if self.state_manager.is_pause_requested() {
+                        self.state_manager.clear_pause_request()?;
+                        return Err(self.handle_interruption(
+                            &mut state,
+                            &claude_runner,
+                            Some(&worktree_setup_ctx),
+                        ));
+                    }
                     continue;
                 }
+                // Handle interruption from pause request during Claude run
+                Err(Autom8Error::Interrupted) => {
+                    return Err(self.handle_interruption(
+                        &mut state,
+                        &claude_runner,
+                        Some(&worktree_setup_ctx),
+                    ));
+                }
+                // Propagate other errors normally
+                Err(e) => return Err(e),
             }
         }
     }

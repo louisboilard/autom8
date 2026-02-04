@@ -508,7 +508,6 @@ dependencies = [
  "egui",
  "hex",
  "indicatif",
- "libc",
  "ratatui",
  "regex",
  "serde",
