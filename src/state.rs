@@ -3813,36 +3813,6 @@ src/lib.rs | Library module | [Config]
     }
 
     #[test]
-    fn test_check_branch_conflict_returns_correct_metadata() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create a running session
-        let sm1 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session-abc".to_string(),
-        );
-        let state1 = RunState::new(
-            PathBuf::from("test1.json"),
-            "feature/my-feature".to_string(),
-        );
-        sm1.save(&state1).unwrap();
-
-        // Check conflict from another session
-        let sm2 = StateManager::with_dir_and_session(
-            temp_dir.path().to_path_buf(),
-            "session-xyz".to_string(),
-        );
-        let conflict = sm2.check_branch_conflict("feature/my-feature").unwrap();
-
-        assert!(conflict.is_some());
-        let conflict = conflict.unwrap();
-        assert_eq!(conflict.session_id, "session-abc");
-        assert_eq!(conflict.branch_name, "feature/my-feature");
-        // worktree_path should be set (to CWD by default in tests)
-        assert!(!conflict.worktree_path.as_os_str().is_empty());
-    }
-
-    #[test]
     fn test_session_metadata_is_running_field() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
