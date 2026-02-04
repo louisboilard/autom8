@@ -645,11 +645,6 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
                 Err(_) => continue, // Skip if can't read
             };
 
-            // Skip non-running sessions
-            if !metadata.is_running {
-                continue;
-            }
-
             // Check if worktree was deleted (stale session)
             let is_stale = !metadata.worktree_path.exists();
             let is_main_session = metadata.session_id == MAIN_SESSION_ID;
