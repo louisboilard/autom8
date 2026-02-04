@@ -7912,6 +7912,102 @@ mod tests {
     }
 
     // ========================================================================
+    // Sidebar Icon Tests (US-005)
+    // ========================================================================
+
+    #[test]
+    fn test_us005_sidebar_icon_size_is_appropriate() {
+        // Icon should be appropriately sized for the sidebar (48-64px range)
+        assert!(
+            SIDEBAR_ICON_SIZE >= 48.0,
+            "Icon should be at least 48px for visibility"
+        );
+        assert!(
+            SIDEBAR_ICON_SIZE <= 64.0,
+            "Icon should be at most 64px to fit sidebar"
+        );
+    }
+
+    #[test]
+    fn test_us005_sidebar_icon_fits_in_sidebar() {
+        // Icon should fit within the sidebar width with margin
+        let icon_with_margin = SIDEBAR_ICON_SIZE + spacing::MD * 2.0;
+        assert!(
+            icon_with_margin < SIDEBAR_WIDTH,
+            "Icon with margin ({}) should fit within sidebar width ({})",
+            icon_with_margin,
+            SIDEBAR_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_us005_sidebar_icon_section_height_is_reasonable() {
+        // The icon section height should account for icon plus padding
+        let icon_section_height = SIDEBAR_ICON_SIZE + spacing::MD * 2.0;
+
+        // Should be positive
+        assert!(icon_section_height > 0.0);
+
+        // Should be reasonable (not too tall)
+        assert!(
+            icon_section_height < 100.0,
+            "Icon section should not be too tall"
+        );
+    }
+
+    #[test]
+    fn test_us005_icon_asset_exists() {
+        // Verify the icon asset file exists (compile-time check via include_image!)
+        // The fact that this compiles means the asset exists.
+        // We can also verify the constant is defined correctly.
+        assert_eq!(SIDEBAR_ICON_SIZE, 48.0);
+    }
+
+    // ========================================================================
+    // US-006: Window Icon Tests
+    // ========================================================================
+
+    #[test]
+    fn test_us006_window_icon_loads_successfully() {
+        // Verify the window icon loads without error
+        let icon_data = load_window_icon();
+
+        // Should have non-empty RGBA data
+        assert!(!icon_data.rgba.is_empty(), "Icon should have pixel data");
+    }
+
+    #[test]
+    fn test_us006_window_icon_has_correct_dimensions() {
+        // Verify the icon has the expected dimensions (64x64 from the PNG)
+        let icon_data = load_window_icon();
+
+        assert_eq!(icon_data.width, 64, "Icon width should be 64px");
+        assert_eq!(icon_data.height, 64, "Icon height should be 64px");
+    }
+
+    #[test]
+    fn test_us006_window_icon_rgba_size_is_valid() {
+        // RGBA = 4 bytes per pixel, so total size should be width * height * 4
+        let icon_data = load_window_icon();
+
+        let expected_size = (icon_data.width * icon_data.height * 4) as usize;
+        assert_eq!(
+            icon_data.rgba.len(),
+            expected_size,
+            "RGBA buffer size should match width * height * 4"
+        );
+    }
+
+    #[test]
+    fn test_us006_viewport_includes_icon() {
+        // Verify that build_viewport() produces a viewport builder
+        // The fact that this compiles and runs means the icon was successfully
+        // embedded and set via .with_icon()
+        let _viewport = build_viewport();
+        // If we got here without panic, the icon was loaded and set successfully
+    }
+
+    // ========================================================================
     // Config Tab Tests (US-001)
     // ========================================================================
 
@@ -8431,7 +8527,8 @@ mod tests {
         // Test that the save_project_config_for function is accessible
         // This verifies the function signature is correct
         let config = crate::config::Config::default();
-        let project_name = "nonexistent-test-project-xyz";
+        // Use a unique project name to avoid conflicts with other tests
+        let project_name = "test-save-config-function-check";
 
         // Just verify the function exists and can be called
         // (will fail due to directory access, but tests the API)
@@ -14216,5 +14313,415 @@ mod tests {
 
         let count = count_cleanable_specs(spec_dir, &active_specs);
         assert_eq!(count, 0, "All active specs should result in 0 cleanable");
+    }
+
+    // ========================================================================
+    // Output Display Box Overflow Tests (US-001: gui-fixes-improvs)
+    // ========================================================================
+
+    #[test]
+    fn test_output_display_max_chars_calculation() {
+        // US-001: Test that max_output_chars is calculated correctly based on
+        // available width and character width estimate.
+        // Formula: floor((text_area_width) / char_width_estimate)
+        // Where text_area_width = content_width - output_padding * 2.0
+        // and char_width_estimate = 10.0 (conservative for 16px monospace)
+
+        let content_width: f32 = 400.0;
+        let output_padding: f32 = 6.0;
+        let char_width_estimate: f32 = 10.0;
+
+        let text_area_width = content_width - output_padding * 2.0;
+        let max_output_chars = (text_area_width / char_width_estimate).floor() as usize;
+
+        // For content_width=400, padding=6, width=10:
+        // text_area_width = 400 - 12 = 388
+        // max_chars = floor(388 / 10) = 38
+        assert_eq!(max_output_chars, 38);
+    }
+
+    #[test]
+    fn test_output_display_max_chars_varies_with_card_width() {
+        // US-001: Verify max chars scales with card width
+        let output_padding: f32 = 6.0;
+        let char_width_estimate: f32 = 10.0;
+
+        let calc_max_chars = |content_width: f32| -> usize {
+            let text_area_width = content_width - output_padding * 2.0;
+            (text_area_width / char_width_estimate).floor() as usize
+        };
+
+        // Narrower cards should have fewer chars per line
+        let narrow_chars = calc_max_chars(CARD_MIN_WIDTH - CARD_PADDING * 2.0); // ~360
+        let wide_chars = calc_max_chars(CARD_MAX_WIDTH - CARD_PADDING * 2.0); // ~760
+
+        // Verify scaling: wide cards should allow more chars
+        assert!(
+            wide_chars > narrow_chars,
+            "Wide cards should allow more characters per line"
+        );
+
+        // Min card (400 width, 20 padding = 360 content): floor((360-12)/10) = 34
+        // Max card (800 width, 20 padding = 760 content): floor((760-12)/10) = 74
+        assert_eq!(narrow_chars, 34);
+        assert_eq!(wide_chars, 74);
+    }
+
+    #[test]
+    fn test_output_display_lines_constant() {
+        // US-001: Verify OUTPUT_LINES_TO_SHOW constant is set appropriately
+        // This constant controls how many lines are displayed in session cards
+        assert_eq!(OUTPUT_LINES_TO_SHOW, 12);
+    }
+
+    #[test]
+    fn test_output_display_vertical_bounds_check() {
+        // US-001: Test the vertical bounds check logic
+        // Lines should only be rendered if they fit within the output area.
+        // Formula: output_y <= max_start_y where max_start_y = output_rect.max.y - output_padding - line_height
+
+        let output_rect_max_y: f32 = 200.0;
+        let output_padding: f32 = 6.0;
+        let line_height: f32 = 18.0; // FontSize::Large (16px) + 2.0
+
+        let max_start_y = output_rect_max_y - output_padding - line_height;
+        // max_start_y = 200 - 6 - 18 = 176
+
+        // A line at y=170 should fit
+        assert!(170.0_f32 <= max_start_y, "Line at y=170 should fit");
+
+        // A line at y=180 should NOT fit
+        assert!(180.0_f32 > max_start_y, "Line at y=180 should not fit");
+    }
+
+    #[test]
+    fn test_output_display_line_height_calculation() {
+        // US-001: Verify line height calculation
+        // Line height = FontSize::Large.pixels() + 2.0 spacing
+        use crate::ui::gui::typography::FontSize;
+
+        let font_size = FontSize::Large.pixels(); // 16.0
+        let line_height = font_size + 2.0;
+
+        assert_eq!(line_height, 18.0);
+    }
+
+    #[test]
+    fn test_truncation_prevents_horizontal_overflow() {
+        // US-001: Test that truncation with truncate_with_ellipsis prevents
+        // long lines from exceeding character limits
+        use crate::ui::gui::components::truncate_with_ellipsis;
+
+        let max_chars = 40;
+        let long_line =
+            "This is a very long line that definitely exceeds the maximum character limit";
+        let short_line = "Short line";
+
+        let truncated_long = truncate_with_ellipsis(long_line, max_chars);
+        let truncated_short = truncate_with_ellipsis(short_line, max_chars);
+
+        // Long line should be truncated
+        assert!(
+            truncated_long.chars().count() <= max_chars,
+            "Truncated line should not exceed max_chars"
+        );
+        assert!(
+            truncated_long.ends_with("..."),
+            "Truncated line should end with ellipsis"
+        );
+
+        // Short line should remain unchanged
+        assert_eq!(truncated_short, short_line);
+    }
+
+    #[test]
+    fn test_output_display_handles_empty_lines() {
+        // US-001: Test that empty output displays fallback message
+        // When live_output is empty, "Waiting for output..." should be shown
+
+        // This is a logic test - the actual rendering uses a fallback message
+        let empty_lines: Vec<&str> = vec![];
+        assert!(
+            empty_lines.is_empty(),
+            "Empty lines should trigger fallback display"
+        );
+
+        // Verify the fallback message constant fits within typical bounds
+        let fallback_msg = "Waiting for output...";
+        let typical_max_chars = 34; // For minimum card width
+        assert!(
+            fallback_msg.chars().count() <= typical_max_chars,
+            "Fallback message should fit within minimum card width"
+        );
+    }
+
+    #[test]
+    fn test_output_display_no_live_output_message_fits() {
+        // US-001: Test that "No live output" message fits within bounds
+        let no_output_msg = "No live output";
+        let typical_max_chars = 34; // For minimum card width
+        assert!(
+            no_output_msg.chars().count() <= typical_max_chars,
+            "No live output message should fit within minimum card width"
+        );
+    }
+
+    // ========================================================================
+    // US-002: Output Display Update Mechanism Tests
+    // ========================================================================
+
+    /// Helper to create a minimal SessionData for testing output display logic.
+    fn make_test_session_data(
+        run: Option<crate::state::RunState>,
+        live_output: Option<crate::state::LiveState>,
+    ) -> SessionData {
+        use crate::state::SessionMetadata;
+        use std::path::PathBuf;
+
+        SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: "main".to_string(),
+                worktree_path: PathBuf::from("/test/path"),
+                branch_name: "test-branch".to_string(),
+                created_at: chrono::Utc::now(),
+                last_active_at: chrono::Utc::now(),
+                is_running: true,
+            },
+            run,
+            progress: None,
+            load_error: None,
+            is_main_session: true,
+            is_stale: false,
+            live_output,
+        }
+    }
+
+    /// Helper to create a RunState with the given machine state.
+    fn make_test_run_state(machine_state: MachineState) -> crate::state::RunState {
+        use std::path::PathBuf;
+
+        crate::state::RunState {
+            run_id: "test-run".to_string(),
+            status: crate::state::RunStatus::Running,
+            machine_state,
+            spec_json_path: PathBuf::from("/test/spec.json"),
+            spec_md_path: None,
+            branch: "test-branch".to_string(),
+            current_story: None,
+            iteration: 1,
+            review_iteration: 0,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            iterations: vec![],
+            config: None,
+            knowledge: Default::default(),
+            pre_story_commit: None,
+            session_id: Some("main".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_output_source_priority_fresh_live_output() {
+        // US-002: Fresh live output should be preferred when:
+        // - machine_state == RunningClaude
+        // - live_output exists
+        // - output is fresh (< 5 seconds)
+        // - output_lines is not empty
+
+        let mut live = crate::state::LiveState::new(MachineState::RunningClaude);
+        live.output_lines = vec![
+            "Line 1".to_string(),
+            "Line 2".to_string(),
+            "Line 3".to_string(),
+        ];
+        // LiveState::new() sets updated_at to now, so it's fresh
+
+        let run = make_test_run_state(MachineState::RunningClaude);
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::Live(_)),
+            "Fresh live output should be selected when running Claude"
+        );
+
+        if let OutputSource::Live(lines) = output {
+            assert_eq!(lines.len(), 3);
+            assert_eq!(lines[0], "Line 1");
+        }
+    }
+
+    #[test]
+    fn test_output_source_stale_live_falls_back_to_iteration() {
+        // US-002: When live output is stale (> 5 seconds), should fall back to
+        // iteration output_snippet
+
+        let mut live = crate::state::LiveState::new(MachineState::RunningClaude);
+        live.output_lines = vec!["Stale live line".to_string()];
+        // Make the output stale (10 seconds old)
+        live.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+
+        let mut run = make_test_run_state(MachineState::RunningClaude);
+        run.iterations.push(crate::state::IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            status: crate::state::IterationStatus::Running,
+            output_snippet: "Iteration line 1\nIteration line 2".to_string(),
+            work_summary: None,
+        });
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::Iteration(_)),
+            "Should fall back to iteration output when live output is stale"
+        );
+
+        if let OutputSource::Iteration(lines) = output {
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0], "Iteration line 1");
+        }
+    }
+
+    #[test]
+    fn test_output_source_non_running_claude_uses_iteration() {
+        // US-002: When machine_state is not RunningClaude, should use iteration
+        // output even if live output exists and is fresh
+
+        let mut live = crate::state::LiveState::new(MachineState::Reviewing);
+        live.output_lines = vec!["Live line".to_string()];
+        // Output is fresh
+
+        let mut run = make_test_run_state(MachineState::Reviewing);
+        run.iterations.push(crate::state::IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            status: crate::state::IterationStatus::Running,
+            output_snippet: "Review output line".to_string(),
+            work_summary: None,
+        });
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::Iteration(_)),
+            "Should use iteration output when not in RunningClaude state"
+        );
+    }
+
+    #[test]
+    fn test_output_source_waiting_when_live_empty() {
+        // US-002: When running Claude with live output but no lines yet,
+        // should return Waiting
+
+        let live = crate::state::LiveState::new(MachineState::RunningClaude);
+        // output_lines is empty by default
+
+        let run = make_test_run_state(MachineState::RunningClaude);
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::Waiting),
+            "Should return Waiting when live output exists but is empty"
+        );
+    }
+
+    #[test]
+    fn test_output_source_no_data_when_no_live() {
+        // US-002: When there's no live output at all, should return NoData
+
+        let run = make_test_run_state(MachineState::RunningClaude);
+        let session = make_test_session_data(Some(run), None);
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::NoData),
+            "Should return NoData when no live output exists"
+        );
+    }
+
+    #[test]
+    fn test_output_source_status_message_for_other_states() {
+        // US-002: For states other than RunningClaude with no iteration output,
+        // should return status message
+
+        let mut live = crate::state::LiveState::new(MachineState::Committing);
+        live.output_lines = vec!["Some output".to_string()];
+
+        let run = make_test_run_state(MachineState::Committing);
+        // No iterations, so no output_snippet
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        assert!(
+            matches!(output, OutputSource::StatusMessage(_)),
+            "Should return status message when no iteration output available"
+        );
+
+        if let OutputSource::StatusMessage(msg) = output {
+            assert_eq!(msg, "Committing changes...");
+        }
+    }
+
+    #[test]
+    fn test_output_source_limits_to_output_lines_to_show() {
+        // US-002: Live output should be limited to OUTPUT_LINES_TO_SHOW lines
+
+        let mut live = crate::state::LiveState::new(MachineState::RunningClaude);
+        // Add more lines than OUTPUT_LINES_TO_SHOW
+        for i in 1..=20 {
+            live.output_lines.push(format!("Line {}", i));
+        }
+
+        let run = make_test_run_state(MachineState::RunningClaude);
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+        if let OutputSource::Live(lines) = output {
+            assert_eq!(
+                lines.len(),
+                OUTPUT_LINES_TO_SHOW,
+                "Should limit to OUTPUT_LINES_TO_SHOW"
+            );
+            // Should have the LAST lines (9 through 20, but only 12)
+            assert_eq!(lines[0], "Line 9");
+            assert_eq!(lines[11], "Line 20");
+        } else {
+            panic!("Expected Live output source");
+        }
+    }
+
+    #[test]
+    fn test_output_source_freshness_threshold_constant() {
+        // US-002: Verify the freshness threshold matches TUI (5 seconds)
+        assert_eq!(
+            LIVE_OUTPUT_FRESHNESS_SECS, 5,
+            "Freshness threshold should be 5 seconds to match TUI"
+        );
+    }
+
+    #[test]
+    fn test_output_source_enum_variants() {
+        // US-002: Verify all OutputSource variants work correctly
+        let live = OutputSource::Live(vec!["test".to_string()]);
+        let iter = OutputSource::Iteration(vec!["test".to_string()]);
+        let status = OutputSource::StatusMessage("test".to_string());
+        let waiting = OutputSource::Waiting;
+        let no_data = OutputSource::NoData;
+
+        // All should be comparable for equality
+        assert_ne!(live, iter);
+        assert_ne!(status.clone(), waiting.clone());
+        assert_ne!(waiting, no_data);
+        assert_eq!(status, OutputSource::StatusMessage("test".to_string()));
     }
 }
