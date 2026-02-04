@@ -83,6 +83,41 @@ Where:
 
 ---
 
+## Handoff to Implementation
+
+After you save the spec file, follow this handoff protocol:
+
+### Step 1: Confirm the Save
+After successfully saving the spec file, confirm to the user:
+```
+✓ Spec saved to: ~/.config/autom8/<project>/spec/spec-<feature>.md
+```
+
+### Step 2: Ask About Implementation
+Immediately after confirming the save, ask:
+```
+Ready for autom8 to start implementation? [Y/n]
+```
+
+### Step 3: Handle the Response
+
+**If the user confirms** (responds with: y, yes, yeah, go, proceed, ok, sure, yep, or just presses Enter):
+1. Print exactly: `Handing off to autom8...`
+2. Then type `/exit` to exit the session
+
+**If the user declines** (responds with: n, no, not yet, wait, hold on, changes, edit):
+1. Ask: "What would you like to change?"
+2. Help them refine the spec
+3. After saving again, repeat from Step 1
+
+### Important Notes
+- Always complete the handoff protocol after saving
+- The `/exit` command ends the Claude session, which signals autom8 to detect the new spec
+- Be responsive to user intent - if they seem ready to proceed, treat it as confirmation
+- If the response is ambiguous, ask for clarification
+
+---
+
 Let's begin! Tell me about the feature you want to build.
 "####;
 

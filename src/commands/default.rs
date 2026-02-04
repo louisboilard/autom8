@@ -164,9 +164,9 @@ fn start_spec_creation(verbose: bool) -> Result<()> {
     println!("  - Acceptance criteria for each story");
     println!();
     println!(
-        "When you're done, save the spec as {CYAN}spec-<feature>.md{RESET} and exit the session."
+        "When your spec is ready, Claude will ask if you'd like autom8 to start implementation."
     );
-    println!("autom8 will automatically proceed to implementation.");
+    println!("Say {CYAN}yes{RESET} to hand off automatically—autom8 takes it from there.");
     println!();
     println!("{GRAY}Starting Claude...{RESET}");
     println!();
