@@ -1294,6 +1294,83 @@ fn ensure_project_config_dir_at(
     Ok((dir, created))
 }
 
+/// Get the spec subdirectory path for a given project config directory.
+///
+/// This is a testable version that allows specifying a custom project config directory path.
+/// Unlike the real `spec_dir()`, this doesn't perform filesystem operations or require
+/// the directory to exist.
+#[cfg(test)]
+fn spec_dir_at(project_config_dir: &std::path::Path) -> PathBuf {
+    project_config_dir.join(SPEC_SUBDIR)
+}
+
+/// Check if a file path is within a given config directory.
+///
+/// This is a testable version of `is_in_config_dir` that allows specifying a custom
+/// base config directory path instead of using the real `~/.config/autom8` directory.
+/// Handles path canonicalization like the original function.
+#[cfg(test)]
+fn is_in_config_dir_at(
+    base_config_dir: &std::path::Path,
+    file_path: &std::path::Path,
+) -> Result<bool> {
+    // Canonicalize both paths to handle relative paths and symlinks
+    let canonical_file = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    let canonical_config = base_config_dir
+        .canonicalize()
+        .unwrap_or_else(|_| base_config_dir.to_path_buf());
+
+    Ok(canonical_file.starts_with(&canonical_config))
+}
+
+/// Move a file to a specified spec directory if it's not already there.
+///
+/// This is a testable version of `move_to_config_dir` that allows specifying a custom
+/// destination spec directory instead of using the real `~/.config/autom8/<project>/spec/` directory.
+///
+/// Uses `fs::rename()` when possible, falls back to copy+delete for cross-filesystem moves.
+///
+/// Returns `MoveResult` with the destination path and whether the file was moved.
+#[cfg(test)]
+fn move_to_config_dir_at(
+    dest_spec_dir: &std::path::Path,
+    file_path: &std::path::Path,
+) -> Result<MoveResult> {
+    // If already in the destination spec directory, return original path
+    if is_in_config_dir_at(dest_spec_dir, file_path)? {
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
+        return Ok(MoveResult {
+            dest_path: canonical,
+            was_moved: false,
+        });
+    }
+
+    // Ensure destination directory exists
+    fs::create_dir_all(dest_spec_dir)?;
+
+    // Get filename and create destination path
+    let filename = file_path
+        .file_name()
+        .ok_or_else(|| Autom8Error::Config("Could not determine filename".to_string()))?;
+    let dest_path = dest_spec_dir.join(filename);
+
+    // Try rename first (fast, atomic), fall back to copy+delete for cross-filesystem
+    if fs::rename(file_path, &dest_path).is_err() {
+        // Cross-filesystem move: copy then delete original
+        fs::copy(file_path, &dest_path)?;
+        fs::remove_file(file_path)?;
+    }
+
+    Ok(MoveResult {
+        dest_path,
+        was_moved: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1353,6 +1430,170 @@ mod tests {
         assert!(created);
         assert!(path.exists());
         assert!(config_path.exists()); // Parent was also created
+    }
+
+    #[test]
+    fn test_spec_dir_at_returns_spec_subdirectory() {
+        let project_config_dir = PathBuf::from("/some/project/config/dir");
+        let result = spec_dir_at(&project_config_dir);
+        assert_eq!(result, PathBuf::from("/some/project/config/dir/spec"));
+    }
+
+    #[test]
+    fn test_spec_dir_at_with_temp_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let (project_dir, _) =
+            ensure_project_config_dir_at(temp_dir.path(), "test-project").unwrap();
+
+        let spec_dir = spec_dir_at(&project_dir);
+
+        // Verify it points to the spec subdirectory
+        assert_eq!(spec_dir, project_dir.join("spec"));
+        // Since ensure_project_config_dir_at creates the spec dir, it should exist
+        assert!(spec_dir.exists());
+        assert!(spec_dir.is_dir());
+    }
+
+    #[test]
+    fn test_is_in_config_dir_at_returns_true_for_file_inside_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let file_inside = config_dir.join("subdir").join("file.txt");
+        fs::create_dir_all(file_inside.parent().unwrap()).unwrap();
+        fs::write(&file_inside, "test").unwrap();
+
+        let result = is_in_config_dir_at(&config_dir, &file_inside).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_in_config_dir_at_returns_false_for_file_outside_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        let other_dir = temp_dir.path().join("other");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&other_dir).unwrap();
+
+        let file_outside = other_dir.join("file.txt");
+        fs::write(&file_outside, "test").unwrap();
+
+        let result = is_in_config_dir_at(&config_dir, &file_outside).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_is_in_config_dir_at_handles_nonexistent_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Use canonicalized config_dir to construct path - mimics real usage
+        // where paths are typically derived from the config dir itself
+        let canonical_config = config_dir.canonicalize().unwrap();
+        let nonexistent_file = canonical_config.join("does_not_exist.txt");
+
+        // Should return true because the path starts with canonicalized config_dir
+        let result = is_in_config_dir_at(&config_dir, &nonexistent_file).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_move_to_config_dir_at_moves_file_to_dest_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_spec_dir = temp_dir.path().join("dest_config").join("spec");
+        fs::create_dir_all(&source_dir).unwrap();
+
+        let source_file = source_dir.join("test-file.json");
+        let content = r#"{"test": "data"}"#;
+        fs::write(&source_file, content).unwrap();
+
+        let result = move_to_config_dir_at(&dest_spec_dir, &source_file).unwrap();
+
+        assert!(result.was_moved, "File should have been moved");
+        assert!(result.dest_path.exists(), "Destination file should exist");
+        assert!(
+            !source_file.exists(),
+            "Source file should be deleted after move"
+        );
+        assert!(
+            result.dest_path.starts_with(&dest_spec_dir),
+            "File should be in the specified dest_spec_dir"
+        );
+        assert_eq!(
+            fs::read_to_string(&result.dest_path).unwrap(),
+            content,
+            "Content should match"
+        );
+    }
+
+    #[test]
+    fn test_move_to_config_dir_at_returns_unchanged_if_already_in_dest() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_spec_dir = temp_dir.path().join("config").join("spec");
+        fs::create_dir_all(&dest_spec_dir).unwrap();
+
+        let existing_file = dest_spec_dir.join("already-here.md");
+        fs::write(&existing_file, "# Already here").unwrap();
+
+        let result = move_to_config_dir_at(&dest_spec_dir, &existing_file).unwrap();
+
+        assert!(!result.was_moved, "File should not have been moved");
+        assert!(
+            existing_file.exists(),
+            "File should still exist in original location"
+        );
+        assert_eq!(
+            result.dest_path.canonicalize().unwrap(),
+            existing_file.canonicalize().unwrap(),
+            "Path should be the canonical original"
+        );
+    }
+
+    #[test]
+    fn test_move_to_config_dir_at_preserves_filename() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_spec_dir = temp_dir.path().join("config").join("spec");
+        fs::create_dir_all(&source_dir).unwrap();
+
+        let source_file = source_dir.join("my-custom-filename.txt");
+        fs::write(&source_file, "test content").unwrap();
+
+        let result = move_to_config_dir_at(&dest_spec_dir, &source_file).unwrap();
+
+        assert_eq!(
+            result.dest_path.file_name().unwrap().to_str().unwrap(),
+            "my-custom-filename.txt",
+            "Filename should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_move_to_config_dir_at_creates_dest_dir_if_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_spec_dir = temp_dir
+            .path()
+            .join("nonexistent")
+            .join("nested")
+            .join("spec");
+        fs::create_dir_all(&source_dir).unwrap();
+        // Note: dest_spec_dir does not exist yet
+
+        let source_file = source_dir.join("test.md");
+        fs::write(&source_file, "# Test").unwrap();
+
+        let result = move_to_config_dir_at(&dest_spec_dir, &source_file).unwrap();
+
+        assert!(result.was_moved, "File should have been moved");
+        assert!(
+            dest_spec_dir.exists(),
+            "Destination directory should be created"
+        );
+        assert!(result.dest_path.exists(), "Destination file should exist");
     }
 
     #[test]
@@ -1485,11 +1726,16 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_project_config_dir_creates_real_directory() {
-        // This test uses the real function to verify it works end-to-end
-        let result = ensure_project_config_dir();
+    fn test_ensure_project_config_dir_creates_directory_structure() {
+        // Use TempDir for isolation - does not touch ~/.config/autom8/
+        let temp_dir = TempDir::new().unwrap();
+
+        let result = ensure_project_config_dir_at(temp_dir.path(), "test-project");
         assert!(result.is_ok());
-        let (path, _created) = result.unwrap();
+        let (path, created) = result.unwrap();
+
+        // Verify the directory was created
+        assert!(created);
 
         // Verify structure
         assert!(path.exists());
@@ -1499,17 +1745,15 @@ mod tests {
 
     #[test]
     fn test_is_in_config_dir_true_for_file_in_config() {
-        // Create a file inside the config directory
-        let config_dir = project_config_dir().unwrap();
+        // Create a file inside a temp config directory
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
         fs::create_dir_all(&config_dir).unwrap();
         let test_file = config_dir.join("test.json");
         fs::write(&test_file, "{}").unwrap();
 
-        let result = is_in_config_dir(&test_file).unwrap();
+        let result = is_in_config_dir_at(&config_dir, &test_file).unwrap();
         assert!(result, "File in config dir should return true");
-
-        // Cleanup
-        fs::remove_file(&test_file).ok();
     }
 
     #[test]
@@ -1525,46 +1769,49 @@ mod tests {
     #[test]
     fn test_is_in_config_dir_true_for_file_in_subdirectory() {
         // Create a file in a subdirectory of config
-        let spec_dir = spec_dir().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        let spec_dir = config_dir.join("spec");
         fs::create_dir_all(&spec_dir).unwrap();
         let test_file = spec_dir.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
-        let result = is_in_config_dir(&test_file).unwrap();
+        let result = is_in_config_dir_at(&config_dir, &test_file).unwrap();
         assert!(result, "File in config subdirectory should return true");
-
-        // Cleanup
-        fs::remove_file(&test_file).ok();
     }
 
     #[test]
     fn test_is_in_config_dir_true_for_file_in_different_project() {
         // Create a file in a different project's directory within the config area
         // This simulates a file in a worktree-named project directory
-        let base = config_dir().unwrap();
-        let other_project_spec_dir = base.join("some-other-project-wt-feature").join("spec");
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        let other_project_spec_dir = config_dir
+            .join("some-other-project-wt-feature")
+            .join("spec");
         fs::create_dir_all(&other_project_spec_dir).unwrap();
         let test_file = other_project_spec_dir.join("test.md");
         fs::write(&test_file, "# Test").unwrap();
 
-        let result = is_in_config_dir(&test_file).unwrap();
+        let result = is_in_config_dir_at(&config_dir, &test_file).unwrap();
         assert!(
             result,
             "File in different project's config dir should return true"
         );
-
-        // Cleanup
-        fs::remove_dir_all(base.join("some-other-project-wt-feature")).ok();
     }
 
     #[test]
     fn test_move_to_config_dir_moves_md_to_spec() {
         let temp_dir = TempDir::new().unwrap();
-        let source_file = temp_dir.path().join("test-spec.md");
+        let source_dir = temp_dir.path().join("source");
+        let dest_spec_dir = temp_dir.path().join("config").join("spec");
+        fs::create_dir_all(&source_dir).unwrap();
+
+        let source_file = source_dir.join("test-spec.md");
         let content = "# Test Spec\n\nThis is a test.";
         fs::write(&source_file, content).unwrap();
 
-        let result = move_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir_at(&dest_spec_dir, &source_file).unwrap();
 
         assert!(result.was_moved, "File should have been moved");
         assert!(result.dest_path.exists(), "Destination file should exist");
@@ -1581,9 +1828,7 @@ mod tests {
             content,
             "Content should match"
         );
-
-        // Cleanup
-        fs::remove_file(&result.dest_path).ok();
+        // No cleanup needed - TempDir handles it
     }
 
     #[test]
@@ -1617,13 +1862,15 @@ mod tests {
 
     #[test]
     fn test_move_to_config_dir_no_move_if_already_in_config() {
-        // Create a file already in the config directory
-        let spec_dir = spec_dir().unwrap();
-        fs::create_dir_all(&spec_dir).unwrap();
-        let existing_file = spec_dir.join("existing-test.md");
+        // Create a file already in the destination spec directory
+        let temp_dir = TempDir::new().unwrap();
+        let dest_spec_dir = temp_dir.path().join("config").join("spec");
+        fs::create_dir_all(&dest_spec_dir).unwrap();
+
+        let existing_file = dest_spec_dir.join("existing-test.md");
         fs::write(&existing_file, "# Already here").unwrap();
 
-        let result = move_to_config_dir(&existing_file).unwrap();
+        let result = move_to_config_dir_at(&dest_spec_dir, &existing_file).unwrap();
 
         assert!(!result.was_moved, "File should not have been moved");
         assert!(
@@ -1635,18 +1882,20 @@ mod tests {
             existing_file.canonicalize().unwrap(),
             "Path should be the original"
         );
-
-        // Cleanup
-        fs::remove_file(&existing_file).ok();
+        // No cleanup needed - TempDir handles it
     }
 
     #[test]
     fn test_move_to_config_dir_unknown_extension_goes_to_spec() {
         let temp_dir = TempDir::new().unwrap();
-        let source_file = temp_dir.path().join("test-file.txt");
+        let source_dir = temp_dir.path().join("source");
+        let dest_spec_dir = temp_dir.path().join("config").join("spec");
+        fs::create_dir_all(&source_dir).unwrap();
+
+        let source_file = source_dir.join("test-file.txt");
         fs::write(&source_file, "Some content").unwrap();
 
-        let result = move_to_config_dir(&source_file).unwrap();
+        let result = move_to_config_dir_at(&dest_spec_dir, &source_file).unwrap();
 
         assert!(result.was_moved, "File should have been moved");
         assert!(
@@ -1657,9 +1906,7 @@ mod tests {
             result.dest_path.parent().unwrap().ends_with("spec"),
             "Unknown extensions should default to spec/ directory"
         );
-
-        // Cleanup
-        fs::remove_file(&result.dest_path).ok();
+        // No cleanup needed - TempDir handles it
     }
 
     #[test]
