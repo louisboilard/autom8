@@ -7,7 +7,7 @@
 
 use crate::config::{list_projects_tree, ProjectTreeInfo};
 use crate::error::Result;
-use crate::spec::Spec;
+use crate::spec::{Spec, UserStory};
 use crate::state::{
     IterationStatus, LiveState, MachineState, RunState, RunStatus, SessionMetadata, StateManager,
 };
@@ -275,6 +275,9 @@ pub struct SessionData {
     pub is_stale: bool,
     /// Live output state for streaming Claude output (from live.json).
     pub live_output: Option<LiveState>,
+    /// Cached user stories from the spec (to avoid file I/O on every render frame).
+    /// This is populated during `load_sessions()` and should be used by `load_story_items()`.
+    pub cached_user_stories: Option<Vec<UserStory>>,
 }
 
 impl SessionData {
@@ -662,6 +665,7 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
                     is_main_session,
                     is_stale: true,
                     live_output: None,
+                    cached_user_stories: None,
                 });
                 continue;
             }
@@ -683,13 +687,18 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
                 .ok()
                 .and_then(|content| serde_json::from_str(&content).ok());
 
-            // Load spec to get progress information
-            let progress = run.as_ref().and_then(|r| {
-                Spec::load(&r.spec_json_path).ok().map(|spec| RunProgress {
-                    completed: spec.completed_count(),
-                    total: spec.total_count(),
+            // Load spec to get progress information and cache user stories
+            let (progress, cached_user_stories) = run
+                .as_ref()
+                .and_then(|r| Spec::load(&r.spec_json_path).ok())
+                .map(|spec| {
+                    let progress = RunProgress {
+                        completed: spec.completed_count(),
+                        total: spec.total_count(),
+                    };
+                    (Some(progress), Some(spec.user_stories))
                 })
-            });
+                .unwrap_or((None, None));
 
             sessions.push(SessionData {
                 project_name: project_name.clone(),
@@ -700,6 +709,7 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
                 is_main_session,
                 is_stale: false,
                 live_output,
+                cached_user_stories,
             });
         }
     }
@@ -878,6 +888,7 @@ mod tests {
             is_main_session: is_main,
             is_stale,
             live_output: None,
+            cached_user_stories: None,
         }
     }
 
