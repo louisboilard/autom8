@@ -49,23 +49,33 @@ const MAX_REVIEW_ITERATIONS: u32 = 3;
 const LIVE_FLUSH_INTERVAL_MS: u64 = 200;
 const LIVE_FLUSH_LINE_COUNT: usize = 10;
 
+/// Heartbeat interval for indicating the run is still active (US-002).
+/// The heartbeat is updated every 2-3 seconds.
+const HEARTBEAT_INTERVAL_MS: u64 = 2500;
+
 /// Helper struct that wraps a callback and periodically flushes output to live.json.
 /// Flushes every ~200ms or every ~10 lines, whichever comes first.
+/// Also updates heartbeat every ~2.5 seconds to indicate the run is still active.
 struct LiveOutputFlusher<'a> {
     state_manager: &'a StateManager,
     live_state: LiveState,
     line_count_since_flush: usize,
     last_flush: Instant,
+    last_heartbeat: Instant,
 }
 
 impl<'a> LiveOutputFlusher<'a> {
     fn new(state_manager: &'a StateManager, machine_state: MachineState) -> Self {
-        Self {
+        let mut flusher = Self {
             state_manager,
             live_state: LiveState::new(machine_state),
             line_count_since_flush: 0,
             last_flush: Instant::now(),
-        }
+            last_heartbeat: Instant::now(),
+        };
+        // Immediately flush to ensure live.json exists with current state
+        flusher.flush();
+        flusher
     }
 
     /// Append a line to the buffer and flush if thresholds are met.
@@ -73,7 +83,7 @@ impl<'a> LiveOutputFlusher<'a> {
         self.live_state.append_line(line.to_string());
         self.line_count_since_flush += 1;
 
-        // Check if we should flush
+        // Check if we should flush output
         let time_elapsed =
             self.last_flush.elapsed() >= Duration::from_millis(LIVE_FLUSH_INTERVAL_MS);
         let lines_threshold = self.line_count_since_flush >= LIVE_FLUSH_LINE_COUNT;
@@ -81,14 +91,30 @@ impl<'a> LiveOutputFlusher<'a> {
         if time_elapsed || lines_threshold {
             self.flush();
         }
+
+        // Check if we should update heartbeat (even if no flush needed)
+        self.maybe_update_heartbeat();
+    }
+
+    /// Update heartbeat if the interval has elapsed.
+    /// This ensures the heartbeat is updated even during periods of low output.
+    fn maybe_update_heartbeat(&mut self) {
+        if self.last_heartbeat.elapsed() >= Duration::from_millis(HEARTBEAT_INTERVAL_MS) {
+            self.live_state.update_heartbeat();
+            self.flush();
+            self.last_heartbeat = Instant::now();
+        }
     }
 
     /// Flush the current state to live.json.
     fn flush(&mut self) {
+        // Update heartbeat on every flush to keep it fresh
+        self.live_state.update_heartbeat();
         // Ignore errors - live output is best-effort for monitoring
         let _ = self.state_manager.save_live(&self.live_state);
         self.line_count_since_flush = 0;
         self.last_flush = Instant::now();
+        self.last_heartbeat = Instant::now();
     }
 
     /// Final flush to ensure all remaining output is written.
@@ -97,6 +123,14 @@ impl<'a> LiveOutputFlusher<'a> {
             self.flush();
         }
     }
+}
+
+/// Flush live.json immediately with a state update.
+/// This is used outside of Claude operations (e.g., during state transitions)
+/// to ensure the GUI sees state changes immediately.
+fn flush_live_state(state_manager: &StateManager, machine_state: MachineState) {
+    let live_state = LiveState::new(machine_state);
+    let _ = state_manager.save_live(&live_state);
 }
 
 /// Runs an operation with either a verbose timer or spinner display,
@@ -343,6 +377,12 @@ impl Runner {
         config.worktree
     }
 
+    /// Flush live.json with the current state without saving state.
+    /// Used when we want to update live.json but state has already been saved.
+    fn flush_live(&self, machine_state: MachineState) {
+        flush_live_state(&self.state_manager, machine_state);
+    }
+
     /// Setup worktree context for a run.
     ///
     /// When worktree mode is enabled, this will:
@@ -544,6 +584,7 @@ impl Runner {
             print_state_transition(state.machine_state, MachineState::Reviewing);
             state.transition_to(MachineState::Reviewing);
             self.state_manager.save(state)?;
+            self.flush_live(MachineState::Reviewing);
 
             // Update breadcrumb to enter Review state
             breadcrumb.enter_state(BreadcrumbState::Review);
@@ -551,10 +592,12 @@ impl Runner {
             print_phase_banner("REVIEWING", BannerColor::Cyan);
             print_reviewing(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
-            // Run reviewer with progress display
+            // Run reviewer with progress display and live output (for heartbeat updates)
             let review_iter = state.review_iteration;
-            let review_result = with_progress_display(
+            let review_result = with_progress_display_and_live(
                 self.verbose,
+                &self.state_manager,
+                MachineState::Reviewing,
                 || VerboseTimer::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 || ClaudeSpinner::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 |callback| run_reviewer(spec, review_iter, MAX_REVIEW_ITERATIONS, callback),
@@ -596,6 +639,7 @@ impl Runner {
                     print_state_transition(MachineState::Reviewing, MachineState::Correcting);
                     state.transition_to(MachineState::Correcting);
                     self.state_manager.save(state)?;
+                    self.flush_live(MachineState::Correcting);
 
                     // Update breadcrumb to enter Correct state
                     breadcrumb.enter_state(BreadcrumbState::Correct);
@@ -603,9 +647,11 @@ impl Runner {
                     print_phase_banner("CORRECTING", BannerColor::Yellow);
                     print_issues_found(state.review_iteration, MAX_REVIEW_ITERATIONS);
 
-                    // Run corrector with progress display
-                    let corrector_result = with_progress_display(
+                    // Run corrector with progress display and live output (for heartbeat updates)
+                    let corrector_result = with_progress_display_and_live(
                         self.verbose,
+                        &self.state_manager,
+                        MachineState::Correcting,
                         || VerboseTimer::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         || ClaudeSpinner::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         |callback| run_corrector(spec, review_iter, callback),
@@ -696,15 +742,18 @@ impl Runner {
         print_state_transition(state.machine_state, MachineState::Committing);
         state.transition_to(MachineState::Committing);
         self.state_manager.save(state)?;
+        self.flush_live(MachineState::Committing);
 
         // Update breadcrumb to enter Commit state
         breadcrumb.enter_state(BreadcrumbState::Commit);
 
         print_phase_banner("COMMITTING", BannerColor::Cyan);
 
-        // Run commit with progress display
-        let commit_result = with_progress_display(
+        // Run commit with progress display and live output (for heartbeat updates)
+        let commit_result = with_progress_display_and_live(
             self.verbose,
+            &self.state_manager,
+            MachineState::Committing,
             VerboseTimer::new_for_commit,
             ClaudeSpinner::new_for_commit,
             |callback| run_for_commit(spec, callback),
@@ -761,6 +810,7 @@ impl Runner {
         print_state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
+        self.flush_live(MachineState::CreatingPR);
 
         match create_pull_request(spec, commits_were_made) {
             Ok(PRResult::Success(url)) => {
@@ -837,6 +887,8 @@ impl Runner {
         self.handle_commit_and_pr(state, spec, breadcrumb)?;
 
         state.transition_to(MachineState::Completed);
+        // Flush live state to ensure GUI sees the Completed state before cleanup
+        self.flush_live(MachineState::Completed);
         self.state_manager.save(state)?;
         print_summary_fn(state.iteration, story_results)?;
         self.archive_and_cleanup(state)?;
@@ -1062,6 +1114,8 @@ impl Runner {
         self.handle_commit_and_pr(state, spec, breadcrumb)?;
 
         state.transition_to(MachineState::Completed);
+        // Flush live state to ensure GUI sees the Completed state before cleanup
+        self.flush_live(MachineState::Completed);
         self.state_manager.save(state)?;
         print_summary_fn(state.iteration, story_results)?;
         self.archive_and_cleanup(state)?;
@@ -1243,6 +1297,8 @@ impl Runner {
         }
         state.transition_to(MachineState::Initializing);
         effective_state_manager.save(&state)?;
+        // Flush live.json immediately so GUI sees the state transition
+        flush_live_state(&effective_state_manager, MachineState::Initializing);
 
         print_state_transition(MachineState::GeneratingSpec, MachineState::Initializing);
 
@@ -1375,6 +1431,7 @@ impl Runner {
         print_state_transition(state.machine_state, MachineState::PickingStory);
         state.transition_to(MachineState::PickingStory);
         self.state_manager.save(&state)?;
+        self.flush_live(MachineState::PickingStory);
 
         // Mark metadata as saved now that state has been persisted
         // This ensures cleanup_on_interruption won't remove the worktree
@@ -1444,6 +1501,7 @@ impl Runner {
             print_state_transition(MachineState::PickingStory, MachineState::RunningClaude);
             state.start_iteration(&story.id);
             self.state_manager.save(&state)?;
+            self.flush_live(MachineState::RunningClaude);
 
             // Update breadcrumb to enter Story state
             breadcrumb.enter_state(BreadcrumbState::Story);
@@ -3043,20 +3101,32 @@ mod tests {
     }
 
     #[test]
-    fn test_live_output_flusher_final_flush_no_op_when_empty() {
+    fn test_live_output_flusher_final_flush_no_op_when_no_new_lines() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
         sm.ensure_dirs().unwrap();
 
         let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
 
-        // No lines added, final flush should be a no-op
+        // Note: LiveOutputFlusher::new() now flushes immediately for heartbeat support (US-002)
+        // So live.json already exists from the constructor
+
+        // No additional lines added, final flush should be a no-op
+        // (line_count_since_flush is 0 after the initial flush in constructor)
         flusher.final_flush();
         assert_eq!(flusher.line_count_since_flush, 0);
 
-        // File should not exist (no flush needed)
+        // File SHOULD exist now (from the constructor's immediate flush)
         let loaded = sm.load_live();
-        assert!(loaded.is_none());
+        assert!(
+            loaded.is_some(),
+            "live.json should exist from constructor flush"
+        );
+        assert_eq!(
+            loaded.unwrap().output_lines.len(),
+            0,
+            "Output lines should be empty"
+        );
     }
 
     #[test]
@@ -3081,6 +3151,84 @@ mod tests {
             "Flush interval should be 200ms"
         );
         assert_eq!(LIVE_FLUSH_LINE_COUNT, 10, "Flush line count should be 10");
+    }
+
+    // ========================================================================
+    // US-002: Heartbeat Mechanism Tests
+    // ========================================================================
+
+    #[test]
+    fn test_heartbeat_interval_constant() {
+        // Verify the heartbeat interval is ~2.5 seconds
+        assert_eq!(
+            HEARTBEAT_INTERVAL_MS, 2500,
+            "Heartbeat interval should be 2500ms"
+        );
+    }
+
+    #[test]
+    fn test_live_output_flusher_new_flushes_immediately() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Creating a new flusher should immediately flush live.json
+        let _flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Verify live.json was created
+        let loaded = sm.load_live();
+        assert!(
+            loaded.is_some(),
+            "live.json should exist after flusher creation"
+        );
+
+        let live = loaded.unwrap();
+        assert_eq!(live.machine_state, MachineState::RunningClaude);
+        assert!(
+            live.is_heartbeat_fresh(),
+            "Initial heartbeat should be fresh"
+        );
+    }
+
+    #[test]
+    fn test_live_output_flusher_flush_updates_heartbeat() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        let mut flusher = LiveOutputFlusher::new(&sm, MachineState::RunningClaude);
+
+        // Add a line and flush
+        flusher.append("test output");
+        flusher.flush();
+
+        // Verify heartbeat is fresh
+        let loaded = sm.load_live().unwrap();
+        assert!(
+            loaded.is_heartbeat_fresh(),
+            "Heartbeat should be fresh after flush"
+        );
+    }
+
+    #[test]
+    fn test_flush_live_state_function() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Call the standalone flush function
+        flush_live_state(&sm, MachineState::Reviewing);
+
+        // Verify live.json was created with correct state
+        let loaded = sm.load_live();
+        assert!(
+            loaded.is_some(),
+            "live.json should exist after flush_live_state"
+        );
+
+        let live = loaded.unwrap();
+        assert_eq!(live.machine_state, MachineState::Reviewing);
+        assert!(live.is_heartbeat_fresh(), "Heartbeat should be fresh");
     }
 
     // ========================================================================

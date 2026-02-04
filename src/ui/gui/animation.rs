@@ -1,17 +1,29 @@
 //! Decorative animations for the GUI.
 //!
-//! To disable animations, simply don't call the render function.
+//! Animation functions are pure renderers - they don't schedule repaints.
+//! Call `schedule_frame()` once per frame when any animation is visible.
 
-use egui::{Color32, Sense, Ui};
+use egui::{Color32, Rect, Rounding, Sense, Stroke, Ui};
+
+/// Animation frame interval (~30fps for smooth animation with low CPU).
+const FRAME_INTERVAL_MS: u64 = 33;
+
+/// Schedule the next animation frame.
+///
+/// Call this once per frame when any animation is visible.
+/// Multiple calls per frame are harmless but wasteful.
+#[inline]
+pub fn schedule_frame(ctx: &egui::Context) {
+    ctx.request_repaint_after(std::time::Duration::from_millis(FRAME_INTERVAL_MS));
+}
 
 /// Render rising particles animation.
 ///
 /// Particles rise from the bottom center and spread outward as they rise,
 /// fading out as they reach the top.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
 pub fn render_rising_particles(ui: &mut Ui, width: f32, height: f32) {
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(33));
-
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
     let painter = ui.painter();
     let time = ui.ctx().input(|i| i.time) as f32;
@@ -87,5 +99,159 @@ pub fn render_rising_particles(ui: &mut Ui, width: f32, height: f32) {
             *dot_size,
             color.linear_multiply(alpha.max(0.0) * 0.7),
         );
+    }
+}
+
+/// Precomputed infinity path points (unit lemniscate, centered at origin).
+/// Generated once at compile time to avoid per-frame allocations.
+const NUM_POINTS: usize = 32;
+
+/// Compute a point on the unit lemniscate for parameter t (0 to TAU).
+#[inline]
+fn lemniscate_point(t: f32) -> (f32, f32) {
+    let sin_t = t.sin();
+    let cos_t = t.cos();
+    let denom = 1.0 + sin_t * sin_t;
+    (cos_t / denom, sin_t * cos_t / denom)
+}
+
+/// Render a self-drawing infinity sign animation.
+///
+/// The infinity symbol traces itself continuously in a smooth loop,
+/// with a gradient trail effect that fades out behind the leading edge.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
+///
+/// # Arguments
+/// * `painter` - The egui painter to draw with
+/// * `time` - Current animation time in seconds
+/// * `rect` - The rectangle to draw the infinity sign within
+/// * `color` - The primary color for the infinity sign
+/// * `speed` - Animation speed multiplier (1.0 = normal speed)
+pub fn render_infinity(painter: &egui::Painter, time: f32, rect: Rect, color: Color32, speed: f32) {
+    let center = rect.center();
+    let half_width = rect.width() / 2.0 - 2.0;
+    let half_height = rect.height() / 2.0 - 1.0;
+
+    // Animation cycle: 0.0 to 1.0 over the full loop
+    let cycle = (time * speed * 0.3) % 1.0;
+
+    const TRAIL_LENGTH: f32 = 0.35;
+    let head_pos = cycle;
+    let tail_pos = (cycle - TRAIL_LENGTH).rem_euclid(1.0);
+
+    // Only draw segments in the visible trail range
+    for i in 0..NUM_POINTS {
+        let seg_mid = (i as f32 + 0.5) / NUM_POINTS as f32;
+
+        // Check if this segment is within the trail
+        let in_trail = if head_pos > tail_pos {
+            seg_mid >= tail_pos && seg_mid <= head_pos
+        } else {
+            seg_mid >= tail_pos || seg_mid <= head_pos
+        };
+
+        if !in_trail {
+            continue;
+        }
+
+        // Calculate distance from head position (accounting for wraparound)
+        let dist_from_head = {
+            let direct = (head_pos - seg_mid).abs();
+            let wrapped = 1.0 - direct;
+            direct.min(wrapped)
+        };
+
+        // Alpha based on distance from head
+        let alpha = if dist_from_head < TRAIL_LENGTH {
+            let progress = 1.0 - (dist_from_head / TRAIL_LENGTH);
+            progress * progress
+        } else {
+            0.0
+        };
+
+        if alpha > 0.02 {
+            // Compute points on demand
+            let t1 = (i as f32 / NUM_POINTS as f32) * std::f32::consts::TAU;
+            let t2 = ((i + 1) as f32 / NUM_POINTS as f32) * std::f32::consts::TAU;
+            let (x1, y1) = lemniscate_point(t1);
+            let (x2, y2) = lemniscate_point(t2);
+
+            let p1 = egui::pos2(center.x + half_width * x1, center.y + half_height * y1);
+            let p2 = egui::pos2(center.x + half_width * x2, center.y + half_height * y2);
+
+            painter.line_segment([p1, p2], Stroke::new(1.5, color.linear_multiply(alpha)));
+        }
+    }
+
+    // Draw head dot
+    let head_t = cycle * std::f32::consts::TAU;
+    let (hx, hy) = lemniscate_point(head_t);
+    painter.circle_filled(
+        egui::pos2(center.x + half_width * hx, center.y + half_height * hy),
+        2.0,
+        color,
+    );
+}
+
+/// Render a horizontal progress bar with animated shimmer effect.
+///
+/// The bar fills from left to right based on progress, with a subtle
+/// shimmer highlight that sweeps across the filled portion.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
+///
+/// # Arguments
+/// * `painter` - The egui painter to draw with
+/// * `time` - Current animation time in seconds
+/// * `rect` - The rectangle for the progress bar
+/// * `progress` - Progress value from 0.0 to 1.0
+/// * `bg_color` - Background (unfilled) color
+/// * `fill_color` - Fill (progress) color
+pub fn render_progress_bar(
+    painter: &egui::Painter,
+    time: f32,
+    rect: Rect,
+    progress: f32,
+    bg_color: Color32,
+    fill_color: Color32,
+) {
+    let progress = progress.clamp(0.0, 1.0);
+    let rounding = Rounding::same(rect.height() / 2.0);
+
+    // Draw background track
+    painter.rect_filled(rect, rounding, bg_color);
+
+    if progress > 0.0 {
+        // Calculate filled portion (fills from left to right)
+        let fill_width = rect.width() * progress;
+        let fill_rect =
+            Rect::from_min_max(rect.min, egui::pos2(rect.min.x + fill_width, rect.max.y));
+        painter.rect_filled(fill_rect, rounding, fill_color);
+
+        // Animated shimmer effect - a bright highlight that sweeps across
+        let shimmer_cycle = (time * 0.5) % 2.0; // Slower cycle with pause
+        if shimmer_cycle < 1.0 {
+            let shimmer_pos = shimmer_cycle;
+            let shimmer_x = fill_rect.min.x + (fill_width * shimmer_pos);
+
+            // Only draw shimmer if it's within the filled area
+            if shimmer_x >= fill_rect.min.x && shimmer_x <= fill_rect.max.x {
+                let shimmer_width = 12.0_f32.min(fill_width * 0.3);
+                let shimmer_rect = Rect::from_min_max(
+                    egui::pos2(
+                        (shimmer_x - shimmer_width / 2.0).max(fill_rect.min.x),
+                        rect.min.y,
+                    ),
+                    egui::pos2(
+                        (shimmer_x + shimmer_width / 2.0).min(fill_rect.max.x),
+                        rect.max.y,
+                    ),
+                );
+
+                let shimmer_color = Color32::from_rgba_unmultiplied(255, 255, 255, 76);
+                painter.rect_filled(shimmer_rect, rounding, shimmer_color);
+            }
+        }
     }
 }

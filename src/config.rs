@@ -938,6 +938,8 @@ pub struct SpecSummary {
     pub completed_count: usize,
     /// Total number of stories.
     pub total_count: usize,
+    /// Whether this spec is currently being executed (has an active run).
+    pub is_active: bool,
 }
 
 /// Summary of a user story.
@@ -1007,15 +1009,22 @@ pub fn get_project_description(project_name: &str) -> Result<Option<ProjectDescr
                 .unwrap_or("unknown")
                 .to_string();
 
+            // A spec is active if there's an active run and the spec's branch matches the current branch
+            let is_active = has_active_run
+                && current_branch
+                    .as_ref()
+                    .is_some_and(|b| b == &spec.branch_name);
+
             specs.push(SpecSummary {
                 filename,
                 path: spec_path,
                 project_name: spec.project,
-                branch_name: spec.branch_name,
+                branch_name: spec.branch_name.clone(),
                 description: spec.description,
                 stories,
                 completed_count,
                 total_count,
+                is_active,
             });
         }
     }
@@ -2123,6 +2132,7 @@ mod tests {
             }],
             completed_count: 1,
             total_count: 1,
+            is_active: false,
         };
 
         assert_eq!(summary.filename, "test.json");
@@ -2130,6 +2140,7 @@ mod tests {
         assert_eq!(summary.branch_name, "feature/test");
         assert_eq!(summary.completed_count, 1);
         assert_eq!(summary.total_count, 1);
+        assert!(!summary.is_active);
     }
 
     #[test]
@@ -3392,5 +3403,88 @@ review = false
         // Deserialize back
         let parsed: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.worktree_cleanup, config.worktree_cleanup);
+    }
+
+    // US-001: Conditional Story Display in Describe View
+
+    #[test]
+    fn test_us001_spec_summary_is_active_field() {
+        // Verify SpecSummary has is_active field
+        let spec_active = SpecSummary {
+            filename: "spec-active.json".to_string(),
+            path: PathBuf::from("/test/spec-active.json"),
+            project_name: "test".to_string(),
+            branch_name: "feature/active".to_string(),
+            description: "Active spec".to_string(),
+            stories: vec![],
+            completed_count: 0,
+            total_count: 0,
+            is_active: true,
+        };
+
+        let spec_inactive = SpecSummary {
+            filename: "spec-inactive.json".to_string(),
+            path: PathBuf::from("/test/spec-inactive.json"),
+            project_name: "test".to_string(),
+            branch_name: "feature/inactive".to_string(),
+            description: "Inactive spec".to_string(),
+            stories: vec![],
+            completed_count: 0,
+            total_count: 0,
+            is_active: false,
+        };
+
+        assert!(spec_active.is_active);
+        assert!(!spec_inactive.is_active);
+    }
+
+    #[test]
+    fn test_us001_project_description_no_active_run_all_specs_inactive() {
+        // Acquire lock for thread safety
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // When there's no active run, all specs should have is_active = false
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        // If the project doesn't have an active run, all specs should be inactive
+        if !desc.has_active_run {
+            for spec in &desc.specs {
+                assert!(
+                    !spec.is_active,
+                    "Spec {} should not be active when no run is active",
+                    spec.filename
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_us001_project_description_at_most_one_spec_active() {
+        // Acquire lock for thread safety
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // At most one spec can be active at a time (matching the active branch)
+        let desc = get_project_description("autom8").unwrap().unwrap();
+
+        let active_count = desc.specs.iter().filter(|s| s.is_active).count();
+        assert!(
+            active_count <= 1,
+            "At most one spec should be active, found {}",
+            active_count
+        );
+
+        // If there's an active run, there should be exactly one active spec
+        // (if the spec for that branch exists)
+        if desc.has_active_run && desc.current_branch.is_some() {
+            let branch = desc.current_branch.as_ref().unwrap();
+            let matching_spec = desc.specs.iter().find(|s| &s.branch_name == branch);
+            if let Some(spec) = matching_spec {
+                assert!(
+                    spec.is_active,
+                    "Spec with matching branch {} should be active",
+                    branch
+                );
+            }
+        }
     }
 }

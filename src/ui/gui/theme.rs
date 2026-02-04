@@ -206,6 +206,9 @@ pub mod colors {
     /// Idle state - gray (indicates inactive).
     pub const STATUS_IDLE: Color32 = Color32::from_rgb(142, 142, 147);
 
+    /// Correcting state - orange (attention needed, distinct from warning amber).
+    pub const STATUS_CORRECTING: Color32 = Color32::from_rgb(255, 94, 58);
+
     // ==========================================================================
     // Status Background Colors (for badges/highlights)
     // ==========================================================================
@@ -224,6 +227,9 @@ pub mod colors {
 
     /// Idle state background - warm light beige.
     pub const STATUS_IDLE_BG: Color32 = Color32::from_rgb(245, 243, 239);
+
+    /// Correcting state background - light orange.
+    pub const STATUS_CORRECTING_BG: Color32 = Color32::from_rgb(255, 237, 230);
 }
 
 // Note: The Status enum is defined in the components module to avoid duplication.

@@ -235,9 +235,42 @@ pub fn print_project_description(desc: &crate::config::ProjectDescription) {
     );
 }
 
-/// Print summary of a single spec with its user stories.
+/// Print summary of a single spec.
+///
+/// Shows full details (with user stories) only for the active spec.
+/// All other specs (including when no spec is active) show condensed view.
 fn print_spec_summary(spec: &crate::config::SpecSummary) {
-    println!("{CYAN}━━━{RESET} {BOLD}{}{RESET}", spec.filename);
+    // Show "(Active)" indicator for the active spec
+    let active_label = if spec.is_active {
+        format!(" {YELLOW}(Active){RESET}")
+    } else {
+        String::new()
+    };
+
+    println!(
+        "{CYAN}━━━{RESET} {BOLD}{}{RESET}{}",
+        spec.filename, active_label
+    );
+
+    // Only show full details for the active spec
+    // All other specs (or when no spec is active) show condensed view
+    if !spec.is_active {
+        let desc_preview = if spec.description.len() > 80 {
+            format!("{}...", &spec.description[..80])
+        } else {
+            spec.description.clone()
+        };
+        let first_line = desc_preview.lines().next().unwrap_or(&desc_preview);
+        println!("{GRAY}{}{RESET}", first_line);
+        println!(
+            "{GRAY}({}/{} stories complete){RESET}",
+            spec.completed_count, spec.total_count
+        );
+        println!();
+        return;
+    }
+
+    // Full display for active spec only
     println!("{BLUE}Project:{RESET} {}", spec.project_name);
     println!("{BLUE}Branch:{RESET}  {}", spec.branch_name);
 
