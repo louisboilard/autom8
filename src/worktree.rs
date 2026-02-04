@@ -782,9 +782,6 @@ pub fn format_worktree_error(error: &str, branch_name: &str, worktree_path: &Pat
 mod tests {
     use super::*;
 
-    // Use the shared CWD_MUTEX for tests that depend on current working directory
-    use crate::test_utils::CWD_MUTEX;
-
     // ========================================================================
     // WorktreeInfo struct tests
     // ========================================================================
