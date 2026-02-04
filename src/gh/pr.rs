@@ -39,7 +39,15 @@ pub fn update_pr_description(spec: &Spec, pr_number: u32) -> Result<PRResult> {
     if let Some(template_content) = detect_pr_template(&repo_root) {
         // Template found - use agent path
         let title = format_pr_title(spec);
-        match run_template_agent(spec, &template_content, &title, Some(pr_number), |_| {}) {
+        // Draft flag is not applicable when updating existing PRs
+        match run_template_agent(
+            spec,
+            &template_content,
+            &title,
+            Some(pr_number),
+            false,
+            |_| {},
+        ) {
             Ok(TemplateAgentResult::Success(url)) => {
                 return Ok(PRResult::Updated(url));
             }
@@ -97,7 +105,12 @@ fn update_pr_description_direct(spec: &Spec, pr_number: u32) -> Result<PRResult>
 }
 
 /// Create a pull request for the current branch using the GitHub CLI
-pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRResult> {
+///
+/// # Arguments
+/// * `spec` - The spec containing PR details (title, description, user stories)
+/// * `commits_were_made` - If false, PR creation is skipped
+/// * `draft` - If true, creates PR in draft mode
+pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) -> Result<PRResult> {
     if !commits_were_made {
         return Ok(PRResult::Skipped(
             "No commits were made in this session".to_string(),
@@ -159,7 +172,7 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
     if let Some(template_content) = detect_pr_template(&repo_root) {
         // Template found - use agent path
         let title = format_pr_title(spec);
-        match run_template_agent(spec, &template_content, &title, None, |_| {}) {
+        match run_template_agent(spec, &template_content, &title, None, draft, |_| {}) {
             Ok(TemplateAgentResult::Success(url)) => {
                 return Ok(PRResult::Success(url));
             }
@@ -181,17 +194,37 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool) -> Result<PRRes
     }
 
     // No template or agent failed - use current generated description path
-    create_pull_request_direct(spec)
+    create_pull_request_direct(spec, draft)
+}
+
+/// Build command arguments for `gh pr create`.
+///
+/// Returns a vector of arguments including title, body, and optionally --draft.
+/// This is extracted for testability.
+#[cfg(test)]
+fn build_pr_create_args<'a>(title: &'a str, body: &'a str, draft: bool) -> Vec<&'a str> {
+    let mut args = vec!["pr", "create", "--title", title, "--body", body];
+    if draft {
+        args.push("--draft");
+    }
+    args
 }
 
 /// Create PR directly using generated format (internal fallback)
-fn create_pull_request_direct(spec: &Spec) -> Result<PRResult> {
+///
+/// # Arguments
+/// * `spec` - The spec containing PR title and description details
+/// * `draft` - If true, creates PR in draft mode using `--draft` flag
+fn create_pull_request_direct(spec: &Spec, draft: bool) -> Result<PRResult> {
     let title = format_pr_title(spec);
     let body = format_pr_description(spec);
 
-    let output = Command::new("gh")
-        .args(["pr", "create", "--title", &title, "--body", &body])
-        .output()?;
+    let mut args = vec!["pr", "create", "--title", &title, "--body", &body];
+    if draft {
+        args.push("--draft");
+    }
+
+    let output = Command::new("gh").args(&args).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -284,7 +317,7 @@ mod tests {
     #[test]
     fn test_create_pr_skips_when_no_commits() {
         let spec = make_test_spec();
-        let result = create_pull_request(&spec, false);
+        let result = create_pull_request(&spec, false, false);
         assert!(result.is_ok());
         match result.unwrap() {
             PRResult::Skipped(msg) => {
@@ -354,6 +387,60 @@ mod tests {
         assert!(body.contains("Summary"));
         assert!(body.contains("US-001"));
         assert!(body.contains("Test Story"));
+    }
+
+    // ========================================================================
+    // Draft flag tests
+    // ========================================================================
+
+    #[test]
+    fn test_build_pr_create_args_without_draft() {
+        let title = "Test PR Title";
+        let body = "Test PR body content";
+        let args = build_pr_create_args(title, body, false);
+
+        assert_eq!(args, vec!["pr", "create", "--title", title, "--body", body]);
+        assert!(!args.contains(&"--draft"));
+    }
+
+    #[test]
+    fn test_build_pr_create_args_with_draft() {
+        let title = "Test PR Title";
+        let body = "Test PR body content";
+        let args = build_pr_create_args(title, body, true);
+
+        assert_eq!(
+            args,
+            vec!["pr", "create", "--title", title, "--body", body, "--draft"]
+        );
+        assert!(args.contains(&"--draft"));
+    }
+
+    #[test]
+    fn test_build_pr_create_args_draft_flag_position() {
+        // Verify --draft is appended at the end
+        let args = build_pr_create_args("title", "body", true);
+        assert_eq!(args.last(), Some(&"--draft"));
+    }
+
+    #[test]
+    fn test_create_pull_request_skips_when_no_commits_regardless_of_draft() {
+        let spec = make_test_spec();
+
+        // Both draft=false and draft=true should skip when no commits
+        let result_no_draft = create_pull_request(&spec, false, false);
+        assert!(result_no_draft.is_ok());
+        match result_no_draft.unwrap() {
+            PRResult::Skipped(msg) => assert!(msg.contains("No commits")),
+            _ => panic!("Expected Skipped result"),
+        }
+
+        let result_with_draft = create_pull_request(&spec, false, true);
+        assert!(result_with_draft.is_ok());
+        match result_with_draft.unwrap() {
+            PRResult::Skipped(msg) => assert!(msg.contains("No commits")),
+            _ => panic!("Expected Skipped result"),
+        }
     }
 
     // ========================================================================

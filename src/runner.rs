@@ -839,22 +839,29 @@ impl Runner {
         }
 
         // PR Creation step
-        self.handle_pr_creation(state, spec, commits_were_made)
+        self.handle_pr_creation(state, spec, commits_were_made, config.pull_request_draft)
     }
 
     /// Handle PR creation after committing.
+    ///
+    /// # Arguments
+    /// * `state` - The current run state
+    /// * `spec` - The spec containing PR details
+    /// * `commits_were_made` - Whether commits were made in this session
+    /// * `draft` - Whether to create the PR in draft mode
     fn handle_pr_creation(
         &self,
         state: &mut RunState,
         spec: &Spec,
         commits_were_made: bool,
+        draft: bool,
     ) -> Result<()> {
         print_state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
         self.flush_live(MachineState::CreatingPR);
 
-        match create_pull_request(spec, commits_were_made) {
+        match create_pull_request(spec, commits_were_made, draft) {
             Ok(PRResult::Success(url)) => {
                 print_pr_success(&url);
                 print_state_transition(MachineState::CreatingPR, MachineState::Completed);
