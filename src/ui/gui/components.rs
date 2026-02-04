@@ -177,6 +177,22 @@ pub fn badge_background_color(status_color: Color32) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// Check if a MachineState represents a finished/terminal state.
+///
+/// US-002: Used to determine when the close button should be visible on session tabs.
+/// Terminal states are those where the run has ended (success, failure, or idle):
+/// - `Completed`: Run finished successfully
+/// - `Failed`: Run ended with an error
+/// - `Idle`: No active run (session has never started or was interrupted)
+///
+/// All other states are considered "in progress" and the close button should be hidden.
+pub fn is_terminal_state(state: MachineState) -> bool {
+    matches!(
+        state,
+        MachineState::Completed | MachineState::Failed | MachineState::Idle
+    )
+}
+
 // ============================================================================
 // Progress Components
 // ============================================================================
