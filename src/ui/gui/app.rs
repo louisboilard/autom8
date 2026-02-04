@@ -3,7 +3,6 @@
 //! This module contains the eframe application setup and main window
 //! configuration for the autom8 GUI.
 
-use crate::claude::ClaudeUsage;
 use crate::error::{Autom8Error, Result};
 use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
@@ -74,7 +73,7 @@ const OUTPUT_LINES_TO_SHOW: usize = 50;
 /// This matches the TUI's behavior for consistent user experience.
 const LIVE_OUTPUT_FRESHNESS_SECS: i64 = 5;
 
-// MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
+// MAX_BRANCH_LENGTH is imported from components module.
 
 // ============================================================================
 // Projects View Constants (using spacing scale)
@@ -1989,84 +1988,6 @@ fn load_work_summaries(session: &SessionData) -> Vec<WorkSummaryItem> {
     items.sort_by(|a, b| b.iteration.cmp(&a.iteration));
 
     items
-}
-
-/// Format a number with thousands separators (e.g., 1234567 -> "1,234,567").
-fn format_number_with_commas(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
-/// Token usage entry for a single phase.
-#[derive(Debug, Clone)]
-struct PhaseUsageEntry {
-    /// Phase name (e.g., "US-001", "Planning", "Final Review").
-    phase: String,
-    /// Usage data for this phase.
-    usage: ClaudeUsage,
-}
-
-/// Token usage data for display.
-#[derive(Debug, Clone)]
-struct TokenUsageData {
-    /// Total usage across all phases.
-    total: ClaudeUsage,
-    /// Per-phase breakdown.
-    phases: Vec<PhaseUsageEntry>,
-}
-
-/// Load token usage data from a session's run state.
-///
-/// Returns Some(TokenUsageData) if the session has usage data, None otherwise.
-fn load_token_usage(session: &SessionData) -> Option<TokenUsageData> {
-    let run = session.run.as_ref()?;
-    let total = run.total_usage.clone()?;
-
-    // Only return data if there are actual tokens used
-    if total.total_tokens() == 0 {
-        return None;
-    }
-
-    // Collect phase usage entries
-    let mut phases: Vec<PhaseUsageEntry> = run
-        .phase_usage
-        .iter()
-        .map(|(phase, usage)| PhaseUsageEntry {
-            phase: phase.clone(),
-            usage: usage.clone(),
-        })
-        .collect();
-
-    // Sort phases in a logical order: Planning first, then US-* in order, then others
-    phases.sort_by(|a, b| {
-        let order = |p: &str| -> (u8, u32) {
-            if p == "Planning" {
-                (0, 0)
-            } else if let Some(num) = p.strip_prefix("US-") {
-                if let Ok(n) = num.parse::<u32>() {
-                    (1, n)
-                } else {
-                    (2, 0)
-                }
-            } else if p == "Final Review" {
-                (3, 0)
-            } else if p == "PR & Commit" {
-                (4, 0)
-            } else {
-                (5, 0)
-            }
-        };
-        order(&a.phase).cmp(&order(&b.phase))
-    });
-
-    Some(TokenUsageData { total, phases })
 }
 
 /// The main GUI application state.
@@ -6771,14 +6692,16 @@ impl Autom8App {
         let mut tab_to_select: Option<String> = None;
         let mut tab_to_close: Option<String> = None;
 
-        // Collect visible sessions (those with open tabs)
-        let visible_sessions: Vec<(String, String)> = self
+        // Collect visible sessions (those with open tabs) with their status
+        // US-001: Include status for visual distinction between running/completed sessions
+        let visible_sessions: Vec<(String, String, Option<MachineState>)> = self
             .sessions
             .iter()
             .filter(|s| self.open_session_tabs.contains(&s.metadata.session_id))
             .map(|s| {
                 let branch_label = strip_worktree_prefix(&s.metadata.branch_name, &s.project_name);
-                (s.metadata.session_id.clone(), branch_label)
+                let state = s.run.as_ref().map(|r| r.machine_state);
+                (s.metadata.session_id.clone(), branch_label, state)
             })
             .collect();
 
@@ -6796,14 +6719,18 @@ impl Autom8App {
                         ui.horizontal_centered(|ui| {
                             ui.add_space(spacing::XS);
 
-                            for (session_id, branch_label) in &visible_sessions {
+                            for (session_id, branch_label, state) in &visible_sessions {
                                 let is_active = self
                                     .selected_session_id
                                     .as_ref()
                                     .is_some_and(|id| id == session_id);
 
-                                let (tab_clicked, close_clicked) =
-                                    self.render_active_session_tab(ui, branch_label, is_active);
+                                let (tab_clicked, close_clicked) = self.render_active_session_tab(
+                                    ui,
+                                    branch_label,
+                                    is_active,
+                                    *state,
+                                );
 
                                 if tab_clicked {
                                     tab_to_select = Some(session_id.clone());
@@ -6853,6 +6780,7 @@ impl Autom8App {
 
     /// Render a single tab in the active session tab bar.
     ///
+    /// US-001: Tabs show a status dot to distinguish running vs completed sessions.
     /// US-003: Tabs have close buttons (X) that are always visible.
     /// Returns (tab_clicked, close_clicked).
     fn render_active_session_tab(
@@ -6860,6 +6788,7 @@ impl Autom8App {
         ui: &mut egui::Ui,
         label: &str,
         is_active: bool,
+        state: Option<MachineState>,
     ) -> (bool, bool) {
         // Calculate text size
         let text_galley = ui.fonts(|f| {
@@ -6871,9 +6800,14 @@ impl Autom8App {
         });
         let text_size = text_galley.size();
 
-        // Calculate tab dimensions including close button
+        // US-001: Add space for status dot before label
+        let status_dot_radius = 4.0;
+        let status_dot_spacing = spacing::SM;
+        let status_dot_space = status_dot_radius * 2.0 + status_dot_spacing;
+
+        // Calculate tab dimensions including status dot and close button
         let close_button_space = TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING;
-        let tab_width = text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
+        let tab_width = status_dot_space + text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
         let tab_height = CONTENT_TAB_BAR_HEIGHT - TAB_UNDERLINE_HEIGHT - spacing::XS;
         let tab_size = egui::vec2(tab_width, tab_height);
 
@@ -6895,6 +6829,15 @@ impl Autom8App {
                 .rect_filled(rect, Rounding::same(rounding::BUTTON), bg_color);
         }
 
+        // US-001: Draw status dot to indicate session state
+        let status_color = state.map(state_to_color).unwrap_or(colors::STATUS_IDLE);
+        let dot_center = egui::pos2(
+            rect.left() + TAB_PADDING_H + status_dot_radius,
+            rect.center().y,
+        );
+        ui.painter()
+            .circle_filled(dot_center, status_dot_radius, status_color);
+
         // Draw text
         let text_color = if is_active {
             colors::TEXT_PRIMARY
@@ -6904,7 +6847,7 @@ impl Autom8App {
             colors::TEXT_MUTED
         };
 
-        let text_x = rect.left() + TAB_PADDING_H;
+        let text_x = rect.left() + TAB_PADDING_H + status_dot_space;
         let text_pos = egui::pos2(text_x, rect.center().y - text_size.y / 2.0);
 
         ui.painter().galley(
@@ -7164,6 +7107,30 @@ impl Autom8App {
                                         .color(colors::TEXT_MUTED),
                                 );
                             }
+
+                            // Infinity animation for non-idle states with progress
+                            if state != MachineState::Idle && session.progress.is_some() {
+                                ui.add_space(spacing::MD);
+
+                                // Fill available horizontal space
+                                let available_width = ui.available_width() - spacing::MD;
+                                if available_width > 30.0 {
+                                    let animation_height = 12.0;
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(available_width, animation_height),
+                                        Sense::hover(),
+                                    );
+                                    let time = ui.ctx().input(|i| i.time) as f32;
+                                    super::animation::render_infinity(
+                                        ui.painter(),
+                                        time,
+                                        rect,
+                                        state_color,
+                                        1.0,
+                                    );
+                                    super::animation::schedule_frame(ui.ctx());
+                                }
+                            }
                         });
 
                         ui.add_space(spacing::LG);
@@ -7191,7 +7158,10 @@ impl Autom8App {
                                         // Section header
                                         ui.label(
                                             egui::RichText::new("Output")
-                                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                                .font(typography::font(
+                                                    FontSize::Body,
+                                                    FontWeight::Medium,
+                                                ))
                                                 .color(colors::TEXT_SECONDARY),
                                         );
 
@@ -7210,8 +7180,12 @@ impl Autom8App {
                                                     .auto_shrink([false, false])
                                                     .stick_to_bottom(true)
                                                     .show(ui, |ui| {
-                                                        let output_source = get_output_for_session(session);
-                                                        Self::render_output_content(ui, &output_source);
+                                                        let output_source =
+                                                            get_output_for_session(session);
+                                                        Self::render_output_content(
+                                                            ui,
+                                                            &output_source,
+                                                        );
                                                     });
                                             });
                                     });
@@ -7226,7 +7200,6 @@ impl Autom8App {
                                         // Load data once for display
                                         let story_items = load_story_items(session);
                                         let work_summaries = load_work_summaries(session);
-                                        let token_usage = load_token_usage(session);
 
                                         let section_gap = spacing::MD;
 
@@ -7241,12 +7214,17 @@ impl Autom8App {
                                                     .show(ui, |ui| {
                                                         ui.set_min_height(stacked_section_height);
                                                         ui.set_max_height(stacked_section_height);
-                                                        ui.set_width(panel_width - spacing::MD * 2.0);
+                                                        ui.set_width(
+                                                            panel_width - spacing::MD * 2.0,
+                                                        );
 
                                                         egui::ScrollArea::vertical()
                                                             .auto_shrink([false, false])
                                                             .show(ui, |ui| {
-                                                                Self::render_story_items_content(ui, &story_items);
+                                                                Self::render_story_items_content(
+                                                                    ui,
+                                                                    &story_items,
+                                                                );
                                                             });
                                                     });
                                             });
@@ -7264,40 +7242,20 @@ impl Autom8App {
                                                     .show(ui, |ui| {
                                                         ui.set_min_height(stacked_section_height);
                                                         ui.set_max_height(stacked_section_height);
-                                                        ui.set_width(panel_width - spacing::MD * 2.0);
+                                                        ui.set_width(
+                                                            panel_width - spacing::MD * 2.0,
+                                                        );
 
                                                         egui::ScrollArea::vertical()
                                                             .auto_shrink([false, false])
                                                             .show(ui, |ui| {
-                                                                Self::render_work_summaries_content(ui, &work_summaries);
+                                                                Self::render_work_summaries_content(
+                                                                    ui,
+                                                                    &work_summaries,
+                                                                );
                                                             });
                                                     });
                                             });
-
-                                        // === Token Usage Section (Collapsible) ===
-                                        if let Some(ref usage_data) = token_usage {
-                                            ui.add_space(section_gap);
-
-                                            CollapsibleSection::new("token_usage", "Token Usage")
-                                                .default_expanded(true)
-                                                .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                    egui::Frame::none()
-                                                        .fill(colors::SURFACE_HOVER)
-                                                        .rounding(rounding::CARD)
-                                                        .inner_margin(egui::Margin::same(spacing::MD))
-                                                        .show(ui, |ui| {
-                                                            ui.set_min_height(stacked_section_height);
-                                                            ui.set_max_height(stacked_section_height);
-                                                            ui.set_width(panel_width - spacing::MD * 2.0);
-
-                                                            egui::ScrollArea::vertical()
-                                                                .auto_shrink([false, false])
-                                                                .show(ui, |ui| {
-                                                                    Self::render_token_usage_content(ui, usage_data);
-                                                                });
-                                                        });
-                                                });
-                                        }
                                     });
 
                                     // Bottom padding
@@ -7315,7 +7273,10 @@ impl Autom8App {
                                     // Section header
                                     ui.label(
                                         egui::RichText::new("Output")
-                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                            .font(typography::font(
+                                                FontSize::Body,
+                                                FontWeight::Medium,
+                                            ))
                                             .color(colors::TEXT_SECONDARY),
                                     );
 
@@ -7339,7 +7300,8 @@ impl Autom8App {
                                                 .auto_shrink([false, false])
                                                 .stick_to_bottom(true)
                                                 .show(ui, |ui| {
-                                                    let output_source = get_output_for_session(session);
+                                                    let output_source =
+                                                        get_output_for_session(session);
                                                     Self::render_output_content(ui, &output_source);
                                                 });
                                         });
@@ -7348,82 +7310,33 @@ impl Autom8App {
                                 // Gap between panels
                                 ui.add_space(panel_gap);
 
-                            // === RIGHT PANEL: Detail sections ===
-                            ui.vertical(|ui| {
-                                ui.set_width(panel_width);
+                                // === RIGHT PANEL: Detail sections ===
+                                ui.vertical(|ui| {
+                                    ui.set_width(panel_width);
 
-                                // Load data once for display
-                                let story_items = load_story_items(session);
-                                let work_summaries = load_work_summaries(session);
-                                let token_usage = load_token_usage(session);
+                                    // Load data once for display
+                                    let story_items = load_story_items(session);
+                                    let work_summaries = load_work_summaries(session);
 
-                                // Calculate heights for sections
-                                // Each section has: header + spacing + card
-                                let section_header_height =
-                                    typography::line_height(FontSize::Body) + spacing::SM;
-                                let section_gap = spacing::MD;
+                                    // Calculate heights for sections
+                                    // Each section has: header + spacing + card
+                                    let section_header_height =
+                                        typography::line_height(FontSize::Body) + spacing::SM;
+                                    let section_gap = spacing::MD;
 
-                                // Determine number of sections (token usage may be hidden)
-                                let num_sections = if token_usage.is_some() { 3.0 } else { 2.0 };
-                                let num_gaps = if token_usage.is_some() { 2.0 } else { 1.0 };
+                                    // Two sections: Stories and Work Summaries
+                                    let num_sections = 2.0;
+                                    let num_gaps = 1.0;
 
-                                // Split remaining height evenly between sections
-                                let available_for_sections = panel_height
-                                    - section_header_height * num_sections
-                                    - section_gap * num_gaps;
-                                let section_card_height =
-                                    (available_for_sections / num_sections).max(60.0);
+                                    // Split remaining height evenly between sections
+                                    let available_for_sections = panel_height
+                                        - section_header_height * num_sections
+                                        - section_gap * num_gaps;
+                                    let section_card_height =
+                                        (available_for_sections / num_sections).max(60.0);
 
-                                // === Stories Section (Collapsible) ===
-                                CollapsibleSection::new("stories", "Stories")
-                                    .default_expanded(true)
-                                    .show(ui, &mut self.section_collapsed_state, |ui| {
-                                        egui::Frame::none()
-                                            .fill(colors::SURFACE_HOVER)
-                                            .rounding(rounding::CARD)
-                                            .inner_margin(egui::Margin::same(spacing::MD))
-                                            .show(ui, |ui| {
-                                                ui.set_min_height(section_card_height);
-                                                ui.set_max_height(section_card_height);
-                                                ui.set_width(panel_width - spacing::MD * 2.0);
-
-                                                egui::ScrollArea::vertical()
-                                                    .auto_shrink([false, false])
-                                                    .show(ui, |ui| {
-                                                        Self::render_story_items_content(ui, &story_items);
-                                                    });
-                                            });
-                                    });
-
-                                // Gap between sections
-                                ui.add_space(section_gap);
-
-                                // === Work Summaries Section (Collapsible) ===
-                                CollapsibleSection::new("work_summaries", "Work Summaries")
-                                    .default_expanded(true)
-                                    .show(ui, &mut self.section_collapsed_state, |ui| {
-                                        egui::Frame::none()
-                                            .fill(colors::SURFACE_HOVER)
-                                            .rounding(rounding::CARD)
-                                            .inner_margin(egui::Margin::same(spacing::MD))
-                                            .show(ui, |ui| {
-                                                ui.set_min_height(section_card_height);
-                                                ui.set_max_height(section_card_height);
-                                                ui.set_width(panel_width - spacing::MD * 2.0);
-
-                                                egui::ScrollArea::vertical()
-                                                    .auto_shrink([false, false])
-                                                    .show(ui, |ui| {
-                                                        Self::render_work_summaries_content(ui, &work_summaries);
-                                                    });
-                                            });
-                                    });
-
-                                // === Token Usage Section (Collapsible) ===
-                                if let Some(ref usage_data) = token_usage {
-                                    ui.add_space(section_gap);
-
-                                    CollapsibleSection::new("token_usage", "Token Usage")
+                                    // === Stories Section (Collapsible) ===
+                                    CollapsibleSection::new("stories", "Stories")
                                         .default_expanded(true)
                                         .show(ui, &mut self.section_collapsed_state, |ui| {
                                             egui::Frame::none()
@@ -7438,13 +7351,42 @@ impl Autom8App {
                                                     egui::ScrollArea::vertical()
                                                         .auto_shrink([false, false])
                                                         .show(ui, |ui| {
-                                                            Self::render_token_usage_content(ui, usage_data);
+                                                            Self::render_story_items_content(
+                                                                ui,
+                                                                &story_items,
+                                                            );
                                                         });
                                                 });
                                         });
-                                }
+
+                                    // Gap between sections
+                                    ui.add_space(section_gap);
+
+                                    // === Work Summaries Section (Collapsible) ===
+                                    CollapsibleSection::new("work_summaries", "Work Summaries")
+                                        .default_expanded(true)
+                                        .show(ui, &mut self.section_collapsed_state, |ui| {
+                                            egui::Frame::none()
+                                                .fill(colors::SURFACE_HOVER)
+                                                .rounding(rounding::CARD)
+                                                .inner_margin(egui::Margin::same(spacing::MD))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_height(section_card_height);
+                                                    ui.set_max_height(section_card_height);
+                                                    ui.set_width(panel_width - spacing::MD * 2.0);
+
+                                                    egui::ScrollArea::vertical()
+                                                        .auto_shrink([false, false])
+                                                        .show(ui, |ui| {
+                                                            Self::render_work_summaries_content(
+                                                                ui,
+                                                                &work_summaries,
+                                                            );
+                                                        });
+                                                });
+                                        });
+                                });
                             });
-                        });
                         } // End of else block (side-by-side layout)
                     });
                 });
@@ -7563,177 +7505,6 @@ impl Autom8App {
                                 .color(colors::TEXT_SECONDARY),
                         );
                     });
-            }
-        }
-    }
-
-    /// Render token usage content (extracted for reuse in both layouts).
-    fn render_token_usage_content(ui: &mut egui::Ui, usage_data: &TokenUsageData) {
-        // Total Usage Summary
-        egui::Frame::none()
-            .fill(colors::SURFACE)
-            .rounding(rounding::SMALL)
-            .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
-            .show(ui, |ui| {
-                // Header: Total tokens
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Total")
-                            .font(typography::font(FontSize::Small, FontWeight::SemiBold))
-                            .color(colors::TEXT_PRIMARY),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format_number_with_commas(
-                                usage_data.total.total_tokens(),
-                            ))
-                            .font(typography::font(FontSize::Small, FontWeight::SemiBold))
-                            .color(colors::ACCENT),
-                        );
-                    });
-                });
-
-                ui.add_space(spacing::XS);
-
-                // Input tokens
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("  Input")
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_SECONDARY),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format_number_with_commas(
-                                usage_data.total.input_tokens,
-                            ))
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_SECONDARY),
-                        );
-                    });
-                });
-
-                // Output tokens
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("  Output")
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_SECONDARY),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format_number_with_commas(
-                                usage_data.total.output_tokens,
-                            ))
-                            .font(typography::font(FontSize::Small, FontWeight::Regular))
-                            .color(colors::TEXT_SECONDARY),
-                        );
-                    });
-                });
-
-                // Cache read tokens (if non-zero)
-                if usage_data.total.cache_read_tokens > 0 {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("  Cache Read")
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format_number_with_commas(
-                                    usage_data.total.cache_read_tokens,
-                                ))
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                            );
-                        });
-                    });
-                }
-
-                // Cache creation tokens (if non-zero)
-                if usage_data.total.cache_creation_tokens > 0 {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("  Cache Creation")
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format_number_with_commas(
-                                    usage_data.total.cache_creation_tokens,
-                                ))
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                            );
-                        });
-                    });
-                }
-
-                // Thinking tokens (if non-zero)
-                if usage_data.total.thinking_tokens > 0 {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("  Thinking")
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format_number_with_commas(
-                                    usage_data.total.thinking_tokens,
-                                ))
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                            );
-                        });
-                    });
-                }
-            });
-
-        // Per-Phase Breakdown (only show if there are multiple phases)
-        if usage_data.phases.len() > 1 {
-            ui.add_space(spacing::SM);
-
-            ui.label(
-                egui::RichText::new("By Phase")
-                    .font(typography::font(FontSize::Small, FontWeight::Medium))
-                    .color(colors::TEXT_MUTED),
-            );
-
-            ui.add_space(spacing::XS);
-
-            for phase_entry in &usage_data.phases {
-                egui::Frame::none()
-                    .fill(colors::SURFACE)
-                    .rounding(rounding::SMALL)
-                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(&phase_entry.phase)
-                                    .font(typography::font(FontSize::Small, FontWeight::Medium))
-                                    .color(colors::TEXT_PRIMARY),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format_number_with_commas(
-                                            phase_entry.usage.total_tokens(),
-                                        ))
-                                        .font(typography::font(
-                                            FontSize::Small,
-                                            FontWeight::Regular,
-                                        ))
-                                        .color(colors::TEXT_SECONDARY),
-                                    );
-                                },
-                            );
-                        });
-                    });
-                ui.add_space(spacing::XS);
             }
         }
     }
@@ -8743,51 +8514,5 @@ mod tests {
             }
             other => panic!("Expected StatusMessage, got {:?}", other),
         }
-    }
-
-    // =========================================================================
-    // format_number_with_commas Tests
-    // =========================================================================
-
-    #[test]
-    fn test_format_number_with_commas_zero() {
-        assert_eq!(format_number_with_commas(0), "0");
-    }
-
-    #[test]
-    fn test_format_number_with_commas_small_numbers() {
-        assert_eq!(format_number_with_commas(1), "1");
-        assert_eq!(format_number_with_commas(12), "12");
-        assert_eq!(format_number_with_commas(123), "123");
-        assert_eq!(format_number_with_commas(999), "999");
-    }
-
-    #[test]
-    fn test_format_number_with_commas_thousands() {
-        assert_eq!(format_number_with_commas(1000), "1,000");
-        assert_eq!(format_number_with_commas(1234), "1,234");
-        assert_eq!(format_number_with_commas(9999), "9,999");
-    }
-
-    #[test]
-    fn test_format_number_with_commas_millions() {
-        assert_eq!(format_number_with_commas(1000000), "1,000,000");
-        assert_eq!(format_number_with_commas(1234567), "1,234,567");
-        assert_eq!(format_number_with_commas(9999999), "9,999,999");
-    }
-
-    #[test]
-    fn test_format_number_with_commas_large_numbers() {
-        assert_eq!(format_number_with_commas(1000000000), "1,000,000,000");
-        assert_eq!(format_number_with_commas(123456789012), "123,456,789,012");
-    }
-
-    #[test]
-    fn test_format_number_with_commas_boundary_values() {
-        // Test values at boundaries between thousand groups
-        assert_eq!(format_number_with_commas(100), "100");
-        assert_eq!(format_number_with_commas(1000), "1,000");
-        assert_eq!(format_number_with_commas(10000), "10,000");
-        assert_eq!(format_number_with_commas(100000), "100,000");
     }
 }
