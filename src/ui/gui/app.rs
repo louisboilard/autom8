@@ -4,6 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
+use crate::process::{ProcessMetrics, ProcessMonitor};
 use crate::state::{MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
@@ -87,6 +88,32 @@ const OUTPUT_LINES_TO_SHOW: usize = 12;
 
 /// Maximum number of columns in the grid layout (2x2 grid for 1/4 screen each).
 const MAX_GRID_COLUMNS: usize = 2;
+
+// ============================================================================
+// Expandable Session Card Constants (US-005)
+// ============================================================================
+
+/// Additional height when a session card is expanded.
+/// Includes: Process info section (~60px) + Resource meters (~40px) + Action buttons (~40px) + spacing.
+const CARD_EXPANDED_EXTRA_HEIGHT: f32 = 160.0;
+
+/// Height of the expand/collapse toggle button.
+const CARD_EXPAND_BUTTON_SIZE: f32 = 24.0;
+
+/// Height of action buttons in expanded view.
+const CARD_ACTION_BUTTON_HEIGHT: f32 = 28.0;
+
+/// Width of action buttons in expanded view.
+const CARD_ACTION_BUTTON_WIDTH: f32 = 80.0;
+
+/// Spacing between action buttons.
+const CARD_ACTION_BUTTON_GAP: f32 = 8.0;
+
+/// Height of resource meter bars.
+const RESOURCE_METER_HEIGHT: f32 = 8.0;
+
+/// Animation duration for card expansion (seconds).
+const CARD_EXPAND_ANIMATION_DURATION: f32 = 0.15;
 
 // MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
@@ -1160,6 +1187,244 @@ impl PendingCleanOperation {
 }
 
 // ============================================================================
+// Process Control State (US-008)
+// ============================================================================
+
+/// Types of actions that can be in progress on a session.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActionType {
+    Killing,
+    Pausing,
+    Resuming,
+}
+
+impl ActionType {
+    /// Get the display text for this action type.
+    pub fn display_text(&self) -> &'static str {
+        match self {
+            ActionType::Killing => "Killing...",
+            ActionType::Pausing => "Pausing...",
+            ActionType::Resuming => "Resuming...",
+        }
+    }
+}
+
+/// Feedback state for an in-progress action.
+#[derive(Debug, Clone)]
+pub struct ActionFeedback {
+    /// The type of action in progress.
+    pub action_type: ActionType,
+    /// When the action started (for timeout/display duration).
+    pub started_at: Instant,
+}
+
+impl ActionFeedback {
+    /// Create new action feedback.
+    pub fn new(action_type: ActionType) -> Self {
+        Self {
+            action_type,
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Duration in ms after which feedback should be cleared.
+    pub const FEEDBACK_DURATION_MS: u64 = 500;
+
+    /// Check if the feedback has expired and should be cleared.
+    pub fn is_expired(&self) -> bool {
+        self.started_at.elapsed() > Duration::from_millis(Self::FEEDBACK_DURATION_MS)
+    }
+}
+
+/// Error from a process control action.
+#[derive(Debug, Clone)]
+pub struct ProcessControlError {
+    /// Error message to display.
+    pub message: String,
+    /// When the error occurred (for auto-clear timeout).
+    pub occurred_at: Instant,
+}
+
+impl ProcessControlError {
+    /// Create a new error.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            occurred_at: Instant::now(),
+        }
+    }
+
+    /// Duration in ms after which error should be auto-cleared.
+    pub const ERROR_DISPLAY_DURATION_MS: u64 = 5000;
+
+    /// Check if the error has expired and should be cleared.
+    pub fn is_expired(&self) -> bool {
+        self.occurred_at.elapsed() > Duration::from_millis(Self::ERROR_DISPLAY_DURATION_MS)
+    }
+}
+
+// ============================================================================
+// Kill Process Confirmation (US-005)
+// ============================================================================
+
+/// Pending kill operation awaiting user confirmation.
+///
+/// US-005: Kill button shows confirmation before executing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingKillOperation {
+    /// The session ID (for matching after confirmation).
+    pub session_id: String,
+    /// The project name (for display in the dialog).
+    pub project_name: String,
+    /// The branch name (for display in the dialog).
+    pub branch_name: String,
+}
+
+impl PendingKillOperation {
+    /// Create a new pending kill operation.
+    pub fn new(session_id: String, project_name: String, branch_name: String) -> Self {
+        Self {
+            session_id,
+            project_name,
+            branch_name,
+        }
+    }
+
+    /// Get the title for the confirmation dialog.
+    pub fn title(&self) -> &'static str {
+        "Kill Process"
+    }
+
+    /// Get the message for the confirmation dialog.
+    pub fn message(&self) -> String {
+        format!(
+            "Are you sure you want to kill this session?\n\n\
+             Project: {}\n\
+             Branch: {}\n\n\
+             This cannot be undone.",
+            self.project_name, self.branch_name
+        )
+    }
+}
+
+// ============================================================================
+// Session Card Actions (US-005)
+// ============================================================================
+
+/// Actions that can be triggered from a session card.
+///
+/// Returned by `render_session_card_inner` to indicate what user interactions occurred.
+#[derive(Debug, Clone, Default)]
+struct SessionCardActions {
+    /// User clicked the expand/collapse toggle.
+    toggle_expanded: bool,
+    /// User clicked the kill button (needs confirmation).
+    kill_clicked: bool,
+    /// User clicked the pause/resume button.
+    pause_clicked: bool,
+    /// User clicked the view details button.
+    details_clicked: bool,
+}
+
+// ============================================================================
+// Process Detail Modal State (US-006)
+// ============================================================================
+
+/// State for the process detail modal.
+///
+/// US-006: Modal dialog for viewing comprehensive process details and full output history.
+/// Opened when clicking "View Details" button on expanded session card.
+#[derive(Debug, Clone)]
+pub struct ProcessDetailModalState {
+    /// The session ID being viewed.
+    pub session_id: String,
+    /// Project name for display.
+    pub project_name: String,
+    /// Branch name for display.
+    pub branch_name: String,
+    /// Whether this is the main session or a worktree.
+    pub is_main_session: bool,
+    /// Whether auto-scroll is enabled for the output view.
+    /// When true, output scrolls to bottom automatically on new content.
+    pub auto_scroll: bool,
+    /// Current scroll offset (used to detect manual scrolling).
+    /// When user scrolls up, auto_scroll is disabled.
+    pub last_scroll_offset: f32,
+}
+
+impl ProcessDetailModalState {
+    /// Create a new process detail modal state.
+    pub fn new(
+        session_id: String,
+        project_name: String,
+        branch_name: String,
+        is_main_session: bool,
+    ) -> Self {
+        Self {
+            session_id,
+            project_name,
+            branch_name,
+            is_main_session,
+            auto_scroll: true,
+            last_scroll_offset: 0.0,
+        }
+    }
+
+    /// Get the title for the modal header.
+    pub fn title(&self) -> String {
+        if self.is_main_session {
+            format!("{} (main)", self.project_name)
+        } else {
+            format!("{} ({})", self.project_name, &self.session_id)
+        }
+    }
+}
+
+// ============================================================================
+// Process Detail Modal Constants (US-006)
+// ============================================================================
+
+/// Modal width as a fraction of window width (~80%).
+const DETAIL_MODAL_WIDTH_FRACTION: f32 = 0.8;
+
+/// Modal height as a fraction of window height (~90%).
+const DETAIL_MODAL_HEIGHT_FRACTION: f32 = 0.9;
+
+/// Minimum modal width to ensure usability.
+const DETAIL_MODAL_MIN_WIDTH: f32 = 600.0;
+
+/// Minimum modal height to ensure usability.
+const DETAIL_MODAL_MIN_HEIGHT: f32 = 400.0;
+
+/// Height of the modal header section.
+const DETAIL_MODAL_HEADER_HEIGHT: f32 = 60.0;
+
+/// Height of the modal footer section.
+const DETAIL_MODAL_FOOTER_HEIGHT: f32 = 56.0;
+
+/// Internal padding for modal sections.
+const DETAIL_MODAL_SECTION_PADDING: f32 = 16.0;
+
+/// Height of section headers in the modal body.
+const DETAIL_MODAL_SECTION_HEADER_HEIGHT: f32 = 24.0;
+
+/// Height of info rows in the Process Info section.
+#[allow(dead_code)]
+const DETAIL_MODAL_INFO_ROW_HEIGHT: f32 = 20.0;
+
+/// Height of resource meter bars.
+const DETAIL_MODAL_METER_HEIGHT: f32 = 12.0;
+
+/// Gap between footer buttons.
+const DETAIL_MODAL_BUTTON_GAP: f32 = 12.0;
+
+/// Width of footer buttons.
+const DETAIL_MODAL_BUTTON_WIDTH: f32 = 100.0;
+
+/// Height of footer buttons.
+const DETAIL_MODAL_BUTTON_HEIGHT: f32 = 36.0;
+
+// ============================================================================
 // Result Modal Types (US-007)
 // ============================================================================
 
@@ -1602,6 +1867,53 @@ pub struct Autom8App {
     /// Cleanup result to display in a modal after operation completes.
     /// When Some, a result modal is displayed with the cleanup summary.
     pending_result_modal: Option<CleanupResult>,
+
+    // ========================================================================
+    // Expandable Session Cards State (US-005)
+    // ========================================================================
+    /// Set of session IDs that are currently expanded.
+    /// Persists during refresh cycles (not reset when data is reloaded).
+    expanded_sessions: std::collections::HashSet<String>,
+
+    /// Pending kill confirmation for a session.
+    /// When Some, shows a confirmation dialog before killing the process.
+    pending_kill_confirmation: Option<PendingKillOperation>,
+
+    /// Animation progress for card expansion (0.0 = collapsed, 1.0 = expanded).
+    /// Maps session_id to animation progress for smooth height transitions.
+    card_expansion_progress: std::collections::HashMap<String, f32>,
+
+    // ========================================================================
+    // Process Detail Modal State (US-006)
+    // ========================================================================
+    /// Process detail modal state.
+    /// When Some, the process detail modal is displayed for the specified session.
+    pending_detail_modal: Option<ProcessDetailModalState>,
+
+    // ========================================================================
+    // Process Monitoring State (US-007)
+    // ========================================================================
+    /// Process monitors for active sessions.
+    /// Maps session_id to ProcessMonitor for tracking CPU/memory usage.
+    /// Monitors are created when a session's PID is discovered and removed
+    /// when the session ends or the process exits.
+    process_monitors: std::collections::HashMap<String, ProcessMonitor>,
+
+    // ========================================================================
+    // Process Control State (US-008)
+    // ========================================================================
+    /// Set of session IDs that are currently paused (SIGSTOP sent).
+    /// Used to track pause state across GUI refreshes and toggle button labels.
+    paused_sessions: std::collections::HashSet<String>,
+
+    /// Pending action feedback (brief "Killing...", "Pausing...", etc. state).
+    /// Maps session_id to the pending action message and timestamp.
+    /// Cleared after a short duration (~500ms) or when the action completes.
+    pending_action_feedback: std::collections::HashMap<String, ActionFeedback>,
+
+    /// Last error message from a process control action.
+    /// Displayed in a toast-style notification and auto-cleared.
+    process_control_error: Option<ProcessControlError>,
 }
 
 impl Default for Autom8App {
@@ -1655,6 +1967,14 @@ impl Autom8App {
             command_tx,
             pending_clean_confirmation: None,
             pending_result_modal: None,
+            expanded_sessions: std::collections::HashSet::new(),
+            pending_kill_confirmation: None,
+            card_expansion_progress: std::collections::HashMap::new(),
+            pending_detail_modal: None,
+            process_monitors: std::collections::HashMap::new(),
+            paused_sessions: std::collections::HashSet::new(),
+            pending_action_feedback: std::collections::HashMap::new(),
+            process_control_error: None,
         };
         // Initial data load
         app.refresh_data();
@@ -1714,6 +2034,44 @@ impl Autom8App {
     /// Toggles the sidebar collapsed state.
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+    }
+
+    // ========================================================================
+    // Expandable Session Cards State (US-005)
+    // ========================================================================
+
+    /// Returns whether a session card is expanded.
+    pub fn is_session_expanded(&self, session_id: &str) -> bool {
+        self.expanded_sessions.contains(session_id)
+    }
+
+    /// Toggles the expanded state of a session card.
+    pub fn toggle_session_expanded(&mut self, session_id: &str) {
+        if self.expanded_sessions.contains(session_id) {
+            self.expanded_sessions.remove(session_id);
+        } else {
+            self.expanded_sessions.insert(session_id.to_string());
+        }
+    }
+
+    /// Sets the expanded state of a session card.
+    pub fn set_session_expanded(&mut self, session_id: &str, expanded: bool) {
+        if expanded {
+            self.expanded_sessions.insert(session_id.to_string());
+        } else {
+            self.expanded_sessions.remove(session_id);
+        }
+    }
+
+    /// Gets the animation progress for a card expansion (0.0 = collapsed, 1.0 = expanded).
+    pub fn card_expansion_progress(&self, session_id: &str) -> f32 {
+        *self.card_expansion_progress.get(session_id).unwrap_or(&0.0)
+    }
+
+    /// Sets the animation progress for a card expansion.
+    fn set_card_expansion_progress(&mut self, session_id: &str, progress: f32) {
+        self.card_expansion_progress
+            .insert(session_id.to_string(), progress);
     }
 
     // ========================================================================
@@ -2644,6 +3002,12 @@ impl Autom8App {
     /// Loads project and session data, handling errors gracefully.
     /// Missing or corrupted files are captured as `load_error` strings
     /// rather than causing failures.
+    ///
+    /// Also manages process monitors for active sessions (US-007):
+    /// - Creates monitors for sessions with PIDs that don't have monitors yet
+    /// - Refreshes existing monitors to get updated CPU/memory metrics
+    /// - Removes monitors for sessions that no longer exist
+    /// - Populates process_metrics in sessions from their monitors
     pub fn refresh_data(&mut self) {
         self.last_refresh = Instant::now();
 
@@ -2654,6 +3018,241 @@ impl Autom8App {
         self.projects = ui_data.projects;
         self.sessions = ui_data.sessions;
         self.has_active_runs = ui_data.has_active_runs;
+
+        // Update process monitors for sessions with PIDs (US-007)
+        self.update_process_monitors();
+    }
+
+    // ========================================================================
+    // Process Control Methods (US-008)
+    // ========================================================================
+
+    /// Kill a process by sending SIGKILL.
+    ///
+    /// US-008: Sends SIGKILL to the Claude process to terminate it immediately.
+    /// Called when user confirms kill action from the confirmation dialog.
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID whose process should be killed
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the signal was sent successfully
+    /// * `Ok(false)` if no PID was found for the session
+    /// * `Err(message)` if the signal failed to send
+    #[cfg(unix)]
+    fn kill_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
+        // Find the session and its PID
+        let pid = self
+            .sessions
+            .iter()
+            .find(|s| s.metadata.session_id == session_id)
+            .and_then(|s| s.pid);
+
+        let Some(pid) = pid else {
+            return Ok(false);
+        };
+
+        // Send SIGKILL
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+
+        if result == 0 {
+            // Clean up paused state if it was paused
+            self.paused_sessions.remove(session_id);
+            // Remove the process monitor
+            self.process_monitors.remove(session_id);
+            Ok(true)
+        } else {
+            let err = std::io::Error::last_os_error();
+            // ESRCH means process doesn't exist (already dead) - not an error
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                self.paused_sessions.remove(session_id);
+                self.process_monitors.remove(session_id);
+                Ok(true)
+            } else {
+                Err(format!("Failed to kill process: {}", err))
+            }
+        }
+    }
+
+    /// Kill a process (non-Unix stub).
+    #[cfg(not(unix))]
+    fn kill_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
+        Err("Process control is not supported on this platform".to_string())
+    }
+
+    /// Pause a process by sending SIGSTOP.
+    ///
+    /// US-008: Sends SIGSTOP to pause the Claude process.
+    /// The button should toggle to show "Resume" after pausing.
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID whose process should be paused
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the signal was sent successfully
+    /// * `Ok(false)` if no PID was found for the session
+    /// * `Err(message)` if the signal failed to send
+    #[cfg(unix)]
+    fn pause_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
+        // Find the session and its PID
+        let pid = self
+            .sessions
+            .iter()
+            .find(|s| s.metadata.session_id == session_id)
+            .and_then(|s| s.pid);
+
+        let Some(pid) = pid else {
+            return Ok(false);
+        };
+
+        // Send SIGSTOP
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
+
+        if result == 0 {
+            // Track as paused
+            self.paused_sessions.insert(session_id.to_string());
+            Ok(true)
+        } else {
+            let err = std::io::Error::last_os_error();
+            // ESRCH means process doesn't exist - treat as "no process to pause"
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                Ok(false)
+            } else {
+                Err(format!("Failed to pause process: {}", err))
+            }
+        }
+    }
+
+    /// Pause a process (non-Unix stub).
+    #[cfg(not(unix))]
+    fn pause_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
+        Err("Process control is not supported on this platform".to_string())
+    }
+
+    /// Resume a paused process by sending SIGCONT.
+    ///
+    /// US-008: Sends SIGCONT to resume a paused Claude process.
+    /// The button should toggle back to show "Pause" after resuming.
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID whose process should be resumed
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the signal was sent successfully
+    /// * `Ok(false)` if no PID was found for the session
+    /// * `Err(message)` if the signal failed to send
+    #[cfg(unix)]
+    fn resume_process(&mut self, session_id: &str) -> std::result::Result<bool, String> {
+        // Find the session and its PID
+        let pid = self
+            .sessions
+            .iter()
+            .find(|s| s.metadata.session_id == session_id)
+            .and_then(|s| s.pid);
+
+        let Some(pid) = pid else {
+            return Ok(false);
+        };
+
+        // Send SIGCONT
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGCONT) };
+
+        if result == 0 {
+            // Remove from paused set
+            self.paused_sessions.remove(session_id);
+            Ok(true)
+        } else {
+            let err = std::io::Error::last_os_error();
+            // ESRCH means process doesn't exist - treat as "no process to resume"
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                self.paused_sessions.remove(session_id);
+                Ok(false)
+            } else {
+                Err(format!("Failed to resume process: {}", err))
+            }
+        }
+    }
+
+    /// Resume a process (non-Unix stub).
+    #[cfg(not(unix))]
+    fn resume_process(&mut self, _session_id: &str) -> std::result::Result<bool, String> {
+        Err("Process control is not supported on this platform".to_string())
+    }
+
+    /// Check if a session is currently paused.
+    fn is_session_paused(&self, session_id: &str) -> bool {
+        self.paused_sessions.contains(session_id)
+    }
+
+    /// Clear expired action feedback entries.
+    fn clear_expired_feedback(&mut self) {
+        self.pending_action_feedback
+            .retain(|_, feedback| !feedback.is_expired());
+    }
+
+    /// Clear expired process control errors.
+    fn clear_expired_errors(&mut self) {
+        if let Some(ref error) = self.process_control_error {
+            if error.is_expired() {
+                self.process_control_error = None;
+            }
+        }
+    }
+
+    /// Update process monitors for active sessions (US-007).
+    ///
+    /// This method:
+    /// - Creates ProcessMonitor instances for sessions that have PIDs but no monitor
+    /// - Refreshes existing monitors to get updated metrics
+    /// - Removes monitors for sessions that no longer exist or have no PID
+    /// - Populates the process_metrics field in sessions from their monitors
+    fn update_process_monitors(&mut self) {
+        // Collect current session IDs and their PIDs
+        let session_pids: std::collections::HashMap<String, Option<u32>> = self
+            .sessions
+            .iter()
+            .map(|s| (s.metadata.session_id.clone(), s.pid))
+            .collect();
+
+        // Remove monitors for sessions that no longer exist or have no PID
+        self.process_monitors.retain(|session_id, _| {
+            session_pids
+                .get(session_id)
+                .map(|pid| pid.is_some())
+                .unwrap_or(false)
+        });
+
+        // Create monitors for sessions with PIDs that don't have monitors yet
+        for session in &self.sessions {
+            if let Some(pid) = session.pid {
+                if !self
+                    .process_monitors
+                    .contains_key(&session.metadata.session_id)
+                {
+                    self.process_monitors.insert(
+                        session.metadata.session_id.clone(),
+                        ProcessMonitor::new(pid),
+                    );
+                }
+            }
+        }
+
+        // Refresh all monitors and collect metrics
+        let mut metrics_map: std::collections::HashMap<String, Option<ProcessMetrics>> =
+            std::collections::HashMap::new();
+        for (session_id, monitor) in &mut self.process_monitors {
+            monitor.refresh();
+            metrics_map.insert(session_id.clone(), monitor.metrics());
+        }
+
+        // Populate process_metrics in sessions
+        // Handle race condition: if monitor returns None (process exited), metrics will be None
+        for session in &mut self.sessions {
+            session.process_metrics = metrics_map
+                .get(&session.metadata.session_id)
+                .cloned()
+                .flatten();
+        }
     }
 }
 
@@ -2664,6 +3263,10 @@ impl eframe::App for Autom8App {
 
         // Poll for command execution messages from background threads
         self.poll_command_messages();
+
+        // US-008: Clear expired action feedback and errors
+        self.clear_expired_feedback();
+        self.clear_expired_errors();
 
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
@@ -2728,6 +3331,15 @@ impl eframe::App for Autom8App {
 
         // Render result modal if cleanup operation completed (US-007)
         self.render_result_modal(ctx);
+
+        // Render kill confirmation dialog (US-005)
+        self.render_kill_confirmation_dialog(ctx);
+
+        // Render process detail modal (US-006)
+        self.render_process_detail_modal(ctx);
+
+        // Render process control error toast (US-008)
+        self.render_process_control_error_toast(ctx);
     }
 }
 
@@ -3289,6 +3901,759 @@ impl Autom8App {
             }
             ModalAction::None => {
                 // Modal is still open, do nothing
+            }
+        }
+    }
+
+    /// Render the kill confirmation dialog overlay.
+    ///
+    /// US-005: Kill button shows confirmation before executing.
+    /// This method renders a modal dialog when `pending_kill_confirmation` is Some.
+    fn render_kill_confirmation_dialog(&mut self, ctx: &egui::Context) {
+        // Early return if no confirmation is pending
+        let pending = match &self.pending_kill_confirmation {
+            Some(op) => op.clone(),
+            None => return,
+        };
+
+        // Create the modal using the reusable component
+        let modal = Modal::new(pending.title())
+            .id("kill_confirmation")
+            .message(pending.message())
+            .cancel_button(ModalButton::secondary("Cancel"))
+            .confirm_button(ModalButton::destructive("Kill Process"));
+
+        match modal.show(ctx) {
+            ModalAction::Confirmed => {
+                // US-008: Actually kill the process via SIGKILL
+                let session_id = pending.session_id.clone();
+
+                // Set action feedback
+                self.pending_action_feedback
+                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Killing));
+
+                // Send the kill signal
+                match self.kill_process(&session_id) {
+                    Ok(true) => {
+                        // Successfully killed
+                    }
+                    Ok(false) => {
+                        // No process to kill (already exited)
+                    }
+                    Err(msg) => {
+                        // Failed to kill - show error
+                        self.process_control_error = Some(ProcessControlError::new(msg));
+                    }
+                }
+
+                self.pending_kill_confirmation = None;
+            }
+            ModalAction::Cancelled => {
+                self.pending_kill_confirmation = None;
+            }
+            ModalAction::None => {
+                // Modal is still open, do nothing
+            }
+        }
+    }
+
+    /// Render the process detail modal overlay.
+    ///
+    /// US-006: Modal dialog for viewing comprehensive process details and full output history.
+    /// This method renders a large modal when `pending_detail_modal` is Some.
+    fn render_process_detail_modal(&mut self, ctx: &egui::Context) {
+        // Early return if no detail modal is pending
+        let modal_state = match &self.pending_detail_modal {
+            Some(state) => state.clone(),
+            None => return,
+        };
+
+        // Find the session data for this modal
+        let session_data = self
+            .sessions
+            .iter()
+            .find(|s| s.metadata.session_id == modal_state.session_id)
+            .cloned();
+
+        // US-008: Check if session is paused
+        let is_session_paused = self.paused_sessions.contains(&modal_state.session_id);
+
+        // Calculate modal dimensions
+        let screen_rect = ctx.screen_rect();
+        let modal_width =
+            (screen_rect.width() * DETAIL_MODAL_WIDTH_FRACTION).max(DETAIL_MODAL_MIN_WIDTH);
+        let modal_height =
+            (screen_rect.height() * DETAIL_MODAL_HEIGHT_FRACTION).max(DETAIL_MODAL_MIN_HEIGHT);
+
+        // Calculate position (centered)
+        let modal_x = (screen_rect.width() - modal_width) / 2.0;
+        let modal_y = (screen_rect.height() - modal_height) / 2.0;
+        let modal_pos = Pos2::new(modal_x, modal_y);
+
+        // Track whether to close the modal
+        let mut should_close = false;
+        // Track action button clicks
+        let mut kill_clicked = false;
+        let mut pause_clicked = false;
+        // Track auto_scroll toggle
+        let mut toggle_auto_scroll = false;
+
+        // Render backdrop (semi-transparent overlay that captures clicks)
+        egui::Area::new(egui::Id::new("detail_modal_backdrop"))
+            .order(Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                // Draw semi-transparent backdrop
+                ui.painter().rect_filled(
+                    screen_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 128),
+                );
+
+                // Capture clicks on backdrop to close modal
+                let (_, response) = ui.allocate_exact_size(screen_rect.size(), Sense::click());
+                if response.clicked() {
+                    should_close = true;
+                }
+            });
+
+        // Render modal dialog
+        egui::Area::new(egui::Id::new("detail_modal_dialog"))
+            .order(Order::Foreground)
+            .fixed_pos(modal_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(theme::shadow::elevated())
+                    .stroke(Stroke::new(1.0, colors::BORDER))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(modal_width, modal_height));
+                        ui.set_max_size(Vec2::new(modal_width, modal_height));
+
+                        // Use vertical layout for header, body, footer
+                        ui.vertical(|ui| {
+                            // ==================================================================
+                            // HEADER: Session name, state badge, duration
+                            // ==================================================================
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(modal_width, DETAIL_MODAL_HEADER_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                    // Title
+                                    ui.label(
+                                        egui::RichText::new(modal_state.title())
+                                            .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                                            .color(colors::TEXT_PRIMARY),
+                                    );
+
+                                    // State badge
+                                    if let Some(ref session) = session_data {
+                                        if let Some(ref run) = session.run {
+                                            ui.add_space(spacing::MD);
+                                            let state_color = state_to_color(run.machine_state);
+                                            let state_text = format_state(run.machine_state);
+
+                                            // Draw badge background
+                                            let _badge_text = egui::RichText::new(state_text)
+                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                .color(Color32::WHITE);
+                                            let galley = ui.painter().layout_no_wrap(
+                                                state_text.to_string(),
+                                                typography::font(FontSize::Caption, FontWeight::Medium),
+                                                Color32::WHITE,
+                                            );
+                                            let badge_width = galley.rect.width() + 16.0;
+                                            let badge_height = 20.0;
+                                            let (badge_rect, _) = ui.allocate_exact_size(
+                                                Vec2::new(badge_width, badge_height),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                badge_rect,
+                                                Rounding::same(4.0),
+                                                badge_background_color(state_color),
+                                            );
+                                            ui.painter().galley(
+                                                Pos2::new(badge_rect.center().x - galley.rect.width() / 2.0, badge_rect.center().y - galley.rect.height() / 2.0),
+                                                galley,
+                                                Color32::TRANSPARENT,
+                                            );
+                                        }
+                                    }
+
+                                    // Spacer
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                        // Duration
+                                        if let Some(ref session) = session_data {
+                                            if let Some(ref run) = session.run {
+                                                let duration_text = format_duration(run.started_at);
+                                                ui.label(
+                                                    egui::RichText::new(duration_text)
+                                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                                        .color(colors::TEXT_SECONDARY),
+                                                );
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+
+                            // Separator
+                            ui.add_space(spacing::XS);
+                            let sep_rect = Rect::from_min_size(
+                                ui.cursor().min,
+                                Vec2::new(modal_width, 1.0),
+                            );
+                            ui.painter().rect_filled(sep_rect, Rounding::ZERO, colors::SEPARATOR);
+                            ui.add_space(1.0);
+
+                            // ==================================================================
+                            // BODY: Process Info, Resources, Output History, Error Details
+                            // ==================================================================
+                            let body_height = modal_height - DETAIL_MODAL_HEADER_HEIGHT - DETAIL_MODAL_FOOTER_HEIGHT - 2.0;
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(modal_width, body_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                    // Horizontal split: left side (info + resources), right side (output)
+                                    let left_width = 280.0;
+                                    let right_width = modal_width - left_width - DETAIL_MODAL_SECTION_PADDING * 3.0;
+                                    let content_height = body_height - DETAIL_MODAL_SECTION_PADDING * 2.0;
+
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                        // Left column: Process Info + Resources
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(left_width, content_height),
+                                            egui::Layout::top_down(egui::Align::LEFT),
+                                            |ui| {
+                                                // Process Info section
+                                                ui.label(
+                                                    egui::RichText::new("Process Info")
+                                                        .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                                        .color(colors::TEXT_PRIMARY),
+                                                );
+                                                ui.add_space(spacing::SM);
+
+                                                // Info rows
+                                                if let Some(ref session) = session_data {
+                                                    // PID (US-007 - uses real data from session.pid)
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("PID:")
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                .color(colors::TEXT_SECONDARY),
+                                                        );
+                                                        let pid_text = match session.pid {
+                                                            Some(pid) => pid.to_string(),
+                                                            None => "—".to_string(),
+                                                        };
+                                                        ui.label(
+                                                            egui::RichText::new(pid_text)
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                .color(colors::TEXT_PRIMARY),
+                                                        );
+                                                    });
+
+                                                    // Spawn time
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("Started:")
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                .color(colors::TEXT_SECONDARY),
+                                                        );
+                                                        if let Some(ref run) = session.run {
+                                                            let time_str = format_relative_time(run.started_at);
+                                                            ui.label(
+                                                                egui::RichText::new(time_str)
+                                                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                    .color(colors::TEXT_PRIMARY),
+                                                            );
+                                                        } else {
+                                                            ui.label(
+                                                                egui::RichText::new("—")
+                                                                    .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                    .color(colors::TEXT_PRIMARY),
+                                                            );
+                                                        }
+                                                    });
+
+                                                    // Pause state (placeholder)
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("Paused:")
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                .color(colors::TEXT_SECONDARY),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new("No")
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                .color(colors::TEXT_PRIMARY),
+                                                        );
+                                                    });
+
+                                                    // Exit code (if terminated)
+                                                    if let Some(ref run) = session.run {
+                                                        if run.finished_at.is_some() {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label(
+                                                                    egui::RichText::new("Exit Code:")
+                                                                        .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                        .color(colors::TEXT_SECONDARY),
+                                                                );
+                                                                let exit_text = match run.status {
+                                                                    crate::state::RunStatus::Completed => "0 (success)".to_string(),
+                                                                    crate::state::RunStatus::Failed => "1 (failed)".to_string(),
+                                                                    crate::state::RunStatus::Interrupted => "— (interrupted)".to_string(),
+                                                                    _ => "—".to_string(),
+                                                                };
+                                                                ui.label(
+                                                                    egui::RichText::new(exit_text)
+                                                                        .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                        .color(colors::TEXT_PRIMARY),
+                                                                );
+                                                            });
+                                                        }
+                                                    }
+
+                                                    // Branch
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new("Branch:")
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                .color(colors::TEXT_SECONDARY),
+                                                        );
+                                                        let branch = truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH);
+                                                        ui.label(
+                                                            egui::RichText::new(branch)
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                .color(colors::TEXT_PRIMARY),
+                                                        );
+                                                    });
+                                                } else {
+                                                    ui.label(
+                                                        egui::RichText::new("Session not found")
+                                                            .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                            .color(colors::TEXT_MUTED),
+                                                    );
+                                                }
+
+                                                ui.add_space(spacing::LG);
+
+                                                // Resources section
+                                                ui.label(
+                                                    egui::RichText::new("Resources")
+                                                        .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                                        .color(colors::TEXT_PRIMARY),
+                                                );
+                                                ui.add_space(spacing::SM);
+
+                                                // Get metrics from session_data (US-007)
+                                                let (cpu_percent, cpu_text, mem_percent, mem_text) = session_data
+                                                    .as_ref()
+                                                    .and_then(|s| s.process_metrics.as_ref())
+                                                    .map(|m| {
+                                                        let cpu_pct = m.cpu_percent.min(100.0) / 100.0;
+                                                        let mem_pct = m.memory_percent.min(100.0) / 100.0;
+                                                        let mem_mb = m.memory_bytes as f64 / 1024.0 / 1024.0;
+                                                        (
+                                                            cpu_pct,
+                                                            format!("{:.1}%", m.cpu_percent),
+                                                            mem_pct,
+                                                            format!("{:.1} MB", mem_mb),
+                                                        )
+                                                    })
+                                                    .unwrap_or((0.0, "—%".to_string(), 0.0, "— MB".to_string()));
+
+                                                // CPU meter (US-007 - uses real data from process_metrics)
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new("CPU:")
+                                                            .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                            .color(colors::TEXT_SECONDARY),
+                                                    );
+                                                });
+                                                let cpu_rect = ui.allocate_space(Vec2::new(left_width - 20.0, DETAIL_MODAL_METER_HEIGHT));
+                                                ui.painter().rect_filled(
+                                                    cpu_rect.1,
+                                                    Rounding::same(4.0),
+                                                    colors::SURFACE_HOVER,
+                                                );
+                                                // Draw filled portion based on real CPU usage
+                                                let filled_width = cpu_rect.1.width() * cpu_percent;
+                                                if filled_width > 0.0 {
+                                                    let filled_rect = Rect::from_min_size(
+                                                        cpu_rect.1.min,
+                                                        Vec2::new(filled_width, DETAIL_MODAL_METER_HEIGHT),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        filled_rect,
+                                                        Rounding::same(4.0),
+                                                        colors::ACCENT,
+                                                    );
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(&cpu_text)
+                                                        .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                        .color(colors::TEXT_MUTED),
+                                                );
+
+                                                ui.add_space(spacing::SM);
+
+                                                // Memory meter (US-007 - uses real data from process_metrics)
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new("Memory:")
+                                                            .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                            .color(colors::TEXT_SECONDARY),
+                                                    );
+                                                });
+                                                let mem_rect = ui.allocate_space(Vec2::new(left_width - 20.0, DETAIL_MODAL_METER_HEIGHT));
+                                                ui.painter().rect_filled(
+                                                    mem_rect.1,
+                                                    Rounding::same(4.0),
+                                                    colors::SURFACE_HOVER,
+                                                );
+                                                // Draw filled portion based on real memory usage
+                                                let mem_fill_width = mem_rect.1.width() * mem_percent;
+                                                if mem_fill_width > 0.0 {
+                                                    let mem_fill_rect = Rect::from_min_size(
+                                                        mem_rect.1.min,
+                                                        Vec2::new(mem_fill_width, DETAIL_MODAL_METER_HEIGHT),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        mem_fill_rect,
+                                                        Rounding::same(4.0),
+                                                        colors::ACCENT,
+                                                    );
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(&mem_text)
+                                                        .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                        .color(colors::TEXT_MUTED),
+                                                );
+
+                                                // Error Details section (only if failed/errored)
+                                                if let Some(ref session) = session_data {
+                                                    if let Some(ref run) = session.run {
+                                                        if run.status == crate::state::RunStatus::Failed {
+                                                            ui.add_space(spacing::LG);
+                                                            ui.label(
+                                                                egui::RichText::new("Error Details")
+                                                                    .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                                                    .color(colors::STATUS_ERROR),
+                                                            );
+                                                            ui.add_space(spacing::SM);
+
+                                                            // Show last iteration output_snippet as error context
+                                                            if let Some(last_iter) = run.iterations.last() {
+                                                                if !last_iter.output_snippet.is_empty() {
+                                                                    ui.label(
+                                                                        egui::RichText::new(&last_iter.output_snippet)
+                                                                            .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                            .color(colors::TEXT_SECONDARY),
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    // Also show load_error if present
+                                                    if let Some(ref err) = session.load_error {
+                                                        ui.add_space(spacing::LG);
+                                                        ui.label(
+                                                            egui::RichText::new("Load Error")
+                                                                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                                                .color(colors::STATUS_ERROR),
+                                                        );
+                                                        ui.add_space(spacing::SM);
+                                                        ui.label(
+                                                            egui::RichText::new(err)
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                                                                .color(colors::TEXT_SECONDARY),
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                        );
+
+                                        ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                        // Right column: Output History
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(right_width, content_height),
+                                            egui::Layout::top_down(egui::Align::LEFT),
+                                            |ui| {
+                                                // Header with title and auto-scroll toggle
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new("Output History")
+                                                            .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                                            .color(colors::TEXT_PRIMARY),
+                                                    );
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        // Auto-scroll toggle button
+                                                        let auto_scroll = modal_state.auto_scroll;
+                                                        let btn_text = if auto_scroll { "Auto-scroll: ON" } else { "Auto-scroll: OFF" };
+                                                        let btn_color = if auto_scroll { colors::ACCENT } else { colors::SURFACE_HOVER };
+                                                        let btn = egui::Button::new(
+                                                            egui::RichText::new(btn_text)
+                                                                .font(typography::font(FontSize::Caption, FontWeight::Medium))
+                                                                .color(if auto_scroll { Color32::WHITE } else { colors::TEXT_SECONDARY }),
+                                                        )
+                                                        .fill(btn_color)
+                                                        .rounding(Rounding::same(rounding::BUTTON))
+                                                        .stroke(Stroke::new(1.0, colors::BORDER));
+
+                                                        if ui.add(btn).clicked() {
+                                                            toggle_auto_scroll = true;
+                                                        }
+                                                    });
+                                                });
+
+                                                ui.add_space(spacing::SM);
+
+                                                // Output scroll area
+                                                let output_height = content_height - DETAIL_MODAL_SECTION_HEADER_HEIGHT - spacing::SM - spacing::LG;
+                                                egui::Frame::none()
+                                                    .fill(colors::SURFACE_ELEVATED)
+                                                    .rounding(Rounding::same(rounding::CARD))
+                                                    .stroke(Stroke::new(1.0, colors::BORDER))
+                                                    .inner_margin(egui::Margin::same(spacing::SM))
+                                                    .show(ui, |ui| {
+                                                        let mut scroll_area = egui::ScrollArea::vertical()
+                                                            .auto_shrink([false, false])
+                                                            .max_height(output_height - spacing::SM * 2.0);
+
+                                                        if modal_state.auto_scroll {
+                                                            scroll_area = scroll_area.stick_to_bottom(true);
+                                                        }
+
+                                                        scroll_area.show(ui, |ui| {
+                                                            ui.set_min_width(right_width - spacing::SM * 4.0);
+
+                                                            // Get output lines
+                                                            if let Some(ref session) = session_data {
+                                                                if let Some(ref live) = session.live_output {
+                                                                    if live.output_lines.is_empty() {
+                                                                        ui.label(
+                                                                            egui::RichText::new("No output yet...")
+                                                                                .font(typography::mono(FontSize::Small))
+                                                                                .color(colors::TEXT_MUTED),
+                                                                        );
+                                                                    } else {
+                                                                        // Display all output lines (up to 500)
+                                                                        for line in &live.output_lines {
+                                                                            ui.label(
+                                                                                egui::RichText::new(line)
+                                                                                    .font(typography::mono(FontSize::Small))
+                                                                                    .color(colors::TEXT_PRIMARY),
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    ui.label(
+                                                                        egui::RichText::new("No live output available")
+                                                                            .font(typography::mono(FontSize::Small))
+                                                                            .color(colors::TEXT_MUTED),
+                                                                    );
+                                                                }
+                                                            } else {
+                                                                ui.label(
+                                                                    egui::RichText::new("Session not found")
+                                                                        .font(typography::mono(FontSize::Small))
+                                                                        .color(colors::TEXT_MUTED),
+                                                                );
+                                                            }
+                                                        });
+                                                    });
+                                            },
+                                        );
+                                    });
+                                },
+                            );
+
+                            // Separator
+                            let sep_rect2 = Rect::from_min_size(
+                                ui.cursor().min,
+                                Vec2::new(modal_width, 1.0),
+                            );
+                            ui.painter().rect_filled(sep_rect2, Rounding::ZERO, colors::SEPARATOR);
+                            ui.add_space(1.0);
+
+                            // ==================================================================
+                            // FOOTER: Action buttons (Kill, Pause/Resume, Close)
+                            // ==================================================================
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(modal_width, DETAIL_MODAL_FOOTER_HEIGHT),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.add_space(DETAIL_MODAL_SECTION_PADDING);
+
+                                    // Close button (rightmost)
+                                    let close_btn = egui::Button::new(
+                                        egui::RichText::new("Close")
+                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                            .color(colors::TEXT_PRIMARY),
+                                    )
+                                    .fill(colors::SURFACE_ELEVATED)
+                                    .rounding(Rounding::same(rounding::BUTTON))
+                                    .stroke(Stroke::new(1.0, colors::BORDER));
+
+                                    if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], close_btn).clicked() {
+                                        should_close = true;
+                                    }
+
+                                    ui.add_space(DETAIL_MODAL_BUTTON_GAP);
+
+                                    // Pause/Resume button - US-008: Toggle based on paused state
+                                    let pause_btn_text = if is_session_paused { "Resume" } else { "Pause" };
+                                    let pause_btn_color = if is_session_paused { colors::STATUS_SUCCESS } else { colors::ACCENT };
+                                    let pause_btn = egui::Button::new(
+                                        egui::RichText::new(pause_btn_text)
+                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(pause_btn_color)
+                                    .rounding(Rounding::same(rounding::BUTTON));
+
+                                    if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], pause_btn).clicked() {
+                                        pause_clicked = true;
+                                    }
+
+                                    ui.add_space(DETAIL_MODAL_BUTTON_GAP);
+
+                                    // Kill button (leftmost of the group)
+                                    let kill_btn = egui::Button::new(
+                                        egui::RichText::new("Kill")
+                                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(colors::STATUS_ERROR)
+                                    .rounding(Rounding::same(rounding::BUTTON));
+
+                                    if ui.add_sized([DETAIL_MODAL_BUTTON_WIDTH, DETAIL_MODAL_BUTTON_HEIGHT], kill_btn).clicked() {
+                                        kill_clicked = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
+
+        // Handle Escape key
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            should_close = true;
+        }
+
+        // Process actions
+        if should_close {
+            self.pending_detail_modal = None;
+        } else if kill_clicked {
+            // Open kill confirmation dialog (reuse existing pattern)
+            self.pending_kill_confirmation = Some(PendingKillOperation::new(
+                modal_state.session_id.clone(),
+                modal_state.project_name.clone(),
+                modal_state.branch_name.clone(),
+            ));
+            self.pending_detail_modal = None;
+        } else if pause_clicked {
+            // US-008: Toggle pause/resume for the session
+            let session_id = modal_state.session_id.clone();
+            let is_paused = self.paused_sessions.contains(&session_id);
+            if is_paused {
+                // Resume
+                self.pending_action_feedback.insert(
+                    session_id.clone(),
+                    ActionFeedback::new(ActionType::Resuming),
+                );
+                match self.resume_process(&session_id) {
+                    Ok(_) => {}
+                    Err(msg) => {
+                        self.process_control_error = Some(ProcessControlError::new(msg));
+                    }
+                }
+            } else {
+                // Pause
+                self.pending_action_feedback
+                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Pausing));
+                match self.pause_process(&session_id) {
+                    Ok(_) => {}
+                    Err(msg) => {
+                        self.process_control_error = Some(ProcessControlError::new(msg));
+                    }
+                }
+            }
+        } else if toggle_auto_scroll {
+            // Toggle auto-scroll state
+            if let Some(ref mut state) = self.pending_detail_modal {
+                state.auto_scroll = !state.auto_scroll;
+            }
+        }
+    }
+
+    /// Render an error toast for process control errors.
+    ///
+    /// US-008: Displays a toast notification when a process control action fails.
+    /// The toast appears at the bottom of the screen and auto-dismisses.
+    fn render_process_control_error_toast(&mut self, ctx: &egui::Context) {
+        let error = match &self.process_control_error {
+            Some(e) => e.clone(),
+            None => return,
+        };
+
+        // Toast dimensions and position (bottom center)
+        let screen_rect = ctx.screen_rect();
+        let toast_width = 400.0_f32.min(screen_rect.width() - 32.0);
+        let toast_height = 48.0;
+        let toast_x = (screen_rect.width() - toast_width) / 2.0;
+        let toast_y = screen_rect.max.y - toast_height - 24.0;
+        let toast_pos = Pos2::new(toast_x, toast_y);
+
+        egui::Area::new(egui::Id::new("process_control_error_toast"))
+            .order(Order::Foreground)
+            .fixed_pos(toast_pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(colors::STATUS_ERROR)
+                    .rounding(Rounding::same(rounding::CARD))
+                    .shadow(theme::shadow::elevated())
+                    .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+                    .show(ui, |ui| {
+                        ui.set_min_size(Vec2::new(toast_width, toast_height - 24.0));
+                        ui.horizontal(|ui| {
+                            // Error icon
+                            ui.label(
+                                egui::RichText::new("⚠")
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(Color32::WHITE),
+                            );
+                            ui.add_space(8.0);
+                            // Error message
+                            ui.label(
+                                egui::RichText::new(&error.message)
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(Color32::WHITE),
+                            );
+                        });
+                    });
+            });
+
+        // Also allow clicking the toast to dismiss it early
+        let toast_rect = Rect::from_min_size(toast_pos, Vec2::new(toast_width, toast_height));
+        if ctx.input(|i| i.pointer.any_click()) {
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                if toast_rect.contains(pos) {
+                    self.process_control_error = None;
+                }
             }
         }
     }
@@ -5726,7 +7091,7 @@ impl Autom8App {
     }
 
     /// Render the Active Runs view.
-    fn render_active_runs(&self, ui: &mut egui::Ui) {
+    fn render_active_runs(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             // Header section with consistent spacing
             ui.label(
@@ -5796,7 +7161,8 @@ impl Autom8App {
     /// Render the sessions in a responsive grid layout.
     /// Cards are sized to approximately 50% width and 50% height, creating a 2x2 visible grid.
     /// When more than 4 sessions exist, the content scrolls vertically.
-    fn render_sessions_grid(&self, ui: &mut egui::Ui) {
+    /// US-005: Cards can expand to show additional process info and controls.
+    fn render_sessions_grid(&mut self, ui: &mut egui::Ui) {
         let available_width = ui.available_width();
         let available_height = ui.available_height();
         let columns = Self::calculate_grid_columns(available_width);
@@ -5804,13 +7170,34 @@ impl Autom8App {
         // Calculate card dimensions based on available space
         let card_width = Self::calculate_card_width(available_width, columns);
 
-        // Calculate height: 2 rows visible with spacing (edge spacing + inter-row spacing)
+        // Calculate base height: 2 rows visible with spacing (edge spacing + inter-row spacing)
         let total_v_spacing = CARD_SPACING * 3.0; // Top + between rows + bottom
-        let card_height = ((available_height - total_v_spacing) / 2.0).max(CARD_MIN_HEIGHT);
+        let base_card_height = ((available_height - total_v_spacing) / 2.0).max(CARD_MIN_HEIGHT);
 
         // Calculate total width of card row for centering
         let row_width = (card_width * columns as f32) + (CARD_SPACING * (columns as f32 - 1.0));
         let h_offset = ((available_width - row_width) / 2.0).max(0.0);
+
+        // Collect sessions and their expansion state to avoid borrowing issues
+        let session_data: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|s| {
+                let session_id = s.metadata.session_id.clone();
+                let is_expanded = self.expanded_sessions.contains(&session_id);
+                let progress = self.card_expansion_progress(&session_id);
+                (s.clone(), session_id, is_expanded, progress)
+            })
+            .collect();
+
+        // Track which sessions need expansion state updates
+        let mut toggle_requests: Vec<String> = Vec::new();
+        // Track kill button clicks (session_id, project_name, branch_name)
+        let mut kill_requests: Vec<(String, String, String)> = Vec::new();
+        // Track pause/resume button clicks (session_id)
+        let mut pause_requests: Vec<String> = Vec::new();
+        // Track details button clicks (session_id, project_name, branch_name, is_main_session)
+        let mut details_requests: Vec<(String, String, String, bool)> = Vec::new();
 
         // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
@@ -5821,42 +7208,197 @@ impl Autom8App {
                 ui.add_space(CARD_SPACING);
 
                 // Create rows of cards with consistent spacing, centered horizontally
-                let mut session_iter = self.sessions.iter().peekable();
+                let mut session_iter = session_data.iter().peekable();
                 while session_iter.peek().is_some() {
+                    // Determine max height for this row (based on expanded state)
+                    let row_sessions: Vec<_> = session_iter.by_ref().take(columns).collect();
+
+                    // Find max expansion progress in this row for consistent row height
+                    let max_expansion = row_sessions
+                        .iter()
+                        .map(|(_, _, _, progress)| *progress)
+                        .fold(0.0_f32, f32::max);
+
+                    let _row_height =
+                        base_card_height + (CARD_EXPANDED_EXTRA_HEIGHT * max_expansion);
+
                     ui.horizontal(|ui| {
                         // Add horizontal offset for centering
                         ui.add_space(h_offset);
 
-                        for i in 0..columns {
-                            if let Some(session) = session_iter.next() {
-                                self.render_session_card(ui, session, card_width, card_height);
-                                // Add spacing between cards (but not after the last one in row)
-                                if i < columns - 1 {
-                                    ui.add_space(CARD_SPACING);
-                                }
+                        for (i, (session, session_id, is_expanded, progress)) in
+                            row_sessions.iter().enumerate()
+                        {
+                            let card_height =
+                                base_card_height + (CARD_EXPANDED_EXTRA_HEIGHT * progress);
+                            let is_paused = self.paused_sessions.contains(session_id);
+                            let action_feedback = self.pending_action_feedback.get(session_id);
+                            let card_actions = Self::render_session_card_inner(
+                                ui,
+                                session,
+                                session_id,
+                                *is_expanded,
+                                *progress,
+                                card_width,
+                                card_height,
+                                &self.pending_kill_confirmation,
+                                is_paused,
+                                action_feedback,
+                            );
+                            if card_actions.toggle_expanded {
+                                toggle_requests.push(session_id.clone());
+                            }
+                            if card_actions.kill_clicked {
+                                kill_requests.push((
+                                    session_id.clone(),
+                                    session.project_name.clone(),
+                                    session.metadata.branch_name.clone(),
+                                ));
+                            }
+                            if card_actions.pause_clicked {
+                                pause_requests.push(session_id.clone());
+                            }
+                            if card_actions.details_clicked {
+                                details_requests.push((
+                                    session_id.clone(),
+                                    session.project_name.clone(),
+                                    session.metadata.branch_name.clone(),
+                                    session.is_main_session,
+                                ));
+                            }
+                            // Add spacing between cards (but not after the last one in row)
+                            if i < row_sessions.len() - 1 {
+                                ui.add_space(CARD_SPACING);
                             }
                         }
                     });
                     ui.add_space(CARD_SPACING);
                 }
             });
+
+        // Process toggle requests outside the borrow
+        for session_id in toggle_requests {
+            self.toggle_session_expanded(&session_id);
+        }
+
+        // Process kill requests (show confirmation dialog)
+        // Only process the first one to avoid multiple dialogs
+        if let Some((session_id, project_name, branch_name)) = kill_requests.into_iter().next() {
+            self.pending_kill_confirmation = Some(PendingKillOperation::new(
+                session_id,
+                project_name,
+                branch_name,
+            ));
+        }
+
+        // Process pause/resume requests
+        // US-008: Toggle between pause (SIGSTOP) and resume (SIGCONT)
+        for session_id in pause_requests {
+            let is_paused = self.is_session_paused(&session_id);
+            if is_paused {
+                // Currently paused -> resume
+                self.pending_action_feedback.insert(
+                    session_id.clone(),
+                    ActionFeedback::new(ActionType::Resuming),
+                );
+                match self.resume_process(&session_id) {
+                    Ok(_) => {}
+                    Err(msg) => {
+                        self.process_control_error = Some(ProcessControlError::new(msg));
+                    }
+                }
+            } else {
+                // Currently running -> pause
+                self.pending_action_feedback
+                    .insert(session_id.clone(), ActionFeedback::new(ActionType::Pausing));
+                match self.pause_process(&session_id) {
+                    Ok(_) => {}
+                    Err(msg) => {
+                        self.process_control_error = Some(ProcessControlError::new(msg));
+                    }
+                }
+            }
+        }
+
+        // Process details requests (open detail modal)
+        // Only process the first one to avoid multiple modals
+        if let Some((session_id, project_name, branch_name, is_main_session)) =
+            details_requests.into_iter().next()
+        {
+            self.pending_detail_modal = Some(ProcessDetailModalState::new(
+                session_id,
+                project_name,
+                branch_name,
+                is_main_session,
+            ));
+        }
+
+        // Update animation progress for all sessions
+        self.update_card_expansion_animations(ui.ctx());
     }
 
-    /// Render a single session card.
+    /// Update card expansion animations for smooth transitions.
+    fn update_card_expansion_animations(&mut self, ctx: &egui::Context) {
+        let dt = ctx.input(|i| i.predicted_dt);
+        let speed = 1.0 / CARD_EXPAND_ANIMATION_DURATION;
+
+        // Collect session IDs that need animation updates
+        let session_ids: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|s| s.metadata.session_id.clone())
+            .collect();
+
+        let mut needs_repaint = false;
+
+        for session_id in session_ids {
+            let is_expanded = self.expanded_sessions.contains(&session_id);
+            let target = if is_expanded { 1.0 } else { 0.0 };
+            let current = self.card_expansion_progress(&session_id);
+
+            if (current - target).abs() > 0.001 {
+                let new_progress = if is_expanded {
+                    (current + dt * speed).min(1.0)
+                } else {
+                    (current - dt * speed).max(0.0)
+                };
+                self.set_card_expansion_progress(&session_id, new_progress);
+                needs_repaint = true;
+            }
+        }
+
+        if needs_repaint {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Render a single session card (inner implementation).
     ///
     /// The card displays:
-    /// - Header: Project name, session badge (main/worktree), branch name
+    /// - Header: Project name, session badge (main/worktree), expand/collapse toggle
+    /// - Branch name row
     /// - Status row: Colored indicator dot with state label
     /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
     /// - Duration row: Time elapsed since run started
     /// - Output section: Last OUTPUT_LINES_TO_SHOW lines of Claude output in monospace font
-    fn render_session_card(
-        &self,
+    /// - Expanded section (when expanded): Process info, resource meters, action buttons
+    ///
+    /// Returns the actions triggered by user interaction with the card.
+    #[allow(clippy::too_many_arguments)]
+    fn render_session_card_inner(
         ui: &mut egui::Ui,
         session: &SessionData,
+        session_id: &str,
+        _is_expanded: bool,
+        expansion_progress: f32,
         card_width: f32,
         card_height: f32,
-    ) {
+        pending_kill: &Option<PendingKillOperation>,
+        is_paused: bool,
+        action_feedback: Option<&ActionFeedback>,
+    ) -> SessionCardActions {
+        let mut actions = SessionCardActions::default();
+
         // Define card dimensions
         let card_size = Vec2::new(card_width, card_height);
 
@@ -5865,7 +7407,7 @@ impl Autom8App {
 
         // Skip if not visible (optimization for scrolling)
         if !ui.is_rect_visible(rect) {
-            return;
+            return actions;
         }
 
         // Draw card background with elevation
@@ -5953,6 +7495,78 @@ impl Autom8App {
             badge_galley,
             Color32::TRANSPARENT,
         );
+
+        // ====================================================================
+        // EXPAND/COLLAPSE TOGGLE BUTTON (right side of header)
+        // ====================================================================
+        let expand_btn_size = CARD_EXPAND_BUTTON_SIZE;
+        let expand_btn_x = content_rect.max.x - expand_btn_size;
+        let expand_btn_y = cursor_y;
+        let expand_btn_rect = Rect::from_min_size(
+            egui::pos2(expand_btn_x, expand_btn_y),
+            egui::vec2(expand_btn_size, expand_btn_size),
+        );
+
+        // Check for click on expand button
+        let expand_btn_response = ui.interact(
+            expand_btn_rect,
+            egui::Id::new(format!("expand_btn_{}", session_id)),
+            Sense::click(),
+        );
+
+        if expand_btn_response.clicked() {
+            actions.toggle_expanded = true;
+        }
+
+        // Draw expand button background on hover
+        let expand_btn_hovered = expand_btn_response.hovered();
+        if expand_btn_hovered {
+            painter.rect_filled(
+                expand_btn_rect,
+                Rounding::same(rounding::SMALL),
+                colors::SURFACE_HOVER,
+            );
+        }
+
+        // Draw chevron icon (rotates based on expansion state)
+        let chevron_center = expand_btn_rect.center();
+        let chevron_size = 6.0;
+        let chevron_color = if expand_btn_hovered {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_MUTED
+        };
+
+        // Interpolate rotation based on expansion progress
+        let rotation_angle = expansion_progress * std::f32::consts::PI;
+        let cos_r = rotation_angle.cos();
+        let sin_r = rotation_angle.sin();
+
+        // Chevron points (pointing down when collapsed, up when expanded)
+        let base_points = [
+            egui::vec2(-chevron_size, -chevron_size / 2.0),
+            egui::vec2(0.0, chevron_size / 2.0),
+            egui::vec2(chevron_size, -chevron_size / 2.0),
+        ];
+
+        let rotated_points: Vec<Pos2> = base_points
+            .iter()
+            .map(|p| {
+                let rx = p.x * cos_r - p.y * sin_r;
+                let ry = p.x * sin_r + p.y * cos_r;
+                egui::pos2(chevron_center.x + rx, chevron_center.y + ry)
+            })
+            .collect();
+
+        painter.line_segment(
+            [rotated_points[0], rotated_points[1]],
+            Stroke::new(2.0, chevron_color),
+        );
+        painter.line_segment(
+            [rotated_points[1], rotated_points[2]],
+            Stroke::new(2.0, chevron_color),
+        );
+
         cursor_y += project_galley.rect.height() + spacing::XS;
 
         // Branch name row
@@ -5970,7 +7584,7 @@ impl Autom8App {
         cursor_y += branch_galley.rect.height() + spacing::SM;
 
         // ====================================================================
-        // STATUS ROW: Colored indicator dot with state label
+        // STATUS ROW: Colored indicator dot with state label + Paused badge
         // ====================================================================
         let (state, state_color) = if let Some(ref run) = session.run {
             (run.machine_state, state_to_color(run.machine_state))
@@ -5978,13 +7592,18 @@ impl Autom8App {
             (MachineState::Idle, colors::STATUS_IDLE)
         };
 
-        // Status dot
+        // Status dot - use yellow when paused
         let dot_radius = 4.0;
+        let dot_color = if is_paused {
+            colors::STATUS_WARNING
+        } else {
+            state_color
+        };
         let dot_center = egui::pos2(
             content_rect.min.x + dot_radius,
             cursor_y + FontSize::Caption.pixels() / 2.0,
         );
-        painter.circle_filled(dot_center, dot_radius, state_color);
+        painter.circle_filled(dot_center, dot_radius, dot_color);
 
         // State text
         let state_text = format_state(state);
@@ -5993,14 +7612,48 @@ impl Autom8App {
             typography::font(FontSize::Caption, FontWeight::Medium),
             colors::TEXT_PRIMARY,
         );
+        let state_text_x = content_rect.min.x + dot_radius * 2.0 + spacing::SM;
         painter.galley(
-            egui::pos2(
-                content_rect.min.x + dot_radius * 2.0 + spacing::SM,
-                cursor_y,
-            ),
+            egui::pos2(state_text_x, cursor_y),
             state_galley.clone(),
             Color32::TRANSPARENT,
         );
+
+        // US-008: Add "Paused" badge when session is paused
+        if is_paused {
+            let badge_x = state_text_x + state_galley.rect.width() + spacing::SM;
+            let badge_text = "Paused";
+            let badge_galley = painter.layout_no_wrap(
+                badge_text.to_string(),
+                typography::font(FontSize::Caption, FontWeight::Medium),
+                colors::STATUS_WARNING,
+            );
+            // Draw badge background
+            let badge_padding = 4.0;
+            let badge_rect = Rect::from_min_size(
+                egui::pos2(badge_x - badge_padding, cursor_y - 2.0),
+                Vec2::new(
+                    badge_galley.rect.width() + badge_padding * 2.0,
+                    badge_galley.rect.height() + 4.0,
+                ),
+            );
+            painter.rect(
+                badge_rect,
+                Rounding::same(rounding::SMALL),
+                Color32::from_rgba_unmultiplied(
+                    colors::STATUS_WARNING.r(),
+                    colors::STATUS_WARNING.g(),
+                    colors::STATUS_WARNING.b(),
+                    40,
+                ),
+                Stroke::NONE,
+            );
+            painter.galley(
+                egui::pos2(badge_x, cursor_y),
+                badge_galley,
+                Color32::TRANSPARENT,
+            );
+        }
         cursor_y += state_galley.rect.height() + spacing::XS;
 
         // ====================================================================
@@ -6078,7 +7731,7 @@ impl Autom8App {
         }
 
         // ====================================================================
-        // OUTPUT SECTION: Last 5 lines of Claude output in monospace
+        // OUTPUT SECTION: Last 12 lines of Claude output in monospace
         // ====================================================================
         // Draw a subtle separator line
         let separator_y = cursor_y;
@@ -6089,16 +7742,39 @@ impl Autom8App {
         );
         cursor_y += spacing::SM;
 
-        // Output section background
+        // Calculate output section height (leaves room for expanded content if needed)
+        let expanded_section_height = CARD_EXPANDED_EXTRA_HEIGHT * expansion_progress;
+        let output_bottom = content_rect.max.y - expanded_section_height;
+
+        // Output section background - dimmed when paused
+        // US-008: Visual indication of paused state
         let output_rect = Rect::from_min_max(
             egui::pos2(content_rect.min.x, cursor_y),
-            egui::pos2(content_rect.max.x, content_rect.max.y),
+            egui::pos2(content_rect.max.x, output_bottom),
         );
+        let output_bg_color = if is_paused {
+            // Slightly darker/dimmed when paused
+            Color32::from_rgba_unmultiplied(
+                colors::SURFACE_HOVER.r() / 2,
+                colors::SURFACE_HOVER.g() / 2,
+                colors::SURFACE_HOVER.b() / 2,
+                colors::SURFACE_HOVER.a(),
+            )
+        } else {
+            colors::SURFACE_HOVER
+        };
         painter.rect_filled(
             output_rect,
             Rounding::same(rounding::SMALL),
-            colors::SURFACE_HOVER,
+            output_bg_color,
         );
+
+        // Output text color - dimmed when paused
+        let output_text_color = if is_paused {
+            colors::TEXT_DISABLED
+        } else {
+            colors::TEXT_SECONDARY
+        };
 
         // Output lines with consistent padding
         let output_padding = 6.0; // Inner padding for output section
@@ -6136,7 +7812,7 @@ impl Autom8App {
                     let line_galley = painter.layout_no_wrap(
                         line_text,
                         typography::mono(FontSize::Caption),
-                        colors::TEXT_SECONDARY,
+                        output_text_color,
                     );
                     painter.galley(
                         egui::pos2(content_rect.min.x + output_padding, output_y),
@@ -6146,7 +7822,7 @@ impl Autom8App {
                     output_y += line_height;
 
                     // Stop if we exceed the output area
-                    if output_y > content_rect.max.y - output_padding {
+                    if output_y > output_bottom - output_padding {
                         break;
                     }
                 }
@@ -6164,6 +7840,442 @@ impl Autom8App {
                 Color32::TRANSPARENT,
             );
         }
+
+        // ====================================================================
+        // EXPANDED SECTION: Process info, resource meters, action buttons
+        // ====================================================================
+        if expansion_progress > 0.01 {
+            // Only render when visible
+            let expanded_top = output_bottom + spacing::SM;
+            let alpha = (expansion_progress * 255.0) as u8;
+
+            // Draw separator above expanded section
+            painter.hline(
+                content_rect.x_range(),
+                expanded_top - spacing::SM / 2.0,
+                Stroke::new(1.0, colors::BORDER),
+            );
+
+            let mut expanded_y = expanded_top;
+
+            // ----------------------------------------------------------------
+            // PROCESS INFO SECTION
+            // ----------------------------------------------------------------
+            // Display real process info from session data (US-007)
+            let info_label_galley = painter.layout_no_wrap(
+                "Process Info".to_string(),
+                typography::font(FontSize::Caption, FontWeight::SemiBold),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_SECONDARY.r(),
+                    colors::TEXT_SECONDARY.g(),
+                    colors::TEXT_SECONDARY.b(),
+                    alpha,
+                ),
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, expanded_y),
+                info_label_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+            expanded_y += info_label_galley.rect.height() + spacing::XS;
+
+            // PID info (from session.pid, US-007)
+            let pid_text = match session.pid {
+                Some(pid) => format!("PID: {}", pid),
+                None => "PID: —".to_string(),
+            };
+            let pid_galley = painter.layout_no_wrap(
+                pid_text,
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_MUTED.r(),
+                    colors::TEXT_MUTED.g(),
+                    colors::TEXT_MUTED.b(),
+                    alpha,
+                ),
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, expanded_y),
+                pid_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+
+            // Spawn time (from run started_at if available)
+            if let Some(ref run) = session.run {
+                let spawn_text = format!("Started: {}", run.started_at.format("%H:%M:%S"));
+                let spawn_galley = painter.layout_no_wrap(
+                    spawn_text,
+                    typography::font(FontSize::Caption, FontWeight::Regular),
+                    Color32::from_rgba_unmultiplied(
+                        colors::TEXT_MUTED.r(),
+                        colors::TEXT_MUTED.g(),
+                        colors::TEXT_MUTED.b(),
+                        alpha,
+                    ),
+                );
+                painter.galley(
+                    egui::pos2(
+                        content_rect.min.x + pid_galley.rect.width() + spacing::LG,
+                        expanded_y,
+                    ),
+                    spawn_galley,
+                    Color32::TRANSPARENT,
+                );
+            }
+
+            expanded_y += pid_galley.rect.height() + spacing::SM;
+
+            // ----------------------------------------------------------------
+            // RESOURCE METERS SECTION
+            // ----------------------------------------------------------------
+            let meters_label_galley = painter.layout_no_wrap(
+                "Resources".to_string(),
+                typography::font(FontSize::Caption, FontWeight::SemiBold),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_SECONDARY.r(),
+                    colors::TEXT_SECONDARY.g(),
+                    colors::TEXT_SECONDARY.b(),
+                    alpha,
+                ),
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, expanded_y),
+                meters_label_galley.clone(),
+                Color32::TRANSPARENT,
+            );
+            expanded_y += meters_label_galley.rect.height() + spacing::XS;
+
+            // CPU meter
+            let cpu_label_width = 40.0;
+            let meter_width = (content_width - cpu_label_width - spacing::SM) / 2.0 - spacing::MD;
+
+            let cpu_label_galley = painter.layout_no_wrap(
+                "CPU:".to_string(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_MUTED.r(),
+                    colors::TEXT_MUTED.g(),
+                    colors::TEXT_MUTED.b(),
+                    alpha,
+                ),
+            );
+            painter.galley(
+                egui::pos2(content_rect.min.x, expanded_y),
+                cpu_label_galley,
+                Color32::TRANSPARENT,
+            );
+
+            // Get CPU and memory percentages from process_metrics (US-007)
+            let (cpu_percent, mem_percent) = session
+                .process_metrics
+                .as_ref()
+                .map(|m| {
+                    (
+                        m.cpu_percent.min(100.0) / 100.0,
+                        m.memory_percent.min(100.0) / 100.0,
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+
+            // CPU meter bar (US-007 - uses real data from process_metrics)
+            let cpu_meter_rect = Rect::from_min_size(
+                egui::pos2(content_rect.min.x + cpu_label_width, expanded_y + 2.0),
+                egui::vec2(meter_width, RESOURCE_METER_HEIGHT),
+            );
+            painter.rect_filled(
+                cpu_meter_rect,
+                Rounding::same(rounding::SMALL),
+                Color32::from_rgba_unmultiplied(
+                    colors::SURFACE_HOVER.r(),
+                    colors::SURFACE_HOVER.g(),
+                    colors::SURFACE_HOVER.b(),
+                    alpha,
+                ),
+            );
+            // Fill based on actual CPU usage
+            let cpu_fill_width = meter_width * cpu_percent;
+            if cpu_fill_width > 0.0 {
+                let cpu_fill_rect = Rect::from_min_size(
+                    cpu_meter_rect.min,
+                    egui::vec2(cpu_fill_width, RESOURCE_METER_HEIGHT),
+                );
+                painter.rect_filled(
+                    cpu_fill_rect,
+                    Rounding::same(rounding::SMALL),
+                    Color32::from_rgba_unmultiplied(
+                        colors::STATUS_RUNNING.r(),
+                        colors::STATUS_RUNNING.g(),
+                        colors::STATUS_RUNNING.b(),
+                        alpha,
+                    ),
+                );
+            }
+
+            // Memory meter
+            let mem_start_x = content_rect.min.x + content_width / 2.0;
+            let mem_label_galley = painter.layout_no_wrap(
+                "Mem:".to_string(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_MUTED.r(),
+                    colors::TEXT_MUTED.g(),
+                    colors::TEXT_MUTED.b(),
+                    alpha,
+                ),
+            );
+            painter.galley(
+                egui::pos2(mem_start_x, expanded_y),
+                mem_label_galley,
+                Color32::TRANSPARENT,
+            );
+
+            // Memory meter bar (US-007 - uses real data from process_metrics)
+            let mem_meter_rect = Rect::from_min_size(
+                egui::pos2(mem_start_x + cpu_label_width, expanded_y + 2.0),
+                egui::vec2(meter_width, RESOURCE_METER_HEIGHT),
+            );
+            painter.rect_filled(
+                mem_meter_rect,
+                Rounding::same(rounding::SMALL),
+                Color32::from_rgba_unmultiplied(
+                    colors::SURFACE_HOVER.r(),
+                    colors::SURFACE_HOVER.g(),
+                    colors::SURFACE_HOVER.b(),
+                    alpha,
+                ),
+            );
+            // Fill based on actual memory usage
+            let mem_fill_width = meter_width * mem_percent;
+            if mem_fill_width > 0.0 {
+                let mem_fill_rect = Rect::from_min_size(
+                    mem_meter_rect.min,
+                    egui::vec2(mem_fill_width, RESOURCE_METER_HEIGHT),
+                );
+                painter.rect_filled(
+                    mem_fill_rect,
+                    Rounding::same(rounding::SMALL),
+                    Color32::from_rgba_unmultiplied(
+                        colors::ACCENT.r(),
+                        colors::ACCENT.g(),
+                        colors::ACCENT.b(),
+                        alpha,
+                    ),
+                );
+            }
+
+            expanded_y += RESOURCE_METER_HEIGHT + spacing::MD;
+
+            // ----------------------------------------------------------------
+            // ACTION BUTTONS ROW
+            // ----------------------------------------------------------------
+            let btn_y = expanded_y;
+            let btn_height = CARD_ACTION_BUTTON_HEIGHT;
+            let btn_width = CARD_ACTION_BUTTON_WIDTH;
+            let btn_gap = CARD_ACTION_BUTTON_GAP;
+
+            // Calculate button positions (centered)
+            let total_btn_width = btn_width * 3.0 + btn_gap * 2.0;
+            let btn_start_x = content_rect.min.x + (content_width - total_btn_width) / 2.0;
+
+            // Determine if buttons should be disabled
+            // Kill is disabled if there's a pending kill confirmation for this session
+            let kill_pending = pending_kill
+                .as_ref()
+                .map(|p| p.session_id == session_id)
+                .unwrap_or(false);
+
+            // Kill button (red)
+            let kill_btn_rect = Rect::from_min_size(
+                egui::pos2(btn_start_x, btn_y),
+                egui::vec2(btn_width, btn_height),
+            );
+            let kill_btn_id = egui::Id::new(format!("kill_btn_{}", session_id));
+            let kill_response = ui.interact(kill_btn_rect, kill_btn_id, Sense::click());
+
+            let kill_bg_color = if kill_pending {
+                colors::SURFACE_HOVER
+            } else if kill_response.hovered() {
+                Color32::from_rgba_unmultiplied(
+                    colors::STATUS_ERROR.r(),
+                    colors::STATUS_ERROR.g(),
+                    colors::STATUS_ERROR.b(),
+                    ((alpha as f32) * 0.8) as u8,
+                )
+            } else {
+                Color32::from_rgba_unmultiplied(
+                    colors::STATUS_ERROR.r(),
+                    colors::STATUS_ERROR.g(),
+                    colors::STATUS_ERROR.b(),
+                    alpha,
+                )
+            };
+
+            painter.rect(
+                kill_btn_rect,
+                Rounding::same(rounding::BUTTON),
+                kill_bg_color,
+                Stroke::NONE,
+            );
+
+            let kill_text_color = if kill_pending {
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_DISABLED.r(),
+                    colors::TEXT_DISABLED.g(),
+                    colors::TEXT_DISABLED.b(),
+                    alpha,
+                )
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
+            };
+
+            let kill_galley = painter.layout_no_wrap(
+                "Kill".to_string(),
+                typography::font(FontSize::Caption, FontWeight::Medium),
+                kill_text_color,
+            );
+            let kill_text_pos = egui::pos2(
+                kill_btn_rect.center().x - kill_galley.rect.width() / 2.0,
+                kill_btn_rect.center().y - kill_galley.rect.height() / 2.0,
+            );
+            painter.galley(kill_text_pos, kill_galley, Color32::TRANSPARENT);
+
+            // Pause/Resume button - toggles based on paused state
+            // US-008: Shows "Resume" when paused, "Pause" when running
+            let pause_btn_rect = Rect::from_min_size(
+                egui::pos2(btn_start_x + btn_width + btn_gap, btn_y),
+                egui::vec2(btn_width, btn_height),
+            );
+            let pause_btn_id = egui::Id::new(format!("pause_btn_{}", session_id));
+            let pause_response = ui.interact(pause_btn_rect, pause_btn_id, Sense::click());
+
+            // Determine button text based on paused state and action feedback
+            let pause_btn_text = if let Some(feedback) = action_feedback {
+                match feedback.action_type {
+                    ActionType::Pausing => "Pausing...",
+                    ActionType::Resuming => "Resuming...",
+                    ActionType::Killing => {
+                        if is_paused {
+                            "Resume"
+                        } else {
+                            "Pause"
+                        }
+                    }
+                }
+            } else if is_paused {
+                "Resume"
+            } else {
+                "Pause"
+            };
+
+            // Use different color when paused (green for resume)
+            let pause_base_color = if is_paused {
+                colors::STATUS_SUCCESS
+            } else {
+                colors::ACCENT
+            };
+
+            let pause_bg_color = if pause_response.hovered() {
+                Color32::from_rgba_unmultiplied(
+                    pause_base_color.r(),
+                    pause_base_color.g(),
+                    pause_base_color.b(),
+                    ((alpha as f32) * 0.8) as u8,
+                )
+            } else {
+                Color32::from_rgba_unmultiplied(
+                    pause_base_color.r(),
+                    pause_base_color.g(),
+                    pause_base_color.b(),
+                    alpha,
+                )
+            };
+
+            painter.rect(
+                pause_btn_rect,
+                Rounding::same(rounding::BUTTON),
+                pause_bg_color,
+                Stroke::NONE,
+            );
+
+            let pause_galley = painter.layout_no_wrap(
+                pause_btn_text.to_string(),
+                typography::font(FontSize::Caption, FontWeight::Medium),
+                Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+            );
+            let pause_text_pos = egui::pos2(
+                pause_btn_rect.center().x - pause_galley.rect.width() / 2.0,
+                pause_btn_rect.center().y - pause_galley.rect.height() / 2.0,
+            );
+            painter.galley(pause_text_pos, pause_galley, Color32::TRANSPARENT);
+
+            // View Details button
+            let details_btn_rect = Rect::from_min_size(
+                egui::pos2(btn_start_x + (btn_width + btn_gap) * 2.0, btn_y),
+                egui::vec2(btn_width, btn_height),
+            );
+            let details_btn_id = egui::Id::new(format!("details_btn_{}", session_id));
+            let details_response = ui.interact(details_btn_rect, details_btn_id, Sense::click());
+
+            let details_bg_color = if details_response.hovered() {
+                Color32::from_rgba_unmultiplied(
+                    colors::SURFACE_SELECTED.r(),
+                    colors::SURFACE_SELECTED.g(),
+                    colors::SURFACE_SELECTED.b(),
+                    alpha,
+                )
+            } else {
+                Color32::from_rgba_unmultiplied(
+                    colors::SURFACE_HOVER.r(),
+                    colors::SURFACE_HOVER.g(),
+                    colors::SURFACE_HOVER.b(),
+                    alpha,
+                )
+            };
+
+            painter.rect(
+                details_btn_rect,
+                Rounding::same(rounding::BUTTON),
+                details_bg_color,
+                Stroke::new(
+                    1.0,
+                    Color32::from_rgba_unmultiplied(
+                        colors::BORDER.r(),
+                        colors::BORDER.g(),
+                        colors::BORDER.b(),
+                        alpha,
+                    ),
+                ),
+            );
+
+            let details_galley = painter.layout_no_wrap(
+                "Details".to_string(),
+                typography::font(FontSize::Caption, FontWeight::Medium),
+                Color32::from_rgba_unmultiplied(
+                    colors::TEXT_PRIMARY.r(),
+                    colors::TEXT_PRIMARY.g(),
+                    colors::TEXT_PRIMARY.b(),
+                    alpha,
+                ),
+            );
+            let details_text_pos = egui::pos2(
+                details_btn_rect.center().x - details_galley.rect.width() / 2.0,
+                details_btn_rect.center().y - details_galley.rect.height() / 2.0,
+            );
+            painter.galley(details_text_pos, details_galley, Color32::TRANSPARENT);
+
+            // Handle button clicks
+            if kill_response.clicked() && !kill_pending {
+                actions.kill_clicked = true;
+            }
+            if pause_response.clicked() {
+                actions.pause_clicked = true;
+            }
+            if details_response.clicked() {
+                actions.details_clicked = true;
+            }
+        }
+
+        actions
     }
 
     // state_to_color is now imported from the components module.
@@ -12357,5 +14469,680 @@ mod tests {
         assert!(msg.contains("2 sessions,"), "Should use plural for 2+");
         assert!(msg.contains("2 sessions were skipped"), "Should use plural");
         assert!(msg.contains("2 errors occurred"), "Should use plural");
+    }
+
+    // ========================================================================
+    // US-005: Expandable Session Cards Tests
+    // ========================================================================
+
+    #[test]
+    fn test_us005_session_expansion_state_tracking() {
+        // Acceptance criteria: Expanded state persists during refresh cycles
+        let mut app = Autom8App::new();
+
+        // Initially no sessions are expanded
+        assert!(!app.is_session_expanded("session1"));
+        assert!(!app.is_session_expanded("session2"));
+
+        // Toggle expansion
+        app.toggle_session_expanded("session1");
+        assert!(app.is_session_expanded("session1"));
+        assert!(!app.is_session_expanded("session2"));
+
+        // Toggle again (collapse)
+        app.toggle_session_expanded("session1");
+        assert!(!app.is_session_expanded("session1"));
+    }
+
+    #[test]
+    fn test_us005_set_session_expanded() {
+        let mut app = Autom8App::new();
+
+        // Set expanded directly
+        app.set_session_expanded("session1", true);
+        assert!(app.is_session_expanded("session1"));
+
+        // Set collapsed directly
+        app.set_session_expanded("session1", false);
+        assert!(!app.is_session_expanded("session1"));
+    }
+
+    #[test]
+    fn test_us005_card_expansion_progress() {
+        let mut app = Autom8App::new();
+
+        // Initially progress is 0.0
+        assert!((app.card_expansion_progress("session1") - 0.0).abs() < f32::EPSILON);
+
+        // Set progress
+        app.set_card_expansion_progress("session1", 0.5);
+        assert!((app.card_expansion_progress("session1") - 0.5).abs() < f32::EPSILON);
+
+        // Set to fully expanded
+        app.set_card_expansion_progress("session1", 1.0);
+        assert!((app.card_expansion_progress("session1") - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_us005_expanded_state_persists_across_sessions() {
+        // Acceptance criteria: Expanded state persists during refresh cycles
+        let mut app = Autom8App::new();
+
+        // Expand a session
+        app.set_session_expanded("session-abc", true);
+        assert!(app.is_session_expanded("session-abc"));
+
+        // Simulate refresh (expanded_sessions is not cleared during refresh)
+        // The refresh_data method doesn't clear expanded_sessions
+        app.refresh_data();
+
+        // State should persist
+        assert!(app.is_session_expanded("session-abc"));
+    }
+
+    #[test]
+    fn test_us005_multiple_sessions_expanded() {
+        // Multiple sessions can be expanded simultaneously
+        let mut app = Autom8App::new();
+
+        app.set_session_expanded("session1", true);
+        app.set_session_expanded("session2", true);
+        app.set_session_expanded("session3", true);
+
+        assert!(app.is_session_expanded("session1"));
+        assert!(app.is_session_expanded("session2"));
+        assert!(app.is_session_expanded("session3"));
+
+        // Collapse one
+        app.set_session_expanded("session2", false);
+
+        assert!(app.is_session_expanded("session1"));
+        assert!(!app.is_session_expanded("session2"));
+        assert!(app.is_session_expanded("session3"));
+    }
+
+    #[test]
+    fn test_us005_pending_kill_operation_new() {
+        // Test PendingKillOperation creation
+        let pending = PendingKillOperation::new(
+            "session-123".to_string(),
+            "my-project".to_string(),
+            "feature/test".to_string(),
+        );
+
+        assert_eq!(pending.session_id, "session-123");
+        assert_eq!(pending.project_name, "my-project");
+        assert_eq!(pending.branch_name, "feature/test");
+    }
+
+    #[test]
+    fn test_us005_pending_kill_operation_title() {
+        // Acceptance criteria: Kill button shows confirmation before executing
+        let pending = PendingKillOperation::new(
+            "session-123".to_string(),
+            "my-project".to_string(),
+            "feature/test".to_string(),
+        );
+
+        assert_eq!(pending.title(), "Kill Process");
+    }
+
+    #[test]
+    fn test_us005_pending_kill_operation_message() {
+        // Acceptance criteria: Kill button shows confirmation before executing
+        let pending = PendingKillOperation::new(
+            "session-123".to_string(),
+            "my-project".to_string(),
+            "feature/test".to_string(),
+        );
+
+        let message = pending.message();
+
+        // Message should contain project name
+        assert!(
+            message.contains("my-project"),
+            "Message should contain project name"
+        );
+
+        // Message should contain branch name
+        assert!(
+            message.contains("feature/test"),
+            "Message should contain branch name"
+        );
+
+        // US-008: Message should warn that action cannot be undone
+        assert!(
+            message.contains("cannot be undone"),
+            "Message should warn that action cannot be undone"
+        );
+    }
+
+    #[test]
+    fn test_us005_pending_kill_confirmation_state() {
+        // Test that pending_kill_confirmation can be set
+        let mut app = Autom8App::new();
+
+        assert!(
+            app.pending_kill_confirmation.is_none(),
+            "Should start with no pending kill confirmation"
+        );
+
+        // Set pending kill confirmation
+        app.pending_kill_confirmation = Some(PendingKillOperation::new(
+            "session-test".to_string(),
+            "test-project".to_string(),
+            "main".to_string(),
+        ));
+
+        assert!(app.pending_kill_confirmation.is_some());
+        match &app.pending_kill_confirmation {
+            Some(pending) => {
+                assert_eq!(pending.session_id, "session-test");
+            }
+            None => panic!("Expected pending kill confirmation"),
+        }
+    }
+
+    #[test]
+    fn test_us005_session_card_actions_default() {
+        // Test SessionCardActions default state
+        let actions = SessionCardActions::default();
+
+        assert!(!actions.toggle_expanded);
+        assert!(!actions.kill_clicked);
+        assert!(!actions.pause_clicked);
+        assert!(!actions.details_clicked);
+    }
+
+    #[test]
+    fn test_us005_card_expansion_constants() {
+        // Verify card expansion constants are reasonable
+        assert!(
+            CARD_EXPANDED_EXTRA_HEIGHT > 100.0,
+            "Extra height should be significant (>100px)"
+        );
+        assert!(
+            CARD_EXPANDED_EXTRA_HEIGHT < 300.0,
+            "Extra height should not be excessive (<300px)"
+        );
+
+        assert!(
+            CARD_EXPAND_BUTTON_SIZE >= 20.0,
+            "Expand button should be large enough to tap"
+        );
+        assert!(
+            CARD_EXPAND_ANIMATION_DURATION > 0.05,
+            "Animation should be noticeable"
+        );
+        assert!(
+            CARD_EXPAND_ANIMATION_DURATION < 0.5,
+            "Animation should be quick"
+        );
+    }
+
+    #[test]
+    fn test_us005_action_button_constants() {
+        // Verify action button constants are reasonable
+        assert!(
+            CARD_ACTION_BUTTON_HEIGHT >= 24.0,
+            "Buttons should be tall enough to tap"
+        );
+        assert!(
+            CARD_ACTION_BUTTON_WIDTH >= 60.0,
+            "Buttons should be wide enough for labels"
+        );
+        assert!(
+            CARD_ACTION_BUTTON_GAP >= 4.0,
+            "Buttons should have some spacing"
+        );
+    }
+
+    #[test]
+    fn test_us005_resource_meter_constant() {
+        // Verify resource meter height is reasonable
+        assert!(
+            RESOURCE_METER_HEIGHT >= 4.0,
+            "Meter should be visible (>4px)"
+        );
+        assert!(
+            RESOURCE_METER_HEIGHT <= 20.0,
+            "Meter should not be too tall (<20px)"
+        );
+    }
+
+    // ========================================================================
+    // US-006: Process Detail Modal Tests
+    // ========================================================================
+
+    #[test]
+    fn test_us006_process_detail_modal_state_new() {
+        // Test ProcessDetailModalState::new creates the expected state
+        let state = ProcessDetailModalState::new(
+            "session123".to_string(),
+            "test-project".to_string(),
+            "feature/test".to_string(),
+            false,
+        );
+
+        assert_eq!(state.session_id, "session123");
+        assert_eq!(state.project_name, "test-project");
+        assert_eq!(state.branch_name, "feature/test");
+        assert!(!state.is_main_session);
+        assert!(
+            state.auto_scroll,
+            "Auto-scroll should be enabled by default"
+        );
+        assert_eq!(state.last_scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn test_us006_process_detail_modal_state_title_main() {
+        // Test title generation for main session
+        let state = ProcessDetailModalState::new(
+            "main".to_string(),
+            "my-project".to_string(),
+            "main".to_string(),
+            true,
+        );
+
+        assert_eq!(state.title(), "my-project (main)");
+    }
+
+    #[test]
+    fn test_us006_process_detail_modal_state_title_worktree() {
+        // Test title generation for worktree session
+        let state = ProcessDetailModalState::new(
+            "abc12345".to_string(),
+            "my-project".to_string(),
+            "feature/test".to_string(),
+            false,
+        );
+
+        assert_eq!(state.title(), "my-project (abc12345)");
+    }
+
+    #[test]
+    fn test_us006_pending_detail_modal_initially_none() {
+        // Test that pending_detail_modal starts as None
+        let app = Autom8App::new();
+        assert!(
+            app.pending_detail_modal.is_none(),
+            "pending_detail_modal should be None on initialization"
+        );
+    }
+
+    #[test]
+    fn test_us006_pending_detail_modal_can_be_set() {
+        // Test that pending_detail_modal can be set
+        let mut app = Autom8App::new();
+
+        app.pending_detail_modal = Some(ProcessDetailModalState::new(
+            "session456".to_string(),
+            "test-proj".to_string(),
+            "main".to_string(),
+            true,
+        ));
+
+        assert!(app.pending_detail_modal.is_some());
+        if let Some(state) = &app.pending_detail_modal {
+            assert_eq!(state.session_id, "session456");
+            assert_eq!(state.project_name, "test-proj");
+        }
+    }
+
+    #[test]
+    fn test_us006_session_card_actions_details_clicked() {
+        // Test that details_clicked flag works correctly
+        let mut actions = SessionCardActions::default();
+
+        assert!(
+            !actions.details_clicked,
+            "details_clicked should default to false"
+        );
+
+        actions.details_clicked = true;
+        assert!(actions.details_clicked);
+    }
+
+    #[test]
+    fn test_us006_modal_constants_reasonable_sizes() {
+        // Verify modal dimension constants are reasonable
+        assert!(
+            DETAIL_MODAL_WIDTH_FRACTION > 0.5 && DETAIL_MODAL_WIDTH_FRACTION <= 1.0,
+            "Modal width fraction should be >50% and <=100%"
+        );
+        assert!(
+            DETAIL_MODAL_HEIGHT_FRACTION > 0.5 && DETAIL_MODAL_HEIGHT_FRACTION <= 1.0,
+            "Modal height fraction should be >50% and <=100%"
+        );
+        assert!(
+            DETAIL_MODAL_MIN_WIDTH >= 400.0,
+            "Minimum width should be at least 400px for usability"
+        );
+        assert!(
+            DETAIL_MODAL_MIN_HEIGHT >= 300.0,
+            "Minimum height should be at least 300px for usability"
+        );
+    }
+
+    #[test]
+    fn test_us006_modal_layout_constants() {
+        // Verify modal layout constants make sense
+        assert!(
+            DETAIL_MODAL_HEADER_HEIGHT >= 40.0,
+            "Header should have room for title and badge"
+        );
+        assert!(
+            DETAIL_MODAL_FOOTER_HEIGHT >= 40.0,
+            "Footer should have room for buttons"
+        );
+        assert!(
+            DETAIL_MODAL_SECTION_PADDING >= 8.0,
+            "Section padding should be comfortable"
+        );
+    }
+
+    #[test]
+    fn test_us006_modal_button_constants() {
+        // Verify modal button constants are reasonable
+        assert!(
+            DETAIL_MODAL_BUTTON_WIDTH >= 80.0,
+            "Buttons should be wide enough for labels"
+        );
+        assert!(
+            DETAIL_MODAL_BUTTON_HEIGHT >= 28.0,
+            "Buttons should be tall enough to tap"
+        );
+        assert!(
+            DETAIL_MODAL_BUTTON_GAP >= 8.0,
+            "Button gap should be reasonable"
+        );
+    }
+
+    #[test]
+    fn test_us006_auto_scroll_toggle() {
+        // Test auto_scroll can be toggled
+        let mut state = ProcessDetailModalState::new(
+            "session".to_string(),
+            "project".to_string(),
+            "branch".to_string(),
+            false,
+        );
+
+        assert!(state.auto_scroll, "Auto-scroll should be on by default");
+
+        state.auto_scroll = false;
+        assert!(
+            !state.auto_scroll,
+            "Auto-scroll should be toggleable to off"
+        );
+
+        state.auto_scroll = true;
+        assert!(
+            state.auto_scroll,
+            "Auto-scroll should be toggleable back on"
+        );
+    }
+
+    #[test]
+    fn test_us006_modal_dimensions_calculation() {
+        // Test that modal dimensions are calculated correctly
+        let screen_width = 1200.0;
+        let screen_height = 800.0;
+
+        let modal_width = (screen_width * DETAIL_MODAL_WIDTH_FRACTION).max(DETAIL_MODAL_MIN_WIDTH);
+        let modal_height =
+            (screen_height * DETAIL_MODAL_HEIGHT_FRACTION).max(DETAIL_MODAL_MIN_HEIGHT);
+
+        // With 80% fraction, should get 960x720
+        assert_eq!(modal_width, 960.0);
+        assert_eq!(modal_height, 720.0);
+    }
+
+    #[test]
+    fn test_us006_modal_min_dimensions_enforced() {
+        // Test that minimum dimensions are enforced for small screens
+        let screen_width = 500.0;
+        let screen_height = 400.0;
+
+        let modal_width = (screen_width * DETAIL_MODAL_WIDTH_FRACTION).max(DETAIL_MODAL_MIN_WIDTH);
+        let modal_height =
+            (screen_height * DETAIL_MODAL_HEIGHT_FRACTION).max(DETAIL_MODAL_MIN_HEIGHT);
+
+        // Should use minimums
+        assert_eq!(modal_width, DETAIL_MODAL_MIN_WIDTH);
+        assert_eq!(modal_height, DETAIL_MODAL_MIN_HEIGHT);
+    }
+
+    // ========================================================================
+    // US-008 Process Control Tests: Kill/Pause/Resume Actions
+    // ========================================================================
+
+    #[test]
+    fn test_us008_action_type_display_text() {
+        // Test ActionType display text
+        assert_eq!(ActionType::Killing.display_text(), "Killing...");
+        assert_eq!(ActionType::Pausing.display_text(), "Pausing...");
+        assert_eq!(ActionType::Resuming.display_text(), "Resuming...");
+    }
+
+    #[test]
+    fn test_us008_action_feedback_new() {
+        // Test ActionFeedback creation
+        let feedback = ActionFeedback::new(ActionType::Killing);
+        assert_eq!(feedback.action_type, ActionType::Killing);
+        // Just created, should not be expired
+        assert!(!feedback.is_expired());
+    }
+
+    #[test]
+    fn test_us008_process_control_error_new() {
+        // Test ProcessControlError creation
+        let error = ProcessControlError::new("Test error message");
+        assert_eq!(error.message, "Test error message");
+        // Just created, should not be expired
+        assert!(!error.is_expired());
+    }
+
+    #[test]
+    fn test_us008_paused_sessions_state() {
+        // Test that paused_sessions HashSet is properly initialized
+        let app = Autom8App::new();
+        assert!(
+            app.paused_sessions.is_empty(),
+            "Should start with no paused sessions"
+        );
+    }
+
+    #[test]
+    fn test_us008_pending_action_feedback_state() {
+        // Test that pending_action_feedback HashMap is properly initialized
+        let app = Autom8App::new();
+        assert!(
+            app.pending_action_feedback.is_empty(),
+            "Should start with no action feedback"
+        );
+    }
+
+    #[test]
+    fn test_us008_process_control_error_state() {
+        // Test that process_control_error is properly initialized
+        let app = Autom8App::new();
+        assert!(
+            app.process_control_error.is_none(),
+            "Should start with no process control error"
+        );
+    }
+
+    #[test]
+    fn test_us008_is_session_paused_false_by_default() {
+        // Test is_session_paused returns false for unknown sessions
+        let app = Autom8App::new();
+        assert!(
+            !app.is_session_paused("unknown-session"),
+            "Unknown session should not be paused"
+        );
+    }
+
+    #[test]
+    fn test_us008_paused_sessions_tracking() {
+        // Test paused sessions can be tracked
+        let mut app = Autom8App::new();
+
+        // Initially not paused
+        assert!(!app.is_session_paused("test-session"));
+
+        // Mark as paused
+        app.paused_sessions.insert("test-session".to_string());
+        assert!(app.is_session_paused("test-session"));
+
+        // Mark as resumed (remove from set)
+        app.paused_sessions.remove("test-session");
+        assert!(!app.is_session_paused("test-session"));
+    }
+
+    #[test]
+    fn test_us008_action_feedback_tracking() {
+        // Test action feedback can be tracked
+        let mut app = Autom8App::new();
+
+        // Add feedback
+        app.pending_action_feedback.insert(
+            "test-session".to_string(),
+            ActionFeedback::new(ActionType::Pausing),
+        );
+
+        assert!(app.pending_action_feedback.contains_key("test-session"));
+        let feedback = app.pending_action_feedback.get("test-session").unwrap();
+        assert_eq!(feedback.action_type, ActionType::Pausing);
+    }
+
+    #[test]
+    fn test_us008_process_control_error_tracking() {
+        // Test process control error can be tracked
+        let mut app = Autom8App::new();
+
+        // Set error
+        app.process_control_error = Some(ProcessControlError::new("Test error"));
+
+        assert!(app.process_control_error.is_some());
+        assert_eq!(
+            app.process_control_error.as_ref().unwrap().message,
+            "Test error"
+        );
+
+        // Clear error
+        app.process_control_error = None;
+        assert!(app.process_control_error.is_none());
+    }
+
+    #[test]
+    fn test_us008_kill_confirmation_dialog_message() {
+        // Test that kill confirmation dialog has correct message format
+        let pending = PendingKillOperation::new(
+            "session-123".to_string(),
+            "my-project".to_string(),
+            "feature/test".to_string(),
+        );
+
+        let message = pending.message();
+
+        // Should mention "cannot be undone" per acceptance criteria
+        assert!(
+            message.contains("cannot be undone"),
+            "Kill confirmation should warn that action cannot be undone"
+        );
+
+        // Should include project name
+        assert!(
+            message.contains("my-project"),
+            "Message should contain project name"
+        );
+
+        // Should include branch name
+        assert!(
+            message.contains("feature/test"),
+            "Message should contain branch name"
+        );
+    }
+
+    #[test]
+    fn test_us008_action_feedback_duration_constant() {
+        // Verify feedback duration constant is reasonable
+        assert!(
+            ActionFeedback::FEEDBACK_DURATION_MS >= 100,
+            "Feedback should be visible for at least 100ms"
+        );
+        assert!(
+            ActionFeedback::FEEDBACK_DURATION_MS <= 2000,
+            "Feedback should not persist too long (< 2s)"
+        );
+    }
+
+    #[test]
+    fn test_us008_process_control_error_duration_constant() {
+        // Verify error display duration constant is reasonable
+        assert!(
+            ProcessControlError::ERROR_DISPLAY_DURATION_MS >= 2000,
+            "Error should be visible for at least 2 seconds"
+        );
+        assert!(
+            ProcessControlError::ERROR_DISPLAY_DURATION_MS <= 10000,
+            "Error should not persist too long (< 10s)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_us008_kill_process_no_pid() {
+        // Test kill_process returns Ok(false) when no session with PID exists
+        let mut app = Autom8App::new();
+
+        // No sessions exist, so no PID to kill
+        let result = app.kill_process("nonexistent-session");
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = no process to kill
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_us008_pause_process_no_pid() {
+        // Test pause_process returns Ok(false) when no session with PID exists
+        let mut app = Autom8App::new();
+
+        // No sessions exist, so no PID to pause
+        let result = app.pause_process("nonexistent-session");
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = no process to pause
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_us008_resume_process_no_pid() {
+        // Test resume_process returns Ok(false) when no session with PID exists
+        let mut app = Autom8App::new();
+
+        // No sessions exist, so no PID to resume
+        let result = app.resume_process("nonexistent-session");
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = no process to resume
+    }
+
+    #[test]
+    fn test_us008_clear_expired_feedback_empty() {
+        // Test clear_expired_feedback handles empty map gracefully
+        let mut app = Autom8App::new();
+        // Should not panic
+        app.clear_expired_feedback();
+        assert!(app.pending_action_feedback.is_empty());
+    }
+
+    #[test]
+    fn test_us008_clear_expired_errors_none() {
+        // Test clear_expired_errors handles None error gracefully
+        let mut app = Autom8App::new();
+        // Should not panic
+        app.clear_expired_errors();
+        assert!(app.process_control_error.is_none());
     }
 }
