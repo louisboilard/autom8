@@ -14494,6 +14494,8 @@ mod tests {
         // US-006: Large numbers should format correctly
         assert_eq!(Autom8App::format_tokens(1_000_000_000), "1,000,000,000");
         assert_eq!(Autom8App::format_tokens(9_999_999_999), "9,999,999,999");
+    }
+
     // ========================================================================
     // Output Display Box Overflow Tests (US-001: gui-fixes-improvs)
     // ========================================================================
@@ -14697,6 +14699,8 @@ mod tests {
             knowledge: Default::default(),
             pre_story_commit: None,
             session_id: Some("main".to_string()),
+            total_usage: None,
+            phase_usage: std::collections::HashMap::new(),
         }
     }
 
@@ -14750,6 +14754,7 @@ mod tests {
             status: crate::state::IterationStatus::Running,
             output_snippet: "Iteration line 1\nIteration line 2".to_string(),
             work_summary: None,
+            usage: None,
         });
 
         let session = make_test_session_data(Some(run), Some(live));
@@ -14784,6 +14789,7 @@ mod tests {
             status: crate::state::IterationStatus::Running,
             output_snippet: "Review output line".to_string(),
             work_summary: None,
+            usage: None,
         });
 
         let session = make_test_session_data(Some(run), Some(live));
