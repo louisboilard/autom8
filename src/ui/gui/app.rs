@@ -7,7 +7,7 @@ use crate::error::{Autom8Error, Result};
 use crate::state::{MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
-    truncate_with_ellipsis, MAX_BRANCH_LENGTH, MAX_TEXT_LENGTH,
+    strip_worktree_prefix, truncate_with_ellipsis, MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -61,38 +61,17 @@ const TAB_PADDING_H: f32 = 16.0; // spacing::LG
 pub const DEFAULT_REFRESH_INTERVAL_MS: u64 = 500;
 
 // ============================================================================
-// Grid Layout Constants (using spacing scale)
+// Active Runs View Constants
 // ============================================================================
 
-/// Minimum width for a card in the grid layout.
-/// Cards should take approximately 50% of available width.
-const CARD_MIN_WIDTH: f32 = 400.0;
-
-/// Maximum width for a card in the grid layout.
-/// Allows cards to grow larger for better content display.
-const CARD_MAX_WIDTH: f32 = 800.0;
-
-/// Spacing between cards in the grid (uses XL from spacing scale for larger cards).
-const CARD_SPACING: f32 = 24.0; // spacing::XL
-
-/// Internal padding for cards (uses XL from spacing scale for larger cards).
-const CARD_PADDING: f32 = 20.0; // Between LG and XL
-
-/// Minimum height for a card.
-/// Cards should take approximately 50% of available height.
-const CARD_MIN_HEIGHT: f32 = 320.0;
-
-/// Number of output lines to display in session cards.
-/// Increased for better monitoring of streaming output.
-const OUTPUT_LINES_TO_SHOW: usize = 12;
+/// Number of output lines to display when getting output for a session.
+/// Used by `get_output_for_session()` to limit output from both live and iteration sources.
+const OUTPUT_LINES_TO_SHOW: usize = 50;
 
 /// Freshness threshold for live output in seconds.
 /// Live output older than this is considered stale and we fall back to iteration output.
 /// This matches the TUI's behavior for consistent user experience.
 const LIVE_OUTPUT_FRESHNESS_SECS: i64 = 5;
-
-/// Maximum number of columns in the grid layout (2x2 grid for 1/4 screen each).
-const MAX_GRID_COLUMNS: usize = 2;
 
 // MAX_TEXT_LENGTH and MAX_BRANCH_LENGTH are imported from components module.
 
@@ -286,10 +265,8 @@ enum OutputSource {
     /// Contains the lines to display (already limited to OUTPUT_LINES_TO_SHOW).
     Iteration(Vec<String>),
     /// Status message fallback when no output is available.
-    /// Contains a descriptive message based on the machine state.
+    /// Contains a descriptive message based on the machine state (e.g., "Waiting for output...").
     StatusMessage(String),
-    /// Waiting for initial output (run just started).
-    Waiting,
     /// No live output data available (session may not be actively running).
     NoData,
 }
@@ -361,12 +338,7 @@ fn get_output_for_session(session: &SessionData) -> OutputSource {
     }
 
     // Priority 3: Fall back to status message based on machine state
-    // Handle special case where live output exists but is empty (waiting for first output)
-    if session.live_output.is_some() && machine_state == MachineState::RunningClaude {
-        return OutputSource::Waiting;
-    }
-
-    // If there's no live output at all, show NoData
+    // If there's no live output at all, show NoData (session not actively running)
     if session.live_output.is_none() {
         return OutputSource::NoData;
     }
@@ -378,7 +350,10 @@ fn get_output_for_session(session: &SessionData) -> OutputSource {
         MachineState::GeneratingSpec => "Generating spec from markdown...",
         MachineState::Initializing => "Initializing run...",
         MachineState::PickingStory => "Selecting next story...",
-        MachineState::RunningClaude => "Claude is working...",
+        // US-004: For RunningClaude, show "Waiting" only when there's no iteration output
+        // (i.e., we got here because there's no output at all to show).
+        // This ensures previous iteration output remains visible until new output arrives.
+        MachineState::RunningClaude => "Waiting for output...",
         MachineState::Reviewing => "Reviewing changes...",
         MachineState::Correcting => "Applying corrections...",
         MachineState::Committing => "Committing changes...",
@@ -1920,6 +1895,24 @@ pub struct Autom8App {
     sidebar_collapsed: bool,
 
     // ========================================================================
+    // Active Runs Tab State (Tab Bar - US-001, US-003)
+    // ========================================================================
+    /// Session ID of the currently selected session tab in the Active Runs view.
+    /// Using ID instead of index is more robust when sessions change order.
+    /// None means no session is selected (will auto-select first if available).
+    selected_session_id: Option<String>,
+
+    /// Session IDs that have open tabs in the Active Runs view (US-003).
+    /// Tracks which sessions are currently visible as tabs.
+    /// Tabs auto-open for new sessions unless manually closed.
+    open_session_tabs: std::collections::HashSet<String>,
+
+    /// Session IDs that have been manually closed (US-003).
+    /// These sessions won't auto-reopen when refreshed.
+    /// Cleared when a session completes and is no longer active.
+    closed_session_tabs: std::collections::HashSet<String>,
+
+    // ========================================================================
     // Config Tab State
     // ========================================================================
     /// State for the Config tab (scope selection, cached configs, etc.).
@@ -2011,6 +2004,9 @@ impl Autom8App {
             last_refresh: Instant::now(),
             refresh_interval,
             sidebar_collapsed: false,
+            selected_session_id: None,
+            open_session_tabs: std::collections::HashSet::new(),
+            closed_session_tabs: std::collections::HashSet::new(),
             config_state: ConfigTabState::new(),
             context_menu: None,
             command_executions: std::collections::HashMap::new(),
@@ -3133,6 +3129,40 @@ impl Autom8App {
         self.projects = ui_data.projects;
         self.sessions = ui_data.sessions;
         self.has_active_runs = ui_data.has_active_runs;
+
+        // US-003: Sync open_session_tabs with current sessions
+        self.sync_session_tabs();
+    }
+
+    /// Sync session tabs with current session list (US-003).
+    ///
+    /// This method:
+    /// 1. Auto-opens tabs for new sessions (unless manually closed)
+    /// 2. Removes tabs for sessions that no longer exist
+    /// 3. Clears closed_session_tabs for sessions that are gone (so they can reopen later)
+    fn sync_session_tabs(&mut self) {
+        // Get current session IDs
+        let current_session_ids: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|s| s.metadata.session_id.clone())
+            .collect();
+
+        // Auto-open tabs for new sessions (if not manually closed)
+        for session_id in &current_session_ids {
+            if !self.closed_session_tabs.contains(session_id) {
+                self.open_session_tabs.insert(session_id.clone());
+            }
+        }
+
+        // Remove tabs for sessions that no longer exist
+        self.open_session_tabs
+            .retain(|id| current_session_ids.contains(id));
+
+        // Clear closed_session_tabs for sessions that are gone
+        // This allows the tab to auto-open if the session appears again later
+        self.closed_session_tabs
+            .retain(|id| current_session_ids.contains(id));
     }
 }
 
@@ -6395,8 +6425,17 @@ impl Autom8App {
         result.chars().rev().collect()
     }
 
-    /// Render the Active Runs view.
-    fn render_active_runs(&self, ui: &mut egui::Ui) {
+    /// Render the Active Runs view with tab bar for session selection.
+    ///
+    /// When there are active sessions, displays a horizontal tab bar where each
+    /// session gets its own tab (labeled with branch name). Clicking a tab switches
+    /// to that session's expanded view with full output display.
+    ///
+    /// US-003: Tabs have close buttons and follow a lifecycle:
+    /// - Tabs auto-appear for new active runs
+    /// - Tabs persist after completion until manually closed
+    /// - Closing all tabs returns to empty state
+    fn render_active_runs(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             // Header section with consistent spacing
             ui.label(
@@ -6407,13 +6446,513 @@ impl Autom8App {
 
             ui.add_space(spacing::SM);
 
-            // Empty state or grid layout
-            if self.sessions.is_empty() {
+            // US-003: Filter sessions to only those with open tabs
+            let visible_sessions: Vec<(usize, &SessionData)> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| self.open_session_tabs.contains(&s.metadata.session_id))
+                .collect();
+
+            // Empty state if no sessions or all tabs closed
+            if visible_sessions.is_empty() {
                 self.render_empty_active_runs(ui);
             } else {
-                self.render_sessions_grid(ui);
+                // Ensure valid selection: auto-select first visible session if none selected
+                // or if current selection is not visible (US-005: robust to session order changes)
+                let current_selection_valid = self.selected_session_id.as_ref().is_some_and(|id| {
+                    visible_sessions
+                        .iter()
+                        .any(|(_, s)| s.metadata.session_id == *id)
+                });
+
+                if !current_selection_valid {
+                    // Select first visible session by ID
+                    self.selected_session_id = visible_sessions
+                        .first()
+                        .map(|(_, s)| s.metadata.session_id.clone());
+                }
+
+                // Render tab bar for session selection
+                self.render_active_session_tab_bar(ui);
+
+                ui.add_space(spacing::SM);
+
+                // Render expanded view for selected session (find by ID, robust to reordering)
+                if let Some(ref selected_id) = self.selected_session_id {
+                    if let Some(session) = self
+                        .sessions
+                        .iter()
+                        .find(|s| s.metadata.session_id == *selected_id)
+                    {
+                        // Clone session data to avoid borrow issues
+                        let session = session.clone();
+                        self.render_expanded_session_view(ui, &session);
+                    }
+                }
             }
         });
+    }
+
+    /// Render the horizontal tab bar for active session selection.
+    ///
+    /// Each session gets a tab with its branch name (worktree prefix stripped).
+    /// The tab bar scrolls horizontally if there are many tabs (US-005).
+    ///
+    /// US-003: Tabs have close buttons. Only sessions with open tabs are shown.
+    /// US-005: Uses session ID instead of index for robust selection during rapid changes.
+    fn render_active_session_tab_bar(&mut self, ui: &mut egui::Ui) {
+        let available_width = ui.available_width();
+        let scroll_width = available_width.min(TAB_BAR_MAX_SCROLL_WIDTH);
+
+        // Track which tab to select and which to close (by session ID for robustness)
+        let mut tab_to_select: Option<String> = None;
+        let mut tab_to_close: Option<String> = None;
+
+        // Collect visible sessions (those with open tabs)
+        let visible_sessions: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .filter(|s| self.open_session_tabs.contains(&s.metadata.session_id))
+            .map(|s| {
+                let branch_label = strip_worktree_prefix(&s.metadata.branch_name, &s.project_name);
+                (s.metadata.session_id.clone(), branch_label)
+            })
+            .collect();
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(available_width, CONTENT_TAB_BAR_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                egui::ScrollArea::horizontal()
+                    .max_width(scroll_width)
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            ui.add_space(spacing::XS);
+
+                            for (session_id, branch_label) in &visible_sessions {
+                                let is_active = self
+                                    .selected_session_id
+                                    .as_ref()
+                                    .is_some_and(|id| id == session_id);
+
+                                let (tab_clicked, close_clicked) =
+                                    self.render_active_session_tab(ui, branch_label, is_active);
+
+                                if tab_clicked {
+                                    tab_to_select = Some(session_id.clone());
+                                }
+                                if close_clicked {
+                                    tab_to_close = Some(session_id.clone());
+                                }
+                                ui.add_space(spacing::XS);
+                            }
+                        });
+                    });
+            },
+        );
+
+        // Apply selection after render loop (by ID, robust to reordering)
+        if let Some(session_id) = tab_to_select {
+            self.selected_session_id = Some(session_id);
+        }
+
+        // US-003: Handle tab close
+        if let Some(session_id) = tab_to_close {
+            self.close_session_tab(&session_id);
+        }
+    }
+
+    /// Close a session tab (US-003).
+    ///
+    /// Removes the tab from the open set and adds to closed set.
+    /// If the closed tab was selected, clears selection (render_active_runs will auto-select).
+    fn close_session_tab(&mut self, session_id: &str) {
+        // Remove from open tabs
+        self.open_session_tabs.remove(session_id);
+
+        // Add to closed tabs (prevents auto-reopen)
+        self.closed_session_tabs.insert(session_id.to_string());
+
+        // If the closed tab was selected, clear selection
+        // (render_active_runs will auto-select the first available)
+        if self
+            .selected_session_id
+            .as_ref()
+            .is_some_and(|id| id == session_id)
+        {
+            self.selected_session_id = None;
+        }
+    }
+
+    /// Render a single tab in the active session tab bar.
+    ///
+    /// US-003: Tabs have close buttons (X) that are always visible.
+    /// Returns (tab_clicked, close_clicked).
+    fn render_active_session_tab(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        is_active: bool,
+    ) -> (bool, bool) {
+        // Calculate text size
+        let text_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                label.to_string(),
+                typography::font(FontSize::Body, FontWeight::Medium),
+                colors::TEXT_PRIMARY,
+            )
+        });
+        let text_size = text_galley.size();
+
+        // Calculate tab dimensions including close button
+        let close_button_space = TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING;
+        let tab_width = text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
+        let tab_height = CONTENT_TAB_BAR_HEIGHT - TAB_UNDERLINE_HEIGHT - spacing::XS;
+        let tab_size = egui::vec2(tab_width, tab_height);
+
+        // Allocate space for the tab
+        let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        // Draw tab background
+        let bg_color = if is_active {
+            colors::SURFACE_SELECTED
+        } else if is_hovered {
+            colors::SURFACE_HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        if bg_color != Color32::TRANSPARENT {
+            ui.painter()
+                .rect_filled(rect, Rounding::same(rounding::BUTTON), bg_color);
+        }
+
+        // Draw text
+        let text_color = if is_active {
+            colors::TEXT_PRIMARY
+        } else if is_hovered {
+            colors::TEXT_SECONDARY
+        } else {
+            colors::TEXT_MUTED
+        };
+
+        let text_x = rect.left() + TAB_PADDING_H;
+        let text_pos = egui::pos2(text_x, rect.center().y - text_size.y / 2.0);
+
+        ui.painter().galley(
+            text_pos,
+            ui.fonts(|f| {
+                f.layout_no_wrap(
+                    label.to_string(),
+                    typography::font(
+                        FontSize::Body,
+                        if is_active {
+                            FontWeight::SemiBold
+                        } else {
+                            FontWeight::Medium
+                        },
+                    ),
+                    text_color,
+                )
+            }),
+            Color32::TRANSPARENT,
+        );
+
+        // US-003: Draw close button
+        let close_rect = Rect::from_min_size(
+            egui::pos2(
+                rect.right() - TAB_PADDING_H - TAB_CLOSE_BUTTON_SIZE,
+                rect.center().y - TAB_CLOSE_BUTTON_SIZE / 2.0,
+            ),
+            egui::vec2(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE),
+        );
+
+        // Check if mouse is over the close button
+        let close_hovered = ui
+            .ctx()
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pos| close_rect.contains(pos));
+
+        // Draw close button background on hover
+        if close_hovered {
+            ui.painter().rect_filled(
+                close_rect,
+                Rounding::same(rounding::SMALL),
+                colors::SURFACE_HOVER,
+            );
+        }
+
+        // Draw X icon
+        let x_color = if close_hovered {
+            colors::TEXT_PRIMARY
+        } else {
+            colors::TEXT_MUTED
+        };
+        let x_center = close_rect.center();
+        let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3;
+
+        ui.painter().line_segment(
+            [
+                egui::pos2(x_center.x - x_size, x_center.y - x_size),
+                egui::pos2(x_center.x + x_size, x_center.y + x_size),
+            ],
+            Stroke::new(1.5, x_color),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(x_center.x + x_size, x_center.y - x_size),
+                egui::pos2(x_center.x - x_size, x_center.y + x_size),
+            ],
+            Stroke::new(1.5, x_color),
+        );
+
+        // Draw underline indicator for active tab
+        if is_active {
+            let underline_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.bottom()),
+                egui::vec2(rect.width(), TAB_UNDERLINE_HEIGHT),
+            );
+            ui.painter()
+                .rect_filled(underline_rect, Rounding::ZERO, colors::ACCENT);
+        }
+
+        // Close button click takes precedence over tab click
+        let close_clicked = response.clicked() && close_hovered;
+        let tab_clicked = response.clicked() && !close_hovered;
+
+        (tab_clicked, close_clicked)
+    }
+
+    /// Render the expanded view for a selected session.
+    ///
+    /// This view takes most of the available space and shows:
+    /// - Session metadata (project, branch, state, progress) at top
+    /// - Large output section filling remaining space
+    ///
+    /// Styled to match RunDetail view with Title-sized header and consistent padding.
+    fn render_expanded_session_view(&self, ui: &mut egui::Ui, session: &SessionData) {
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+
+        // Use the full available area with padding matching RunDetail style
+        let content_padding = spacing::LG;
+        let content_width = available_width - content_padding * 2.0;
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(available_width, available_height),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                ui.add_space(content_padding);
+
+                ui.horizontal(|ui| {
+                    ui.add_space(content_padding);
+
+                    ui.vertical(|ui| {
+                        ui.set_width(content_width);
+
+                        // === HEADER: Branch name (primary identifier) with session badge ===
+                        let branch_display = strip_worktree_prefix(
+                            &session.metadata.branch_name,
+                            &session.project_name,
+                        );
+
+                        ui.horizontal(|ui| {
+                            // Branch name as the prominent title (matches RunDetail header size)
+                            ui.label(
+                                egui::RichText::new(&branch_display)
+                                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                                    .color(colors::TEXT_PRIMARY),
+                            );
+
+                            ui.add_space(spacing::MD);
+
+                            // Session badge
+                            let badge_text = if session.is_main_session {
+                                "main"
+                            } else {
+                                &session.metadata.session_id
+                            };
+                            let badge_color = if session.is_main_session {
+                                colors::ACCENT
+                            } else {
+                                colors::TEXT_SECONDARY
+                            };
+                            let badge_bg = if session.is_main_session {
+                                colors::ACCENT_SUBTLE
+                            } else {
+                                colors::SURFACE_HOVER
+                            };
+
+                            egui::Frame::none()
+                                .fill(badge_bg)
+                                .rounding(rounding::SMALL)
+                                .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(badge_text)
+                                            .font(typography::font(
+                                                FontSize::Small,
+                                                FontWeight::Medium,
+                                            ))
+                                            .color(badge_color),
+                                    );
+                                });
+                        });
+
+                        ui.add_space(spacing::XS);
+
+                        // === PROJECT NAME (secondary info) ===
+                        ui.label(
+                            egui::RichText::new(&session.project_name)
+                                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                        );
+
+                        ui.add_space(spacing::MD);
+
+                        // === STATUS ROW ===
+                        let appears_stuck = session.appears_stuck();
+                        let (state, state_color) = if let Some(ref run) = session.run {
+                            let base_color = state_to_color(run.machine_state);
+                            let color = if appears_stuck {
+                                colors::STATUS_WARNING
+                            } else {
+                                base_color
+                            };
+                            (run.machine_state, color)
+                        } else {
+                            (MachineState::Idle, colors::STATUS_IDLE)
+                        };
+
+                        ui.horizontal(|ui| {
+                            // Status dot
+                            let dot_size = 8.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(dot_size, dot_size),
+                                Sense::hover(),
+                            );
+                            ui.painter()
+                                .circle_filled(rect.center(), dot_size / 2.0, state_color);
+
+                            ui.add_space(spacing::SM);
+
+                            // State text
+                            let state_text = if appears_stuck {
+                                format!("{} (Not responding)", format_state(state))
+                            } else {
+                                format_state(state).to_string()
+                            };
+                            ui.label(
+                                egui::RichText::new(state_text)
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(colors::TEXT_PRIMARY),
+                            );
+
+                            // Progress info
+                            if let Some(ref progress) = session.progress {
+                                ui.add_space(spacing::MD);
+                                ui.label(
+                                    egui::RichText::new(progress.as_fraction())
+                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                        .color(colors::TEXT_SECONDARY),
+                                );
+
+                                // Current story
+                                if let Some(ref run) = session.run {
+                                    if let Some(ref story_id) = run.current_story {
+                                        ui.add_space(spacing::SM);
+                                        ui.label(
+                                            egui::RichText::new(story_id)
+                                                .font(typography::font(
+                                                    FontSize::Body,
+                                                    FontWeight::Regular,
+                                                ))
+                                                .color(colors::TEXT_MUTED),
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Duration
+                            if let Some(ref run) = session.run {
+                                ui.add_space(spacing::MD);
+                                ui.label(
+                                    egui::RichText::new(format_duration(run.started_at))
+                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                        .color(colors::TEXT_MUTED),
+                                );
+                            }
+                        });
+
+                        ui.add_space(spacing::LG);
+
+                        // === OUTPUT SECTION ===
+                        // Section header
+                        ui.label(
+                            egui::RichText::new("Output")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::TEXT_SECONDARY),
+                        );
+
+                        ui.add_space(spacing::SM);
+
+                        // Output area - fills remaining space with card-like styling
+                        let output_height = ui.available_height() - content_padding;
+
+                        egui::Frame::none()
+                            .fill(colors::SURFACE_HOVER)
+                            .rounding(rounding::CARD)
+                            .inner_margin(egui::Margin::same(spacing::MD))
+                            .show(ui, |ui| {
+                                ui.set_min_height(output_height);
+                                ui.set_max_height(output_height);
+
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        let output_source = get_output_for_session(session);
+
+                                        // Use Small font (12px) to maximize visible lines
+                                        // This allows 30+ lines in typical window heights
+                                        match output_source {
+                                            OutputSource::Live(lines)
+                                            | OutputSource::Iteration(lines) => {
+                                                for line in lines {
+                                                    ui.label(
+                                                        egui::RichText::new(line.trim())
+                                                            .font(typography::mono(FontSize::Small))
+                                                            .color(colors::TEXT_SECONDARY),
+                                                    );
+                                                }
+                                            }
+                                            OutputSource::StatusMessage(message) => {
+                                                ui.label(
+                                                    egui::RichText::new(message)
+                                                        .font(typography::mono(FontSize::Small))
+                                                        .color(colors::TEXT_DISABLED),
+                                                );
+                                            }
+                                            OutputSource::NoData => {
+                                                ui.label(
+                                                    egui::RichText::new("No live output")
+                                                        .font(typography::mono(FontSize::Small))
+                                                        .color(colors::TEXT_DISABLED),
+                                                );
+                                            }
+                                        }
+                                    });
+                            });
+                    });
+                });
+            },
+        );
     }
 
     /// Render the empty state for Active Runs view.
@@ -6438,531 +6977,6 @@ impl Autom8App {
                     .color(colors::TEXT_MUTED),
             );
         });
-    }
-
-    /// Calculate the number of grid columns based on available width.
-    /// Always returns at most 2 columns for a 2x2 grid layout where each card
-    /// takes approximately 1/4 of the screen.
-    fn calculate_grid_columns(available_width: f32) -> usize {
-        // Calculate how many cards fit, accounting for spacing
-        let card_with_spacing = CARD_MIN_WIDTH + CARD_SPACING;
-        let columns = ((available_width + CARD_SPACING) / card_with_spacing).floor() as usize;
-
-        // Clamp to range: minimum 1, maximum 2 (for 2x2 grid of 1/4 screen cards)
-        columns.clamp(1, MAX_GRID_COLUMNS)
-    }
-
-    /// Calculate the card width for the current number of columns.
-    /// Accounts for edge spacing and inter-card spacing.
-    fn calculate_card_width(available_width: f32, columns: usize) -> f32 {
-        // Total spacing: edges (left + right) + between cards
-        let total_spacing = CARD_SPACING * (columns as f32 + 1.0);
-        let card_width = (available_width - total_spacing) / columns as f32;
-
-        // Clamp to min/max bounds
-        card_width.clamp(CARD_MIN_WIDTH, CARD_MAX_WIDTH)
-    }
-
-    /// Render the sessions in a responsive grid layout.
-    /// Cards are sized to approximately 50% width and 50% height, creating a 2x2 visible grid.
-    /// When more than 4 sessions exist, the content scrolls vertically.
-    fn render_sessions_grid(&self, ui: &mut egui::Ui) {
-        let available_width = ui.available_width();
-        let available_height = ui.available_height();
-        let columns = Self::calculate_grid_columns(available_width);
-
-        // Calculate card dimensions based on available space
-        let card_width = Self::calculate_card_width(available_width, columns);
-
-        // Calculate height: 2 rows visible with spacing (edge spacing + inter-row spacing)
-        let total_v_spacing = CARD_SPACING * 3.0; // Top + between rows + bottom
-        let card_height = ((available_height - total_v_spacing) / 2.0).max(CARD_MIN_HEIGHT);
-
-        // Calculate total width of card row for centering
-        let row_width = (card_width * columns as f32) + (CARD_SPACING * (columns as f32 - 1.0));
-        let h_offset = ((available_width - row_width) / 2.0).max(0.0);
-
-        // Scrollable area for the grid with smooth scrolling
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-            .show(ui, |ui| {
-                // Add top spacing
-                ui.add_space(CARD_SPACING);
-
-                // Create rows of cards with consistent spacing, centered horizontally
-                let mut session_iter = self.sessions.iter().peekable();
-                while session_iter.peek().is_some() {
-                    ui.horizontal(|ui| {
-                        // Add horizontal offset for centering
-                        ui.add_space(h_offset);
-
-                        for i in 0..columns {
-                            if let Some(session) = session_iter.next() {
-                                self.render_session_card(ui, session, card_width, card_height);
-                                // Add spacing between cards (but not after the last one in row)
-                                if i < columns - 1 {
-                                    ui.add_space(CARD_SPACING);
-                                }
-                            }
-                        }
-                    });
-                    ui.add_space(CARD_SPACING);
-                }
-            });
-    }
-
-    /// Render a single session card.
-    ///
-    /// The card displays:
-    /// - Header: Project name, session badge (main/worktree), branch name
-    /// - Status row: Colored indicator dot with state label
-    /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
-    /// - Duration row: Time elapsed since run started
-    /// - Output section: Last OUTPUT_LINES_TO_SHOW lines of Claude output in monospace font
-    fn render_session_card(
-        &self,
-        ui: &mut egui::Ui,
-        session: &SessionData,
-        card_width: f32,
-        card_height: f32,
-    ) {
-        // Define card dimensions
-        let card_size = Vec2::new(card_width, card_height);
-
-        // Allocate space for the card
-        let (rect, _response) = ui.allocate_exact_size(card_size, Sense::hover());
-
-        // Skip if not visible (optimization for scrolling)
-        if !ui.is_rect_visible(rect) {
-            return;
-        }
-
-        // Draw card background with elevation and state-specific styling
-        let card_rect = rect;
-        let painter = ui.painter();
-
-        // Determine state-specific colors for the card
-        let (state, state_color) = session
-            .run
-            .as_ref()
-            .map(|r| (r.machine_state, state_to_color(r.machine_state)))
-            .unwrap_or((MachineState::Idle, colors::STATUS_IDLE));
-
-        // Show progress bar and infinity animation for non-idle states with progress data
-        let has_progress_bar = !matches!(state, MachineState::Idle) && session.progress.is_some();
-
-        // Shadow for subtle elevation
-        let shadow = theme::shadow::subtle();
-        let shadow_rect = Rect::from_min_size(
-            card_rect.min + shadow.offset,
-            card_rect.size() + Vec2::splat(shadow.spread * 2.0),
-        );
-        painter.rect_filled(
-            shadow_rect.expand(shadow.blur / 2.0),
-            Rounding::same(rounding::CARD),
-            shadow.color,
-        );
-
-        // Card background with state-colored left border accent
-        // First draw the full card background
-        painter.rect(
-            card_rect,
-            Rounding::same(rounding::CARD),
-            colors::SURFACE,
-            Stroke::new(1.0, colors::BORDER),
-        );
-
-        // Draw a colored accent stripe on the left edge for state differentiation
-        // This provides subtle but clear visual indication of the current phase
-        let accent_width = 3.0;
-        let accent_rect =
-            Rect::from_min_size(card_rect.min, egui::vec2(accent_width, card_rect.height()));
-        painter.rect_filled(
-            accent_rect,
-            Rounding {
-                nw: rounding::CARD,
-                sw: rounding::CARD,
-                ne: 0.0,
-                se: 0.0,
-            },
-            state_color,
-        );
-
-        // Draw card content
-        let content_rect = card_rect.shrink(CARD_PADDING);
-        let mut cursor_y = content_rect.min.y;
-        let content_width = content_rect.width();
-
-        // ====================================================================
-        // HEADER ROW: Project name and session badge
-        // ====================================================================
-        let project_name =
-            truncate_with_ellipsis(&session.project_name, MAX_TEXT_LENGTH.saturating_sub(10));
-        let project_galley = painter.layout_no_wrap(
-            project_name,
-            typography::font(FontSize::Heading, FontWeight::SemiBold),
-            colors::TEXT_PRIMARY,
-        );
-        painter.galley(
-            egui::pos2(content_rect.min.x, cursor_y),
-            project_galley.clone(),
-            Color32::TRANSPARENT,
-        );
-
-        // Session badge (main/worktree ID) - positioned after project name
-        let badge_text = if session.is_main_session {
-            "main".to_string()
-        } else {
-            session.metadata.session_id.clone()
-        };
-        let badge_padding_h = 6.0; // Inner padding for badge
-        let badge_padding_v = 2.0; // Inner padding for badge
-        let badge_galley = painter.layout_no_wrap(
-            badge_text,
-            typography::font(FontSize::Caption, FontWeight::Medium),
-            if session.is_main_session {
-                colors::ACCENT
-            } else {
-                colors::TEXT_SECONDARY
-            },
-        );
-        let badge_x = content_rect.min.x + project_galley.rect.width() + 8.0;
-        let badge_bg_rect = Rect::from_min_size(
-            egui::pos2(badge_x, cursor_y),
-            egui::vec2(
-                badge_galley.rect.width() + badge_padding_h * 2.0,
-                badge_galley.rect.height() + badge_padding_v * 2.0,
-            ),
-        );
-        let badge_bg_color = if session.is_main_session {
-            colors::ACCENT_SUBTLE
-        } else {
-            colors::SURFACE_HOVER
-        };
-        painter.rect_filled(
-            badge_bg_rect,
-            Rounding::same(rounding::SMALL),
-            badge_bg_color,
-        );
-        painter.galley(
-            egui::pos2(badge_x + badge_padding_h, cursor_y + badge_padding_v),
-            badge_galley,
-            Color32::TRANSPARENT,
-        );
-        cursor_y += project_galley.rect.height() + spacing::XS;
-
-        // Branch name row
-        let branch_text = truncate_with_ellipsis(&session.metadata.branch_name, MAX_BRANCH_LENGTH);
-        let branch_galley = painter.layout_no_wrap(
-            branch_text,
-            typography::font(FontSize::Heading, FontWeight::Regular),
-            colors::TEXT_MUTED,
-        );
-        painter.galley(
-            egui::pos2(content_rect.min.x, cursor_y),
-            branch_galley.clone(),
-            Color32::TRANSPARENT,
-        );
-        cursor_y += branch_galley.rect.height() + spacing::SM;
-
-        // ====================================================================
-        // STATUS ROW: Colored indicator dot with state label
-        // ====================================================================
-        // Check if session appears stuck (heartbeat is stale)
-        let appears_stuck = session.appears_stuck();
-
-        let (state, state_color) = if let Some(ref run) = session.run {
-            let base_color = state_to_color(run.machine_state);
-            // Override color to warning if session appears stuck
-            let color = if appears_stuck {
-                colors::STATUS_WARNING
-            } else {
-                base_color
-            };
-            (run.machine_state, color)
-        } else {
-            (MachineState::Idle, colors::STATUS_IDLE)
-        };
-
-        // Status dot
-        let dot_radius = 4.0;
-        let dot_center = egui::pos2(
-            content_rect.min.x + dot_radius,
-            cursor_y + FontSize::Body.pixels() / 2.0,
-        );
-        painter.circle_filled(dot_center, dot_radius, state_color);
-
-        // State text - append "(Not responding)" if stuck
-        let state_text = if appears_stuck {
-            format!("{} (Not responding)", format_state(state))
-        } else {
-            format_state(state).to_string()
-        };
-        let state_galley = painter.layout_no_wrap(
-            state_text,
-            typography::font(FontSize::Body, FontWeight::Medium),
-            colors::TEXT_PRIMARY,
-        );
-        painter.galley(
-            egui::pos2(
-                content_rect.min.x + dot_radius * 2.0 + spacing::SM,
-                cursor_y,
-            ),
-            state_galley.clone(),
-            Color32::TRANSPARENT,
-        );
-
-        // Large infinity animation centered in the available space after status text
-        if has_progress_bar {
-            // Calculate available space after status text
-            let status_end_x =
-                content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
-            let available_width = content_rect.max.x - status_end_x - spacing::MD; // respect right padding
-
-            // Make infinity fill most of the available space
-            let infinity_width = (available_width * 0.7).clamp(60.0, 120.0);
-            let infinity_height = (state_galley.rect.height() * 0.9).max(16.0);
-
-            let infinity_x = status_end_x + (available_width - infinity_width) / 2.0;
-            let infinity_rect = Rect::from_min_size(
-                Pos2::new(
-                    infinity_x,
-                    cursor_y + (state_galley.rect.height() - infinity_height) / 2.0,
-                ),
-                egui::vec2(infinity_width, infinity_height),
-            );
-            let time = ui.ctx().input(|i| i.time) as f32;
-            super::animation::render_infinity(painter, time, infinity_rect, state_color, 1.0);
-        }
-
-        // Progress bar commented out - keeping infinity animation instead
-        // if has_progress_bar {
-        //     if let Some(ref progress) = session.progress {
-        //         let bar_width = 100.0;
-        //         let bar_height = 8.0;
-        //         let progress_value = if progress.total > 0 {
-        //             progress.completed as f32 / progress.total as f32
-        //         } else {
-        //             0.0
-        //         };
-        //         let status_end_x =
-        //             content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
-        //         let available_width = content_rect.max.x - status_end_x;
-        //         let bar_x = status_end_x + (available_width - bar_width) / 2.0;
-        //         let bar_rect = Rect::from_min_size(
-        //             Pos2::new(
-        //                 bar_x,
-        //                 cursor_y + (state_galley.rect.height() - bar_height) / 2.0,
-        //             ),
-        //             egui::vec2(bar_width, bar_height),
-        //         );
-        //         let time = ui.ctx().input(|i| i.time) as f32;
-        //         super::animation::render_progress_bar(
-        //             painter,
-        //             time,
-        //             bar_rect,
-        //             progress_value,
-        //             colors::SURFACE_HOVER,
-        //             state_color,
-        //         );
-        //     }
-        // }
-
-        cursor_y += state_galley.rect.height() + spacing::XS;
-
-        // ====================================================================
-        // ERROR MESSAGE (if present)
-        // ====================================================================
-        if let Some(ref error) = session.load_error {
-            let error_text = truncate_with_ellipsis(error, MAX_TEXT_LENGTH);
-            let error_galley = painter.layout_no_wrap(
-                error_text,
-                typography::font(FontSize::Body, FontWeight::Regular),
-                colors::STATUS_ERROR,
-            );
-            painter.galley(
-                egui::pos2(content_rect.min.x, cursor_y),
-                error_galley.clone(),
-                Color32::TRANSPARENT,
-            );
-            cursor_y += error_galley.rect.height() + spacing::XS;
-        }
-
-        // ====================================================================
-        // PROGRESS ROW: Story progress and current story ID
-        // ====================================================================
-        if let Some(ref progress) = session.progress {
-            let progress_text = progress.as_fraction();
-            let progress_galley = painter.layout_no_wrap(
-                progress_text,
-                typography::font(FontSize::Body, FontWeight::Regular),
-                colors::TEXT_SECONDARY,
-            );
-            painter.galley(
-                egui::pos2(content_rect.min.x, cursor_y),
-                progress_galley.clone(),
-                Color32::TRANSPARENT,
-            );
-
-            // Current story ID (if available)
-            if let Some(ref run) = session.run {
-                if let Some(ref story_id) = run.current_story {
-                    let story_text = truncate_with_ellipsis(story_id, 15);
-                    let story_galley = painter.layout_no_wrap(
-                        story_text,
-                        typography::font(FontSize::Body, FontWeight::Regular),
-                        colors::TEXT_MUTED,
-                    );
-                    painter.galley(
-                        egui::pos2(
-                            content_rect.min.x + progress_galley.rect.width() + spacing::MD,
-                            cursor_y,
-                        ),
-                        story_galley,
-                        Color32::TRANSPARENT,
-                    );
-                }
-            }
-
-            cursor_y += progress_galley.rect.height() + spacing::XS;
-        }
-
-        // ====================================================================
-        // DURATION ROW: Time elapsed since run started
-        // ====================================================================
-        if let Some(ref run) = session.run {
-            let duration_text = format_duration(run.started_at);
-            let duration_galley = painter.layout_no_wrap(
-                duration_text,
-                typography::font(FontSize::Body, FontWeight::Regular),
-                colors::TEXT_MUTED,
-            );
-            painter.galley(
-                egui::pos2(content_rect.min.x, cursor_y),
-                duration_galley.clone(),
-                Color32::TRANSPARENT,
-            );
-            cursor_y += duration_galley.rect.height() + spacing::SM;
-        }
-
-        // ====================================================================
-        // OUTPUT SECTION: Intelligent output display (US-002)
-        // ====================================================================
-        // This section implements smart output source selection matching the TUI's
-        // behavior. Priority: 1) Fresh live output, 2) Iteration output, 3) Status message.
-        // See `get_output_for_session()` for detailed selection logic.
-
-        // Draw a subtle separator line
-        let separator_y = cursor_y;
-        painter.line_segment(
-            [
-                Pos2::new(content_rect.min.x, separator_y),
-                Pos2::new(content_rect.max.x, separator_y),
-            ],
-            Stroke::new(1.0, colors::BORDER),
-        );
-        cursor_y += spacing::SM;
-
-        // Output section background
-        let output_rect = Rect::from_min_max(
-            egui::pos2(content_rect.min.x, cursor_y),
-            egui::pos2(content_rect.max.x, content_rect.max.y),
-        );
-        painter.rect_filled(
-            output_rect,
-            Rounding::same(rounding::SMALL),
-            colors::SURFACE_HOVER,
-        );
-
-        // Output lines with consistent padding
-        let output_padding = 6.0; // Inner padding for output section
-        let mut output_y = cursor_y + output_padding;
-        let line_height = FontSize::Large.pixels() + 2.0;
-
-        // Calculate the inner content area for text (within the output section)
-        let text_area_width = content_width - output_padding * 2.0;
-
-        // Use a conservative character width estimate for monospace font at 16px
-        // Geist Mono at 16px is approximately 9.6px per character, but we use 10.0
-        // to be conservative and ensure text doesn't overflow
-        let char_width_estimate = 10.0;
-        let max_output_chars = (text_area_width / char_width_estimate).floor() as usize;
-
-        // Create a clipped painter that constrains all drawing to the output rect.
-        // This ensures no text can bleed outside the designated output area.
-        let clipped_painter = painter.with_clip_rect(output_rect);
-
-        // Calculate the maximum Y position where a line can start and still fit
-        let max_start_y = output_rect.max.y - output_padding - line_height;
-
-        // Get the appropriate output source using intelligent selection
-        let output_source = get_output_for_session(session);
-
-        // Render based on output source type
-        match output_source {
-            OutputSource::Live(lines) | OutputSource::Iteration(lines) => {
-                // Render output lines (same visual treatment for live and iteration output)
-                for line in lines {
-                    // Check if the line would fit BEFORE drawing (prevents partial lines)
-                    if output_y > max_start_y {
-                        break;
-                    }
-
-                    let line_text = truncate_with_ellipsis(line.trim(), max_output_chars);
-                    let line_galley = clipped_painter.layout_no_wrap(
-                        line_text,
-                        typography::mono(FontSize::Large),
-                        colors::TEXT_SECONDARY,
-                    );
-                    clipped_painter.galley(
-                        egui::pos2(content_rect.min.x + output_padding, output_y),
-                        line_galley,
-                        Color32::TRANSPARENT,
-                    );
-                    output_y += line_height;
-                }
-            }
-            OutputSource::StatusMessage(message) => {
-                // Render status message
-                let status_galley = clipped_painter.layout_no_wrap(
-                    message,
-                    typography::mono(FontSize::Large),
-                    colors::TEXT_DISABLED,
-                );
-                clipped_painter.galley(
-                    egui::pos2(content_rect.min.x + output_padding, output_y),
-                    status_galley,
-                    Color32::TRANSPARENT,
-                );
-            }
-            OutputSource::Waiting => {
-                // Render "waiting for output" message
-                let waiting_galley = clipped_painter.layout_no_wrap(
-                    "Waiting for output...".to_string(),
-                    typography::mono(FontSize::Large),
-                    colors::TEXT_DISABLED,
-                );
-                clipped_painter.galley(
-                    egui::pos2(content_rect.min.x + output_padding, output_y),
-                    waiting_galley,
-                    Color32::TRANSPARENT,
-                );
-            }
-            OutputSource::NoData => {
-                // Render "no live output" message
-                let no_output_galley = clipped_painter.layout_no_wrap(
-                    "No live output".to_string(),
-                    typography::mono(FontSize::Large),
-                    colors::TEXT_DISABLED,
-                );
-                clipped_painter.galley(
-                    egui::pos2(content_rect.min.x + output_padding, output_y),
-                    no_output_galley,
-                    Color32::TRANSPARENT,
-                );
-            }
-        }
     }
 
     // state_to_color is now imported from the components module.
@@ -7721,22 +7735,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Grid Layout
-    // =========================================================================
-
-    #[test]
-    fn test_grid_layout_calculations() {
-        // Column calculation
-        assert_eq!(Autom8App::calculate_grid_columns(300.0), 1);
-        assert_eq!(Autom8App::calculate_grid_columns(900.0), 2);
-        assert_eq!(Autom8App::calculate_grid_columns(2000.0), 2); // Capped at 2
-
-        // Card width clamping
-        assert_eq!(Autom8App::calculate_card_width(600.0, 2), CARD_MIN_WIDTH);
-        assert_eq!(Autom8App::calculate_card_width(2000.0, 2), CARD_MAX_WIDTH);
-    }
-
-    // =========================================================================
     // Tab System
     // =========================================================================
 
@@ -7848,12 +7846,89 @@ mod tests {
         let live = OutputSource::Live(vec!["test".to_string()]);
         let iter = OutputSource::Iteration(vec!["test".to_string()]);
         let status = OutputSource::StatusMessage("test".to_string());
-        let waiting = OutputSource::Waiting;
         let no_data = OutputSource::NoData;
 
         assert_ne!(live, iter);
-        assert_ne!(status.clone(), waiting.clone());
-        assert_ne!(waiting, no_data);
+        assert_ne!(status.clone(), no_data.clone());
         assert_eq!(status, OutputSource::StatusMessage("test".to_string()));
+    }
+
+    /// US-004: Tests that iteration output is preserved when live output is empty.
+    /// This ensures "Waiting for output..." doesn't replace valid previous output.
+    #[test]
+    fn test_iteration_output_preserved_when_live_empty() {
+        use crate::state::{IterationRecord, IterationStatus, LiveState};
+
+        // Create a run state with RunningClaude state and iteration with output
+        let mut run = make_test_run_state(MachineState::RunningClaude);
+        run.iterations.push(IterationRecord {
+            number: 1,
+            story_id: "US-001".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            status: IterationStatus::Running,
+            output_snippet: "Previous iteration output\nLine 2\nLine 3".to_string(),
+            work_summary: None,
+            usage: None,
+        });
+
+        // Create live output with EMPTY output_lines (new invocation just started)
+        let live = LiveState {
+            output_lines: vec![], // Empty - this is the bug scenario
+            updated_at: Utc::now(),
+            machine_state: MachineState::RunningClaude,
+            last_heartbeat: Utc::now(),
+        };
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+
+        // Should fall through to iteration output, NOT return "Waiting for output..."
+        match output {
+            OutputSource::Iteration(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines
+                    .iter()
+                    .any(|l| l.contains("Previous iteration output")));
+            }
+            OutputSource::StatusMessage(msg) => {
+                // This is the bug we're fixing - it should NOT show "Waiting for output..."
+                panic!(
+                    "Bug: Should have shown iteration output, not status message: {}",
+                    msg
+                );
+            }
+            other => panic!("Unexpected output source: {:?}", other),
+        }
+    }
+
+    /// US-004: When there's no iteration output AND no live output, show status message.
+    #[test]
+    fn test_waiting_shown_only_when_no_output() {
+        use crate::state::LiveState;
+
+        // Create a run state with RunningClaude state but NO iterations
+        let run = make_test_run_state(MachineState::RunningClaude);
+
+        // Create live output with empty output_lines
+        let live = LiveState {
+            output_lines: vec![],
+            updated_at: Utc::now(),
+            machine_state: MachineState::RunningClaude,
+            last_heartbeat: Utc::now(),
+        };
+
+        let session = make_test_session_data(Some(run), Some(live));
+
+        let output = get_output_for_session(&session);
+
+        // With no iteration output and no live output, should show status message
+        match output {
+            OutputSource::StatusMessage(msg) => {
+                assert_eq!(msg, "Waiting for output...");
+            }
+            other => panic!("Expected StatusMessage, got {:?}", other),
+        }
     }
 }
