@@ -505,27 +505,33 @@ pub struct RunHistoryData {
 /// For GUI (which swallows errors), call `.unwrap_or_default()`.
 /// For TUI (which propagates errors), use the `?` operator.
 pub fn load_ui_data(project_filter: Option<&str>) -> Result<UiData> {
-    // Load projects (returns error if config directory is inaccessible)
-    let tree_infos = list_projects_tree()?;
-
-    // Filter by project if specified
-    let filtered: Vec<_> = if let Some(filter) = project_filter {
-        tree_infos
-            .into_iter()
-            .filter(|p| p.name == filter)
-            .collect()
-    } else {
-        tree_infos
-    };
-
-    // Collect project data including active runs and progress
-    let projects: Vec<ProjectData> = filtered.iter().map(load_project_data).collect();
-
-    // Collect sessions for Active Runs view
-    let sessions = load_sessions(&filtered, project_filter);
+    // Load sessions first - this is critical for Active Runs detection
+    // and doesn't depend on git or StateManager
+    let sessions = load_sessions(project_filter);
 
     // Determine if there are active runs
     let has_active_runs = !sessions.is_empty();
+
+    // Load projects for the Projects view (may fail if git issues, but that's ok)
+    // This uses StateManager which can spawn git subprocesses
+    let projects = match list_projects_tree() {
+        Ok(tree_infos) => {
+            let filtered: Vec<_> = if let Some(filter) = project_filter {
+                tree_infos
+                    .into_iter()
+                    .filter(|p| p.name == filter)
+                    .collect()
+            } else {
+                tree_infos
+            };
+            filtered.iter().map(load_project_data).collect()
+        }
+        Err(_) => {
+            // If project loading fails (e.g., git subprocess issues),
+            // return empty projects but still return sessions
+            Vec::new()
+        }
+    };
 
     Ok(UiData {
         projects,
@@ -568,36 +574,74 @@ fn load_project_data(info: &ProjectTreeInfo) -> ProjectData {
 
 /// Load sessions for the Active Runs view.
 ///
-/// Collects all running sessions across all projects, filtering out
-/// stale sessions (where the worktree no longer exists).
-fn load_sessions(
-    project_infos: &[ProjectTreeInfo],
-    project_filter: Option<&str>,
-) -> Vec<SessionData> {
+/// Directly reads session metadata files from disk without going through
+/// StateManager, avoiding git subprocess spawning and other overhead.
+/// This makes session detection reliable regardless of where the UI runs from.
+fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
     let mut sessions: Vec<SessionData> = Vec::new();
 
-    // Get all project names to check
-    let project_names: Vec<_> = if let Some(filter) = project_filter {
-        vec![filter.to_string()]
-    } else {
-        project_infos.iter().map(|p| p.name.clone()).collect()
+    // Get the base config directory (~/.config/autom8/)
+    let base_dir = match crate::config::config_dir() {
+        Ok(dir) => dir,
+        Err(_) => return sessions,
     };
 
-    for project_name in project_names {
-        // Get the StateManager for this project
-        let sm = match StateManager::for_project(&project_name) {
-            Ok(sm) => sm,
-            Err(_) => continue, // Skip projects we can't access
+    if !base_dir.exists() {
+        return sessions;
+    }
+
+    // List all project directories
+    let project_dirs = match std::fs::read_dir(&base_dir) {
+        Ok(entries) => entries,
+        Err(_) => return sessions,
+    };
+
+    for entry in project_dirs.filter_map(|e| e.ok()) {
+        let project_path = entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+
+        let project_name = match project_path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
         };
 
-        // List all sessions for this project
-        let project_sessions = match sm.list_sessions() {
-            Ok(s) => s,
-            Err(_) => continue, // Skip if we can't list sessions
+        // Apply project filter if specified
+        if let Some(filter) = project_filter {
+            if project_name != filter {
+                continue;
+            }
+        }
+
+        // Look for sessions directory
+        let sessions_dir = project_path.join("sessions");
+        if !sessions_dir.exists() {
+            continue;
+        }
+
+        // List all session directories
+        let session_dirs = match std::fs::read_dir(&sessions_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
         };
 
-        // Process each session
-        for metadata in project_sessions {
+        for session_entry in session_dirs.filter_map(|e| e.ok()) {
+            let session_path = session_entry.path();
+            if !session_path.is_dir() {
+                continue;
+            }
+
+            // Read metadata.json directly
+            let metadata_path = session_path.join("metadata.json");
+            let metadata: SessionMetadata = match std::fs::read_to_string(&metadata_path) {
+                Ok(content) => match serde_json::from_str(&content) {
+                    Ok(m) => m,
+                    Err(_) => continue, // Skip malformed metadata
+                },
+                Err(_) => continue, // Skip if can't read
+            };
+
             // Skip non-running sessions
             if !metadata.is_running {
                 continue;
@@ -605,11 +649,9 @@ fn load_sessions(
 
             // Check if worktree was deleted (stale session)
             let is_stale = !metadata.worktree_path.exists();
-
-            // Determine if this is the main session
             let is_main_session = metadata.session_id == MAIN_SESSION_ID;
 
-            // For stale sessions, set error and skip state loading
+            // For stale sessions, add with error and skip state loading
             if is_stale {
                 sessions.push(SessionData {
                     project_name: project_name.clone(),
@@ -624,20 +666,22 @@ fn load_sessions(
                 continue;
             }
 
-            // Load the run state and live output for this session
-            let (run, load_error, live_output) =
-                if let Some(session_sm) = sm.get_session(&metadata.session_id) {
-                    match session_sm.load_current() {
-                        Ok(run) => {
-                            // Load live output (gracefully returns None if missing/corrupted)
-                            let live = session_sm.load_live();
-                            (run, None, live)
-                        }
-                        Err(e) => (None, Some(format!("Corrupted state: {}", e)), None),
-                    }
-                } else {
-                    (None, Some("Session not found".to_string()), None)
+            // Read state.json directly
+            let state_path = session_path.join("state.json");
+            let (run, load_error): (Option<RunState>, Option<String>) =
+                match std::fs::read_to_string(&state_path) {
+                    Ok(content) => match serde_json::from_str(&content) {
+                        Ok(state) => (Some(state), None),
+                        Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+                    },
+                    Err(_) => (None, Some("State file not found".to_string())),
                 };
+
+            // Read live.json directly (optional, for output display)
+            let live_path = session_path.join("live.json");
+            let live_output: Option<LiveState> = std::fs::read_to_string(&live_path)
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok());
 
             // Load spec to get progress information
             let progress = run.as_ref().and_then(|r| {
@@ -765,8 +809,19 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
         ));
     }
 
-    // Already sorted by list_archived, but ensure newest first
-    history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    // Sort with running sessions at top, then by date descending
+    history.sort_by(|a, b| {
+        // First priority: running status at top
+        let a_running = matches!(a.status, RunStatus::Running);
+        let b_running = matches!(b.status, RunStatus::Running);
+
+        match (a_running, b_running) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            // Both same category: sort by started_at descending (newest first)
+            _ => b.started_at.cmp(&a.started_at),
+        }
+    });
 
     Ok(history)
 }
@@ -1363,5 +1418,142 @@ mod tests {
         // Days
         assert_eq!(format_relative_time_secs(86400), "1d ago");
         assert_eq!(format_relative_time_secs(172800), "2d ago");
+    }
+
+    // ========================================================================
+    // US-003: Run History Sorting Tests
+    // ========================================================================
+
+    fn make_test_run_history_entry(
+        run_id: &str,
+        status: RunStatus,
+        started_at_offset_secs: i64,
+    ) -> RunHistoryEntry {
+        use chrono::{Duration, Utc};
+
+        RunHistoryEntry {
+            project_name: "test-project".to_string(),
+            run_id: run_id.to_string(),
+            started_at: Utc::now() - Duration::seconds(started_at_offset_secs),
+            finished_at: None,
+            status,
+            completed_stories: 0,
+            total_stories: 5,
+            branch: "test-branch".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_run_history_sorting_running_at_top() {
+        // Running session should appear before completed ones regardless of date
+        let mut history = vec![
+            make_test_run_history_entry("old-completed", RunStatus::Completed, 60), // 1 min ago
+            make_test_run_history_entry("running", RunStatus::Running, 3600),       // 1 hour ago
+            make_test_run_history_entry("new-completed", RunStatus::Completed, 0),  // now
+        ];
+
+        // Apply the same sorting logic as load_project_run_history
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // Running should be first, even though it started 1 hour ago
+        assert_eq!(history[0].run_id, "running");
+        // Then completed entries sorted by date (newest first)
+        assert_eq!(history[1].run_id, "new-completed");
+        assert_eq!(history[2].run_id, "old-completed");
+    }
+
+    #[test]
+    fn test_run_history_sorting_multiple_running() {
+        // Multiple running sessions should be sorted by started_at (newest first)
+        let mut history = vec![
+            make_test_run_history_entry("running-old", RunStatus::Running, 3600), // 1 hour ago
+            make_test_run_history_entry("running-new", RunStatus::Running, 60),   // 1 min ago
+            make_test_run_history_entry("completed", RunStatus::Completed, 0),    // now
+        ];
+
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // Both running entries should be before completed
+        assert!(matches!(history[0].status, RunStatus::Running));
+        assert!(matches!(history[1].status, RunStatus::Running));
+        // Newest running first
+        assert_eq!(history[0].run_id, "running-new");
+        assert_eq!(history[1].run_id, "running-old");
+        // Completed last
+        assert_eq!(history[2].run_id, "completed");
+    }
+
+    #[test]
+    fn test_run_history_sorting_non_running_by_date() {
+        // Non-running entries should maintain date-descending order
+        let mut history = vec![
+            make_test_run_history_entry("failed", RunStatus::Failed, 120),
+            make_test_run_history_entry("interrupted", RunStatus::Interrupted, 60),
+            make_test_run_history_entry("completed", RunStatus::Completed, 180),
+        ];
+
+        history.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+
+        // All non-running, sorted by date (newest first)
+        assert_eq!(history[0].run_id, "interrupted"); // 60s ago - newest
+        assert_eq!(history[1].run_id, "failed"); // 120s ago
+        assert_eq!(history[2].run_id, "completed"); // 180s ago - oldest
+    }
+
+    #[test]
+    fn test_run_history_sorting_empty_and_single() {
+        // Empty history should not panic
+        let mut empty: Vec<RunHistoryEntry> = vec![];
+        empty.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+        assert!(empty.is_empty());
+
+        // Single entry should remain as-is
+        let mut single = vec![make_test_run_history_entry("only", RunStatus::Running, 0)];
+        single.sort_by(|a, b| {
+            let a_running = matches!(a.status, RunStatus::Running);
+            let b_running = matches!(b.status, RunStatus::Running);
+            match (a_running, b_running) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.started_at.cmp(&a.started_at),
+            }
+        });
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].run_id, "only");
     }
 }
