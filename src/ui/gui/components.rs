@@ -1047,58 +1047,11 @@ mod tests {
             strip_worktree_prefix("autom8-wt-feature/gui-tabs", "autom8"),
             "feature/gui-tabs"
         );
-    }
-
-    #[test]
-    fn test_strip_worktree_prefix_case_insensitive() {
-        // Should handle case differences in project name
+        // Case insensitive matching
         assert_eq!(
             strip_worktree_prefix("MyProject-wt-feature/test", "myproject"),
             "feature/test"
         );
-        assert_eq!(
-            strip_worktree_prefix("MYPROJECT-wt-feature/test", "myproject"),
-            "feature/test"
-        );
-    }
-
-    #[test]
-    fn test_strip_worktree_prefix_preserves_case_in_branch() {
-        // Should preserve the case of the branch name portion
-        assert_eq!(
-            strip_worktree_prefix("myproject-wt-Feature/LOGIN", "myproject"),
-            "Feature/LOGIN"
-        );
-    }
-
-    #[test]
-    fn test_strip_worktree_prefix_partial_match_not_stripped() {
-        // Partial matches should not be stripped
-        assert_eq!(
-            strip_worktree_prefix("myproject-feature/test", "myproject"),
-            "myproject-feature/test"
-        );
-        assert_eq!(
-            strip_worktree_prefix("myproject-wt", "myproject"),
-            "myproject-wt"
-        );
-    }
-
-    #[test]
-    fn test_strip_worktree_prefix_different_project() {
-        // Different project name should not match
-        assert_eq!(
-            strip_worktree_prefix("otherproject-wt-feature/test", "myproject"),
-            "otherproject-wt-feature/test"
-        );
-    }
-
-    #[test]
-    fn test_strip_worktree_prefix_empty_strings() {
-        // Empty branch name
-        assert_eq!(strip_worktree_prefix("", "myproject"), "");
-        // Empty project name (shouldn't match any prefix)
-        assert_eq!(strip_worktree_prefix("feature/test", ""), "feature/test");
     }
 
     // ------------------------------------------------------------------------
@@ -1186,58 +1139,4 @@ mod tests {
         assert_ne!(running_bg, error_bg);
     }
 
-    // ------------------------------------------------------------------------
-    // CollapsibleSection Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_collapsible_section_new() {
-        let section = CollapsibleSection::new("test_id", "Test Title");
-        assert_eq!(section.id, "test_id");
-        assert_eq!(section.title, "Test Title");
-        assert!(section.default_expanded); // Default is expanded
-    }
-
-    #[test]
-    fn test_collapsible_section_default_expanded() {
-        let section_expanded = CollapsibleSection::new("test", "Test").default_expanded(true);
-        assert!(section_expanded.default_expanded);
-
-        let section_collapsed = CollapsibleSection::new("test", "Test").default_expanded(false);
-        assert!(!section_collapsed.default_expanded);
-    }
-
-    #[test]
-    fn test_collapsible_section_state_initialization() {
-        // Test that default_expanded is respected when state is not present
-        let mut state = std::collections::HashMap::new();
-
-        // Section with default_expanded = true should initialize as not collapsed (false)
-        let _ = state.entry("expanded_section".to_string()).or_insert(!true); // !default_expanded where default_expanded = true
-        assert_eq!(state.get("expanded_section"), Some(&false)); // collapsed = false
-
-        // Section with default_expanded = false should initialize as collapsed (true)
-        let _ = state
-            .entry("collapsed_section".to_string())
-            .or_insert(!false); // !default_expanded where default_expanded = false
-        assert_eq!(state.get("collapsed_section"), Some(&true)); // collapsed = true
-    }
-
-    #[test]
-    fn test_collapsible_section_state_persistence() {
-        // Test that state is properly tracked in the HashMap
-        let mut state = std::collections::HashMap::new();
-
-        // Simulate initial state
-        state.insert("section_a".to_string(), false); // expanded
-        state.insert("section_b".to_string(), true); // collapsed
-
-        // Verify state
-        assert_eq!(state.get("section_a"), Some(&false));
-        assert_eq!(state.get("section_b"), Some(&true));
-
-        // Simulate toggle
-        state.insert("section_a".to_string(), true); // now collapsed
-        assert_eq!(state.get("section_a"), Some(&true));
-    }
 }

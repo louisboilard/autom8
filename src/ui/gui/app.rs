@@ -2077,27 +2077,20 @@ pub struct Autom8App {
     sidebar_collapsed: bool,
 
     // ========================================================================
-    // Active Runs Tab State (Tab Bar - US-001, US-003)
+    // Active Runs Tab State (Tab Bar)
     // ========================================================================
     /// Session ID of the currently selected session tab in the Active Runs view.
-    /// Using ID instead of index is more robust when sessions change order.
     /// None means no session is selected (will auto-select first if available).
     selected_session_id: Option<String>,
 
-    /// Session IDs that have open tabs in the Active Runs view (US-003).
-    /// Tracks which sessions are currently visible as tabs.
-    /// Tabs auto-open for new sessions unless manually closed.
-    open_session_tabs: std::collections::HashSet<String>,
-
-    /// Session IDs that have been manually closed (US-003).
-    /// These sessions won't auto-reopen when refreshed.
-    /// Cleared when a session completes and is no longer active.
+    /// Session IDs that have been manually closed by the user.
+    /// These sessions won't auto-reopen even if still running.
     closed_session_tabs: std::collections::HashSet<String>,
 
-    /// Cached session data for sessions that have completed (US-001: Tab Persistence).
-    /// When a session's files are removed after completion, we cache the last known
-    /// session data here so the tab can still be displayed until explicitly closed.
-    cached_completed_sessions: std::collections::HashMap<String, SessionData>,
+    /// Cached session data for sessions seen during this GUI lifetime.
+    /// Persists session data so tabs remain visible after a run completes.
+    /// Cleared when user explicitly closes the tab.
+    seen_sessions: std::collections::HashMap<String, SessionData>,
 
     // ========================================================================
     // Config Tab State
@@ -2200,9 +2193,8 @@ impl Autom8App {
             refresh_interval,
             sidebar_collapsed: false,
             selected_session_id: None,
-            open_session_tabs: std::collections::HashSet::new(),
             closed_session_tabs: std::collections::HashSet::new(),
-            cached_completed_sessions: std::collections::HashMap::new(),
+            seen_sessions: std::collections::HashMap::new(),
             config_state: ConfigTabState::new(),
             context_menu: None,
             command_executions: std::collections::HashMap::new(),
@@ -3323,145 +3315,32 @@ impl Autom8App {
         // No project filter - always show all projects
         let ui_data = load_ui_data(None).unwrap_or_default();
 
-        // US-001: Cache sessions that are in a completed state before updating
-        // This ensures we preserve session data when files are removed after completion
-        self.cache_completed_sessions(&ui_data.sessions);
-
         self.projects = ui_data.projects;
         self.sessions = ui_data.sessions;
         self.has_active_runs = ui_data.has_active_runs;
 
-        // US-001, US-003: Sync open_session_tabs with current sessions
-        self.sync_session_tabs();
-    }
-
-    /// Cache session data for sessions that are in a completed state (US-001).
-    ///
-    /// This allows tabs to persist after a run completes and the session files
-    /// are removed from disk. The cached data is used to render the tab until
-    /// the user explicitly closes it.
-    fn cache_completed_sessions(&mut self, new_sessions: &[SessionData]) {
-        use crate::state::MachineState;
-
-        for session in new_sessions {
-            let session_id = &session.metadata.session_id;
-
-            // Only cache if:
-            // 1. The session is in a terminal state (Completed or Failed)
-            // 2. We haven't already cached it
-            // 3. The tab is currently open
-            if let Some(run) = &session.run {
-                let is_terminal = matches!(
-                    run.machine_state,
-                    MachineState::Completed | MachineState::Failed
-                );
-                let is_tab_open = self.open_session_tabs.contains(session_id);
-                let not_cached = !self.cached_completed_sessions.contains_key(session_id);
-
-                if is_terminal && is_tab_open && not_cached {
-                    self.cached_completed_sessions
-                        .insert(session_id.clone(), session.clone());
-                }
-            }
-        }
-    }
-
-    /// Sync session tabs with current session list (US-001, US-003).
-    ///
-    /// This method:
-    /// 1. Auto-opens tabs for new sessions (unless manually closed)
-    /// 2. US-001: Caches session data when sessions disappear (completed runs)
-    /// 3. US-001: Keeps tabs open for cached completed sessions
-    /// 4. Clears closed_session_tabs for sessions that are gone (so they can reopen later)
-    fn sync_session_tabs(&mut self) {
-        // Get current session IDs
-        let current_session_ids: std::collections::HashSet<String> = self
-            .sessions
-            .iter()
-            .map(|s| s.metadata.session_id.clone())
-            .collect();
-
-        // Auto-open tabs for new sessions (if not manually closed)
-        for session_id in &current_session_ids {
-            if !self.closed_session_tabs.contains(session_id) {
-                self.open_session_tabs.insert(session_id.clone());
-            }
-        }
-
-        // US-001: Cache session data for sessions that are disappearing
-        // (their files were removed after completion)
-        // Only cache if the tab is currently open
-        for session_id in &self.open_session_tabs.clone() {
-            if !current_session_ids.contains(session_id)
-                && !self.cached_completed_sessions.contains_key(session_id)
-            {
-                // Session has disappeared - check if we had it before and cache it
-                // Note: We can't cache here since the data is already gone
-                // Instead, we need to cache proactively when we detect completion
-                // For now, keep the tab open if it's already cached
-            }
-        }
-
-        // US-001: Don't remove tabs for sessions that have cached data
-        // (completed sessions whose files have been removed)
-        self.open_session_tabs.retain(|id| {
-            current_session_ids.contains(id) || self.cached_completed_sessions.contains_key(id)
-        });
-
-        // Clear closed_session_tabs for sessions that are gone AND not cached
-        // This allows the tab to auto-open if the session appears again later
-        self.closed_session_tabs.retain(|id| {
-            current_session_ids.contains(id) || self.cached_completed_sessions.contains_key(id)
-        });
-    }
-
-    /// Get all visible sessions with open tabs (US-001).
-    ///
-    /// Returns sessions from both `self.sessions` (active) and
-    /// `self.cached_completed_sessions` (completed sessions whose files were removed).
-    /// Only includes sessions that have open tabs.
-    fn get_visible_sessions(&self) -> Vec<SessionData> {
-        let mut visible: Vec<SessionData> = Vec::new();
-
-        // Add active sessions with open tabs
+        // Cache all running sessions we see (so tabs persist after completion)
         for session in &self.sessions {
-            if self
-                .open_session_tabs
-                .contains(&session.metadata.session_id)
-            {
-                visible.push(session.clone());
+            let session_id = &session.metadata.session_id;
+            if !self.closed_session_tabs.contains(session_id) {
+                self.seen_sessions
+                    .insert(session_id.clone(), session.clone());
             }
         }
-
-        // Add cached completed sessions with open tabs (if not already in active list)
-        let active_ids: std::collections::HashSet<_> = self
-            .sessions
-            .iter()
-            .map(|s| &s.metadata.session_id)
-            .collect();
-
-        for (session_id, session) in &self.cached_completed_sessions {
-            if self.open_session_tabs.contains(session_id) && !active_ids.contains(session_id) {
-                visible.push(session.clone());
-            }
-        }
-
-        visible
     }
 
-    /// Find a session by ID, checking both active and cached sessions (US-001).
-    fn find_session_by_id(&self, session_id: &str) -> Option<SessionData> {
-        // First check active sessions
-        if let Some(session) = self
-            .sessions
-            .iter()
-            .find(|s| s.metadata.session_id == session_id)
-        {
-            return Some(session.clone());
-        }
+    /// Get all visible sessions (sessions seen during this GUI lifetime, not closed).
+    fn get_visible_sessions(&self) -> Vec<SessionData> {
+        self.seen_sessions
+            .values()
+            .filter(|s| !self.closed_session_tabs.contains(&s.metadata.session_id))
+            .cloned()
+            .collect()
+    }
 
-        // Then check cached completed sessions
-        self.cached_completed_sessions.get(session_id).cloned()
+    /// Find a session by ID from seen sessions.
+    fn find_session_by_id(&self, session_id: &str) -> Option<SessionData> {
+        self.seen_sessions.get(session_id).cloned()
     }
 }
 
@@ -6870,23 +6749,15 @@ impl Autom8App {
         }
     }
 
-    /// Close a session tab (US-001, US-003).
-    ///
-    /// Removes the tab from the open set and adds to closed set.
-    /// US-001: Also removes any cached session data for completed sessions.
-    /// If the closed tab was selected, clears selection (render_active_runs will auto-select).
+    /// Close a session tab and remove it from view.
     fn close_session_tab(&mut self, session_id: &str) {
-        // Remove from open tabs
-        self.open_session_tabs.remove(session_id);
-
-        // Add to closed tabs (prevents auto-reopen)
+        // Mark as closed (prevents showing and auto-reopen)
         self.closed_session_tabs.insert(session_id.to_string());
 
-        // US-001: Remove cached session data when tab is explicitly closed
-        self.cached_completed_sessions.remove(session_id);
+        // Remove from seen sessions
+        self.seen_sessions.remove(session_id);
 
         // If the closed tab was selected, clear selection
-        // (render_active_runs will auto-select the first available)
         if self
             .selected_session_id
             .as_ref()
@@ -7389,67 +7260,17 @@ impl Autom8App {
                                 let story_items = load_story_items(session);
                                 let work_summaries = load_work_summaries(session);
 
-                                // === Stories Section (Collapsible) ===
-                                CollapsibleSection::new("stories", "Stories")
-                                    .default_expanded(true)
-                                    .show(ui, &mut self.section_collapsed_state, |ui| {
-                                        egui::Frame::none()
-                                            .fill(colors::SURFACE_HOVER)
-                                            .rounding(rounding::CARD)
-                                            .inner_margin(egui::Margin::same(spacing::MD))
-                                            .show(ui, |ui| {
-                                                ui.set_min_height(stacked_stories_height);
-                                                ui.set_max_height(stacked_stories_height);
-                                                ui.set_width(
-                                                    details_panel_width - spacing::MD * 2.0,
-                                                );
-
-                                                egui::ScrollArea::vertical()
-                                                    .id_salt(format!(
-                                                        "stacked_stories_{}",
-                                                        session.metadata.session_id
-                                                    ))
-                                                    .auto_shrink([false, false])
-                                                    .show(ui, |ui| {
-                                                        Self::render_story_items_content(
-                                                            ui,
-                                                            &story_items,
-                                                        );
-                                                    });
-                                            });
-                                    });
-
-                                ui.add_space(section_gap);
-
-                                // === Work Summaries Section (Collapsible) ===
-                                CollapsibleSection::new("work_summaries", "Work Summaries")
-                                    .default_expanded(true)
-                                    .show(ui, &mut self.section_collapsed_state, |ui| {
-                                        egui::Frame::none()
-                                            .fill(colors::SURFACE_HOVER)
-                                            .rounding(rounding::CARD)
-                                            .inner_margin(egui::Margin::same(spacing::MD))
-                                            .show(ui, |ui| {
-                                                ui.set_min_height(stacked_summaries_height);
-                                                ui.set_max_height(stacked_summaries_height);
-                                                ui.set_width(
-                                                    details_panel_width - spacing::MD * 2.0,
-                                                );
-
-                                                egui::ScrollArea::vertical()
-                                                    .id_salt(format!(
-                                                        "stacked_summaries_{}",
-                                                        session.metadata.session_id
-                                                    ))
-                                                    .auto_shrink([false, false])
-                                                    .show(ui, |ui| {
-                                                        Self::render_work_summaries_content(
-                                                            ui,
-                                                            &work_summaries,
-                                                        );
-                                                    });
-                                            });
-                                    });
+                                // Render detail sections (Stories + Work Summaries)
+                                Self::render_detail_sections(
+                                    ui,
+                                    &session.metadata.session_id,
+                                    &story_items,
+                                    &work_summaries,
+                                    details_panel_width,
+                                    stacked_stories_height,
+                                    stacked_summaries_height,
+                                    &mut self.section_collapsed_state,
+                                );
                             });
                         } else {
                             // === SIDE-BY-SIDE LAYOUT (Horizontal) ===
@@ -7504,10 +7325,7 @@ impl Autom8App {
                                 // Gap between panels
                                 ui.add_space(panel_gap);
 
-                                // === RIGHT PANEL: Detail sections with outer scroll ===
-                                // Outer scroll area allows scrolling the entire right panel
-                                // when Stories + Work Summaries together exceed panel height.
-                                // Each section has its own independent scroll area.
+                                // === RIGHT PANEL: Detail sections ===
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(details_panel_width, panel_height),
                                     egui::Layout::top_down(egui::Align::LEFT),
@@ -7518,82 +7336,27 @@ impl Autom8App {
                                         let story_items = load_story_items(session);
                                         let work_summaries = load_work_summaries(session);
 
-                                        // Calculate available height for sections
-                                        // Account for section headers and gaps
+                                        // Calculate section heights (70%/30% split)
                                         let section_gap = spacing::MD;
                                         let header_height =
                                             typography::line_height(FontSize::Body) + spacing::SM;
                                         let total_overhead = header_height * 2.0 + section_gap;
                                         let available_for_sections = panel_height - total_overhead;
-
-                                        // 70%/30% split with minimum heights
-                                        let stories_card_height =
+                                        let stories_height =
                                             (available_for_sections * 0.7).max(150.0);
-                                        let summaries_card_height =
+                                        let summaries_height =
                                             (available_for_sections * 0.3).max(100.0);
 
-                                        // === Stories Section (Collapsible) ===
-                                        CollapsibleSection::new("stories", "Stories")
-                                            .default_expanded(true)
-                                            .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                egui::Frame::none()
-                                                    .fill(colors::SURFACE_HOVER)
-                                                    .rounding(rounding::CARD)
-                                                    .inner_margin(egui::Margin::same(spacing::MD))
-                                                    .show(ui, |ui| {
-                                                        ui.set_min_height(stories_card_height);
-                                                        ui.set_max_height(stories_card_height);
-                                                        ui.set_width(
-                                                            details_panel_width - spacing::MD * 2.0,
-                                                        );
-
-                                                        egui::ScrollArea::vertical()
-                                                            .id_salt(format!(
-                                                                "sidebyside_stories_{}",
-                                                                session.metadata.session_id
-                                                            ))
-                                                            .auto_shrink([false, false])
-                                                            .show(ui, |ui| {
-                                                                Self::render_story_items_content(
-                                                                    ui,
-                                                                    &story_items,
-                                                                );
-                                                            });
-                                                    });
-                                            });
-
-                                        // Gap between sections
-                                        ui.add_space(section_gap);
-
-                                        // === Work Summaries Section (Collapsible) ===
-                                        CollapsibleSection::new("work_summaries", "Work Summaries")
-                                            .default_expanded(true)
-                                            .show(ui, &mut self.section_collapsed_state, |ui| {
-                                                egui::Frame::none()
-                                                    .fill(colors::SURFACE_HOVER)
-                                                    .rounding(rounding::CARD)
-                                                    .inner_margin(egui::Margin::same(spacing::MD))
-                                                    .show(ui, |ui| {
-                                                        ui.set_min_height(summaries_card_height);
-                                                        ui.set_max_height(summaries_card_height);
-                                                        ui.set_width(
-                                                            details_panel_width - spacing::MD * 2.0,
-                                                        );
-
-                                                        egui::ScrollArea::vertical()
-                                                            .id_salt(format!(
-                                                                "sidebyside_summaries_{}",
-                                                                session.metadata.session_id
-                                                            ))
-                                                            .auto_shrink([false, false])
-                                                            .show(ui, |ui| {
-                                                                Self::render_work_summaries_content(
-                                                                    ui,
-                                                                    &work_summaries,
-                                                                );
-                                                            });
-                                                    });
-                                            });
+                                        Self::render_detail_sections(
+                                            ui,
+                                            &session.metadata.session_id,
+                                            &story_items,
+                                            &work_summaries,
+                                            details_panel_width,
+                                            stories_height,
+                                            summaries_height,
+                                            &mut self.section_collapsed_state,
+                                        );
                                     },
                                 );
                             });
@@ -7746,6 +7509,72 @@ impl Autom8App {
                 );
             }
         }
+    }
+
+    /// Render detail sections (Stories + Work Summaries) with collapsible headers.
+    /// Used by both stacked and side-by-side layouts.
+    #[allow(clippy::too_many_arguments)]
+    fn render_detail_sections(
+        ui: &mut egui::Ui,
+        session_id: &str,
+        story_items: &[StoryItem],
+        work_summaries: &[WorkSummaryItem],
+        panel_width: f32,
+        stories_height: f32,
+        summaries_height: f32,
+        collapsed_state: &mut std::collections::HashMap<String, bool>,
+    ) {
+        let section_gap = spacing::MD;
+
+        // Use session-specific IDs to avoid shared state across sessions
+        let stories_id = format!("{}_stories", session_id);
+        let summaries_id = format!("{}_summaries", session_id);
+
+        // === Stories Section ===
+        CollapsibleSection::new(&stories_id, "Stories")
+            .default_expanded(true)
+            .show(ui, collapsed_state, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE_HOVER)
+                    .rounding(rounding::CARD)
+                    .inner_margin(egui::Margin::same(spacing::MD))
+                    .show(ui, |ui| {
+                        ui.set_min_height(stories_height);
+                        ui.set_max_height(stories_height);
+                        ui.set_width(panel_width - spacing::MD * 2.0);
+
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("stories_{}", session_id))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                Self::render_story_items_content(ui, story_items);
+                            });
+                    });
+            });
+
+        ui.add_space(section_gap);
+
+        // === Work Summaries Section ===
+        CollapsibleSection::new(&summaries_id, "Work Summaries")
+            .default_expanded(true)
+            .show(ui, collapsed_state, |ui| {
+                egui::Frame::none()
+                    .fill(colors::SURFACE_HOVER)
+                    .rounding(rounding::CARD)
+                    .inner_margin(egui::Margin::same(spacing::MD))
+                    .show(ui, |ui| {
+                        ui.set_min_height(summaries_height);
+                        ui.set_max_height(summaries_height);
+                        ui.set_width(panel_width - spacing::MD * 2.0);
+
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("summaries_{}", session_id))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                Self::render_work_summaries_content(ui, work_summaries);
+                            });
+                    });
+            });
     }
 
     /// Render the empty state for Active Runs view.
