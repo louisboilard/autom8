@@ -6,8 +6,9 @@
 use crate::error::{Autom8Error, Result};
 use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
-    badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
-    strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection, MAX_BRANCH_LENGTH,
+    badge_background_color, format_duration, format_relative_time, format_state, is_terminal_state,
+    state_to_color, strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection,
+    MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -1824,6 +1825,10 @@ const TAB_CLOSE_BUTTON_SIZE: f32 = 16.0;
 /// Padding around the close button.
 const TAB_CLOSE_PADDING: f32 = 4.0;
 
+/// Gap between tab label text and close button (US-005).
+/// Provides visual separation to improve readability.
+const TAB_LABEL_CLOSE_GAP: f32 = 8.0;
+
 /// Height of the content header tab bar (only shown when dynamic tabs exist).
 /// Sized to fit the text tightly without extra vertical gaps.
 const CONTENT_TAB_BAR_HEIGHT: f32 = 32.0;
@@ -2089,6 +2094,11 @@ pub struct Autom8App {
     /// Cleared when a session completes and is no longer active.
     closed_session_tabs: std::collections::HashSet<String>,
 
+    /// Cached session data for sessions that have completed (US-001: Tab Persistence).
+    /// When a session's files are removed after completion, we cache the last known
+    /// session data here so the tab can still be displayed until explicitly closed.
+    cached_completed_sessions: std::collections::HashMap<String, SessionData>,
+
     // ========================================================================
     // Config Tab State
     // ========================================================================
@@ -2192,6 +2202,7 @@ impl Autom8App {
             selected_session_id: None,
             open_session_tabs: std::collections::HashSet::new(),
             closed_session_tabs: std::collections::HashSet::new(),
+            cached_completed_sessions: std::collections::HashMap::new(),
             config_state: ConfigTabState::new(),
             context_menu: None,
             command_executions: std::collections::HashMap::new(),
@@ -3312,20 +3323,56 @@ impl Autom8App {
         // No project filter - always show all projects
         let ui_data = load_ui_data(None).unwrap_or_default();
 
+        // US-001: Cache sessions that are in a completed state before updating
+        // This ensures we preserve session data when files are removed after completion
+        self.cache_completed_sessions(&ui_data.sessions);
+
         self.projects = ui_data.projects;
         self.sessions = ui_data.sessions;
         self.has_active_runs = ui_data.has_active_runs;
 
-        // US-003: Sync open_session_tabs with current sessions
+        // US-001, US-003: Sync open_session_tabs with current sessions
         self.sync_session_tabs();
     }
 
-    /// Sync session tabs with current session list (US-003).
+    /// Cache session data for sessions that are in a completed state (US-001).
+    ///
+    /// This allows tabs to persist after a run completes and the session files
+    /// are removed from disk. The cached data is used to render the tab until
+    /// the user explicitly closes it.
+    fn cache_completed_sessions(&mut self, new_sessions: &[SessionData]) {
+        use crate::state::MachineState;
+
+        for session in new_sessions {
+            let session_id = &session.metadata.session_id;
+
+            // Only cache if:
+            // 1. The session is in a terminal state (Completed or Failed)
+            // 2. We haven't already cached it
+            // 3. The tab is currently open
+            if let Some(run) = &session.run {
+                let is_terminal = matches!(
+                    run.machine_state,
+                    MachineState::Completed | MachineState::Failed
+                );
+                let is_tab_open = self.open_session_tabs.contains(session_id);
+                let not_cached = !self.cached_completed_sessions.contains_key(session_id);
+
+                if is_terminal && is_tab_open && not_cached {
+                    self.cached_completed_sessions
+                        .insert(session_id.clone(), session.clone());
+                }
+            }
+        }
+    }
+
+    /// Sync session tabs with current session list (US-001, US-003).
     ///
     /// This method:
     /// 1. Auto-opens tabs for new sessions (unless manually closed)
-    /// 2. Removes tabs for sessions that no longer exist
-    /// 3. Clears closed_session_tabs for sessions that are gone (so they can reopen later)
+    /// 2. US-001: Caches session data when sessions disappear (completed runs)
+    /// 3. US-001: Keeps tabs open for cached completed sessions
+    /// 4. Clears closed_session_tabs for sessions that are gone (so they can reopen later)
     fn sync_session_tabs(&mut self) {
         // Get current session IDs
         let current_session_ids: std::collections::HashSet<String> = self
@@ -3341,14 +3388,80 @@ impl Autom8App {
             }
         }
 
-        // Remove tabs for sessions that no longer exist
-        self.open_session_tabs
-            .retain(|id| current_session_ids.contains(id));
+        // US-001: Cache session data for sessions that are disappearing
+        // (their files were removed after completion)
+        // Only cache if the tab is currently open
+        for session_id in &self.open_session_tabs.clone() {
+            if !current_session_ids.contains(session_id)
+                && !self.cached_completed_sessions.contains_key(session_id)
+            {
+                // Session has disappeared - check if we had it before and cache it
+                // Note: We can't cache here since the data is already gone
+                // Instead, we need to cache proactively when we detect completion
+                // For now, keep the tab open if it's already cached
+            }
+        }
 
-        // Clear closed_session_tabs for sessions that are gone
+        // US-001: Don't remove tabs for sessions that have cached data
+        // (completed sessions whose files have been removed)
+        self.open_session_tabs.retain(|id| {
+            current_session_ids.contains(id) || self.cached_completed_sessions.contains_key(id)
+        });
+
+        // Clear closed_session_tabs for sessions that are gone AND not cached
         // This allows the tab to auto-open if the session appears again later
-        self.closed_session_tabs
-            .retain(|id| current_session_ids.contains(id));
+        self.closed_session_tabs.retain(|id| {
+            current_session_ids.contains(id) || self.cached_completed_sessions.contains_key(id)
+        });
+    }
+
+    /// Get all visible sessions with open tabs (US-001).
+    ///
+    /// Returns sessions from both `self.sessions` (active) and
+    /// `self.cached_completed_sessions` (completed sessions whose files were removed).
+    /// Only includes sessions that have open tabs.
+    fn get_visible_sessions(&self) -> Vec<SessionData> {
+        let mut visible: Vec<SessionData> = Vec::new();
+
+        // Add active sessions with open tabs
+        for session in &self.sessions {
+            if self
+                .open_session_tabs
+                .contains(&session.metadata.session_id)
+            {
+                visible.push(session.clone());
+            }
+        }
+
+        // Add cached completed sessions with open tabs (if not already in active list)
+        let active_ids: std::collections::HashSet<_> = self
+            .sessions
+            .iter()
+            .map(|s| &s.metadata.session_id)
+            .collect();
+
+        for (session_id, session) in &self.cached_completed_sessions {
+            if self.open_session_tabs.contains(session_id) && !active_ids.contains(session_id) {
+                visible.push(session.clone());
+            }
+        }
+
+        visible
+    }
+
+    /// Find a session by ID, checking both active and cached sessions (US-001).
+    fn find_session_by_id(&self, session_id: &str) -> Option<SessionData> {
+        // First check active sessions
+        if let Some(session) = self
+            .sessions
+            .iter()
+            .find(|s| s.metadata.session_id == session_id)
+        {
+            return Some(session.clone());
+        }
+
+        // Then check cached completed sessions
+        self.cached_completed_sessions.get(session_id).cloned()
     }
 }
 
@@ -6639,13 +6752,8 @@ impl Autom8App {
 
                 ui.add_space(spacing::SM);
 
-                // US-003: Filter sessions to only those with open tabs
-                let visible_sessions: Vec<(usize, &SessionData)> = self
-                    .sessions
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| self.open_session_tabs.contains(&s.metadata.session_id))
-                    .collect();
+                // US-001, US-003: Get visible sessions (active + cached completed)
+                let visible_sessions = self.get_visible_sessions();
 
                 // Empty state if no sessions or all tabs closed
                 if visible_sessions.is_empty() {
@@ -6657,14 +6765,14 @@ impl Autom8App {
                         self.selected_session_id.as_ref().is_some_and(|id| {
                             visible_sessions
                                 .iter()
-                                .any(|(_, s)| s.metadata.session_id == *id)
+                                .any(|s| s.metadata.session_id == *id)
                         });
 
                     if !current_selection_valid {
                         // Select first visible session by ID
                         self.selected_session_id = visible_sessions
                             .first()
-                            .map(|(_, s)| s.metadata.session_id.clone());
+                            .map(|s| s.metadata.session_id.clone());
                     }
 
                     // Render tab bar for session selection
@@ -6673,14 +6781,9 @@ impl Autom8App {
                     ui.add_space(spacing::SM);
 
                     // Render expanded view for selected session (find by ID, robust to reordering)
-                    if let Some(ref selected_id) = self.selected_session_id {
-                        if let Some(session) = self
-                            .sessions
-                            .iter()
-                            .find(|s| s.metadata.session_id == *selected_id)
-                        {
-                            // Clone session data to avoid borrow issues
-                            let session = session.clone();
+                    // US-001: Uses find_session_by_id to check both active and cached sessions
+                    if let Some(selected_id) = self.selected_session_id.clone() {
+                        if let Some(session) = self.find_session_by_id(&selected_id) {
                             self.render_expanded_session_view(ui, &session);
                         }
                     }
@@ -6705,11 +6808,10 @@ impl Autom8App {
         let mut tab_to_close: Option<String> = None;
 
         // Collect visible sessions (those with open tabs) with their status
-        // US-001: Include status for visual distinction between running/completed sessions
+        // US-001: Include both active and cached completed sessions
         let visible_sessions: Vec<(String, String, Option<MachineState>)> = self
-            .sessions
+            .get_visible_sessions()
             .iter()
-            .filter(|s| self.open_session_tabs.contains(&s.metadata.session_id))
             .map(|s| {
                 let branch_label = strip_worktree_prefix(&s.metadata.branch_name, &s.project_name);
                 let state = s.run.as_ref().map(|r| r.machine_state);
@@ -6768,9 +6870,10 @@ impl Autom8App {
         }
     }
 
-    /// Close a session tab (US-003).
+    /// Close a session tab (US-001, US-003).
     ///
     /// Removes the tab from the open set and adds to closed set.
+    /// US-001: Also removes any cached session data for completed sessions.
     /// If the closed tab was selected, clears selection (render_active_runs will auto-select).
     fn close_session_tab(&mut self, session_id: &str) {
         // Remove from open tabs
@@ -6778,6 +6881,9 @@ impl Autom8App {
 
         // Add to closed tabs (prevents auto-reopen)
         self.closed_session_tabs.insert(session_id.to_string());
+
+        // US-001: Remove cached session data when tab is explicitly closed
+        self.cached_completed_sessions.remove(session_id);
 
         // If the closed tab was selected, clear selection
         // (render_active_runs will auto-select the first available)
@@ -6793,7 +6899,8 @@ impl Autom8App {
     /// Render a single tab in the active session tab bar.
     ///
     /// US-001: Tabs show a status dot to distinguish running vs completed sessions.
-    /// US-003: Tabs have close buttons (X) that are always visible.
+    /// US-002: Close button is only visible when the run has finished (terminal state).
+    /// US-003: Tabs have close buttons (X) for closing completed sessions.
     /// Returns (tab_clicked, close_clicked).
     fn render_active_session_tab(
         &self,
@@ -6802,6 +6909,10 @@ impl Autom8App {
         is_active: bool,
         state: Option<MachineState>,
     ) -> (bool, bool) {
+        // US-002: Determine if close button should be shown
+        // Close button is only visible when the run has finished (terminal state)
+        let show_close_button = state.is_none_or(is_terminal_state);
+
         // Calculate text size
         let text_galley = ui.fonts(|f| {
             f.layout_no_wrap(
@@ -6817,8 +6928,14 @@ impl Autom8App {
         let status_dot_spacing = spacing::SM;
         let status_dot_space = status_dot_radius * 2.0 + status_dot_spacing;
 
-        // Calculate tab dimensions including status dot and close button
-        let close_button_space = TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING;
+        // Calculate tab dimensions including status dot
+        // US-002: Only include close button space when button is visible
+        // US-005: Include gap between label text and close button
+        let close_button_space = if show_close_button {
+            TAB_LABEL_CLOSE_GAP + TAB_CLOSE_BUTTON_SIZE + TAB_CLOSE_PADDING
+        } else {
+            0.0
+        };
         let tab_width = status_dot_space + text_size.x + TAB_PADDING_H * 2.0 + close_button_space;
         let tab_height = CONTENT_TAB_BAR_HEIGHT - TAB_UNDERLINE_HEIGHT - spacing::XS;
         let tab_size = egui::vec2(tab_width, tab_height);
@@ -6841,14 +6958,41 @@ impl Autom8App {
                 .rect_filled(rect, Rounding::same(rounding::BUTTON), bg_color);
         }
 
-        // US-001: Draw status dot to indicate session state
+        // US-001, US-003: Draw status indicator to indicate session state
+        // Running states show a colored dot; terminal states show a checkmark
         let status_color = state.map(state_to_color).unwrap_or(colors::STATUS_IDLE);
-        let dot_center = egui::pos2(
+        let indicator_center = egui::pos2(
             rect.left() + TAB_PADDING_H + status_dot_radius,
             rect.center().y,
         );
-        ui.painter()
-            .circle_filled(dot_center, status_dot_radius, status_color);
+
+        // US-003: Use checkmark for terminal states, dot for running states
+        let is_terminal = state.is_none_or(is_terminal_state);
+        if is_terminal {
+            // Draw checkmark for completed/failed/idle states
+            // Size the checkmark to have similar visual weight to the dot (radius 4.0)
+            let check_size = status_dot_radius * 0.9; // ~3.6px, fits within dot bounds
+            let stroke = Stroke::new(2.0, status_color);
+
+            // Checkmark path: short line going down-left, then longer line going up-right
+            // Centered at indicator_center
+            let start = egui::pos2(indicator_center.x - check_size, indicator_center.y);
+            let mid = egui::pos2(
+                indicator_center.x - check_size * 0.3,
+                indicator_center.y + check_size * 0.7,
+            );
+            let end = egui::pos2(
+                indicator_center.x + check_size,
+                indicator_center.y - check_size * 0.6,
+            );
+
+            ui.painter().line_segment([start, mid], stroke);
+            ui.painter().line_segment([mid, end], stroke);
+        } else {
+            // Draw dot for running states
+            ui.painter()
+                .circle_filled(indicator_center, status_dot_radius, status_color);
+        }
 
         // Draw text
         let text_color = if is_active {
@@ -6881,53 +7025,60 @@ impl Autom8App {
             Color32::TRANSPARENT,
         );
 
-        // US-003: Draw close button
-        let close_rect = Rect::from_min_size(
-            egui::pos2(
-                rect.right() - TAB_PADDING_H - TAB_CLOSE_BUTTON_SIZE,
-                rect.center().y - TAB_CLOSE_BUTTON_SIZE / 2.0,
-            ),
-            egui::vec2(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE),
-        );
-
-        // Check if mouse is over the close button
-        let close_hovered = ui
-            .ctx()
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|pos| close_rect.contains(pos));
-
-        // Draw close button background on hover
-        if close_hovered {
-            ui.painter().rect_filled(
-                close_rect,
-                Rounding::same(rounding::SMALL),
-                colors::SURFACE_HOVER,
+        // US-002, US-003: Draw close button only when run has finished
+        let close_hovered = if show_close_button {
+            let close_rect = Rect::from_min_size(
+                egui::pos2(
+                    rect.right() - TAB_PADDING_H - TAB_CLOSE_BUTTON_SIZE,
+                    rect.center().y - TAB_CLOSE_BUTTON_SIZE / 2.0,
+                ),
+                egui::vec2(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE),
             );
-        }
 
-        // Draw X icon
-        let x_color = if close_hovered {
-            colors::TEXT_PRIMARY
+            // Check if mouse is over the close button
+            let hovered = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| close_rect.contains(pos));
+
+            // Draw close button background on hover
+            if hovered {
+                ui.painter().rect_filled(
+                    close_rect,
+                    Rounding::same(rounding::SMALL),
+                    colors::SURFACE_HOVER,
+                );
+            }
+
+            // Draw X icon
+            let x_color = if hovered {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_MUTED
+            };
+            let x_center = close_rect.center();
+            let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3;
+
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x_center.x - x_size, x_center.y - x_size),
+                    egui::pos2(x_center.x + x_size, x_center.y + x_size),
+                ],
+                Stroke::new(1.5, x_color),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x_center.x + x_size, x_center.y - x_size),
+                    egui::pos2(x_center.x - x_size, x_center.y + x_size),
+                ],
+                Stroke::new(1.5, x_color),
+            );
+
+            hovered
         } else {
-            colors::TEXT_MUTED
+            // US-002: When close button is hidden, area does not respond to clicks
+            false
         };
-        let x_center = close_rect.center();
-        let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3;
-
-        ui.painter().line_segment(
-            [
-                egui::pos2(x_center.x - x_size, x_center.y - x_size),
-                egui::pos2(x_center.x + x_size, x_center.y + x_size),
-            ],
-            Stroke::new(1.5, x_color),
-        );
-        ui.painter().line_segment(
-            [
-                egui::pos2(x_center.x + x_size, x_center.y - x_size),
-                egui::pos2(x_center.x - x_size, x_center.y + x_size),
-            ],
-            Stroke::new(1.5, x_color),
-        );
 
         // Draw underline indicator for active tab
         if is_active {
@@ -6940,6 +7091,7 @@ impl Autom8App {
         }
 
         // Close button click takes precedence over tab click
+        // US-002: close_hovered is always false when button is hidden, so close_clicked will be false
         let close_clicked = response.clicked() && close_hovered;
         let tab_clicked = response.clicked() && !close_hovered;
 
@@ -7125,15 +7277,25 @@ impl Autom8App {
                             }
 
                             // Infinity animation for non-idle states with progress
+                            // Constrain to left panel width (output_panel_width) in side-by-side layout
                             if state != MachineState::Idle && session.progress.is_some() {
                                 ui.add_space(spacing::MD);
 
-                                // Fill available horizontal space
-                                let available_width = ui.available_width() - spacing::MD;
-                                if available_width > 30.0 {
+                                // Calculate the space used so far in this horizontal row
+                                let row_start_x = ui.min_rect().left();
+                                let current_x = ui.cursor().left();
+                                let used_width = current_x - row_start_x;
+
+                                // The animation should fill up to the left panel width, minus what's used
+                                // In stacked layout, output_panel_width == content_width (full width)
+                                // In side-by-side layout, output_panel_width == 70% of usable width
+                                let max_animation_width =
+                                    (output_panel_width - used_width - spacing::MD).max(0.0);
+
+                                if max_animation_width > 30.0 {
                                     let animation_height = 12.0;
                                     let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(available_width, animation_height),
+                                        egui::vec2(max_animation_width, animation_height),
                                         Sense::hover(),
                                     );
                                     let time = ui.ctx().input(|i| i.time) as f32;
