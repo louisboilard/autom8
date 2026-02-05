@@ -2430,4 +2430,204 @@ mod tests {
         assert!(main_sm.load_current().unwrap().is_none());
         assert!(wt_sm.load_current().unwrap().is_some());
     }
+
+    // ========================================================================
+    // Pause functionality (US-002)
+    // ========================================================================
+
+    /// Helper to create a runner with a specific state manager directory.
+    fn create_test_runner_at(dir: &Path) -> Runner {
+        Runner {
+            state_manager: StateManager::with_dir(dir.to_path_buf()),
+            verbose: false,
+            skip_review: false,
+            worktree_override: None,
+        }
+    }
+
+    #[test]
+    fn test_us002_check_pause_returns_none_when_no_pause_requested() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // No pause requested - check_pause should return None
+        let result = runner.check_pause(&mut state);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_us002_check_pause_returns_error_when_pause_requested() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Request pause
+        sm.request_pause().unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Pause requested - check_pause should return Some(Autom8Error::Interrupted)
+        let result = runner.check_pause(&mut state);
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), Autom8Error::Interrupted));
+    }
+
+    #[test]
+    fn test_us002_handle_pause_clears_pause_request() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Request pause
+        sm.request_pause().unwrap();
+        assert!(sm.is_pause_requested());
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Handle pause should clear the request
+        runner.handle_pause(&mut state);
+
+        // Verify pause request is cleared using a fresh StateManager
+        let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert!(!sm_check.is_pause_requested());
+    }
+
+    #[test]
+    fn test_us002_handle_pause_sets_run_mode_to_step() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Initially in Auto mode
+        assert_eq!(sm.get_run_mode(), RunMode::Auto);
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Handle pause should set mode to Step
+        runner.handle_pause(&mut state);
+
+        // Verify run mode is Step using a fresh StateManager
+        let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert_eq!(sm_check.get_run_mode(), RunMode::Step);
+    }
+
+    #[test]
+    fn test_us002_handle_pause_sets_status_to_interrupted() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.status = RunStatus::Running;
+        sm.save(&state).unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Handle pause should set status to Interrupted
+        runner.handle_pause(&mut state);
+        assert_eq!(state.status, RunStatus::Interrupted);
+        assert!(state.finished_at.is_some());
+
+        // Verify it's persisted using a fresh StateManager
+        let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
+        let loaded = sm_check.load_current().unwrap().unwrap();
+        assert_eq!(loaded.status, RunStatus::Interrupted);
+    }
+
+    #[test]
+    fn test_us002_check_step_mode_pause_requests_pause_in_step_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata, then set Step mode
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+        sm.set_run_mode(RunMode::Step).unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Initially no pause requested
+        let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert!(!sm_check.is_pause_requested());
+
+        // check_step_mode_pause should request pause in Step mode
+        runner.check_step_mode_pause();
+
+        // Verify pause is requested using a fresh StateManager
+        let sm_check2 = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert!(sm_check2.is_pause_requested());
+    }
+
+    #[test]
+    fn test_us002_check_step_mode_pause_does_nothing_in_auto_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state and metadata (default is Auto mode)
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // Initially no pause requested
+        let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert!(!sm_check.is_pause_requested());
+
+        // check_step_mode_pause should NOT request pause in Auto mode
+        runner.check_step_mode_pause();
+
+        // Verify pause is NOT requested
+        let sm_check2 = StateManager::with_dir(temp_dir.path().to_path_buf());
+        assert!(!sm_check2.is_pause_requested());
+    }
+
+    #[test]
+    fn test_us002_handle_pause_returns_interrupted_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        let runner = create_test_runner_at(temp_dir.path());
+
+        // handle_pause should return Interrupted error
+        let result = runner.handle_pause(&mut state);
+        assert!(matches!(result, Autom8Error::Interrupted));
+    }
+
+    #[test]
+    fn test_us002_paused_session_is_resumable() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save state in Interrupted status (as would happen after pause)
+        let mut state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        state.transition_to(MachineState::PickingStory);
+        state.start_iteration("US-001");
+        state.status = RunStatus::Interrupted;
+        sm.save(&state).unwrap();
+
+        // Verify state can be loaded and is in expected condition for resume
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.status, RunStatus::Interrupted);
+        assert_eq!(loaded.machine_state, MachineState::RunningClaude);
+
+        // The resume logic accepts Interrupted status (verified in commands/resume.rs tests)
+    }
 }
