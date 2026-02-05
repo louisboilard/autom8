@@ -461,7 +461,7 @@ _autom8_complete() {
     # Check if completing first positional arg (not a subcommand)
     if [[ $cword -eq 1 && "$cur" != -* ]]; then
         # Get subcommands
-        local subcommands="run status resume clean config init projects list describe pr-review monitor"
+        local subcommands="run status resume clean config init projects list describe pr-review monitor gui improve"
         # Get spec files
         local specs=$(_autom8_spec_files)
         COMPREPLY=($(compgen -W "$subcommands $specs" -- "$cur"))
@@ -556,6 +556,8 @@ else
                 'describe:Show detailed information about a specific project'
                 'pr-review:Analyze PR review comments and fix real issues'
                 'monitor:Monitor autom8 activity across all projects'
+                'gui:Launch the native GUI to monitor autom8 activity'
+                'improve:Continue iterating on a feature with Claude using context from previous runs'
             )
             for spec in "${spec_files[@]}"; do
                 [[ -n "$spec" ]] && completions+=("$spec:Spec file")
@@ -639,7 +641,7 @@ end
 complete -c autom8 -l spec -xa '(__autom8_spec_files)'
 
 # Add spec file completions for positional argument (first arg that's not a flag)
-complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor' -xa '(__autom8_spec_files)'
+complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor gui improve' -xa '(__autom8_spec_files)'
 
 # Config set key completion
 complete -c autom8 -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set; and test (count (commandline -opc)) -eq 3' -xa 'review commit pull_request worktree worktree_path_pattern worktree_cleanup'
@@ -1513,8 +1515,8 @@ mod tests {
 
         // Should include config in subcommands list
         assert!(
-            script.contains("run status resume clean config init"),
-            "Bash script should include config in dynamic subcommands list"
+            script.contains("run status resume clean config init projects list describe pr-review monitor gui improve"),
+            "Bash script should include all commands in dynamic subcommands list"
         );
     }
 
@@ -1541,8 +1543,8 @@ mod tests {
 
         // Should include config in the exclusion list for spec file completion
         assert!(
-            script.contains("run status resume clean config init"),
-            "Fish script should include config in dynamic subcommands list"
+            script.contains("run status resume clean config init projects list describe pr-review monitor gui improve"),
+            "Fish script should include all commands in dynamic subcommands list"
         );
     }
 
@@ -1804,6 +1806,38 @@ mod tests {
         assert!(
             script.contains("-l yes"),
             "Fish script should include config reset --yes flag"
+        );
+    }
+
+    #[test]
+    fn test_all_shells_include_gui_and_improve() {
+        // Bash: gui and improve in subcommands list
+        let bash_script = generate_completion_script(ShellType::Bash);
+        assert!(
+            bash_script.contains("gui"),
+            "Bash script should include gui command"
+        );
+        assert!(
+            bash_script.contains("improve"),
+            "Bash script should include improve command"
+        );
+
+        // Zsh: gui and improve with descriptions
+        let zsh_script = generate_completion_script(ShellType::Zsh);
+        assert!(
+            zsh_script.contains("'gui:Launch the native GUI to monitor autom8 activity'"),
+            "Zsh script should include gui command with description"
+        );
+        assert!(
+            zsh_script.contains("'improve:Continue iterating on a feature with Claude using context from previous runs'"),
+            "Zsh script should include improve command with description"
+        );
+
+        // Fish: gui and improve in subcommand exclusion list
+        let fish_script = generate_completion_script(ShellType::Fish);
+        assert!(
+            fish_script.contains("__fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor gui improve"),
+            "Fish script should include gui and improve in subcommand list"
         );
     }
 
