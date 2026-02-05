@@ -8724,7 +8724,7 @@ ui.label(
     ) -> (bool, bool) {
         // US-002: Determine if close button should be shown
         // Close button is only visible when the run has finished (terminal state)
-        let show_close_button = state.is_none_or(is_terminal_state);
+        let show_close_button = state.map_or(true, is_terminal_state);
 
         // Calculate text size
         let text_galley = ui.fonts(|f| {
@@ -8780,7 +8780,7 @@ ui.label(
         );
 
         // US-003: Use checkmark for terminal states, dot for running states
-        let is_terminal = state.is_none_or(is_terminal_state);
+        let is_terminal = state.map_or(true, is_terminal_state);
         if is_terminal {
             // Draw checkmark for completed/failed/idle states
             // Size the checkmark to have similar visual weight to the dot (radius 4.0)
