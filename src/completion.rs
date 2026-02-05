@@ -461,7 +461,7 @@ _autom8_complete() {
     # Check if completing first positional arg (not a subcommand)
     if [[ $cword -eq 1 && "$cur" != -* ]]; then
         # Get subcommands
-        local subcommands="run status resume clean config init projects list describe pr-review monitor"
+        local subcommands="run status resume clean config init projects list describe pr-review monitor gui improve"
         # Get spec files
         local specs=$(_autom8_spec_files)
         COMPREPLY=($(compgen -W "$subcommands $specs" -- "$cur"))
@@ -556,6 +556,8 @@ else
                 'describe:Show detailed information about a specific project'
                 'pr-review:Analyze PR review comments and fix real issues'
                 'monitor:Monitor autom8 activity across all projects'
+                'gui:Launch the native GUI to monitor autom8 activity'
+                'improve:Continue iterating on a feature with Claude using context from previous runs'
             )
             for spec in "${spec_files[@]}"; do
                 [[ -n "$spec" ]] && completions+=("$spec:Spec file")
@@ -639,7 +641,7 @@ end
 complete -c autom8 -l spec -xa '(__autom8_spec_files)'
 
 # Add spec file completions for positional argument (first arg that's not a flag)
-complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor' -xa '(__autom8_spec_files)'
+complete -c autom8 -n '__fish_is_first_arg; and not __fish_seen_subcommand_from run status resume clean config init projects list describe pr-review monitor gui improve' -xa '(__autom8_spec_files)'
 
 # Config set key completion
 complete -c autom8 -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set; and test (count (commandline -opc)) -eq 3' -xa 'review commit pull_request worktree worktree_path_pattern worktree_cleanup'
