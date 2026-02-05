@@ -22,6 +22,14 @@ use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Vec2};
 /// Default radius for status indicator dots.
 pub const STATUS_DOT_RADIUS: f32 = 4.0;
 
+// ============================================================================
+// Collapsible Section Constants (US-003)
+// ============================================================================
+
+/// Stroke width for collapsible section chevron indicators.
+/// Matches the theme's hovered widget fg_stroke for visual consistency.
+const CHEVRON_STROKE_WIDTH: f32 = 1.5;
+
 /// A reusable status dot component that renders a small filled circle
 /// with a color representing the current status.
 ///
@@ -593,12 +601,16 @@ impl<'a> CollapsibleSection<'a> {
             Vec2::new(available_width, header_height),
             egui::Sense::click(),
         );
+        let is_hovered = response.hovered();
+
+        // Set pointer cursor for collapsible section headers
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
 
             // Draw hover highlight if applicable
-            if response.hovered() {
+            if is_hovered {
                 painter.rect_filled(rect, Rounding::same(rounding::SMALL), colors::SURFACE_HOVER);
             }
 
@@ -607,7 +619,7 @@ impl<'a> CollapsibleSection<'a> {
             let chevron_x = rect.min.x + spacing::XS;
             let chevron_y = rect.center().y;
 
-            let chevron_color = if response.hovered() {
+            let chevron_color = if is_hovered {
                 colors::TEXT_PRIMARY
             } else {
                 colors::TEXT_SECONDARY
@@ -623,11 +635,11 @@ impl<'a> CollapsibleSection<'a> {
                 ];
                 painter.line_segment(
                     [points[0], points[1]],
-                    egui::Stroke::new(1.5, chevron_color),
+                    egui::Stroke::new(CHEVRON_STROKE_WIDTH, chevron_color),
                 );
                 painter.line_segment(
                     [points[1], points[2]],
-                    egui::Stroke::new(1.5, chevron_color),
+                    egui::Stroke::new(CHEVRON_STROKE_WIDTH, chevron_color),
                 );
             } else {
                 // Down-pointing chevron (expanded)
@@ -642,11 +654,11 @@ impl<'a> CollapsibleSection<'a> {
                 ];
                 painter.line_segment(
                     [points[0], points[1]],
-                    egui::Stroke::new(1.5, chevron_color),
+                    egui::Stroke::new(CHEVRON_STROKE_WIDTH, chevron_color),
                 );
                 painter.line_segment(
                     [points[1], points[2]],
-                    egui::Stroke::new(1.5, chevron_color),
+                    egui::Stroke::new(CHEVRON_STROKE_WIDTH, chevron_color),
                 );
             }
 
@@ -654,7 +666,7 @@ impl<'a> CollapsibleSection<'a> {
             let title_x = chevron_x + chevron_size + spacing::SM;
             let title_y = rect.center().y - typography::line_height(FontSize::Body) / 2.0;
 
-            let title_color = if response.hovered() {
+            let title_color = if is_hovered {
                 colors::TEXT_PRIMARY
             } else {
                 colors::TEXT_SECONDARY
@@ -667,11 +679,6 @@ impl<'a> CollapsibleSection<'a> {
             );
 
             painter.galley(Pos2::new(title_x, title_y), galley, Color32::TRANSPARENT);
-        }
-
-        // Show cursor change on hover
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
         response
