@@ -2034,7 +2034,7 @@ impl StoryStatus {
         }
     }
 
-/// Returns the status indicator text.
+    /// Returns the status indicator text.
     fn indicator(self) -> &'static str {
         match self {
             StoryStatus::Completed => "[done]",
@@ -6568,7 +6568,7 @@ ui.label(
 
             frame.show(ui, |ui| {
                 ui.vertical(|ui| {
-// Error title
+                    // Error title
                     ui.label(
                         egui::RichText::new("Error")
                             .font(typography::font(FontSize::Body, FontWeight::SemiBold))
@@ -6901,8 +6901,10 @@ ui.label(
         let bubble_height = total_content_height + CHAT_BUBBLE_PADDING * 2.0;
 
         // Allocate exact size for the bubble, then draw frame manually
-        let (rect, _response) =
-            ui.allocate_exact_size(egui::vec2(bubble_width, bubble_height), egui::Sense::hover());
+        let (rect, _response) = ui.allocate_exact_size(
+            egui::vec2(bubble_width, bubble_height),
+            egui::Sense::hover(),
+        );
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
@@ -7018,7 +7020,10 @@ ui.label(
             )
         } else {
             // Subsequent messages: include conversation history
-            let mut context = format!("{}\n\n---\n\nConversation so far:\n\n", crate::prompts::SPEC_SKILL_PROMPT);
+            let mut context = format!(
+                "{}\n\n---\n\nConversation so far:\n\n",
+                crate::prompts::SPEC_SKILL_PROMPT
+            );
             for msg in &self.chat_messages {
                 match msg.sender {
                     ChatMessageSender::User => {
@@ -7029,18 +7034,16 @@ ui.label(
                     }
                 }
             }
-            context.push_str(&format!("User: {}\n\nPlease continue the conversation and help refine the specification.", user_message));
+            context.push_str(&format!(
+                "User: {}\n\nPlease continue the conversation and help refine the specification.",
+                user_message
+            ));
             context
         };
 
         // Spawn the Claude CLI process with correct arguments
         let child_result = Command::new("claude")
-            .args([
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+            .args(["--print", "--output-format", "stream-json", "--verbose"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -7249,7 +7252,7 @@ ui.label(
         }
     }
 
-/// Detect spec file path in Claude's output (US-007).
+    /// Detect spec file path in Claude's output (US-007).
     ///
     /// Looks for patterns like:
     /// - `~/.config/autom8/<project>/spec/spec-<feature>.md`
@@ -7393,7 +7396,7 @@ ui.label(
                         }
                     } else {
                         // Pre-confirmation: Show spec path and confirm button
-ui.label(
+                        ui.label(
                             egui::RichText::new("Spec Generated!")
                                 .font(typography::font(FontSize::Body, FontWeight::SemiBold))
                                 .color(colors::STATUS_SUCCESS),
@@ -7429,7 +7432,7 @@ ui.label(
 
                         ui.add_space(spacing::MD);
 
-// Green confirm button
+                        // Green confirm button
                         let confirm_button = egui::Button::new(
                             egui::RichText::new("Confirm & Get Run Command")
                                 .font(typography::font(FontSize::Body, FontWeight::Medium))
@@ -7445,9 +7448,11 @@ ui.label(
                         // Hint that users can continue refining
                         ui.add_space(spacing::MD);
                         ui.label(
-                            egui::RichText::new("Want changes? Keep chatting below to refine the spec.")
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
+                            egui::RichText::new(
+                                "Want changes? Keep chatting below to refine the spec.",
+                            )
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
                         );
                     }
                 });
@@ -7506,7 +7511,7 @@ ui.label(
 
             // Copy button
             let copy_button = egui::Button::new(
-egui::RichText::new("Copy")
+                egui::RichText::new("Copy")
                     .font(typography::font(FontSize::Small, FontWeight::Medium)),
             )
             .fill(colors::SURFACE)
@@ -7523,7 +7528,7 @@ egui::RichText::new("Copy")
         });
     }
 
-/// Build the command to run the spec.
+    /// Build the command to run the spec.
     ///
     /// Format: `cd "<project-root>" && autom8 "<spec-path>"`
     /// Paths are quoted to handle spaces correctly.
@@ -7551,7 +7556,7 @@ egui::RichText::new("Copy")
         crate::config::get_project_repo_path(selected_project)
     }
 
-/// Confirm the spec and show the run command.
+    /// Confirm the spec and show the run command.
     fn confirm_spec(&mut self) {
         self.spec_confirmed = true;
         self.chat_scroll_to_bottom = true;
