@@ -3612,6 +3612,12 @@ impl Autom8App {
                 }
             }
         }
+
+        // Refresh run history for the currently selected project
+        if let Some(ref project) = self.selected_project {
+            let project_name = project.clone();
+            self.load_run_history(&project_name);
+        }
     }
 
     /// Get all visible sessions (sessions seen during this GUI lifetime, not closed).
