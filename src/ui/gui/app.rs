@@ -4978,6 +4978,7 @@ impl Autom8App {
         let mut review = config.review;
         let mut commit = config.commit;
         let mut pull_request = config.pull_request;
+        let mut pull_request_draft = config.pull_request_draft;
         let mut worktree = config.worktree;
         let mut worktree_cleanup = config.worktree_cleanup;
 
@@ -5017,6 +5018,11 @@ impl Autom8App {
                     if !commit && pull_request {
                         pull_request = false;
                         bool_changes.push((ConfigBoolField::PullRequest, false));
+                        // Also cascade to pull_request_draft
+                        if pull_request_draft {
+                            pull_request_draft = false;
+                            bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                        }
                     }
                 }
 
@@ -5033,6 +5039,26 @@ impl Autom8App {
                     Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                    // Cascade: if pull_request is now false and pull_request_draft was true, disable it too
+                    if !pull_request && pull_request_draft {
+                        pull_request_draft = false;
+                        bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request draft toggle - disabled when pull_request is false
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request_draft",
+                    &mut pull_request_draft,
+                    "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
+                    !pull_request, // disabled when pull_request is false
+                    Some("Draft PRs require pull requests to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
 
                 ui.add_space(spacing::XL);
@@ -5131,6 +5157,7 @@ impl Autom8App {
         let mut review = config.review;
         let mut commit = config.commit;
         let mut pull_request = config.pull_request;
+        let mut pull_request_draft = config.pull_request_draft;
         let mut worktree = config.worktree;
         let mut worktree_cleanup = config.worktree_cleanup;
 
@@ -5170,6 +5197,11 @@ impl Autom8App {
                     if !commit && pull_request {
                         pull_request = false;
                         bool_changes.push((ConfigBoolField::PullRequest, false));
+                        // Also cascade to pull_request_draft
+                        if pull_request_draft {
+                            pull_request_draft = false;
+                            bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                        }
                     }
                 }
 
@@ -5186,6 +5218,26 @@ impl Autom8App {
                     Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                    // Cascade: if pull_request is now false and pull_request_draft was true, disable it too
+                    if !pull_request && pull_request_draft {
+                        pull_request_draft = false;
+                        bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request draft toggle - disabled when pull_request is false
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request_draft",
+                    &mut pull_request_draft,
+                    "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
+                    !pull_request, // disabled when pull_request is false
+                    Some("Draft PRs require pull requests to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
 
                 ui.add_space(spacing::XL);
