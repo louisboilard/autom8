@@ -9108,24 +9108,10 @@ ui.label(
                                             // In Step mode or with pause_queued, show as "pausing"
                                             let is_pausing = pause_queued || !is_auto;
                                             let icon_color = if is_pausing {
-                                                // Pulsing animation for pausing state
-                                                let time = ui.input(|i| i.time);
-                                                let pulse = ((time * 2.0).sin() as f32 + 1.0) / 2.0; // 0.0 to 1.0
-                                                let alpha = 80 + (pulse * 120.0) as u8; // 80 to 200
-                                                Color32::from_rgba_unmultiplied(
-                                                    colors::TEXT_MUTED.r(),
-                                                    colors::TEXT_MUTED.g(),
-                                                    colors::TEXT_MUTED.b(),
-                                                    alpha,
-                                                )
+                                                colors::TEXT_MUTED
                                             } else {
                                                 colors::TEXT_PRIMARY
                                             };
-
-                                            // Request repaint for animation
-                                            if is_pausing {
-                                                ui.ctx().request_repaint();
-                                            }
 
                                             // Draw pause icon (two vertical bars)
                                             let center = rect.center();
@@ -9147,7 +9133,41 @@ ui.label(
                                             );
                                             ui.painter().rect_filled(right_bar, 1.0, icon_color);
 
+                                            // Draw spinning arc when pausing
                                             if is_pausing {
+                                                let time = ui.input(|i| i.time);
+                                                let rotation = (time * 2.0) as f32; // Rotation speed
+                                                let arc_radius = 9.0;
+                                                let arc_width = 1.5;
+                                                let arc_length = std::f32::consts::PI * 1.5; // 270 degrees
+
+                                                // Draw arc as a series of line segments
+                                                let segments = 20;
+                                                let start_angle = rotation;
+                                                let mut points = Vec::with_capacity(segments + 1);
+                                                for i in 0..=segments {
+                                                    let t = i as f32 / segments as f32;
+                                                    let angle = start_angle + t * arc_length;
+                                                    let x = center.x + arc_radius * angle.cos();
+                                                    let y = center.y + arc_radius * angle.sin();
+                                                    points.push(Pos2::new(x, y));
+                                                }
+
+                                                // Draw the arc with a stroke
+                                                let arc_color = Color32::from_rgba_unmultiplied(
+                                                    colors::ACCENT.r(),
+                                                    colors::ACCENT.g(),
+                                                    colors::ACCENT.b(),
+                                                    180,
+                                                );
+                                                for i in 0..points.len() - 1 {
+                                                    ui.painter().line_segment(
+                                                        [points[i], points[i + 1]],
+                                                        Stroke::new(arc_width, arc_color),
+                                                    );
+                                                }
+
+                                                ui.ctx().request_repaint();
                                                 response.on_hover_text(
                                                     "Pausing after current story...",
                                                 );
