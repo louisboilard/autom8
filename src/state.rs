@@ -44,6 +44,14 @@ pub struct SessionMetadata {
     /// Used for branch conflict detection - only running sessions "own" their branch.
     #[serde(default)]
     pub is_running: bool,
+    /// Whether a pause has been requested for this session.
+    /// Set by GUI, read by runner at checkpoints.
+    #[serde(default)]
+    pub pause_requested: bool,
+    /// The run mode for this session.
+    /// Controls whether stories run continuously (Auto) or pause after each (Step).
+    #[serde(default)]
+    pub run_mode: RunMode,
 }
 
 /// Enriched session status for display purposes.
@@ -142,6 +150,19 @@ impl LiveState {
             .num_seconds();
         age < HEARTBEAT_STALE_THRESHOLD_SECS
     }
+}
+
+/// Run mode for controlling execution flow.
+///
+/// Determines whether autom8 runs stories continuously or pauses between them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    /// Run stories continuously to completion (default)
+    #[default]
+    Auto,
+    /// Pause after each story completes, waiting for user to continue
+    Step,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -946,6 +967,8 @@ impl StateManager {
             created_at: state.started_at,
             last_active_at: state.finished_at.unwrap_or_else(Utc::now),
             is_running: state.status == RunStatus::Running,
+            pause_requested: false,
+            run_mode: RunMode::Auto,
         };
         let metadata_content = serde_json::to_string_pretty(&metadata)?;
         fs::write(main_session_dir.join(METADATA_FILE), metadata_content)?;
@@ -1031,6 +1054,9 @@ impl StateManager {
     }
 
     /// Save session metadata based on the current state.
+    ///
+    /// Preserves `pause_requested` from existing metadata (GUI-controlled).
+    /// Preserves `run_mode` from existing metadata (user preference).
     fn save_metadata(&self, state: &RunState) -> Result<()> {
         let worktree_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let is_running = state.status == RunStatus::Running;
@@ -1044,6 +1070,10 @@ impl StateManager {
                 created_at: existing.created_at,
                 last_active_at: Utc::now(),
                 is_running,
+                // Preserve pause_requested - this is controlled by the GUI
+                pause_requested: existing.pause_requested,
+                // Preserve run_mode - this is a user preference
+                run_mode: existing.run_mode,
             }
         } else {
             SessionMetadata {
@@ -1053,6 +1083,8 @@ impl StateManager {
                 created_at: state.started_at,
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
+                run_mode: RunMode::Auto,
             }
         };
 
@@ -1265,6 +1297,97 @@ impl StateManager {
         });
 
         Ok(statuses)
+    }
+
+    // =========================================================================
+    // Pause and Run Mode Methods
+    // =========================================================================
+
+    /// Request a pause for this session.
+    ///
+    /// Sets `pause_requested: true` in the session metadata. The runner
+    /// will check this flag at checkpoints and stop gracefully.
+    pub fn request_pause(&self) -> Result<()> {
+        self.update_metadata_field(|metadata| {
+            metadata.pause_requested = true;
+        })
+    }
+
+    /// Check if a pause has been requested for this session.
+    ///
+    /// Returns `true` if `pause_requested` is set in metadata, `false` otherwise.
+    /// Returns `false` if metadata doesn't exist.
+    pub fn is_pause_requested(&self) -> bool {
+        self.load_metadata()
+            .ok()
+            .flatten()
+            .map(|m| m.pause_requested)
+            .unwrap_or(false)
+    }
+
+    /// Clear the pause request for this session.
+    ///
+    /// Resets `pause_requested: false` in the session metadata.
+    pub fn clear_pause_request(&self) -> Result<()> {
+        self.update_metadata_field(|metadata| {
+            metadata.pause_requested = false;
+        })
+    }
+
+    /// Set the run mode for this session.
+    ///
+    /// # Arguments
+    /// * `mode` - The run mode to set (Auto or Step)
+    pub fn set_run_mode(&self, mode: RunMode) -> Result<()> {
+        self.update_metadata_field(|metadata| {
+            metadata.run_mode = mode;
+        })
+    }
+
+    /// Get the run mode for this session.
+    ///
+    /// Returns `RunMode::Auto` if metadata doesn't exist or can't be read.
+    pub fn get_run_mode(&self) -> RunMode {
+        self.load_metadata()
+            .ok()
+            .flatten()
+            .map(|m| m.run_mode)
+            .unwrap_or(RunMode::Auto)
+    }
+
+    /// Helper to update a single field in metadata without affecting other fields.
+    ///
+    /// Loads existing metadata (or creates default), applies the update function,
+    /// and saves it back.
+    fn update_metadata_field<F>(&self, update_fn: F) -> Result<()>
+    where
+        F: FnOnce(&mut SessionMetadata),
+    {
+        self.ensure_dirs()?;
+
+        // Load existing metadata or create a default one
+        let mut metadata = self.load_metadata()?.unwrap_or_else(|| {
+            let worktree_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            SessionMetadata {
+                session_id: self.session_id.clone(),
+                worktree_path,
+                branch_name: String::new(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running: false,
+                pause_requested: false,
+                run_mode: RunMode::Auto,
+            }
+        });
+
+        // Apply the update
+        update_fn(&mut metadata);
+
+        // Save back
+        let content = serde_json::to_string_pretty(&metadata)?;
+        fs::write(self.metadata_file(), content)?;
+
+        Ok(())
     }
 
     /// Check for branch conflicts with other active sessions.
