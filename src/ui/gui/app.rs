@@ -7081,16 +7081,18 @@ impl Autom8App {
                                     );
                                 });
 
-                            // Mode toggle (Auto/Step) - always visible
-                            // Step mode uses orange/warning color to indicate "controlled" mode
+                            // Unified mode/playback control: [[ Auto | Step ] | ⏸/▶]
                             ui.add_space(spacing::SM);
 
                             let current_mode = session.metadata.run_mode;
                             let is_auto = matches!(current_mode, RunMode::Auto);
+                            let is_running = session.metadata.is_running;
+                            let pause_queued = is_pause_queued(session);
+                            let is_resumable = is_session_resumable(session);
 
-                            // Segmented control style toggle
-                            // Orange tint for Step mode background
+                            // Colors
                             let step_orange_bg = Color32::from_rgb(255, 237, 213);
+                            let play_green = Color32::from_rgb(35, 134, 54);
 
                             egui::Frame::none()
                                 .fill(colors::SURFACE_HOVER)
@@ -7101,7 +7103,7 @@ impl Autom8App {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 2.0;
 
-                                        // Auto option - blue background when selected
+                                        // Auto option
                                         let auto_bg = if is_auto {
                                             colors::ACCENT_SUBTLE
                                         } else {
@@ -7137,14 +7139,14 @@ impl Autom8App {
                                             );
                                         }
 
-                                        // Step option - orange background when selected
+                                        // Step option
                                         let step_bg = if !is_auto {
                                             step_orange_bg
                                         } else {
                                             Color32::TRANSPARENT
                                         };
                                         let step_color = if !is_auto {
-                                            colors::ACCENT
+                                            colors::STATUS_WARNING
                                         } else {
                                             colors::TEXT_MUTED
                                         };
@@ -7172,231 +7174,104 @@ impl Autom8App {
                                                 RunMode::Step,
                                             );
                                         }
+
+                                        // Divider between mode toggle and play/pause
+                                        ui.add_space(2.0);
+                                        let divider_rect = ui.available_rect_before_wrap();
+                                        ui.painter().line_segment(
+                                            [
+                                                Pos2::new(
+                                                    divider_rect.min.x,
+                                                    divider_rect.min.y + 4.0,
+                                                ),
+                                                Pos2::new(
+                                                    divider_rect.min.x,
+                                                    divider_rect.min.y + 16.0,
+                                                ),
+                                            ],
+                                            Stroke::new(1.0, colors::BORDER),
+                                        );
+                                        ui.add_space(4.0);
+
+                                        // Play/Pause button
+                                        if is_running {
+                                            // Show pause button (running state)
+                                            let (icon, icon_color, bg_color) = if pause_queued {
+                                                // Pause is queued - show muted/pending state
+                                                ("⏸", colors::TEXT_MUTED, Color32::TRANSPARENT)
+                                            } else {
+                                                // Can pause
+                                                ("⏸", colors::TEXT_PRIMARY, Color32::TRANSPARENT)
+                                            };
+
+                                            let pause_resp = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(icon)
+                                                        .font(typography::font(
+                                                            FontSize::Small,
+                                                            FontWeight::Medium,
+                                                        ))
+                                                        .color(icon_color),
+                                                )
+                                                .fill(bg_color)
+                                                .rounding(rounding::SMALL)
+                                                .frame(false),
+                                            );
+
+                                            if pause_queued {
+                                                // Show tooltip for pause queued
+                                                pause_resp.on_hover_text(
+                                                    "Pausing after current operation...",
+                                                );
+                                            } else {
+                                                if pause_resp.hovered() {
+                                                    ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                }
+                                                if pause_resp.clicked() {
+                                                    let _ = request_session_pause(
+                                                        &session.project_name,
+                                                        &session.metadata.session_id,
+                                                    );
+                                                }
+                                            }
+                                        } else if is_resumable {
+                                            // Show play button (paused state)
+                                            let play_resp = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("▶")
+                                                        .font(typography::font(
+                                                            FontSize::Small,
+                                                            FontWeight::Medium,
+                                                        ))
+                                                        .color(play_green),
+                                                )
+                                                .fill(Color32::TRANSPARENT)
+                                                .rounding(rounding::SMALL)
+                                                .frame(false),
+                                            );
+
+                                            if play_resp.hovered() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
+                                            if play_resp.clicked() {
+                                                // Resume in current mode
+                                                let force_auto = is_auto;
+                                                let _ = spawn_resume_process(session, force_auto);
+                                            }
+
+                                            // Tooltip showing resume mode (must come last as it consumes response)
+                                            let mode_text = if is_auto { "Auto" } else { "Step" };
+                                            play_resp.on_hover_text(format!(
+                                                "Resume in {} mode",
+                                                mode_text
+                                            ));
+                                        }
                                     });
                                 });
-
-                            // Pause controls based on mode:
-                            // - Auto mode + running: Show "Pause" button
-                            // - Step mode + running: Show "Pauses after story" indicator
-                            // - Pause queued: Show "Pause Queued" badge
-                            let is_running = session.metadata.is_running;
-                            let pause_queued = is_pause_queued(session);
-
-                            if is_running && !pause_queued {
-                                ui.add_space(spacing::SM);
-
-                                if is_auto {
-                                    // Auto mode: Show Pause button
-                                    let pause_btn = egui::Button::new(
-                                        egui::RichText::new("Pause")
-                                            .font(typography::font(
-                                                FontSize::Small,
-                                                FontWeight::Medium,
-                                            ))
-                                            .color(colors::TEXT_PRIMARY),
-                                    )
-                                    .fill(colors::SURFACE_ELEVATED)
-                                    .stroke(Stroke::new(1.0, colors::BORDER))
-                                    .rounding(rounding::SMALL);
-
-                                    let pause_resp = ui.add(pause_btn);
-                                    if pause_resp.hovered() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-                                    if pause_resp.clicked() {
-                                        let _ = request_session_pause(
-                                            &session.project_name,
-                                            &session.metadata.session_id,
-                                        );
-                                    }
-                                } else {
-                                    // Step mode: Show "Pauses after story" indicator
-                                    egui::Frame::none()
-                                        .fill(step_orange_bg)
-                                        .stroke(Stroke::new(
-                                            1.0,
-                                            colors::STATUS_WARNING.linear_multiply(0.5),
-                                        ))
-                                        .rounding(rounding::SMALL)
-                                        .inner_margin(egui::Margin::symmetric(
-                                            spacing::SM,
-                                            spacing::XS,
-                                        ))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new("Pauses after story")
-                                                    .font(typography::font(
-                                                        FontSize::Small,
-                                                        FontWeight::Medium,
-                                                    ))
-                                                    .color(colors::STATUS_WARNING),
-                                            );
-                                        });
-                                }
-                            }
-
-                            if pause_queued {
-                                ui.add_space(spacing::SM);
-                                egui::Frame::none()
-                                    .fill(colors::SURFACE_ELEVATED)
-                                    .stroke(Stroke::new(1.0, colors::BORDER))
-                                    .rounding(rounding::SMALL)
-                                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new("Pause Queued")
-                                                .font(typography::font(
-                                                    FontSize::Small,
-                                                    FontWeight::Medium,
-                                                ))
-                                                .color(colors::TEXT_SECONDARY),
-                                        );
-                                    });
-                            }
-
-                            // Resume button (GitHub-style split button) - in header for paused sessions
-                            if is_session_resumable(session) {
-                                ui.add_space(spacing::SM);
-
-                                // GitHub-style green color
-                                let btn_green = Color32::from_rgb(35, 134, 54);
-                                let btn_green_hover = Color32::from_rgb(46, 160, 67);
-
-                                let button_height = 24.0;
-                                let main_width = 100.0;
-                                let dropdown_width = 22.0;
-                                let total_width = main_width + dropdown_width;
-
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(total_width, button_height),
-                                    Sense::hover(),
-                                );
-
-                                let main_rect = Rect::from_min_size(
-                                    rect.min,
-                                    egui::vec2(main_width, button_height),
-                                );
-                                let dropdown_rect = Rect::from_min_size(
-                                    egui::pos2(rect.min.x + main_width, rect.min.y),
-                                    egui::vec2(dropdown_width, button_height),
-                                );
-
-                                // Check hover states
-                                let main_hovered = ui.rect_contains_pointer(main_rect);
-                                let dropdown_hovered = ui.rect_contains_pointer(dropdown_rect);
-
-                                // Draw main button background (rounded left corners only)
-                                let main_bg = if main_hovered {
-                                    btn_green_hover
-                                } else {
-                                    btn_green
-                                };
-                                let main_rounding = Rounding {
-                                    nw: rounding::BUTTON,
-                                    sw: rounding::BUTTON,
-                                    ne: 0.0,
-                                    se: 0.0,
-                                };
-                                ui.painter().rect_filled(main_rect, main_rounding, main_bg);
-
-                                // Draw divider
-                                let divider_x = main_rect.max.x;
-                                ui.painter().line_segment(
-                                    [
-                                        Pos2::new(divider_x, rect.min.y + 4.0),
-                                        Pos2::new(divider_x, rect.max.y - 4.0),
-                                    ],
-                                    Stroke::new(1.0, Color32::WHITE.linear_multiply(0.3)),
-                                );
-
-                                // Draw dropdown background (rounded right corners only)
-                                let dropdown_bg = if dropdown_hovered {
-                                    btn_green_hover
-                                } else {
-                                    btn_green
-                                };
-                                let dropdown_rounding = Rounding {
-                                    nw: 0.0,
-                                    sw: 0.0,
-                                    ne: rounding::BUTTON,
-                                    se: rounding::BUTTON,
-                                };
-                                ui.painter().rect_filled(
-                                    dropdown_rect,
-                                    dropdown_rounding,
-                                    dropdown_bg,
-                                );
-
-                                // Draw "Resume" text (default action is Auto)
-                                let text_color = Color32::WHITE;
-                                let label_galley = ui.painter().layout_no_wrap(
-                                    "Resume".to_string(),
-                                    typography::font(FontSize::Small, FontWeight::Medium),
-                                    text_color,
-                                );
-                                let label_pos = Pos2::new(
-                                    main_rect.center().x - label_galley.rect.width() / 2.0,
-                                    main_rect.center().y - label_galley.rect.height() / 2.0,
-                                );
-                                ui.painter()
-                                    .galley(label_pos, label_galley, Color32::TRANSPARENT);
-
-                                // Draw dropdown arrow
-                                let arrow_center = dropdown_rect.center();
-                                let arrow_size = 3.0;
-                                let arrow_points = vec![
-                                    Pos2::new(arrow_center.x - arrow_size, arrow_center.y - 1.5),
-                                    Pos2::new(arrow_center.x + arrow_size, arrow_center.y - 1.5),
-                                    Pos2::new(arrow_center.x, arrow_center.y + 2.5),
-                                ];
-                                ui.painter().add(egui::Shape::convex_polygon(
-                                    arrow_points,
-                                    text_color,
-                                    Stroke::NONE,
-                                ));
-
-                                // Handle main button click - Resume in Auto mode (default)
-                                if main_hovered && ui.input(|i| i.pointer.primary_clicked()) {
-                                    let _ = spawn_resume_process(session, true);
-                                }
-
-                                // Handle dropdown click - show popup menu
-                                let popup_id = ui.make_persistent_id(format!(
-                                    "resume_header_dropdown_{}",
-                                    session.metadata.session_id
-                                ));
-                                if dropdown_hovered && ui.input(|i| i.pointer.primary_clicked()) {
-                                    ui.memory_mut(|mem| mem.toggle_popup(popup_id));
-                                }
-
-                                // Dropdown popup
-                                egui::popup_below_widget(
-                                    ui,
-                                    popup_id,
-                                    &response,
-                                    egui::PopupCloseBehavior::CloseOnClickOutside,
-                                    |ui: &mut egui::Ui| {
-                                        ui.set_min_width(150.0);
-                                        if ui.button("Resume (Auto)").clicked() {
-                                            let _ = spawn_resume_process(session, true);
-                                            ui.memory_mut(|mem: &mut egui::Memory| {
-                                                mem.close_popup()
-                                            });
-                                        }
-                                        if ui.button("Resume (Next Step)").clicked() {
-                                            let _ = spawn_resume_process(session, false);
-                                            ui.memory_mut(|mem: &mut egui::Memory| {
-                                                mem.close_popup()
-                                            });
-                                        }
-                                    },
-                                );
-
-                                // Cursor hint
-                                if main_hovered || dropdown_hovered {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                            }
                         });
 
                         ui.add_space(spacing::XS);
