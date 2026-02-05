@@ -7198,10 +7198,24 @@ impl Autom8App {
                                             // In Step mode or with pause_queued, show as "pausing"
                                             let is_pausing = pause_queued || !is_auto;
                                             let icon_color = if is_pausing {
-                                                colors::TEXT_MUTED
+                                                // Pulsing animation for pausing state
+                                                let time = ui.input(|i| i.time);
+                                                let pulse = ((time * 2.0).sin() as f32 + 1.0) / 2.0; // 0.0 to 1.0
+                                                let alpha = 80 + (pulse * 120.0) as u8; // 80 to 200
+                                                Color32::from_rgba_unmultiplied(
+                                                    colors::TEXT_MUTED.r(),
+                                                    colors::TEXT_MUTED.g(),
+                                                    colors::TEXT_MUTED.b(),
+                                                    alpha,
+                                                )
                                             } else {
                                                 colors::TEXT_PRIMARY
                                             };
+
+                                            // Request repaint for animation
+                                            if is_pausing {
+                                                ui.ctx().request_repaint();
+                                            }
 
                                             // Draw pause icon (two vertical bars)
                                             let center = rect.center();
