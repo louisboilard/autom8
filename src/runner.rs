@@ -1409,6 +1409,21 @@ impl Runner {
             StateManager::new()?
         };
 
+        // Clear any stale live output from a previous crashed run
+        let _ = effective_state_manager.clear_live();
+
+        // If NOT in worktree mode and in a git repo, ensure we're on the correct branch
+        if worktree_context.is_none() && git::is_git_repo() {
+            let current_branch = git::current_branch()?;
+            if current_branch != spec.branch_name {
+                print_info(&format!(
+                    "Switching from '{}' to '{}'",
+                    current_branch, spec.branch_name
+                ));
+                git::ensure_branch(&spec.branch_name)?;
+            }
+        }
+
         // Update state with branch from generated spec and session ID
         state.branch = spec.branch_name.clone();
         if let Some((ref session_id, _)) = &worktree_context {
