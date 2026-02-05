@@ -3324,7 +3324,23 @@ impl Autom8App {
 
         for (project_name, session_id) in to_reload {
             if let Some(updated) = load_session_by_id(&project_name, &session_id) {
+                // Session still exists, update with current state
                 self.seen_sessions.insert(session_id, updated);
+            } else {
+                // Session files deleted - check archives for final state
+                if let Some(existing) = self.seen_sessions.get(&session_id).cloned() {
+                    if let Some(ref run) = existing.run {
+                        if let Some(archived_run) =
+                            crate::ui::shared::load_archived_run(&project_name, &run.run_id)
+                        {
+                            // Update the session with archived final state
+                            let mut updated = existing;
+                            updated.run = Some(archived_run);
+                            updated.metadata.is_running = false;
+                            self.seen_sessions.insert(session_id, updated);
+                        }
+                    }
+                }
             }
         }
     }
@@ -7140,14 +7156,8 @@ impl Autom8App {
                             {
                                 ui.add_space(spacing::MD);
 
-                                // Calculate the space used so far in this horizontal row
-                                let row_start_x = ui.min_rect().left();
-                                let current_x = ui.cursor().left();
-                                let used_width = current_x - row_start_x;
-
-                                // Animation fills remaining width
-                                let max_animation_width =
-                                    (content_width - used_width - spacing::MD).max(0.0);
+                                // Animation is 1/3 of content width, capped at 150px
+                                let max_animation_width = (content_width / 3.0).min(150.0);
 
                                 if max_animation_width > 30.0 {
                                     let animation_height = 12.0;

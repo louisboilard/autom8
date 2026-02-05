@@ -798,6 +798,23 @@ pub fn load_session_by_id(project_name: &str, session_id: &str) -> Option<Sessio
     })
 }
 
+/// Load an archived run by run_id from a project's runs directory.
+///
+/// This is useful for retrieving the final state of a run after it completes
+/// and the session files have been cleaned up.
+///
+/// # Arguments
+/// * `project_name` - The project to look in
+/// * `run_id` - The run ID to find
+///
+/// # Returns
+/// * `Option<RunState>` - The archived run state if found
+pub fn load_archived_run(project_name: &str, run_id: &str) -> Option<RunState> {
+    let sm = StateManager::for_project(project_name).ok()?;
+    let archived = sm.list_archived().ok()?;
+    archived.into_iter().find(|r| r.run_id == run_id)
+}
+
 /// Load run history for display.
 ///
 /// This function loads archived runs and converts them to RunHistoryEntry format.
