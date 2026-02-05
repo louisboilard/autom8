@@ -3701,6 +3701,12 @@ impl Autom8App {
             Pos2::new(screen_rect.min.x + ui.available_width(), rect.max.y),
         );
 
+        // Set pointer cursor for enabled items on hover
+        if enabled && response.hovered() {
+            ui.ctx()
+                .output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+        }
+
         ContextMenuItemResponse {
             clicked: response.clicked() && enabled,
             hovered: is_hovered,
@@ -3895,7 +3901,9 @@ impl Autom8App {
         } else {
             "Hide sidebar"
         };
-        response.on_hover_text(tooltip_text)
+        response
+            .on_hover_text(tooltip_text)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     // ========================================================================
@@ -4036,7 +4044,9 @@ impl Autom8App {
             text_color,
         );
 
-        response.clicked()
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
     }
 
     // ========================================================================
@@ -4206,6 +4216,9 @@ impl Autom8App {
                     Rounding::same(rounding::SMALL),
                     colors::SURFACE_HOVER,
                 );
+                // Set pointer cursor when hovering close button
+                ui.ctx()
+                    .output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
             }
 
             // Draw X icon
@@ -4215,7 +4228,7 @@ impl Autom8App {
                 colors::TEXT_MUTED
             };
             let x_center = close_rect.center();
-            let x_size = TAB_CLOSE_BUTTON_SIZE * 0.35;
+            let x_size = TAB_CLOSE_BUTTON_SIZE * 0.35 * if close_hovered { 1.15 } else { 1.0 };
             ui.painter().line_segment(
                 [
                     egui::pos2(x_center.x - x_size, x_center.y - x_size),
@@ -4453,6 +4466,9 @@ impl Autom8App {
                 Rounding::same(rounding::SMALL),
                 colors::SURFACE_HOVER,
             );
+            // Set pointer cursor when hovering close button
+            ui.ctx()
+                .output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
         }
 
         // Draw X icon
@@ -4462,7 +4478,7 @@ impl Autom8App {
             colors::TEXT_MUTED
         };
         let x_center = close_rect.center();
-        let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3;
+        let x_size = TAB_CLOSE_BUTTON_SIZE * 0.3 * if close_hovered { 1.15 } else { 1.0 };
 
         ui.painter().line_segment(
             [
@@ -7451,6 +7467,9 @@ impl Autom8App {
         let is_hovered = response.hovered();
         let was_clicked = response.clicked();
         let was_secondary_clicked = response.secondary_clicked();
+
+        // Set pointer cursor for project rows
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw row background with hover and selected states
         let bg_color = if is_selected {
