@@ -1863,15 +1863,17 @@ const INPUT_BAR_HEIGHT: f32 = 56.0;
 /// Corner rounding for the text input field.
 const INPUT_FIELD_ROUNDING: f32 = 12.0;
 
-/// Send button background color - warm coral/orange accent.
-/// Using STATUS_WARNING (amber) as the base, slightly adjusted for a coral feel.
-const SEND_BUTTON_COLOR: Color32 = Color32::from_rgb(255, 126, 87);
+/// Send button background color - using theme accent color.
+const SEND_BUTTON_COLOR: Color32 = Color32::from_rgb(0, 122, 255);
 
-/// Send button hover color - slightly darker.
-const SEND_BUTTON_HOVER_COLOR: Color32 = Color32::from_rgb(235, 106, 67);
+/// Send button hover color - slightly darker accent.
+const SEND_BUTTON_HOVER_COLOR: Color32 = Color32::from_rgb(0, 100, 210);
 
 /// Send button disabled color - muted gray.
 const SEND_BUTTON_DISABLED_COLOR: Color32 = Color32::from_rgb(200, 200, 200);
+
+/// Size of the send button (square).
+const SEND_BUTTON_SIZE: f32 = 36.0;
 
 // ============================================================================
 // Claude Process Types (US-005: Claude Process Integration)
@@ -2032,13 +2034,13 @@ impl StoryStatus {
         }
     }
 
-    /// Returns the status indicator text.
+/// Returns the status indicator text.
     fn indicator(self) -> &'static str {
         match self {
-            StoryStatus::Completed => "\u{2713}", // ✓ checkmark
-            StoryStatus::Active => "\u{25CF}",    // ● filled circle
-            StoryStatus::Pending => "\u{25CB}",   // ○ empty circle
-            StoryStatus::Failed => "\u{2717}",    // ✗ X mark
+            StoryStatus::Completed => "[done]",
+            StoryStatus::Active => "[...]",
+            StoryStatus::Pending => "[ ]",
+            StoryStatus::Failed => "[x]",
         }
     }
 }
@@ -2322,6 +2324,10 @@ pub struct Autom8App {
     /// Handle to Claude's stdin for sending user messages.
     /// None when no Claude process is running.
     claude_stdin: Option<Arc<ClaudeStdinHandle>>,
+    /// Handle to the Claude child process for termination.
+    /// Stored in Arc<Mutex> so it can be killed from the main thread while
+    /// the background thread is reading output.
+    claude_child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     /// Buffer for accumulating Claude's current response.
     /// Text chunks are accumulated here until the response is complete.
     claude_response_buffer: String,
@@ -2346,7 +2352,7 @@ pub struct Autom8App {
     /// None until Claude writes a spec file to ~/.config/autom8/<project>/spec/
     generated_spec_path: Option<std::path::PathBuf>,
     /// Whether the user has confirmed the generated spec.
-    /// When true, shows the "run command" instructions and "Start New Spec" button.
+    /// When true, shows the "run command" instructions and "Close" button.
     spec_confirmed: bool,
     /// Whether Claude has finished (process exited) after generating a spec.
     /// Used to show the confirmation UI when spec generation is complete.
@@ -2359,6 +2365,9 @@ pub struct Autom8App {
     /// When Some, a confirmation modal is displayed asking user to confirm
     /// abandoning the current session to start a new one.
     pending_project_change: Option<String>,
+    /// Whether a "Close" confirmation modal should be shown.
+    /// When true, displays a modal reminding users to save their spec before resetting.
+    pending_start_new_spec: bool,
 }
 
 impl Default for Autom8App {
@@ -2428,6 +2437,7 @@ impl Autom8App {
             claude_rx,
             claude_tx,
             claude_stdin: None,
+            claude_child: Arc::new(std::sync::Mutex::new(None)),
             claude_response_buffer: String::new(),
             claude_error: None,
             claude_starting: false,
@@ -2437,6 +2447,7 @@ impl Autom8App {
             spec_confirmed: false,
             claude_finished: false,
             pending_project_change: None,
+            pending_start_new_spec: false,
         };
         // Initial data load
         app.refresh_data();
@@ -3695,6 +3706,9 @@ impl eframe::App for Autom8App {
 
         // US-008: Render project change confirmation modal
         self.render_project_change_confirmation(ctx);
+
+        // Render start new spec confirmation modal
+        self.render_start_new_spec_confirmation(ctx);
     }
 }
 
@@ -3708,7 +3722,14 @@ impl eframe::App for Autom8App {
 /// This prevents orphaned Claude processes from lingering after the GUI exits.
 impl Drop for Autom8App {
     fn drop(&mut self) {
-        // Terminate any active Claude subprocess by closing its stdin
+        // Kill any running Claude subprocess
+        if let Ok(mut guard) = self.claude_child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        // Also close stdin handle if it exists (legacy cleanup)
         if let Some(ref stdin_handle) = self.claude_stdin {
             stdin_handle.close();
         }
@@ -4349,6 +4370,54 @@ impl Autom8App {
             ModalAction::Cancelled => {
                 // Cancel the project switch
                 self.pending_project_change = None;
+            }
+            ModalAction::None => {
+                // Modal is still open, do nothing
+            }
+        }
+    }
+
+    /// Render confirmation modal when user clicks "Close".
+    ///
+    /// Shows a modal reminding users that the spec has been saved and where to find it,
+    /// asking for confirmation before clearing the session.
+    fn render_start_new_spec_confirmation(&mut self, ctx: &egui::Context) {
+        // Early return if not pending
+        if !self.pending_start_new_spec {
+            return;
+        }
+
+        // Build message with spec path if available
+        let message = if let Some(ref spec_path) = self.generated_spec_path {
+            format!(
+                "Your spec has been saved to:\n\n{}\n\n\
+                 Make sure you've copied the run command or noted the file location before starting a new spec.\n\n\
+                 Do you want to start a new spec?",
+                spec_path.display()
+            )
+        } else {
+            "Make sure you've saved any important information from this session.\n\n\
+             Do you want to start a new spec?"
+                .to_string()
+        };
+
+        // Create the modal
+        let modal = Modal::new("Close?")
+            .id("start_new_spec_confirmation")
+            .message(&message)
+            .cancel_button(ModalButton::secondary("Cancel"))
+            .confirm_button(ModalButton::new("Close"));
+
+        // Show the modal and handle the action
+        match modal.show(ctx) {
+            ModalAction::Confirmed => {
+                // Reset the session
+                self.reset_create_spec_session();
+                self.pending_start_new_spec = false;
+            }
+            ModalAction::Cancelled => {
+                // Cancel - keep the current session
+                self.pending_start_new_spec = false;
             }
             ModalAction::None => {
                 // Modal is still open, do nothing
@@ -6160,13 +6229,18 @@ impl Autom8App {
         } else {
             // Project selected - show chat interface with input bar (US-003, US-004)
             // Use a vertical layout with the chat area taking remaining space
-            // and the input bar fixed at the bottom
+            // and the input bar fixed at the bottom with generous padding
             let available_height = ui.available_height();
-            let input_bar_height = INPUT_BAR_HEIGHT + spacing::MD; // Include margin
 
-            // Chat area takes available height minus input bar
+            // Reserve space for: separator + input bar + bottom padding
+            let bottom_padding = spacing::XXL + spacing::XL; // 56px
+            let separator_height = spacing::SM * 2.0 + 1.0; // spacing before + after + line
+            let input_bar_height = INPUT_BAR_HEIGHT + spacing::MD;
+            let reserved_bottom = input_bar_height + separator_height + bottom_padding;
+
+            // Chat area takes available height minus reserved bottom space
             ui.allocate_ui(
-                egui::vec2(ui.available_width(), available_height - input_bar_height),
+                egui::vec2(ui.available_width(), available_height - reserved_bottom),
                 |ui| {
                     self.render_create_spec_chat_area(ui);
                 },
@@ -6179,6 +6253,9 @@ impl Autom8App {
 
             // Input bar at the bottom (US-004)
             self.render_create_spec_input_bar(ui);
+
+            // Bottom padding (space already reserved above)
+            ui.add_space(bottom_padding);
         }
     }
 
@@ -6264,16 +6341,7 @@ impl Autom8App {
         ui.vertical_centered(|ui| {
             ui.add_space(spacing::XL);
 
-            // Warning icon
-            ui.label(
-                egui::RichText::new("\u{26A0}") // ⚠ warning emoji
-                    .font(typography::font(FontSize::Display, FontWeight::Regular))
-                    .color(colors::STATUS_WARNING),
-            );
-
-            ui.add_space(spacing::LG);
-
-            ui.label(
+ui.label(
                 egui::RichText::new("No Projects Registered")
                     .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
                     .color(colors::TEXT_PRIMARY),
@@ -6293,16 +6361,7 @@ impl Autom8App {
     /// Render prompt to select a project (US-002).
     fn render_create_spec_select_prompt(&self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(spacing::XL);
-
-            // Document/pencil icon
-            ui.label(
-                egui::RichText::new("\u{270F}") // ✏ pencil emoji
-                    .font(typography::font(FontSize::Display, FontWeight::Regular))
-                    .color(colors::TEXT_MUTED),
-            );
-
-            ui.add_space(spacing::LG);
+            ui.add_space(spacing::XXL);
 
             ui.label(
                 egui::RichText::new("Create a New Specification")
@@ -6316,6 +6375,17 @@ impl Autom8App {
                 egui::RichText::new("Select a project to begin creating a spec")
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_SECONDARY),
+            );
+
+            ui.add_space(spacing::LG);
+
+            // Registration hint
+            ui.label(
+                egui::RichText::new(
+                    "To register a new project, run `autom8` from the project directory",
+                )
+                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
             );
         });
     }
@@ -6405,7 +6475,8 @@ impl Autom8App {
             self.confirm_spec();
         }
         if should_start_new {
-            self.reset_create_spec_session();
+            // Show confirmation modal instead of immediately resetting
+            self.pending_start_new_spec = true;
         }
 
         // Reset scroll flag after rendering
@@ -6489,20 +6560,12 @@ impl Autom8App {
 
             frame.show(ui, |ui| {
                 ui.vertical(|ui| {
-                    // Error icon and title
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("\u{26A0}") // ⚠ warning sign
-                                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
-                                .color(colors::STATUS_ERROR),
-                        );
-                        ui.add_space(spacing::XS);
-                        ui.label(
-                            egui::RichText::new("Error")
-                                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
-                                .color(colors::STATUS_ERROR),
-                        );
-                    });
+// Error title
+                    ui.label(
+                        egui::RichText::new("Error")
+                            .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                            .color(colors::STATUS_ERROR),
+                    );
 
                     ui.add_space(spacing::XS);
 
@@ -6558,104 +6621,115 @@ impl Autom8App {
         // Track if we should send (set by Enter key or button click)
         let mut should_send = false;
 
-        ui.horizontal(|ui| {
-            // Input field takes remaining space minus button width
-            let button_width = 48.0;
-            let available_width = ui.available_width() - button_width - spacing::SM;
+        // Calculate the width for the text input area
+        // Reserve space for: gap + button + right margin
+        let total_width = ui.available_width();
+        let button_area_width = spacing::SM + SEND_BUTTON_SIZE;
+        let input_frame_width = total_width - button_area_width;
 
-            // Create styled input frame
+        ui.horizontal(|ui| {
+            // Input frame with fixed width
             let input_frame = egui::Frame::none()
                 .fill(colors::SURFACE)
                 .rounding(Rounding::same(INPUT_FIELD_ROUNDING))
                 .stroke(Stroke::new(1.0, colors::BORDER))
                 .inner_margin(egui::Margin::symmetric(spacing::MD, spacing::SM));
 
-            input_frame.show(ui, |ui| {
-                ui.set_width(available_width);
-                ui.set_min_height(INPUT_BAR_HEIGHT - spacing::MD * 2.0);
+            let frame_response = input_frame.show(ui, |ui| {
+                // Set the frame to use the calculated width
+                ui.set_width(input_frame_width - spacing::MD * 2.0 - 2.0);
 
-                // Text input with multiline support
-                let text_edit = egui::TextEdit::multiline(&mut self.chat_input_text)
-                    .hint_text(
-                        egui::RichText::new(placeholder)
-                            .color(colors::TEXT_MUTED)
-                            .font(typography::font(FontSize::Body, FontWeight::Regular)),
-                    )
-                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                    .text_color(colors::TEXT_PRIMARY)
-                    .frame(false)
-                    .desired_rows(1)
-                    .lock_focus(true)
-                    .interactive(!self.is_waiting_for_claude);
+                // Scrollable text area with max height
+                let max_input_height = 100.0;
 
-                let response = ui.add(text_edit);
+                egui::ScrollArea::vertical()
+                    .max_height(max_input_height)
+                    .show(ui, |ui| {
+                        // Text input - use full available width
+                        let text_edit = egui::TextEdit::multiline(&mut self.chat_input_text)
+                            .hint_text(
+                                egui::RichText::new(placeholder)
+                                    .color(colors::TEXT_MUTED)
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                            )
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .text_color(colors::TEXT_PRIMARY)
+                            .frame(false)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(1)
+                            .lock_focus(true)
+                            .interactive(!self.is_waiting_for_claude);
 
-                // Handle Enter key to send (Shift+Enter for newline)
-                if response.has_focus() && !self.is_waiting_for_claude {
-                    let modifiers = ui.input(|i| i.modifiers);
-                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let response = ui.add(text_edit);
 
-                    if enter_pressed && !modifiers.shift && can_send {
-                        should_send = true;
-                        // Consume the enter key to prevent newline
-                        response.request_focus();
-                    }
-                }
+                        // Handle Enter key to send (Shift+Enter for newline)
+                        if response.has_focus() && !self.is_waiting_for_claude {
+                            let modifiers = ui.input(|i| i.modifiers);
+                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                            if enter_pressed && !modifiers.shift && can_send {
+                                should_send = true;
+                            }
+                        }
+                    });
             });
+
+            // Get the height of the input frame for vertical centering of button
+            let frame_height = frame_response.response.rect.height();
 
             ui.add_space(spacing::SM);
 
-            // Send button
-            let button_response = ui.add_sized(
-                egui::vec2(button_width, INPUT_BAR_HEIGHT - spacing::MD),
-                |ui: &mut egui::Ui| {
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(button_width, INPUT_BAR_HEIGHT - spacing::MD),
-                        egui::Sense::click(),
+            // Send button - vertically centered with the input
+            ui.vertical(|ui| {
+                // Center the button vertically
+                let button_vertical_offset = (frame_height - SEND_BUTTON_SIZE) / 2.0;
+                if button_vertical_offset > 0.0 {
+                    ui.add_space(button_vertical_offset);
+                }
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(SEND_BUTTON_SIZE, SEND_BUTTON_SIZE),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    // Determine button color based on state
+                    let actual_color = if !can_send {
+                        SEND_BUTTON_DISABLED_COLOR
+                    } else if response.hovered() {
+                        SEND_BUTTON_HOVER_COLOR
+                    } else {
+                        SEND_BUTTON_COLOR
+                    };
+
+                    // Draw circular button background
+                    ui.painter().rect_filled(
+                        rect,
+                        Rounding::same(SEND_BUTTON_SIZE / 2.0),
+                        actual_color,
                     );
 
-                    if ui.is_rect_visible(rect) {
-                        // Determine actual button color based on hover state
-                        let actual_color = if !can_send {
-                            SEND_BUTTON_DISABLED_COLOR
-                        } else if response.hovered() {
-                            SEND_BUTTON_HOVER_COLOR
-                        } else {
-                            SEND_BUTTON_COLOR
-                        };
+                    // Draw send arrow icon
+                    let icon_color = Color32::WHITE;
+                    let center = rect.center();
 
-                        // Draw rounded button background
-                        ui.painter().rect_filled(
-                            rect,
-                            Rounding::same(INPUT_FIELD_ROUNDING),
-                            actual_color,
-                        );
+                    let arrow_points = vec![
+                        egui::pos2(center.x - 6.0, center.y - 5.0),
+                        egui::pos2(center.x + 6.0, center.y),
+                        egui::pos2(center.x - 6.0, center.y + 5.0),
+                        egui::pos2(center.x - 3.0, center.y),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        arrow_points,
+                        icon_color,
+                        Stroke::NONE,
+                    ));
+                }
 
-                        // Draw send arrow icon (paper plane style)
-                        let icon_color = Color32::WHITE;
-                        let center = rect.center();
-
-                        // Simple arrow icon pointing right
-                        let arrow_points = vec![
-                            egui::pos2(center.x - 8.0, center.y - 6.0),
-                            egui::pos2(center.x + 8.0, center.y),
-                            egui::pos2(center.x - 8.0, center.y + 6.0),
-                            egui::pos2(center.x - 4.0, center.y),
-                        ];
-                        ui.painter().add(egui::Shape::convex_polygon(
-                            arrow_points,
-                            icon_color,
-                            Stroke::NONE,
-                        ));
-                    }
-
-                    response
-                },
-            );
-
-            if button_response.clicked() && can_send {
-                should_send = true;
-            }
+                if response.clicked() && can_send {
+                    should_send = true;
+                }
+            });
 
             // Show loading indicator when waiting for Claude
             if self.is_waiting_for_claude {
@@ -6685,6 +6759,11 @@ impl Autom8App {
             return;
         }
 
+        // Don't send if already waiting for Claude
+        if self.is_waiting_for_claude {
+            return;
+        }
+
         // Add user message to chat
         self.add_user_message(&message);
 
@@ -6697,20 +6776,8 @@ impl Autom8App {
             .iter()
             .any(|m| m.sender == ChatMessageSender::Claude);
 
-        if !has_claude_response && !self.is_waiting_for_claude {
-            // First message - spawn Claude in interactive mode for multi-turn conversation
-            self.spawn_claude_interactive(&message);
-        } else if self.claude_stdin.is_some() {
-            // Claude is running - send to stdin (US-006: User Response Handling)
-            if self.send_to_claude(&message) {
-                // Successfully sent - mark as waiting for response
-                self.is_waiting_for_claude = true;
-                self.claude_response_in_progress = false;
-                self.last_claude_output_time = None;
-            }
-        }
-        // If Claude has finished (process terminated) and user sends another message,
-        // we could restart Claude here, but for now we just show the message
+        // Spawn Claude for this message (new process each time with full context)
+        self.spawn_claude_for_message(&message, !has_claude_response);
     }
 
     /// Render the empty state for the chat area (US-003).
@@ -6720,15 +6787,6 @@ impl Autom8App {
         ui.vertical_centered(|ui| {
             ui.add_space(spacing::XXL);
             ui.add_space(spacing::XXL);
-
-            // Chat bubble icon
-            ui.label(
-                egui::RichText::new("\u{1F4AC}") // 💬 speech bubble emoji
-                    .font(typography::font(FontSize::Display, FontWeight::Regular))
-                    .color(colors::TEXT_MUTED),
-            );
-
-            ui.add_space(spacing::LG);
 
             ui.label(
                 egui::RichText::new("Describe the feature you want to build...")
@@ -6790,61 +6848,99 @@ impl Autom8App {
 
         let text_color = colors::TEXT_PRIMARY;
 
-        // Create a frame for the bubble
-        let frame = egui::Frame::none()
-            .fill(bubble_color)
-            .rounding(Rounding::same(CHAT_BUBBLE_ROUNDING))
-            .inner_margin(egui::Margin::same(CHAT_BUBBLE_PADDING))
-            .stroke(if is_user {
-                Stroke::NONE
-            } else {
-                // Claude messages get a subtle border
-                Stroke::new(1.0, colors::BORDER)
-            });
+        // Calculate the actual text width needed for shrink-wrapping
+        let font_id = typography::font(FontSize::Body, FontWeight::Regular);
+        let content_max_width = max_bubble_width - CHAT_BUBBLE_PADDING * 2.0;
 
-        // Apply shadow to Claude messages for depth
-        let frame = if !is_user {
-            frame.shadow(theme::shadow::subtle())
-        } else {
-            frame
+        // Create a layout job to measure the text
+        let mut job = egui::text::LayoutJob::single_section(
+            message.content.clone(),
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color: text_color,
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: content_max_width,
+            ..Default::default()
         };
 
-        frame.show(ui, |ui| {
-            ui.set_max_width(max_bubble_width - CHAT_BUBBLE_PADDING * 2.0);
+        // Measure the galley to get actual text dimensions
+        let galley = ui.fonts(|f| f.layout_job(job.clone()));
+        let text_size = galley.rect.size();
 
-            ui.vertical(|ui| {
-                // Message content with word wrapping
-                let job = egui::text::LayoutJob::single_section(
-                    message.content.clone(),
-                    egui::TextFormat {
-                        font_id: typography::font(FontSize::Body, FontWeight::Regular),
-                        color: text_color,
-                        ..Default::default()
-                    },
-                );
+        // Calculate bubble dimensions - shrink to fit content
+        let min_bubble_width = 50.0;
+        let bubble_content_width = text_size.x.max(min_bubble_width).min(content_max_width);
 
-                ui.label(job);
-
-                // Optional: Show message order indicator for visual clarity
-                // Using relative message number instead of timestamp for simplicity
-                ui.add_space(spacing::XS);
-                ui.with_layout(
-                    if is_user {
-                        egui::Layout::right_to_left(egui::Align::Center)
-                    } else {
-                        egui::Layout::left_to_right(egui::Align::Center)
-                    },
-                    |ui| {
-                        let order_text = format!("#{}", message_index + 1);
-                        ui.label(
-                            egui::RichText::new(order_text)
-                                .font(typography::font(FontSize::Caption, FontWeight::Regular))
-                                .color(colors::TEXT_DISABLED),
-                        );
-                    },
-                );
-            });
+        // Also measure the "#N" indicator
+        let order_text = format!("#{}", message_index + 1);
+        let order_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                order_text.clone(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_DISABLED,
+            )
         });
+        let order_height = order_galley.rect.height();
+
+        // Total content height: text + spacing + order indicator
+        let total_content_height = text_size.y + spacing::XS + order_height;
+
+        // Total bubble size including padding
+        let bubble_width = bubble_content_width + CHAT_BUBBLE_PADDING * 2.0;
+        let bubble_height = total_content_height + CHAT_BUBBLE_PADDING * 2.0;
+
+        // Allocate exact size for the bubble, then draw frame manually
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(bubble_width, bubble_height), egui::Sense::hover());
+
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+
+            // Draw shadow for Claude messages
+            if !is_user {
+                let shadow = theme::shadow::subtle();
+                let shadow_rect = rect.translate(shadow.offset);
+                painter.rect_filled(
+                    shadow_rect.expand(shadow.spread),
+                    Rounding::same(CHAT_BUBBLE_ROUNDING),
+                    shadow.color,
+                );
+            }
+
+            // Draw bubble background
+            painter.rect_filled(rect, Rounding::same(CHAT_BUBBLE_ROUNDING), bubble_color);
+
+            // Draw border for Claude messages
+            if !is_user {
+                painter.rect_stroke(
+                    rect,
+                    Rounding::same(CHAT_BUBBLE_ROUNDING),
+                    Stroke::new(1.0, colors::BORDER),
+                );
+            }
+
+            // Draw the text content
+            let text_pos = rect.min + egui::vec2(CHAT_BUBBLE_PADDING, CHAT_BUBBLE_PADDING);
+            painter.galley(text_pos, galley, text_color);
+
+            // Draw the order indicator
+            let order_y = text_pos.y + text_size.y + spacing::XS;
+            let order_x = if is_user {
+                // Right-aligned for user
+                rect.max.x - CHAT_BUBBLE_PADDING - order_galley.rect.width()
+            } else {
+                // Left-aligned for Claude
+                text_pos.x
+            };
+            painter.galley(
+                egui::pos2(order_x, order_y),
+                order_galley,
+                colors::TEXT_DISABLED,
+            );
+        }
     }
 
     /// Add a message to the chat and trigger scroll to bottom (US-003).
@@ -6879,14 +6975,16 @@ impl Autom8App {
     // Claude Process Integration (US-005)
     // ========================================================================
 
-    /// Spawn Claude in interactive mode for multi-turn conversation.
+    /// Spawn Claude to process a message and get a response.
     ///
     /// This method:
-    /// 1. Spawns `claude` CLI as a subprocess with stdin kept open
-    /// 2. Writes the initial prompt to stdin (without closing it)
-    /// 3. Sets up a background thread to stream stdout to the UI
-    /// 4. Retains stdin handle for subsequent user messages (US-006)
-    fn spawn_claude_interactive(&mut self, initial_message: &str) {
+    /// 1. Builds a prompt with conversation context (for multi-turn)
+    /// 2. Spawns `claude` CLI with proper arguments (--print, --output-format stream-json)
+    /// 3. Writes prompt to stdin and closes it (required for Claude to process)
+    /// 4. Sets up a background thread to stream and parse stdout
+    /// 5. Each call spawns a new process (Claude CLI doesn't support persistent sessions)
+    fn spawn_claude_for_message(&mut self, user_message: &str, is_first_message: bool) {
+        use crate::claude::extract_text_from_stream_line;
         use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};
 
@@ -6894,6 +6992,7 @@ impl Autom8App {
         self.claude_error = None;
         self.claude_response_in_progress = false;
         self.last_claude_output_time = None;
+        self.claude_finished = false;
 
         // US-009: Mark that we're starting Claude (show "Starting Claude..." indicator)
         self.claude_starting = true;
@@ -6901,15 +7000,39 @@ impl Autom8App {
 
         let tx = self.claude_tx.clone();
 
-        // Build the combined prompt: spec creation system prompt + user's initial message
-        let prompt = format!(
-            "{}\n\n---\n\nUser's initial request:\n\n{}\n",
-            crate::prompts::SPEC_SKILL_PROMPT,
-            initial_message
-        );
+        // Build the prompt with conversation context
+        let prompt = if is_first_message {
+            // First message: include system prompt
+            format!(
+                "{}\n\n---\n\nUser's request:\n\n{}\n",
+                crate::prompts::SPEC_SKILL_PROMPT,
+                user_message
+            )
+        } else {
+            // Subsequent messages: include conversation history
+            let mut context = format!("{}\n\n---\n\nConversation so far:\n\n", crate::prompts::SPEC_SKILL_PROMPT);
+            for msg in &self.chat_messages {
+                match msg.sender {
+                    ChatMessageSender::User => {
+                        context.push_str(&format!("User: {}\n\n", msg.content));
+                    }
+                    ChatMessageSender::Claude => {
+                        context.push_str(&format!("Assistant: {}\n\n", msg.content));
+                    }
+                }
+            }
+            context.push_str(&format!("User: {}\n\nPlease continue the conversation and help refine the specification.", user_message));
+            context
+        };
 
-        // Spawn the Claude CLI process
+        // Spawn the Claude CLI process with correct arguments
         let child_result = Command::new("claude")
+            .args([
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -6930,99 +7053,100 @@ impl Autom8App {
             }
         };
 
-        // Take stdin and create a handle for it
-        let stdin = child.stdin.take();
-        if let Some(mut stdin_writer) = stdin {
-            // Write the initial prompt
-            if let Err(e) = stdin_writer.write_all(prompt.as_bytes()) {
+        // Write prompt to stdin and close it (required for Claude to start processing)
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(prompt.as_bytes()) {
                 self.claude_error = Some(format!("Failed to write prompt to Claude: {}", e));
                 self.is_waiting_for_claude = false;
                 self.claude_starting = false;
                 return;
             }
-            if let Err(e) = stdin_writer.flush() {
-                self.claude_error = Some(format!("Failed to flush Claude stdin: {}", e));
-                self.is_waiting_for_claude = false;
-                self.claude_starting = false;
-                return;
-            }
-
-            // Store the stdin handle for future messages
-            self.claude_stdin = Some(Arc::new(ClaudeStdinHandle::new(stdin_writer)));
+            // stdin is dropped here, closing the pipe - this signals Claude to process
         }
 
-        // Spawn background thread to read stdout
+        // Clear the stdin handle since we're not keeping it open
+        self.claude_stdin = None;
+
+        // Take stdout and stderr handles before storing child
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
+        // Store the child process so it can be killed if needed
+        let child_handle = self.claude_child.clone();
+        {
+            let mut guard = child_handle.lock().unwrap();
+            *guard = Some(child);
+        }
+
+        // Spawn background thread to read and parse output
         std::thread::spawn(move || {
-            // Signal that Claude has started (clears claude_starting in poll_claude_messages)
+            // Signal that Claude has started
             let _ = tx.send(ClaudeMessage::Started);
 
-            // Read stdout in a streaming fashion
+            // Read stdout and parse stream-json format
             if let Some(stdout) = stdout {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines() {
                     match line {
-                        Ok(text) => {
-                            // Send each line as output
-                            let _ = tx.send(ClaudeMessage::Output(text));
+                        Ok(json_line) => {
+                            // Parse stream-json and extract text content
+                            if let Some(text) = extract_text_from_stream_line(&json_line) {
+                                let _ = tx.send(ClaudeMessage::Output(text));
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Error reading Claude stdout: {}", e);
+                        Err(_) => {
+                            // Error reading - process may have been killed
                             break;
                         }
                     }
                 }
             }
 
-            // Read any stderr content
+            // Collect stderr for error reporting (don't send as output)
+            let mut stderr_content = String::new();
             if let Some(stderr) = stderr {
                 let reader = BufReader::new(stderr);
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) if !text.is_empty() => {
-                            // Send stderr as output too (Claude CLI outputs some info to stderr)
-                            let _ = tx.send(ClaudeMessage::Output(text));
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
+                for text in reader.lines().take(10).flatten() {
+                    if !text.is_empty() {
+                        stderr_content.push_str(&text);
+                        stderr_content.push('\n');
                     }
                 }
             }
 
-            // Wait for the process to finish
-            match child.wait() {
-                Ok(status) => {
-                    let success = status.success();
-                    let error = if !success {
-                        Some(format!("Claude exited with status: {}", status))
-                    } else {
-                        None
-                    };
-                    let _ = tx.send(ClaudeMessage::Finished { success, error });
-                }
-                Err(e) => {
-                    let _ = tx.send(ClaudeMessage::Finished {
-                        success: false,
-                        error: Some(format!("Failed to wait for Claude: {}", e)),
-                    });
+            // Wait for the process to finish (take it from the mutex)
+            let mut guard = child_handle.lock().unwrap();
+            if let Some(mut child) = guard.take() {
+                match child.wait() {
+                    Ok(status) => {
+                        let success = status.success();
+                        let error = if !success {
+                            if stderr_content.is_empty() {
+                                Some(format!("Claude exited with status: {}", status))
+                            } else {
+                                Some(format!("Claude error: {}", stderr_content.trim()))
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = tx.send(ClaudeMessage::Finished { success, error });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ClaudeMessage::Finished {
+                            success: false,
+                            error: Some(format!("Failed to wait for Claude: {}", e)),
+                        });
+                    }
                 }
             }
+            // If child was already taken (killed), we just exit silently
         });
     }
 
-    /// Send a message to the running Claude subprocess.
-    ///
-    /// Returns true if the message was sent successfully.
-    fn send_to_claude(&self, message: &str) -> bool {
-        if let Some(ref stdin_handle) = self.claude_stdin {
-            stdin_handle.send(message)
-        } else {
-            false
-        }
+    /// Legacy wrapper for spawn_claude_for_message (for compatibility).
+    fn spawn_claude_interactive(&mut self, initial_message: &str) {
+        self.spawn_claude_for_message(initial_message, true);
     }
-
     /// Poll for Claude messages and update state.
     ///
     /// This should be called in the update loop to process messages from the
@@ -7117,12 +7241,11 @@ impl Autom8App {
         }
     }
 
-    /// Detect spec file path in Claude's output (US-007).
+/// Detect spec file path in Claude's output (US-007).
     ///
     /// Looks for patterns like:
     /// - `~/.config/autom8/<project>/spec/spec-<feature>.md`
     /// - Absolute paths like `/Users/.../autom8/<project>/spec/spec-<feature>.md`
-    /// - Write operations mentioning spec file paths
     ///
     /// When detected, stores the path in `generated_spec_path`.
     fn detect_spec_path_in_output(&mut self, text: &str) {
@@ -7131,19 +7254,29 @@ impl Autom8App {
             return;
         }
 
-        // Look for spec file paths in the output
-        // Patterns:
-        // 1. ~/.config/autom8/<project>/spec/spec-<feature>.md
-        // 2. /home/user/.config/autom8/<project>/spec/spec-<feature>.md
-        // 3. /Users/user/.config/autom8/<project>/spec/spec-<feature>.md
+        // Helper to validate a potential spec path
+        let is_valid_spec_path = |path_str: &str| -> bool {
+            // Must contain the expected path structure
+            if !path_str.contains("/spec/spec-") || !path_str.ends_with(".md") {
+                return false;
+            }
+            // Must not contain control characters or be too long
+            if path_str.chars().any(|c| c.is_control()) || path_str.len() > 500 {
+                return false;
+            }
+            // Must look like a filesystem path (no spaces in filename, reasonable chars)
+            let filename = path_str.rsplit('/').next().unwrap_or("");
+            if filename.contains(' ') || filename.is_empty() {
+                return false;
+            }
+            true
+        };
 
-        // Pattern 1: Tilde-based path
+        // Pattern 1: Tilde-based path (~/.config/autom8/...)
         if let Some(start) = text.find("~/.config/autom8/") {
             if let Some(rel_end) = text[start..].find(".md") {
                 let path_str = &text[start..start + rel_end + 3];
-                // Verify it's a spec file
-                if path_str.contains("/spec/spec-") {
-                    // Expand ~ to home directory
+                if is_valid_spec_path(path_str) {
                     if let Some(home) = dirs::home_dir() {
                         let expanded = path_str.replacen("~", &home.to_string_lossy(), 1);
                         self.generated_spec_path = Some(std::path::PathBuf::from(expanded));
@@ -7154,29 +7287,23 @@ impl Autom8App {
         }
 
         // Pattern 2: Absolute paths containing .config/autom8
-        // Look for paths ending in .md that contain /autom8/ and /spec/spec-
         for word in text.split_whitespace() {
-            // Clean up the word (remove quotes, backticks, etc.)
-            let cleaned =
-                word.trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '(' || c == ')');
+            // Clean up the word (remove quotes, backticks, punctuation)
+            let cleaned = word.trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == '`' || c == '(' || c == ')' || c == ',' || c == ':'
+            });
 
-            if cleaned.ends_with(".md")
-                && cleaned.contains(".config/autom8/")
-                && cleaned.contains("/spec/spec-")
-            {
-                // Found a potential spec path
+            if cleaned.contains(".config/autom8/") && is_valid_spec_path(cleaned) {
                 let path = std::path::PathBuf::from(cleaned);
-                // Validate it looks like an absolute path or expand ~
-                if path.is_absolute() || cleaned.starts_with('~') {
-                    if cleaned.starts_with('~') {
-                        if let Some(home) = dirs::home_dir() {
-                            let expanded = cleaned.replacen("~", &home.to_string_lossy(), 1);
-                            self.generated_spec_path = Some(std::path::PathBuf::from(expanded));
-                        }
-                    } else {
-                        self.generated_spec_path = Some(path);
-                    }
+                if path.is_absolute() {
+                    self.generated_spec_path = Some(path);
                     return;
+                } else if cleaned.starts_with('~') {
+                    if let Some(home) = dirs::home_dir() {
+                        let expanded = cleaned.replacen("~", &home.to_string_lossy(), 1);
+                        self.generated_spec_path = Some(std::path::PathBuf::from(expanded));
+                        return;
+                    }
                 }
             }
         }
@@ -7221,7 +7348,7 @@ impl Autom8App {
     /// - Success message with spec file path
     /// - Green checkmark button to confirm
     /// - After confirmation: copy-able command to run the spec
-    /// - "Start New Spec" button to reset the session
+    /// - "Close" button to reset the session
     ///
     /// Returns (should_confirm, should_start_new) to handle button clicks outside the closure.
     fn render_spec_completion_ui(&self, ui: &mut egui::Ui, _max_bubble_width: f32) -> (bool, bool) {
@@ -7244,9 +7371,9 @@ impl Autom8App {
 
                         ui.add_space(spacing::MD);
 
-                        // "Start New Spec" button
+                        // "Close" button
                         let start_new_button = egui::Button::new(
-                            egui::RichText::new("Start New Spec")
+                            egui::RichText::new("Close")
                                 .font(typography::font(FontSize::Body, FontWeight::Medium))
                                 .color(colors::SURFACE),
                         )
@@ -7258,18 +7385,11 @@ impl Autom8App {
                         }
                     } else {
                         // Pre-confirmation: Show spec path and confirm button
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("\u{2705}") // ✅ checkmark
-                                    .font(typography::font(FontSize::Large, FontWeight::SemiBold)),
-                            );
-                            ui.add_space(spacing::XS);
-                            ui.label(
-                                egui::RichText::new("Spec Generated!")
-                                    .font(typography::font(FontSize::Body, FontWeight::SemiBold))
-                                    .color(colors::STATUS_SUCCESS),
-                            );
-                        });
+ui.label(
+                            egui::RichText::new("Spec Generated!")
+                                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                .color(colors::STATUS_SUCCESS),
+                        );
 
                         ui.add_space(spacing::SM);
 
@@ -7301,9 +7421,9 @@ impl Autom8App {
 
                         ui.add_space(spacing::MD);
 
-                        // Green confirm button
+// Green confirm button
                         let confirm_button = egui::Button::new(
-                            egui::RichText::new("\u{2714} Confirm & Get Run Command") // ✔
+                            egui::RichText::new("Confirm & Get Run Command")
                                 .font(typography::font(FontSize::Body, FontWeight::Medium))
                                 .color(colors::SURFACE),
                         )
@@ -7313,6 +7433,14 @@ impl Autom8App {
                         if ui.add(confirm_button).clicked() {
                             should_confirm = true;
                         }
+
+                        // Hint that users can continue refining
+                        ui.add_space(spacing::MD);
+                        ui.label(
+                            egui::RichText::new("Want changes? Keep chatting below to refine the spec.")
+                                .font(typography::font(FontSize::Small, FontWeight::Regular))
+                                .color(colors::TEXT_MUTED),
+                        );
                     }
                 });
             });
@@ -7370,8 +7498,8 @@ impl Autom8App {
 
             // Copy button
             let copy_button = egui::Button::new(
-                egui::RichText::new("\u{1F4CB}") // 📋 clipboard
-                    .font(typography::font(FontSize::Body, FontWeight::Regular)),
+egui::RichText::new("Copy")
+                    .font(typography::font(FontSize::Small, FontWeight::Medium)),
             )
             .fill(colors::SURFACE)
             .stroke(Stroke::new(1.0, colors::BORDER))
@@ -7387,7 +7515,7 @@ impl Autom8App {
         });
     }
 
-    /// Build the command to run the spec.
+/// Build the command to run the spec.
     ///
     /// Format: `cd <project-root> && autom8 run <spec-path>`
     fn build_spec_run_command(&self) -> String {
@@ -7402,11 +7530,7 @@ impl Autom8App {
 
         match project_root {
             Some(root) => format!("cd {} && autom8 run {}", root.display(), spec_path),
-            None => {
-                // Fallback: just show autom8 run with spec path
-                // User needs to be in the project directory
-                format!("autom8 run {}", spec_path)
-            }
+            None => format!("autom8 run {}", spec_path),
         }
     }
 
@@ -7417,21 +7541,17 @@ impl Autom8App {
     fn find_project_root_for_selected_project(&self) -> Option<std::path::PathBuf> {
         let selected_project = self.create_spec_selected_project.as_ref()?;
 
-        // First, check if there are any sessions for this project
+        // Look for a session matching this project
         for session in &self.sessions {
             if &session.project_name == selected_project {
-                // Found a session for this project - use its worktree_path
                 return Some(session.metadata.worktree_path.clone());
             }
         }
 
-        // No active sessions - try to find from project data
-        // This is a fallback; project data doesn't directly store the repo path
-        // but we could potentially derive it from session metadata files
         None
     }
 
-    /// Confirm the spec and show the run command.
+/// Confirm the spec and show the run command.
     fn confirm_spec(&mut self) {
         self.spec_confirmed = true;
         self.chat_scroll_to_bottom = true;
@@ -7461,7 +7581,17 @@ impl Autom8App {
     ///
     /// Also terminates any running Claude subprocess by closing its stdin.
     fn reset_create_spec_session(&mut self) {
-        // Terminate Claude subprocess by closing stdin (signals EOF)
+        // Kill any running Claude subprocess
+        if let Ok(mut guard) = self.claude_child.lock() {
+            if let Some(mut child) = guard.take() {
+                // Kill the process - ignore errors (process may have already exited)
+                let _ = child.kill();
+                // Wait to avoid zombie process
+                let _ = child.wait();
+            }
+        }
+
+        // Close stdin handle if any (legacy, but keep for safety)
         if let Some(ref stdin_handle) = self.claude_stdin {
             stdin_handle.close();
         }
