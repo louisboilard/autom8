@@ -5,8 +5,52 @@
 
 use egui::{Color32, Rect, Rounding, Sense, Stroke, Ui};
 
+// =============================================================================
+// Animation Constants
+// =============================================================================
+
 /// Animation frame interval (~30fps for smooth animation with low CPU).
 const FRAME_INTERVAL_MS: u64 = 33;
+
+// -----------------------------------------------------------------------------
+// Rising Particles Animation (US-005)
+// -----------------------------------------------------------------------------
+
+/// Horizontal drift amplitude for particle wobble effect.
+/// Controls how far particles sway side-to-side as they rise, creating organic movement.
+/// Higher values = more pronounced horizontal oscillation.
+const PARTICLE_DRIFT: f32 = 6.0;
+
+/// Alpha multiplier applied to all particles.
+/// Keeps particles subtle and non-distracting against the background.
+/// Range 0.0-1.0, where 1.0 would be fully opaque.
+const PARTICLE_ALPHA_MULTIPLIER: f32 = 0.7;
+
+// -----------------------------------------------------------------------------
+// Progress Bar Shimmer Animation (US-005)
+// -----------------------------------------------------------------------------
+
+/// Maximum width in pixels of the shimmer highlight effect.
+/// The shimmer is capped at this width or 30% of the filled bar, whichever is smaller.
+/// Controls the visual "size" of the sweeping highlight.
+const SHIMMER_WIDTH: f32 = 12.0;
+
+/// Alpha value (0-255) for the white shimmer overlay.
+/// Tuned to be visible but not overpowering against the fill color.
+/// 76/255 ≈ 30% opacity.
+const SHIMMER_ALPHA: u8 = 76;
+
+// -----------------------------------------------------------------------------
+// Infinity Sign Animation
+// -----------------------------------------------------------------------------
+
+/// Number of line segments used to draw the infinity curve.
+/// Higher values = smoother curve but more draw calls.
+const NUM_POINTS: usize = 32;
+
+/// Length of the fading trail behind the infinity animation head.
+/// Expressed as a fraction of the full loop (0.0-1.0).
+const TRAIL_LENGTH: f32 = 0.35;
 
 /// Schedule the next animation frame.
 ///
@@ -91,20 +135,16 @@ pub fn render_rising_particles(ui: &mut Ui, width: f32, height: f32) {
         };
 
         // Slight horizontal drift for organic feel
-        let drift = (time * 0.5 + phase * 10.0).sin() * 6.0;
+        let drift = (time * 0.5 + phase * 10.0).sin() * PARTICLE_DRIFT;
         let final_x = x + drift;
 
         painter.circle_filled(
             egui::pos2(final_x, y),
             *dot_size,
-            color.linear_multiply(alpha.max(0.0) * 0.7),
+            color.linear_multiply(alpha.max(0.0) * PARTICLE_ALPHA_MULTIPLIER),
         );
     }
 }
-
-/// Precomputed infinity path points (unit lemniscate, centered at origin).
-/// Generated once at compile time to avoid per-frame allocations.
-const NUM_POINTS: usize = 32;
 
 /// Compute a point on the unit lemniscate for parameter t (0 to TAU).
 #[inline]
@@ -136,7 +176,6 @@ pub fn render_infinity(painter: &egui::Painter, time: f32, rect: Rect, color: Co
     // Animation cycle: 0.0 to 1.0 over the full loop
     let cycle = (time * speed * 0.3) % 1.0;
 
-    const TRAIL_LENGTH: f32 = 0.35;
     let head_pos = cycle;
     let tail_pos = (cycle - TRAIL_LENGTH).rem_euclid(1.0);
 
@@ -237,7 +276,7 @@ pub fn render_progress_bar(
 
             // Only draw shimmer if it's within the filled area
             if shimmer_x >= fill_rect.min.x && shimmer_x <= fill_rect.max.x {
-                let shimmer_width = 12.0_f32.min(fill_width * 0.3);
+                let shimmer_width = SHIMMER_WIDTH.min(fill_width * 0.3);
                 let shimmer_rect = Rect::from_min_max(
                     egui::pos2(
                         (shimmer_x - shimmer_width / 2.0).max(fill_rect.min.x),
@@ -249,7 +288,7 @@ pub fn render_progress_bar(
                     ),
                 );
 
-                let shimmer_color = Color32::from_rgba_unmultiplied(255, 255, 255, 76);
+                let shimmer_color = Color32::from_rgba_unmultiplied(255, 255, 255, SHIMMER_ALPHA);
                 painter.rect_filled(shimmer_rect, rounding, shimmer_color);
             }
         }

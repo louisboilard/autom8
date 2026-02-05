@@ -44,8 +44,8 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 /// Default width of the modal dialog.
 const DIALOG_WIDTH: f32 = 400.0;
 
-/// Padding inside the dialog.
-const DIALOG_PADDING: f32 = 24.0;
+/// Padding inside the dialog. Uses spacing::XL for consistency with theme.
+const DIALOG_PADDING: f32 = spacing::XL;
 
 /// Height of the action buttons.
 const BUTTON_HEIGHT: f32 = 36.0;
@@ -53,8 +53,8 @@ const BUTTON_HEIGHT: f32 = 36.0;
 /// Width of the action buttons.
 const BUTTON_WIDTH: f32 = 100.0;
 
-/// Gap between buttons.
-const BUTTON_GAP: f32 = 12.0;
+/// Gap between buttons. Uses spacing::MD for consistency with theme.
+const BUTTON_GAP: f32 = spacing::MD;
 
 /// Backdrop opacity (0-255).
 const BACKDROP_ALPHA: u8 = 128;

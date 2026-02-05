@@ -31,6 +31,27 @@ pub mod spacing {
     pub const XXL: f32 = 32.0;
 }
 
+/// Accessibility constants for ensuring usable touch/click targets.
+///
+/// These values follow WCAG 2.1 Success Criterion 2.5.5 (Target Size) guidelines
+/// to ensure interactive elements are large enough for users with motor impairments.
+pub mod accessibility {
+    /// Minimum recommended touch target size (44px).
+    ///
+    /// Per WCAG 2.1 SC 2.5.5, interactive elements should be at least 44x44 CSS pixels
+    /// to be easily activatable by users with motor impairments or using touch devices.
+    ///
+    /// Current elements below this threshold (for future improvement):
+    /// - Tab close buttons (16px)
+    /// - Toggle switches (36x20px)
+    /// - Context menu items (32px height)
+    /// - Content tab bar (32px height)
+    /// - Sidebar toggle (34px)
+    /// - Modal buttons (36px height)
+    /// - Sidebar items (40px height)
+    pub const MIN_TOUCH_TARGET: f32 = 44.0;
+}
+
 /// Corner rounding values for consistent UI elements.
 pub mod rounding {
     /// Rounding for cards and panels (8px).
@@ -377,6 +398,14 @@ mod tests {
         assert!(spacing::MD < spacing::LG);
         assert!(spacing::LG < spacing::XL);
         assert!(spacing::XL < spacing::XXL);
+    }
+
+    #[test]
+    fn test_accessibility_touch_target() {
+        // WCAG 2.1 SC 2.5.5 specifies 44px as the minimum touch target size
+        assert_eq!(accessibility::MIN_TOUCH_TARGET, 44.0);
+        // Ensure it's larger than all spacing values (touch targets should be substantial)
+        assert!(accessibility::MIN_TOUCH_TARGET > spacing::XXL);
     }
 
     #[test]
