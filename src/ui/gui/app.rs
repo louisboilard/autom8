@@ -6,9 +6,9 @@
 use crate::error::{Autom8Error, Result};
 use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
-    badge_background_color, format_duration, format_relative_time, format_state, is_terminal_state,
-    state_to_color, strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection,
-    MAX_BRANCH_LENGTH,
+    badge_background_color, format_relative_time, format_run_duration, format_state,
+    is_terminal_state, state_to_color, strip_worktree_prefix, truncate_with_ellipsis,
+    CollapsibleSection, MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -9048,9 +9048,12 @@ ui.label(
                             if let Some(ref run) = session.run {
                                 ui.add_space(spacing::MD);
                                 ui.label(
-                                    egui::RichText::new(format_duration(run.started_at))
-                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                        .color(colors::TEXT_MUTED),
+                                    egui::RichText::new(format_run_duration(
+                                        run.started_at,
+                                        run.finished_at,
+                                    ))
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
                                 );
                             }
 

@@ -129,6 +129,19 @@ pub fn format_duration(started_at: DateTime<Utc>) -> String {
     format_duration_secs(duration.num_seconds().max(0) as u64)
 }
 
+/// Format a run duration, using `finished_at` if available, otherwise live from now.
+///
+/// When `finished_at` is `Some`, computes a fixed duration `finished_at - started_at`.
+/// When `finished_at` is `None`, falls back to `Utc::now() - started_at` (live counter).
+pub fn format_run_duration(
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+) -> String {
+    let end = finished_at.unwrap_or_else(Utc::now);
+    let duration = end.signed_duration_since(started_at);
+    format_duration_secs(duration.num_seconds().max(0) as u64)
+}
+
 /// Format a duration in seconds as a human-readable string.
 ///
 /// - Durations under 1 minute show only seconds
