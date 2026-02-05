@@ -7517,7 +7517,8 @@ egui::RichText::new("Copy")
 
 /// Build the command to run the spec.
     ///
-    /// Format: `cd <project-root> && autom8 run <spec-path>`
+    /// Format: `cd "<project-root>" && autom8 "<spec-path>"`
+    /// Paths are quoted to handle spaces correctly.
     fn build_spec_run_command(&self) -> String {
         let spec_path = self
             .generated_spec_path
@@ -7525,30 +7526,21 @@ egui::RichText::new("Copy")
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<spec-path>".to_string());
 
-        // Try to find the project root from sessions
+        // Try to find the project root from project metadata
         let project_root = self.find_project_root_for_selected_project();
 
         match project_root {
-            Some(root) => format!("cd {} && autom8 run {}", root.display(), spec_path),
-            None => format!("autom8 run {}", spec_path),
+            Some(root) => format!("cd \"{}\" && autom8 \"{}\"", root.display(), spec_path),
+            None => format!("autom8 \"{}\"", spec_path),
         }
     }
 
     /// Find the project root directory for the selected project.
     ///
-    /// Looks through sessions to find the worktree_path for a session
-    /// matching the selected project.
+    /// Uses the project metadata (project.json) which stores the repo path.
     fn find_project_root_for_selected_project(&self) -> Option<std::path::PathBuf> {
         let selected_project = self.create_spec_selected_project.as_ref()?;
-
-        // Look for a session matching this project
-        for session in &self.sessions {
-            if &session.project_name == selected_project {
-                return Some(session.metadata.worktree_path.clone());
-            }
-        }
-
-        None
+        crate::config::get_project_repo_path(selected_project)
     }
 
 /// Confirm the spec and show the run command.
