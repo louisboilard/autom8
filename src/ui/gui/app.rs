@@ -2983,7 +2983,7 @@ impl Autom8App {
             entry
                 .started_at
                 .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
+                .format("%Y-%m-%d %I:%M %p")
         );
 
         // Cache the run state if provided
@@ -8100,7 +8100,7 @@ ui.label(
                         run_state
                             .started_at
                             .with_timezone(&chrono::Local)
-                            .format("%Y-%m-%d %H:%M:%S")
+                            .format("%Y-%m-%d %I:%M:%S %p")
                             .to_string(),
                     )
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
@@ -8116,7 +8116,12 @@ ui.label(
                 );
                 if let Some(finished) = run_state.finished_at {
                     ui.label(
-                        egui::RichText::new(finished.format("%Y-%m-%d %H:%M:%S").to_string())
+                        egui::RichText::new(
+                            finished
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %I:%M:%S %p")
+                                .to_string(),
+                        )
                             .font(typography::font(FontSize::Body, FontWeight::Regular))
                             .color(colors::TEXT_PRIMARY),
                     );
@@ -9604,7 +9609,7 @@ ui.label(
             let datetime_text = entry
                 .started_at
                 .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
+                .format("%Y-%m-%d %I:%M %p")
                 .to_string();
             ui.label(
                 egui::RichText::new(datetime_text)
