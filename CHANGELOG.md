@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Phase banners and footers**: Visual framing for different execution phases
 - **Contribution guidelines**: `CONTRIBUTING.md` with development setup and PR workflow
 - **Comprehensive test coverage**: Added tests for `runner.rs` and `spec.rs` core modules
+- **MSRV testing**: CI now tests against minimum supported Rust version (1.80)
+- **Security auditing**: New `security.yml` workflow with cargo-audit for vulnerability detection
+- **Cross-platform release**: Release workflow now builds Windows x86_64 binaries
+- **Automated crates.io publishing**: Release workflow publishes to crates.io on tag push
+- **Code of Conduct**: Added Contributor Covenant v2.1
+- **MIT License**: Added LICENSE file for crates.io compliance
 
 ### Changed
 

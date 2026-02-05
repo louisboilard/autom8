@@ -15,10 +15,16 @@ A CLI tool for orchestrating Claude-powered development. Define your feature req
 ## Installation
 
 ```bash
+# From crates.io
+cargo install autom8
+
+# From source
 cargo install --force --path .
 ```
 
-**Prerequisites:** The [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated.
+**Prerequisites:**
+- **Rust 1.80+**: Install via [rustup](https://rustup.rs/)
+- **[Claude CLI](https://docs.anthropic.com/en/docs/claude-code)**: Must be installed and authenticated
 
 **Optional:** Install the [GitHub CLI](https://cli.github.com/) (`gh auth login`) for automatic PR creation.
 
