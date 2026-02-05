@@ -3936,15 +3936,22 @@ impl Autom8App {
                 self.set_active_tab(tab_id);
             }
 
-            // Fill remaining space, leaving room for icon and animation
+            // Fill remaining space, leaving room for icon, hat animation, and bottom animation
             // Icon positioned higher in the sidebar for better visual balance
             let animation_height = 150.0;
-            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::LG * 2.0; // Icon + generous padding
+            let hat_anim_height: f32 = 70.0; // Space for smoke or sleep animation
+            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::LG + hat_anim_height;
             ui.add_space(ui.available_height() - animation_height - icon_section_height);
 
-            // Decorative mascot icon (US-005)
-            // Centered between the tabs and the animation
-            ui.add_space(spacing::LG);
+            // Hat animation: smoke when working, sleep when idle
+            let sidebar_width = ui.available_width();
+            if self.has_active_runs {
+                // Smoke rises from hat when there are active runs
+                super::animation::render_smoke(ui, sidebar_width, hat_anim_height);
+            } else {
+                // Zzz floats up when idle/sleeping
+                super::animation::render_sleep(ui, sidebar_width, hat_anim_height);
+            }
             ui.horizontal(|ui| {
                 let sidebar_width = ui.available_width();
                 let icon_offset = (sidebar_width - SIDEBAR_ICON_SIZE) / 2.0;

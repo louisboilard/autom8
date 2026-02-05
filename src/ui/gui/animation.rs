@@ -194,6 +194,148 @@ pub fn render_infinity(painter: &egui::Painter, time: f32, rect: Rect, color: Co
     );
 }
 
+/// Render smoke wisps rising from above the mascot's hat.
+///
+/// Wispy smoke puffs rise upward and drift to the left as if escaping
+/// off the edge of the screen. Creates a cozy "working" effect.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
+pub fn render_smoke(ui: &mut Ui, width: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let painter = ui.painter();
+    let time = ui.ctx().input(|i| i.time) as f32;
+
+    // Smoke puff configs: x_start, drift_left, start_size, alpha, speed, phase
+    // Fewer puffs, more spread out, stronger leftward drift
+    const PUFFS: [(f32, f32, f32, f32, f32, f32); 5] = [
+        (0.15, 1.8, 3.0, 0.5, 0.7, 0.0),
+        (0.1, 2.2, 2.5, 0.45, 0.85, 0.2),
+        (0.2, 1.5, 3.5, 0.5, 0.6, 0.4),
+        (0.05, 2.0, 2.8, 0.45, 0.75, 0.6),
+        (0.12, 1.7, 3.2, 0.5, 0.8, 0.8),
+    ];
+
+    // Smoke color - dark warm gray from the start
+    let smoke_color = Color32::from_rgb(90, 85, 80);
+
+    for (x_start, drift_left, start_size, alpha_mult, speed, phase) in PUFFS.iter() {
+        let cycle = ((time * 0.08 * speed) + phase) % 1.0;
+        let y_progress = cycle;
+
+        // Strong leftward drift with variation
+        let drift_variance = (phase * 23.7).sin() * 0.4;
+        let wobble = (time * 0.4 + phase * 13.0).sin() * 0.1;
+        let x_offset = x_start - ((drift_left + drift_variance) * y_progress * y_progress) + wobble;
+
+        // Position: starts at hat tip (left of center), drifts strongly left
+        let origin_x = rect.center().x - 8.0;
+        let x = origin_x + 50.0 * x_offset;
+        let y = rect.bottom() - height * y_progress * 1.5;
+
+        // Alpha: fade in quickly, stay visible, slight fade at very top
+        let alpha = if y_progress < 0.08 {
+            y_progress / 0.08
+        } else if y_progress > 0.85 {
+            1.0 - (y_progress - 0.85) / 0.15
+        } else {
+            1.0
+        };
+
+        // Size grows dramatically as smoke rises and disperses (3x to 4x growth)
+        let size_growth = 1.0 + y_progress * 3.5;
+        let current_size = start_size * size_growth;
+
+        let base_alpha = alpha * alpha_mult;
+
+        // Main cloud - large, soft
+        painter.circle_filled(
+            egui::pos2(x, y),
+            current_size,
+            smoke_color.linear_multiply(base_alpha * 0.5),
+        );
+
+        // Secondary blob offset for irregular cloud shape
+        let blob_x = x + (phase * 17.3).sin() * current_size * 0.4;
+        let blob_y = y + (phase * 11.1).cos() * current_size * 0.3;
+        painter.circle_filled(
+            egui::pos2(blob_x, blob_y),
+            current_size * 0.7,
+            smoke_color.linear_multiply(base_alpha * 0.6),
+        );
+
+        // Third blob for more irregular shape
+        let blob2_x = x - current_size * 0.3 + (phase * 7.9).cos() * current_size * 0.2;
+        let blob2_y = y + current_size * 0.2;
+        painter.circle_filled(
+            egui::pos2(blob2_x, blob2_y),
+            current_size * 0.5,
+            smoke_color.linear_multiply(base_alpha * 0.55),
+        );
+    }
+}
+
+/// Render sleeping "Zzz" animation when idle.
+///
+/// "z" letters float upward and drift to the left, creating
+/// a peaceful sleeping effect when there are no active runs.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
+pub fn render_sleep(ui: &mut Ui, width: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let painter = ui.painter();
+    let time = ui.ctx().input(|i| i.time) as f32;
+
+    // Sleep "z" configs: x_start, drift_left, size, alpha, speed, phase
+    // Gentle leftward drift as they float up
+    const ZZZS: [(f32, f32, f32, f32, f32, f32); 5] = [
+        (0.1, 0.5, 22.0, 0.6, 0.5, 0.0),
+        (0.05, 0.6, 18.0, 0.5, 0.6, 0.25),
+        (0.15, 0.45, 20.0, 0.55, 0.55, 0.5),
+        (0.08, 0.55, 16.0, 0.45, 0.65, 0.7),
+        (0.12, 0.5, 21.0, 0.5, 0.52, 0.85),
+    ];
+
+    // Soft blue-gray color for dreamy effect
+    let zzz_color = Color32::from_rgb(140, 150, 170);
+
+    for (x_start, drift_left, size, alpha_mult, speed, phase) in ZZZS.iter() {
+        let cycle = ((time * 0.06 * speed) + phase) % 1.0; // Slower than smoke
+        let y_progress = cycle;
+
+        // Gentle leftward drift with slight wobble
+        let wobble = (time * 0.3 + phase * 8.0).sin() * 0.04;
+        let x_offset = x_start - (drift_left * y_progress) + wobble;
+
+        // Position: starts right of center, drifts left
+        let origin_x = rect.center().x;
+        let x = origin_x + 35.0 * x_offset;
+        let y = rect.bottom() - height * y_progress * 1.3;
+
+        // Alpha: gentle fade in and out
+        let alpha = if y_progress < 0.15 {
+            y_progress / 0.15
+        } else if y_progress > 0.6 {
+            1.0 - (y_progress - 0.6) / 0.4
+        } else {
+            1.0
+        };
+
+        // Size grows slightly as it rises
+        let current_size = size * (1.0 + y_progress * 0.3);
+
+        // Slight rotation effect via italic
+        let font = egui::FontId::new(current_size, egui::FontFamily::Monospace);
+
+        painter.text(
+            egui::pos2(x, y),
+            egui::Align2::CENTER_CENTER,
+            "z",
+            font,
+            zzz_color.linear_multiply(alpha * alpha_mult),
+        );
+    }
+}
+
 /// Render a horizontal progress bar with animated shimmer effect.
 ///
 /// The bar fills from left to right based on progress, with a subtle
