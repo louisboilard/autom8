@@ -6,9 +6,9 @@
 use crate::error::{Autom8Error, Result};
 use crate::state::{IterationStatus, MachineState, RunMode, SessionStatus, StateManager};
 use crate::ui::gui::components::{
-    badge_background_color, format_duration, format_relative_time, format_state, is_terminal_state,
-    state_to_color, strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection,
-    MAX_BRANCH_LENGTH,
+    badge_background_color, format_relative_time, format_run_duration, format_state,
+    is_terminal_state, state_to_color, strip_worktree_prefix, truncate_with_ellipsis,
+    CollapsibleSection, MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -1732,6 +1732,8 @@ pub enum TabId {
     Projects,
     /// The Config tab (permanent).
     Config,
+    /// The Create Spec tab (permanent).
+    CreateSpec,
     /// A dynamic tab for viewing run details.
     /// Contains the run_id as identifier.
     RunDetail(String),
@@ -1782,6 +1784,8 @@ pub enum Tab {
     Projects,
     /// View of configuration settings.
     Config,
+    /// View for creating new specs.
+    CreateSpec,
 }
 
 impl Tab {
@@ -1791,12 +1795,13 @@ impl Tab {
             Tab::ActiveRuns => "Active Runs",
             Tab::Projects => "Projects",
             Tab::Config => "Config",
+            Tab::CreateSpec => "Create Spec",
         }
     }
 
     /// Returns all available tabs.
     pub fn all() -> &'static [Tab] {
-        &[Tab::ActiveRuns, Tab::Projects, Tab::Config]
+        &[Tab::ActiveRuns, Tab::Projects, Tab::Config, Tab::CreateSpec]
     }
 
     /// Convert to TabId.
@@ -1805,6 +1810,7 @@ impl Tab {
             Tab::ActiveRuns => TabId::ActiveRuns,
             Tab::Projects => TabId::Projects,
             Tab::Config => TabId::Config,
+            Tab::CreateSpec => TabId::CreateSpec,
         }
     }
 }
@@ -1825,6 +1831,171 @@ const TAB_LABEL_CLOSE_GAP: f32 = 8.0;
 /// Height of the content header tab bar (only shown when dynamic tabs exist).
 /// Sized to fit the text tightly without extra vertical gaps.
 const CONTENT_TAB_BAR_HEIGHT: f32 = 32.0;
+
+// ============================================================================
+// Chat Display Constants (US-003: Chat-Style Message Display Area)
+// ============================================================================
+
+/// Maximum width of chat message bubbles as a fraction of available width.
+const CHAT_BUBBLE_MAX_WIDTH_RATIO: f32 = 0.75;
+
+/// Padding inside chat bubbles.
+const CHAT_BUBBLE_PADDING: f32 = 12.0;
+
+/// Corner rounding for chat bubbles.
+const CHAT_BUBBLE_ROUNDING: f32 = 16.0;
+
+/// Vertical spacing between chat messages.
+const CHAT_MESSAGE_SPACING: f32 = 12.0;
+
+/// User message bubble background color (warm beige, slightly darker than surface).
+const USER_BUBBLE_COLOR: Color32 = Color32::from_rgb(238, 235, 229);
+
+/// Claude message bubble background color (white surface).
+const CLAUDE_BUBBLE_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
+
+// ============================================================================
+// Chat Input Bar Constants (US-004: Text Input with Send Button)
+// ============================================================================
+
+/// Height of the input bar area.
+const INPUT_BAR_HEIGHT: f32 = 56.0;
+
+/// Corner rounding for the text input field.
+const INPUT_FIELD_ROUNDING: f32 = 12.0;
+
+/// Send button background color - using theme accent color.
+const SEND_BUTTON_COLOR: Color32 = Color32::from_rgb(0, 122, 255);
+
+/// Send button hover color - slightly darker accent.
+const SEND_BUTTON_HOVER_COLOR: Color32 = Color32::from_rgb(0, 100, 210);
+
+/// Send button disabled color - muted gray.
+const SEND_BUTTON_DISABLED_COLOR: Color32 = Color32::from_rgb(200, 200, 200);
+
+/// Size of the send button (square).
+const SEND_BUTTON_SIZE: f32 = 36.0;
+
+// ============================================================================
+// Claude Process Types (US-005: Claude Process Integration)
+// ============================================================================
+
+/// Message sent from the Claude background thread to the UI.
+#[derive(Debug, Clone)]
+pub enum ClaudeMessage {
+    /// Claude subprocess is being spawned (US-009: Loading and Error States).
+    /// Sent immediately before attempting to spawn, so UI can show "Starting Claude..." indicator.
+    Spawning,
+    /// Claude has started successfully and is ready to receive input.
+    Started,
+    /// A chunk of text output from Claude.
+    Output(String),
+    /// Claude has paused (no output for a while, likely waiting for user input).
+    /// This is used to turn off the typing indicator in multi-turn conversations.
+    ResponsePaused,
+    /// Claude has finished (successfully or with an error).
+    /// This is only sent when the process actually terminates.
+    Finished {
+        /// Whether Claude exited successfully.
+        success: bool,
+        /// Error message if applicable.
+        error: Option<String>,
+    },
+    /// Claude subprocess encountered an error during spawn.
+    SpawnError(String),
+}
+
+/// Handle to the stdin writer for the Claude subprocess.
+///
+/// This allows sending user messages to Claude's stdin from the main thread.
+pub struct ClaudeStdinHandle {
+    /// The stdin writer wrapped in a Mutex for thread-safe access.
+    writer: std::sync::Mutex<Option<std::process::ChildStdin>>,
+}
+
+impl ClaudeStdinHandle {
+    /// Create a new stdin handle.
+    pub fn new(stdin: std::process::ChildStdin) -> Self {
+        Self {
+            writer: std::sync::Mutex::new(Some(stdin)),
+        }
+    }
+
+    /// Send a message to Claude's stdin.
+    ///
+    /// Returns true if the message was sent successfully.
+    pub fn send(&self, message: &str) -> bool {
+        use std::io::Write;
+        if let Ok(mut guard) = self.writer.lock() {
+            if let Some(ref mut stdin) = *guard {
+                // Write the message followed by a newline
+                if let Err(e) = writeln!(stdin, "{}", message) {
+                    eprintln!("Failed to write to Claude stdin: {}", e);
+                    return false;
+                }
+                if let Err(e) = stdin.flush() {
+                    eprintln!("Failed to flush Claude stdin: {}", e);
+                    return false;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Close the stdin handle (signals EOF to Claude).
+    pub fn close(&self) {
+        if let Ok(mut guard) = self.writer.lock() {
+            // Drop the stdin handle to close it
+            *guard = None;
+        }
+    }
+}
+
+// ============================================================================
+// Chat Message Types (US-003: Chat-Style Message Display Area)
+// ============================================================================
+
+/// Represents who sent a chat message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatMessageSender {
+    /// Message sent by the user.
+    User,
+    /// Message sent by Claude.
+    Claude,
+}
+
+/// A single message in the chat conversation.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    /// Who sent this message.
+    pub sender: ChatMessageSender,
+    /// The message content (may contain multiple lines).
+    pub content: String,
+    /// Timestamp when the message was created.
+    pub timestamp: Instant,
+}
+
+impl ChatMessage {
+    /// Create a new chat message.
+    pub fn new(sender: ChatMessageSender, content: impl Into<String>) -> Self {
+        Self {
+            sender,
+            content: content.into(),
+            timestamp: Instant::now(),
+        }
+    }
+
+    /// Create a new user message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(ChatMessageSender::User, content)
+    }
+
+    /// Create a new Claude message.
+    pub fn claude(content: impl Into<String>) -> Self {
+        Self::new(ChatMessageSender::Claude, content)
+    }
+}
 
 // ============================================================================
 // Story Progress Types (US-002: Story Progress Timeline)
@@ -1867,10 +2038,10 @@ impl StoryStatus {
     /// Returns the status indicator text.
     fn indicator(self) -> &'static str {
         match self {
-            StoryStatus::Completed => "\u{2713}", // ✓ checkmark
-            StoryStatus::Active => "\u{25CF}",    // ● filled circle
-            StoryStatus::Pending => "\u{25CB}",   // ○ empty circle
-            StoryStatus::Failed => "\u{2717}",    // ✗ X mark
+            StoryStatus::Completed => "[done]",
+            StoryStatus::Active => "[...]",
+            StoryStatus::Pending => "[ ]",
+            StoryStatus::Failed => "[x]",
         }
     }
 }
@@ -2123,6 +2294,81 @@ pub struct Autom8App {
     /// Maps section ID to collapsed state (true = collapsed, false = expanded).
     /// State persists during the session but not across restarts.
     section_collapsed_state: std::collections::HashMap<String, bool>,
+
+    // ========================================================================
+    // Create Spec Tab State (US-002, US-003, US-004)
+    // ========================================================================
+    /// Selected project name in the Create Spec tab.
+    /// None when no project is selected (initial state).
+    create_spec_selected_project: Option<String>,
+    /// Chat messages in the Create Spec conversation (US-003).
+    /// Stores the full conversation history between user and Claude.
+    chat_messages: Vec<ChatMessage>,
+    /// Flag to trigger auto-scroll to the bottom of the chat (US-003).
+    /// Set to true when new messages are added.
+    chat_scroll_to_bottom: bool,
+    /// Text input content for the chat input bar (US-004).
+    /// Stores the current text being typed by the user.
+    chat_input_text: String,
+    /// Flag indicating whether we're waiting for Claude's response (US-004).
+    /// When true, the input bar is disabled and shows a loading state.
+    is_waiting_for_claude: bool,
+
+    // ========================================================================
+    // Claude Process State (US-005: Claude Process Integration)
+    // ========================================================================
+    /// Channel receiver for messages from the Claude background thread.
+    claude_rx: std::sync::mpsc::Receiver<ClaudeMessage>,
+    /// Channel sender for messages from the Claude background thread.
+    /// Cloned and passed to background threads.
+    claude_tx: std::sync::mpsc::Sender<ClaudeMessage>,
+    /// Handle to Claude's stdin for sending user messages.
+    /// None when no Claude process is running.
+    claude_stdin: Option<Arc<ClaudeStdinHandle>>,
+    /// Handle to the Claude child process for termination.
+    /// Stored in Arc<Mutex> so it can be killed from the main thread while
+    /// the background thread is reading output.
+    claude_child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Buffer for accumulating Claude's current response.
+    /// Text chunks are accumulated here until the response is complete.
+    claude_response_buffer: String,
+    /// Error message from the last Claude operation, if any.
+    /// Displayed in the chat area with a retry option.
+    claude_error: Option<String>,
+    /// Whether Claude subprocess is currently being spawned (US-009: Loading and Error States).
+    /// True from when spawn is initiated until either Started or SpawnError is received.
+    /// Used to show "Starting Claude..." loading indicator distinct from typing indicator.
+    claude_starting: bool,
+    /// Timestamp of the last output received from Claude.
+    /// Used to detect when Claude has paused (finished a response).
+    last_claude_output_time: Option<Instant>,
+    /// Whether Claude is actively streaming output (response in progress).
+    /// Distinct from is_waiting_for_claude which tracks if we expect more output.
+    claude_response_in_progress: bool,
+
+    // ========================================================================
+    // Spec Completion State (US-007: Spec Completion and Confirmation)
+    // ========================================================================
+    /// Path to the generated spec file, detected from Claude's output.
+    /// None until Claude writes a spec file to ~/.config/autom8/<project>/spec/
+    generated_spec_path: Option<std::path::PathBuf>,
+    /// Whether the user has confirmed the generated spec.
+    /// When true, shows the "run command" instructions and "Close" button.
+    spec_confirmed: bool,
+    /// Whether Claude has finished (process exited) after generating a spec.
+    /// Used to show the confirmation UI when spec generation is complete.
+    claude_finished: bool,
+
+    // ========================================================================
+    // Session Management State (US-008: Session State Management)
+    // ========================================================================
+    /// Pending project name to switch to, awaiting confirmation.
+    /// When Some, a confirmation modal is displayed asking user to confirm
+    /// abandoning the current session to start a new one.
+    pending_project_change: Option<String>,
+    /// Whether a "Close" confirmation modal should be shown.
+    /// When true, displays a modal reminding users to save their spec before resetting.
+    pending_start_new_spec: bool,
 }
 
 impl Default for Autom8App {
@@ -2153,6 +2399,9 @@ impl Autom8App {
         // Create channel for command execution messages
         let (command_tx, command_rx) = std::sync::mpsc::channel();
 
+        // Create channel for Claude messages (US-005)
+        let (claude_tx, claude_rx) = std::sync::mpsc::channel();
+
         let mut app = Self {
             current_tab: Tab::default(),
             tabs,
@@ -2181,6 +2430,25 @@ impl Autom8App {
             pending_clean_confirmation: None,
             pending_result_modal: None,
             section_collapsed_state: std::collections::HashMap::new(),
+            create_spec_selected_project: None,
+            chat_messages: Vec::new(),
+            chat_scroll_to_bottom: false,
+            chat_input_text: String::new(),
+            is_waiting_for_claude: false,
+            claude_rx,
+            claude_tx,
+            claude_stdin: None,
+            claude_child: Arc::new(std::sync::Mutex::new(None)),
+            claude_response_buffer: String::new(),
+            claude_error: None,
+            claude_starting: false,
+            last_claude_output_time: None,
+            claude_response_in_progress: false,
+            generated_spec_path: None,
+            spec_confirmed: false,
+            claude_finished: false,
+            pending_project_change: None,
+            pending_start_new_spec: false,
         };
         // Initial data load
         app.refresh_data();
@@ -2671,6 +2939,7 @@ impl Autom8App {
             TabId::ActiveRuns => self.current_tab = Tab::ActiveRuns,
             TabId::Projects => self.current_tab = Tab::Projects,
             TabId::Config => self.current_tab = Tab::Config,
+            TabId::CreateSpec => self.current_tab = Tab::CreateSpec,
             TabId::RunDetail(_) | TabId::CommandOutput(_) => {
                 // Dynamic tabs don't have a legacy equivalent,
                 // but we keep the last static tab for backward compat
@@ -2710,7 +2979,13 @@ impl Autom8App {
         entry: &RunHistoryEntry,
         run_state: Option<crate::state::RunState>,
     ) {
-        let label = format!("Run - {}", entry.started_at.format("%Y-%m-%d %H:%M"));
+        let label = format!(
+            "Run - {}",
+            entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %I:%M %p")
+        );
 
         // Cache the run state if provided
         if let Some(state) = run_state {
@@ -3344,6 +3619,12 @@ impl Autom8App {
                 }
             }
         }
+
+        // Refresh run history for the currently selected project
+        if let Some(ref project) = self.selected_project {
+            let project_name = project.clone();
+            self.load_run_history(&project_name);
+        }
     }
 
     /// Get all visible sessions (sessions seen during this GUI lifetime, not closed).
@@ -3368,6 +3649,9 @@ impl eframe::App for Autom8App {
 
         // Poll for command execution messages from background threads
         self.poll_command_messages();
+
+        // Poll for Claude messages from background thread (US-005)
+        self.poll_claude_messages();
 
         // Request repaint at refresh interval to ensure timely updates
         ctx.request_repaint_after(self.refresh_interval);
@@ -3432,6 +3716,36 @@ impl eframe::App for Autom8App {
 
         // Render result modal if cleanup operation completed (US-007)
         self.render_result_modal(ctx);
+
+        // US-008: Render project change confirmation modal
+        self.render_project_change_confirmation(ctx);
+
+        // Render start new spec confirmation modal
+        self.render_start_new_spec_confirmation(ctx);
+    }
+}
+
+// ============================================================================
+// Drop Implementation (US-008: Clean subprocess termination)
+// ============================================================================
+
+/// Implement Drop to ensure Claude subprocess is terminated when GUI closes.
+///
+/// US-008: Closing GUI terminates any active Claude subprocess cleanly.
+/// This prevents orphaned Claude processes from lingering after the GUI exits.
+impl Drop for Autom8App {
+    fn drop(&mut self) {
+        // Kill any running Claude subprocess
+        if let Ok(mut guard) = self.claude_child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        // Also close stdin handle if it exists (legacy cleanup)
+        if let Some(ref stdin_handle) = self.claude_stdin {
+            stdin_handle.close();
+        }
     }
 }
 
@@ -4032,6 +4346,98 @@ impl Autom8App {
         }
     }
 
+    // ========================================================================
+    // Project Change Confirmation Modal (US-008)
+    // ========================================================================
+
+    /// Render confirmation modal when user tries to change project with an active session.
+    ///
+    /// US-008: Only one spec creation session can be active at a time. If user tries
+    /// to switch projects while a session is active, show a warning/confirmation modal.
+    fn render_project_change_confirmation(&mut self, ctx: &egui::Context) {
+        // Early return if no project change is pending
+        let pending_project = match &self.pending_project_change {
+            Some(name) => name.clone(),
+            None => return,
+        };
+
+        // Create the modal using the reusable component
+        let modal = Modal::new("Switch Project?")
+            .id("project_change_confirmation")
+            .message(
+                "You have an active spec creation session. \
+                 Switching projects will discard your current conversation and any unsaved work.\n\n\
+                 Do you want to continue?",
+            )
+            .cancel_button(ModalButton::secondary("Cancel"))
+            .confirm_button(ModalButton::destructive("Switch Project"));
+
+        // Show the modal and handle the action
+        match modal.show(ctx) {
+            ModalAction::Confirmed => {
+                // Reset current session and switch to the new project
+                self.reset_create_spec_session();
+                self.create_spec_selected_project = Some(pending_project);
+                self.pending_project_change = None;
+            }
+            ModalAction::Cancelled => {
+                // Cancel the project switch
+                self.pending_project_change = None;
+            }
+            ModalAction::None => {
+                // Modal is still open, do nothing
+            }
+        }
+    }
+
+    /// Render confirmation modal when user clicks "Close".
+    ///
+    /// Shows a modal reminding users that the spec has been saved and where to find it,
+    /// asking for confirmation before clearing the session.
+    fn render_start_new_spec_confirmation(&mut self, ctx: &egui::Context) {
+        // Early return if not pending
+        if !self.pending_start_new_spec {
+            return;
+        }
+
+        // Build message with spec path if available
+        let message = if let Some(ref spec_path) = self.generated_spec_path {
+            format!(
+                "Your spec has been saved to:\n\n{}\n\n\
+                 Make sure you've copied the run command or noted the file location before starting a new spec.\n\n\
+                 Do you want to start a new spec?",
+                spec_path.display()
+            )
+        } else {
+            "Make sure you've saved any important information from this session.\n\n\
+             Do you want to start a new spec?"
+                .to_string()
+        };
+
+        // Create the modal
+        let modal = Modal::new("Close?")
+            .id("start_new_spec_confirmation")
+            .message(&message)
+            .cancel_button(ModalButton::secondary("Cancel"))
+            .confirm_button(ModalButton::new("Close"));
+
+        // Show the modal and handle the action
+        match modal.show(ctx) {
+            ModalAction::Confirmed => {
+                // Reset the session
+                self.reset_create_spec_session();
+                self.pending_start_new_spec = false;
+            }
+            ModalAction::Cancelled => {
+                // Cancel - keep the current session
+                self.pending_start_new_spec = false;
+            }
+            ModalAction::None => {
+                // Modal is still open, do nothing
+            }
+        }
+    }
+
     /// Render the sidebar toggle button in the title bar.
     ///
     /// The button uses a hamburger icon (☰) when collapsed (to expand)
@@ -4149,11 +4555,12 @@ impl Autom8App {
             // Render permanent navigation items
             let mut tab_to_activate: Option<TabId> = None;
 
-            // Snapshot of permanent tabs (ActiveRuns, Projects, and Config)
+            // Snapshot of permanent tabs (ActiveRuns, Projects, Config, and CreateSpec)
             let permanent_tabs: Vec<(TabId, &'static str)> = vec![
                 (TabId::ActiveRuns, "Active Runs"),
                 (TabId::Projects, "Projects"),
                 (TabId::Config, "Config"),
+                (TabId::CreateSpec, "Create Spec"),
             ];
 
             for (tab_id, label) in permanent_tabs {
@@ -4520,6 +4927,7 @@ impl Autom8App {
             TabId::ActiveRuns => self.render_active_runs(ui),
             TabId::Projects => self.render_projects(ui),
             TabId::Config => self.render_config(ui),
+            TabId::CreateSpec => self.render_create_spec(ui),
             TabId::RunDetail(run_id) => {
                 let run_id = run_id.clone();
                 self.render_run_detail(ui, &run_id);
@@ -5219,6 +5627,7 @@ impl Autom8App {
         let mut review = config.review;
         let mut commit = config.commit;
         let mut pull_request = config.pull_request;
+        let mut pull_request_draft = config.pull_request_draft;
         let mut worktree = config.worktree;
         let mut worktree_cleanup = config.worktree_cleanup;
 
@@ -5258,6 +5667,11 @@ impl Autom8App {
                     if !commit && pull_request {
                         pull_request = false;
                         bool_changes.push((ConfigBoolField::PullRequest, false));
+                        // Also cascade to pull_request_draft
+                        if pull_request_draft {
+                            pull_request_draft = false;
+                            bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                        }
                     }
                 }
 
@@ -5274,6 +5688,26 @@ impl Autom8App {
                     Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                    // Cascade: if pull_request is now false and pull_request_draft was true, disable it too
+                    if !pull_request && pull_request_draft {
+                        pull_request_draft = false;
+                        bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request draft toggle - disabled when pull_request is false
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request_draft",
+                    &mut pull_request_draft,
+                    "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
+                    !pull_request, // disabled when pull_request is false
+                    Some("Draft PRs require pull requests to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
 
                 ui.add_space(spacing::XL);
@@ -5372,6 +5806,7 @@ impl Autom8App {
         let mut review = config.review;
         let mut commit = config.commit;
         let mut pull_request = config.pull_request;
+        let mut pull_request_draft = config.pull_request_draft;
         let mut worktree = config.worktree;
         let mut worktree_cleanup = config.worktree_cleanup;
 
@@ -5411,6 +5846,11 @@ impl Autom8App {
                     if !commit && pull_request {
                         pull_request = false;
                         bool_changes.push((ConfigBoolField::PullRequest, false));
+                        // Also cascade to pull_request_draft
+                        if pull_request_draft {
+                            pull_request_draft = false;
+                            bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                        }
                     }
                 }
 
@@ -5427,6 +5867,26 @@ impl Autom8App {
                     Some("Pull requests require commits to be enabled"),
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequest, pull_request));
+                    // Cascade: if pull_request is now false and pull_request_draft was true, disable it too
+                    if !pull_request && pull_request_draft {
+                        pull_request_draft = false;
+                        bool_changes.push((ConfigBoolField::PullRequestDraft, false));
+                    }
+                }
+
+                ui.add_space(spacing::SM);
+
+                // Pull request draft toggle - disabled when pull_request is false
+                // Shows tooltip explaining why it's disabled
+                if self.render_config_bool_field_with_disabled(
+                    ui,
+                    "pull_request_draft",
+                    &mut pull_request_draft,
+                    "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
+                    !pull_request, // disabled when pull_request is false
+                    Some("Draft PRs require pull requests to be enabled"),
+                ) {
+                    bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
 
                 ui.add_space(spacing::XL);
@@ -5783,6 +6243,1447 @@ impl Autom8App {
         }
 
         changed_value
+    }
+
+    // ========================================================================
+    // Create Spec View (US-001: Add Create Spec Tab to Sidebar Navigation)
+    // ========================================================================
+
+    /// Render the Create Spec view.
+    ///
+    /// This view provides a conversational interface for creating specification
+    /// files with Claude. Users select a project from a dropdown, then interact
+    /// with Claude to define their feature specification.
+    ///
+    /// Implementation status:
+    /// - US-002: Project selection dropdown at the top
+    /// - US-003: Chat-style message display area
+    /// - US-004: Text input with send button at the bottom
+    fn render_create_spec(&mut self, ui: &mut egui::Ui) {
+        // Header
+        ui.label(
+            egui::RichText::new("Create Spec")
+                .font(typography::font(FontSize::Title, FontWeight::SemiBold))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::MD);
+
+        // Project selection dropdown (US-002)
+        self.render_create_spec_project_dropdown(ui);
+
+        ui.add_space(spacing::LG);
+
+        // Main content area - varies based on state
+        if self.projects.is_empty() {
+            // No projects registered - show in scroll area
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(spacing::LG);
+                    self.render_create_spec_no_projects(ui);
+                });
+        } else if self.create_spec_selected_project.is_none() {
+            // Projects exist but none selected
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(spacing::LG);
+                    self.render_create_spec_select_prompt(ui);
+                });
+        } else {
+            // Project selected - show chat interface with input bar (US-003, US-004)
+            // Use a vertical layout with the chat area taking remaining space
+            // and the input bar fixed at the bottom with generous padding
+            let available_height = ui.available_height();
+
+            // Reserve space for: separator + input bar + bottom padding
+            let bottom_padding = spacing::XXL + spacing::XL; // 56px
+            let separator_height = spacing::SM * 2.0 + 1.0; // spacing before + after + line
+            let input_bar_height = INPUT_BAR_HEIGHT + spacing::MD;
+            let reserved_bottom = input_bar_height + separator_height + bottom_padding;
+
+            // Chat area takes available height minus reserved bottom space
+            ui.allocate_ui(
+                egui::vec2(ui.available_width(), available_height - reserved_bottom),
+                |ui| {
+                    self.render_create_spec_chat_area(ui);
+                },
+            );
+
+            // Separator before input bar
+            ui.add_space(spacing::SM);
+            ui.separator();
+            ui.add_space(spacing::SM);
+
+            // Input bar at the bottom (US-004)
+            self.render_create_spec_input_bar(ui);
+
+            // Bottom padding (space already reserved above)
+            ui.add_space(bottom_padding);
+        }
+    }
+
+    /// Render the project selection dropdown for the Create Spec tab (US-002, US-008).
+    ///
+    /// US-008: If user tries to change project while a session is active,
+    /// show a confirmation modal before switching.
+    fn render_create_spec_project_dropdown(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Project:")
+                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            // Determine the display text for the dropdown
+            let selected_text = self
+                .create_spec_selected_project
+                .as_deref()
+                .unwrap_or("Select a project...");
+
+            // Create the ComboBox
+            let combo_id = ui.make_persistent_id("create_spec_project_dropdown");
+            egui::ComboBox::from_id_salt(combo_id)
+                .selected_text(selected_text)
+                .width(250.0)
+                .show_ui(ui, |ui| {
+                    // List all available projects
+                    for project in &self.projects {
+                        let project_name = &project.info.name;
+                        let is_selected =
+                            self.create_spec_selected_project.as_ref() == Some(project_name);
+
+                        if ui.selectable_label(is_selected, project_name).clicked() {
+                            // US-008: Check if changing project while session is active
+                            let is_different_project =
+                                self.create_spec_selected_project.as_ref() != Some(project_name);
+
+                            if is_different_project && self.has_active_spec_session() {
+                                // Store pending project change and show confirmation modal
+                                self.pending_project_change = Some(project_name.clone());
+                            } else {
+                                // No active session or same project - just switch
+                                self.create_spec_selected_project = Some(project_name.clone());
+                            }
+                        }
+                    }
+                });
+
+            // US-008: "Start Over" button when session is active
+            if self.has_active_spec_session() {
+                ui.add_space(spacing::MD);
+                let start_over_btn = egui::Button::new(
+                    egui::RichText::new("Start Over")
+                        .font(typography::font(FontSize::Small, FontWeight::Medium))
+                        .color(colors::TEXT_SECONDARY),
+                )
+                .fill(colors::SURFACE_ELEVATED)
+                .stroke(Stroke::new(1.0, colors::BORDER))
+                .rounding(Rounding::same(rounding::BUTTON));
+
+                if ui.add(start_over_btn).clicked() {
+                    self.reset_create_spec_session();
+                }
+            }
+        });
+
+        // Show selected project info if one is selected
+        if let Some(ref project_name) = self.create_spec_selected_project {
+            ui.add_space(spacing::XS);
+            ui.label(
+                egui::RichText::new(format!("Selected: {}", project_name))
+                    .font(typography::font(FontSize::Small, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+        }
+    }
+
+    /// Render message when no projects are registered (US-002).
+    fn render_create_spec_no_projects(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(spacing::XL);
+
+ui.label(
+                egui::RichText::new("No Projects Registered")
+                    .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            let message = "No projects registered. Run `autom8` at least once in any repository to register it.";
+            ui.label(
+                egui::RichText::new(message)
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+        });
+    }
+
+    /// Render prompt to select a project (US-002).
+    fn render_create_spec_select_prompt(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(spacing::XXL);
+
+            ui.label(
+                egui::RichText::new("Create a New Specification")
+                    .font(typography::font(FontSize::Heading, FontWeight::SemiBold))
+                    .color(colors::TEXT_PRIMARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Select a project to begin creating a spec")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Note that this is in beta, the more reliable way is to use the CLI by simply running autom8 in your project directory.")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+
+            ui.add_space(spacing::LG);
+
+            // Registration hint
+            ui.label(
+                egui::RichText::new(
+                    "To register a new project, run `autom8` from the project directory",
+                )
+                .font(typography::font(FontSize::Caption, FontWeight::Regular))
+                .color(colors::TEXT_MUTED),
+            );
+        });
+    }
+
+    /// Render the chat area for the Create Spec tab (US-003, US-005).
+    ///
+    /// Displays a scrollable message area with:
+    /// - User messages aligned to the right in rounded bubbles
+    /// - Claude messages aligned to the left with clean typography
+    /// - Empty state prompt when no messages exist
+    /// - Auto-scroll to bottom when new messages arrive
+    /// - Typing indicator when Claude is processing (US-005)
+    /// - Error message with retry button if Claude fails (US-005)
+    fn render_create_spec_chat_area(&mut self, ui: &mut egui::Ui) {
+        // Calculate available width for chat bubbles
+        let available_width = ui.available_width();
+        let max_bubble_width = available_width * CHAT_BUBBLE_MAX_WIDTH_RATIO;
+
+        // Create scroll area for messages
+        let scroll_id = ui.make_persistent_id("create_spec_chat_scroll");
+        let mut scroll_area = egui::ScrollArea::vertical()
+            .id_salt(scroll_id)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true);
+
+        // Handle auto-scroll to bottom
+        if self.chat_scroll_to_bottom {
+            scroll_area = scroll_area
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+        }
+
+        // Track if we need to trigger a retry action
+        let mut should_retry = false;
+        // Track if we need to trigger confirm or start new actions (US-007)
+        let mut should_confirm_spec = false;
+        let mut should_start_new = false;
+
+        scroll_area.show(ui, |ui| {
+            ui.add_space(spacing::LG);
+
+            if self.chat_messages.is_empty() && self.claude_error.is_none() {
+                // Empty state - show prompt
+                self.render_chat_empty_state(ui);
+            } else {
+                // Render all messages
+                for (index, message) in self.chat_messages.iter().enumerate() {
+                    self.render_chat_message(ui, message, max_bubble_width, index);
+                    ui.add_space(CHAT_MESSAGE_SPACING);
+                }
+
+                // US-009: Show starting indicator when Claude is being spawned
+                if self.claude_starting {
+                    ui.add_space(CHAT_MESSAGE_SPACING);
+                    self.render_starting_indicator(ui);
+                } else if self.is_waiting_for_claude {
+                    // Show typing indicator when Claude is processing (US-005)
+                    ui.add_space(CHAT_MESSAGE_SPACING);
+                    self.render_typing_indicator(ui);
+                }
+
+                // Show error message with retry button if Claude failed (US-005)
+                if let Some(ref error) = self.claude_error {
+                    ui.add_space(CHAT_MESSAGE_SPACING);
+                    should_retry = self.render_claude_error(ui, error, max_bubble_width);
+                }
+
+                // US-007: Show spec completion UI when Claude finishes and spec was detected
+                if self.claude_finished && self.generated_spec_path.is_some() {
+                    ui.add_space(CHAT_MESSAGE_SPACING);
+                    let (confirm, start_new) = self.render_spec_completion_ui(ui, max_bubble_width);
+                    should_confirm_spec = confirm;
+                    should_start_new = start_new;
+                }
+            }
+
+            // Add some bottom padding
+            ui.add_space(spacing::XL);
+        });
+
+        // Handle retry action outside the scroll area closure
+        if should_retry {
+            self.retry_claude();
+        }
+
+        // Handle spec confirmation actions outside the scroll area closure (US-007)
+        if should_confirm_spec {
+            self.confirm_spec();
+        }
+        if should_start_new {
+            // Show confirmation modal instead of immediately resetting
+            self.pending_start_new_spec = true;
+        }
+
+        // Reset scroll flag after rendering
+        if self.chat_scroll_to_bottom {
+            self.chat_scroll_to_bottom = false;
+        }
+    }
+
+    /// Render typing indicator when Claude is processing (US-005).
+    ///
+    /// Shows an animated indicator on the left side (Claude's side)
+    /// to indicate that Claude is thinking/generating a response.
+    fn render_typing_indicator(&self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            // Create a bubble-like frame for the indicator
+            let frame = egui::Frame::none()
+                .fill(CLAUDE_BUBBLE_COLOR)
+                .rounding(Rounding::same(CHAT_BUBBLE_ROUNDING))
+                .inner_margin(egui::Margin::symmetric(CHAT_BUBBLE_PADDING, spacing::SM))
+                .stroke(Stroke::new(1.0, colors::BORDER));
+
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Animated dots indicator
+                    ui.spinner();
+                    ui.add_space(spacing::SM);
+                    ui.label(
+                        egui::RichText::new("Claude is thinking...")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                });
+            });
+        });
+    }
+
+    /// Render starting indicator when Claude subprocess is being spawned (US-009).
+    ///
+    /// Shows an animated spinner on the left side with "Starting Claude..."
+    /// to indicate that the Claude process is being initialized.
+    fn render_starting_indicator(&self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            // Create a bubble-like frame for the indicator (same style as typing indicator)
+            let frame = egui::Frame::none()
+                .fill(CLAUDE_BUBBLE_COLOR)
+                .rounding(Rounding::same(CHAT_BUBBLE_ROUNDING))
+                .inner_margin(egui::Margin::symmetric(CHAT_BUBBLE_PADDING, spacing::SM))
+                .stroke(Stroke::new(1.0, colors::BORDER));
+
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Animated spinner
+                    ui.spinner();
+                    ui.add_space(spacing::SM);
+                    ui.label(
+                        egui::RichText::new("Starting Claude...")
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                    );
+                });
+            });
+        });
+    }
+
+    /// Render Claude error message with retry button (US-005).
+    ///
+    /// Shows the error in a red-tinted bubble on the left side with
+    /// a retry button that allows the user to try again.
+    ///
+    /// Returns true if the retry button was clicked.
+    fn render_claude_error(&self, ui: &mut egui::Ui, error: &str, _max_bubble_width: f32) -> bool {
+        let mut should_retry = false;
+
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            // Create an error-styled frame
+            let frame = egui::Frame::none()
+                .fill(colors::STATUS_ERROR_BG)
+                .rounding(Rounding::same(CHAT_BUBBLE_ROUNDING))
+                .inner_margin(egui::Margin::same(CHAT_BUBBLE_PADDING))
+                .stroke(Stroke::new(1.0, colors::STATUS_ERROR));
+
+            frame.show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Error title
+                    ui.label(
+                        egui::RichText::new("Error")
+                            .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                            .color(colors::STATUS_ERROR),
+                    );
+
+                    ui.add_space(spacing::XS);
+
+                    // Error message
+                    ui.label(
+                        egui::RichText::new(error)
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .color(colors::TEXT_PRIMARY),
+                    );
+
+                    ui.add_space(spacing::SM);
+
+                    // Retry button
+                    let retry_button = egui::Button::new(
+                        egui::RichText::new("Retry")
+                            .font(typography::font(FontSize::Body, FontWeight::Medium))
+                            .color(colors::SURFACE),
+                    )
+                    .fill(colors::STATUS_ERROR)
+                    .rounding(Rounding::same(spacing::SM));
+
+                    if ui.add(retry_button).clicked() {
+                        should_retry = true;
+                    }
+                });
+            });
+        });
+
+        should_retry
+    }
+
+    /// Render the input bar for the Create Spec tab (US-004).
+    ///
+    /// Features:
+    /// - Rounded text input field with dynamic placeholder
+    /// - Coral/orange send button on the right
+    /// - Send button disabled when input is empty or waiting for Claude
+    /// - Enter key sends message (Shift+Enter for newline)
+    /// - Input clears after sending
+    /// - Input disabled while waiting for Claude's response
+    fn render_create_spec_input_bar(&mut self, ui: &mut egui::Ui) {
+        // Determine placeholder text based on conversation state
+        let placeholder = if self.chat_messages.is_empty() {
+            "Describe the feature you want to build..."
+        } else {
+            "Reply..."
+        };
+
+        // Check if send should be enabled
+        let input_not_empty = !self.chat_input_text.trim().is_empty();
+        let can_send = input_not_empty && !self.is_waiting_for_claude;
+
+        // Track if we should send (set by Enter key or button click)
+        let mut should_send = false;
+
+        // Calculate the width for the text input area
+        // Reserve space for: gap + button + right margin
+        let total_width = ui.available_width();
+        let button_area_width = spacing::SM + SEND_BUTTON_SIZE;
+        let input_frame_width = total_width - button_area_width;
+
+        ui.horizontal(|ui| {
+            // Input frame with fixed width
+            let input_frame = egui::Frame::none()
+                .fill(colors::SURFACE)
+                .rounding(Rounding::same(INPUT_FIELD_ROUNDING))
+                .stroke(Stroke::new(1.0, colors::BORDER))
+                .inner_margin(egui::Margin::symmetric(spacing::MD, spacing::SM));
+
+            let frame_response = input_frame.show(ui, |ui| {
+                // Set the frame to use the calculated width
+                ui.set_width(input_frame_width - spacing::MD * 2.0 - 2.0);
+
+                // Scrollable text area with max height
+                let max_input_height = 100.0;
+
+                egui::ScrollArea::vertical()
+                    .max_height(max_input_height)
+                    .show(ui, |ui| {
+                        // Text input - use full available width
+                        let text_edit = egui::TextEdit::multiline(&mut self.chat_input_text)
+                            .hint_text(
+                                egui::RichText::new(placeholder)
+                                    .color(colors::TEXT_MUTED)
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular)),
+                            )
+                            .font(typography::font(FontSize::Body, FontWeight::Regular))
+                            .text_color(colors::TEXT_PRIMARY)
+                            .frame(false)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(1)
+                            .lock_focus(true)
+                            .interactive(!self.is_waiting_for_claude);
+
+                        let response = ui.add(text_edit);
+
+                        // Handle Enter key to send (Shift+Enter for newline)
+                        if response.has_focus() && !self.is_waiting_for_claude {
+                            let modifiers = ui.input(|i| i.modifiers);
+                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                            if enter_pressed && !modifiers.shift && can_send {
+                                should_send = true;
+                            }
+                        }
+                    });
+            });
+
+            // Get the height of the input frame for vertical centering of button
+            let frame_height = frame_response.response.rect.height();
+
+            ui.add_space(spacing::SM);
+
+            // Send button - vertically centered with the input
+            ui.vertical(|ui| {
+                // Center the button vertically
+                let button_vertical_offset = (frame_height - SEND_BUTTON_SIZE) / 2.0;
+                if button_vertical_offset > 0.0 {
+                    ui.add_space(button_vertical_offset);
+                }
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(SEND_BUTTON_SIZE, SEND_BUTTON_SIZE),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    // Determine button color based on state
+                    let actual_color = if !can_send {
+                        SEND_BUTTON_DISABLED_COLOR
+                    } else if response.hovered() {
+                        SEND_BUTTON_HOVER_COLOR
+                    } else {
+                        SEND_BUTTON_COLOR
+                    };
+
+                    // Draw circular button background
+                    ui.painter().rect_filled(
+                        rect,
+                        Rounding::same(SEND_BUTTON_SIZE / 2.0),
+                        actual_color,
+                    );
+
+                    // Draw send arrow icon
+                    let icon_color = Color32::WHITE;
+                    let center = rect.center();
+
+                    let arrow_points = vec![
+                        egui::pos2(center.x - 6.0, center.y - 5.0),
+                        egui::pos2(center.x + 6.0, center.y),
+                        egui::pos2(center.x - 6.0, center.y + 5.0),
+                        egui::pos2(center.x - 3.0, center.y),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        arrow_points,
+                        icon_color,
+                        Stroke::NONE,
+                    ));
+                }
+
+                if response.clicked() && can_send {
+                    should_send = true;
+                }
+            });
+
+            // Show loading indicator when waiting for Claude
+            if self.is_waiting_for_claude {
+                ui.add_space(spacing::SM);
+                ui.spinner();
+            }
+        });
+
+        // Handle sending the message
+        if should_send {
+            self.send_chat_message();
+        }
+    }
+
+    /// Send the current chat input as a user message (US-004, US-005).
+    ///
+    /// This method:
+    /// 1. Takes the current input text
+    /// 2. Adds it as a user message to the chat
+    /// 3. Clears the input field
+    /// 4. Triggers scroll to bottom
+    /// 5. If this is the first message, spawns Claude subprocess
+    /// 6. If Claude is already running, sends to Claude's stdin
+    fn send_chat_message(&mut self) {
+        let message = self.chat_input_text.trim().to_string();
+        if message.is_empty() {
+            return;
+        }
+
+        // Don't send if already waiting for Claude
+        if self.is_waiting_for_claude {
+            return;
+        }
+
+        // Add user message to chat
+        self.add_user_message(&message);
+
+        // Clear input field
+        self.chat_input_text.clear();
+
+        // Check if this is the first message (no Claude messages yet)
+        let has_claude_response = self
+            .chat_messages
+            .iter()
+            .any(|m| m.sender == ChatMessageSender::Claude);
+
+        // Spawn Claude for this message (new process each time with full context)
+        self.spawn_claude_for_message(&message, !has_claude_response);
+    }
+
+    /// Render the empty state for the chat area (US-003).
+    ///
+    /// Shows a subtle prompt encouraging the user to describe their feature.
+    fn render_chat_empty_state(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(spacing::XXL);
+            ui.add_space(spacing::XXL);
+
+            ui.label(
+                egui::RichText::new("Describe the feature you want to build...")
+                    .font(typography::font(FontSize::Large, FontWeight::Regular))
+                    .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(spacing::MD);
+
+            ui.label(
+                egui::RichText::new("Claude will help you create a detailed specification")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_DISABLED),
+            );
+        });
+    }
+
+    /// Render a single chat message (US-003).
+    ///
+    /// User messages appear on the right in warm beige bubbles.
+    /// Claude messages appear on the left in white bubbles with subtle shadow.
+    fn render_chat_message(
+        &self,
+        ui: &mut egui::Ui,
+        message: &ChatMessage,
+        max_bubble_width: f32,
+        message_index: usize,
+    ) {
+        let is_user = message.sender == ChatMessageSender::User;
+
+        // Layout direction based on sender
+        if is_user {
+            // User messages: right-aligned
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                self.render_message_bubble(ui, message, max_bubble_width, message_index, true);
+            });
+        } else {
+            // Claude messages: left-aligned
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                self.render_message_bubble(ui, message, max_bubble_width, message_index, false);
+            });
+        }
+    }
+
+    /// Render a message bubble with proper styling (US-003).
+    fn render_message_bubble(
+        &self,
+        ui: &mut egui::Ui,
+        message: &ChatMessage,
+        max_bubble_width: f32,
+        message_index: usize,
+        is_user: bool,
+    ) {
+        let bubble_color = if is_user {
+            USER_BUBBLE_COLOR
+        } else {
+            CLAUDE_BUBBLE_COLOR
+        };
+
+        let text_color = colors::TEXT_PRIMARY;
+
+        // Calculate the actual text width needed for shrink-wrapping
+        let font_id = typography::font(FontSize::Body, FontWeight::Regular);
+        let content_max_width = max_bubble_width - CHAT_BUBBLE_PADDING * 2.0;
+
+        // Create a layout job to measure the text
+        let mut job = egui::text::LayoutJob::single_section(
+            message.content.clone(),
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color: text_color,
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: content_max_width,
+            ..Default::default()
+        };
+
+        // Measure the galley to get actual text dimensions
+        let galley = ui.fonts(|f| f.layout_job(job.clone()));
+        let text_size = galley.rect.size();
+
+        // Calculate bubble dimensions - shrink to fit content
+        let min_bubble_width = 50.0;
+        let bubble_content_width = text_size.x.max(min_bubble_width).min(content_max_width);
+
+        // Also measure the "#N" indicator
+        let order_text = format!("#{}", message_index + 1);
+        let order_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                order_text.clone(),
+                typography::font(FontSize::Caption, FontWeight::Regular),
+                colors::TEXT_DISABLED,
+            )
+        });
+        let order_height = order_galley.rect.height();
+
+        // Total content height: text + spacing + order indicator
+        let total_content_height = text_size.y + spacing::XS + order_height;
+
+        // Total bubble size including padding
+        let bubble_width = bubble_content_width + CHAT_BUBBLE_PADDING * 2.0;
+        let bubble_height = total_content_height + CHAT_BUBBLE_PADDING * 2.0;
+
+        // Allocate exact size for the bubble, then draw frame manually
+        let (rect, _response) = ui.allocate_exact_size(
+            egui::vec2(bubble_width, bubble_height),
+            egui::Sense::hover(),
+        );
+
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+
+            // Draw shadow for Claude messages
+            if !is_user {
+                let shadow = theme::shadow::subtle();
+                let shadow_rect = rect.translate(shadow.offset);
+                painter.rect_filled(
+                    shadow_rect.expand(shadow.spread),
+                    Rounding::same(CHAT_BUBBLE_ROUNDING),
+                    shadow.color,
+                );
+            }
+
+            // Draw bubble background
+            painter.rect_filled(rect, Rounding::same(CHAT_BUBBLE_ROUNDING), bubble_color);
+
+            // Draw border for Claude messages
+            if !is_user {
+                painter.rect_stroke(
+                    rect,
+                    Rounding::same(CHAT_BUBBLE_ROUNDING),
+                    Stroke::new(1.0, colors::BORDER),
+                );
+            }
+
+            // Draw the text content
+            let text_pos = rect.min + egui::vec2(CHAT_BUBBLE_PADDING, CHAT_BUBBLE_PADDING);
+            painter.galley(text_pos, galley, text_color);
+
+            // Draw the order indicator
+            let order_y = text_pos.y + text_size.y + spacing::XS;
+            let order_x = if is_user {
+                // Right-aligned for user
+                rect.max.x - CHAT_BUBBLE_PADDING - order_galley.rect.width()
+            } else {
+                // Left-aligned for Claude
+                text_pos.x
+            };
+            painter.galley(
+                egui::pos2(order_x, order_y),
+                order_galley,
+                colors::TEXT_DISABLED,
+            );
+        }
+    }
+
+    /// Add a message to the chat and trigger scroll to bottom (US-003).
+    ///
+    /// This method is used by other parts of the system to add messages
+    /// to the conversation.
+    #[allow(dead_code)]
+    pub fn add_chat_message(&mut self, message: ChatMessage) {
+        self.chat_messages.push(message);
+        self.chat_scroll_to_bottom = true;
+    }
+
+    /// Add a user message to the chat (US-003).
+    #[allow(dead_code)]
+    pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.add_chat_message(ChatMessage::user(content));
+    }
+
+    /// Add a Claude message to the chat (US-003).
+    #[allow(dead_code)]
+    pub fn add_claude_message(&mut self, content: impl Into<String>) {
+        self.add_chat_message(ChatMessage::claude(content));
+    }
+
+    /// Clear all chat messages (US-003).
+    #[allow(dead_code)]
+    pub fn clear_chat_messages(&mut self) {
+        self.chat_messages.clear();
+    }
+
+    // ========================================================================
+    // Claude Process Integration (US-005)
+    // ========================================================================
+
+    /// Spawn Claude to process a message and get a response.
+    ///
+    /// This method:
+    /// 1. Builds a prompt with conversation context (for multi-turn)
+    /// 2. Spawns `claude` CLI with proper arguments (--print, --output-format stream-json)
+    /// 3. Writes prompt to stdin and closes it (required for Claude to process)
+    /// 4. Sets up a background thread to stream and parse stdout
+    /// 5. Each call spawns a new process (Claude CLI doesn't support persistent sessions)
+    fn spawn_claude_for_message(&mut self, user_message: &str, is_first_message: bool) {
+        use crate::claude::extract_text_from_stream_line;
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        // Clear any previous error and reset state
+        self.claude_error = None;
+        self.claude_response_in_progress = false;
+        self.last_claude_output_time = None;
+        self.claude_finished = false;
+
+        // US-009: Mark that we're starting Claude (show "Starting Claude..." indicator)
+        self.claude_starting = true;
+        self.is_waiting_for_claude = true;
+
+        let tx = self.claude_tx.clone();
+
+        // Build the prompt with conversation context
+        let prompt = if is_first_message {
+            // First message: include system prompt
+            format!(
+                "{}\n\n---\n\nUser's request:\n\n{}\n",
+                crate::prompts::SPEC_SKILL_PROMPT,
+                user_message
+            )
+        } else {
+            // Subsequent messages: include conversation history
+            let mut context = format!(
+                "{}\n\n---\n\nConversation so far:\n\n",
+                crate::prompts::SPEC_SKILL_PROMPT
+            );
+            for msg in &self.chat_messages {
+                match msg.sender {
+                    ChatMessageSender::User => {
+                        context.push_str(&format!("User: {}\n\n", msg.content));
+                    }
+                    ChatMessageSender::Claude => {
+                        context.push_str(&format!("Assistant: {}\n\n", msg.content));
+                    }
+                }
+            }
+            context.push_str(&format!(
+                "User: {}\n\nPlease continue the conversation and help refine the specification.",
+                user_message
+            ));
+            context
+        };
+
+        // Spawn the Claude CLI process with correct arguments
+        let child_result = Command::new("claude")
+            .args(["--print", "--output-format", "stream-json", "--verbose"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        let mut child = match child_result {
+            Ok(child) => child,
+            Err(e) => {
+                let error_msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "Claude CLI not found. Please install it from https://github.com/anthropics/claude-code".to_string()
+                } else {
+                    format!("Failed to spawn Claude: {}", e)
+                };
+                self.claude_error = Some(error_msg);
+                self.is_waiting_for_claude = false;
+                self.claude_starting = false;
+                return;
+            }
+        };
+
+        // Write prompt to stdin and close it (required for Claude to start processing)
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+                self.claude_error = Some(format!("Failed to write prompt to Claude: {}", e));
+                self.is_waiting_for_claude = false;
+                self.claude_starting = false;
+                return;
+            }
+            // stdin is dropped here, closing the pipe - this signals Claude to process
+        }
+
+        // Clear the stdin handle since we're not keeping it open
+        self.claude_stdin = None;
+
+        // Take stdout and stderr handles before storing child
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Store the child process so it can be killed if needed
+        let child_handle = self.claude_child.clone();
+        {
+            let mut guard = child_handle.lock().unwrap();
+            *guard = Some(child);
+        }
+
+        // Spawn background thread to read and parse output
+        std::thread::spawn(move || {
+            // Signal that Claude has started
+            let _ = tx.send(ClaudeMessage::Started);
+
+            // Read stdout and parse stream-json format
+            if let Some(stdout) = stdout {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(json_line) => {
+                            // Parse stream-json and extract text content
+                            if let Some(text) = extract_text_from_stream_line(&json_line) {
+                                let _ = tx.send(ClaudeMessage::Output(text));
+                            }
+                        }
+                        Err(_) => {
+                            // Error reading - process may have been killed
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Collect stderr for error reporting (don't send as output)
+            let mut stderr_content = String::new();
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                for text in reader.lines().take(10).flatten() {
+                    if !text.is_empty() {
+                        stderr_content.push_str(&text);
+                        stderr_content.push('\n');
+                    }
+                }
+            }
+
+            // Wait for the process to finish (take it from the mutex)
+            let mut guard = child_handle.lock().unwrap();
+            if let Some(mut child) = guard.take() {
+                match child.wait() {
+                    Ok(status) => {
+                        let success = status.success();
+                        let error = if !success {
+                            if stderr_content.is_empty() {
+                                Some(format!("Claude exited with status: {}", status))
+                            } else {
+                                Some(format!("Claude error: {}", stderr_content.trim()))
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = tx.send(ClaudeMessage::Finished { success, error });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ClaudeMessage::Finished {
+                            success: false,
+                            error: Some(format!("Failed to wait for Claude: {}", e)),
+                        });
+                    }
+                }
+            }
+            // If child was already taken (killed), we just exit silently
+        });
+    }
+
+    /// Legacy wrapper for spawn_claude_for_message (for compatibility).
+    fn spawn_claude_interactive(&mut self, initial_message: &str) {
+        self.spawn_claude_for_message(initial_message, true);
+    }
+    /// Poll for Claude messages and update state.
+    ///
+    /// This should be called in the update loop to process messages from the
+    /// Claude background thread.
+    fn poll_claude_messages(&mut self) {
+        // Timeout for detecting when Claude has paused (finished a response)
+        const RESPONSE_PAUSE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+        // Process all pending messages (non-blocking)
+        while let Ok(msg) = self.claude_rx.try_recv() {
+            match msg {
+                ClaudeMessage::Spawning => {
+                    // US-009: Claude is being spawned - already handled by spawn functions
+                    // This message exists for consistency but state is set synchronously
+                }
+                ClaudeMessage::Started => {
+                    // Claude has started - mark as receiving response and clear starting state
+                    self.claude_starting = false;
+                    self.claude_response_in_progress = true;
+                }
+                ClaudeMessage::Output(text) => {
+                    // Append to the response buffer
+                    if !self.claude_response_buffer.is_empty() {
+                        self.claude_response_buffer.push('\n');
+                    }
+                    self.claude_response_buffer.push_str(&text);
+
+                    // US-007: Detect spec file path in Claude's output
+                    self.detect_spec_path_in_output(&text);
+
+                    // Update last output time and mark response as in progress
+                    self.last_claude_output_time = Some(Instant::now());
+                    self.claude_response_in_progress = true;
+                }
+                ClaudeMessage::ResponsePaused => {
+                    // Claude has paused - flush the buffer and allow user input
+                    self.flush_claude_response_buffer();
+                    self.is_waiting_for_claude = false;
+                    self.claude_response_in_progress = false;
+                }
+                ClaudeMessage::Finished { success, error } => {
+                    // Process has terminated - flush any remaining output
+                    self.flush_claude_response_buffer();
+
+                    // Handle completion - process has exited
+                    self.is_waiting_for_claude = false;
+                    self.claude_starting = false;
+                    self.claude_response_in_progress = false;
+                    self.last_claude_output_time = None;
+                    // Clear stdin handle since the process has terminated
+                    self.claude_stdin = None;
+
+                    if success {
+                        // US-007: Mark Claude as finished (for spec completion UI)
+                        self.claude_finished = true;
+                    } else if let Some(err) = error {
+                        self.claude_error = Some(err);
+                    }
+                }
+                ClaudeMessage::SpawnError(error) => {
+                    // Show the error and clear starting state (US-009)
+                    self.claude_error = Some(error);
+                    self.is_waiting_for_claude = false;
+                    self.claude_starting = false;
+                    self.claude_response_in_progress = false;
+                    self.claude_stdin = None;
+                }
+            }
+        }
+
+        // Check for response pause timeout (Claude finished responding, waiting for user input)
+        // Only check if we have an active stdin handle and received output recently
+        if self.claude_stdin.is_some() && self.claude_response_in_progress {
+            if let Some(last_output) = self.last_claude_output_time {
+                if last_output.elapsed() >= RESPONSE_PAUSE_TIMEOUT {
+                    // Claude has paused - flush buffer and allow user to respond
+                    self.flush_claude_response_buffer();
+                    self.is_waiting_for_claude = false;
+                    self.claude_response_in_progress = false;
+                }
+            }
+        }
+    }
+
+    /// Flush the Claude response buffer to a chat message.
+    ///
+    /// This is called when we detect Claude has paused or finished responding.
+    fn flush_claude_response_buffer(&mut self) {
+        if !self.claude_response_buffer.is_empty() {
+            let response = std::mem::take(&mut self.claude_response_buffer);
+            self.add_claude_message(response);
+        }
+    }
+
+    /// Detect spec file path in Claude's output (US-007).
+    ///
+    /// Looks for patterns like:
+    /// - `~/.config/autom8/<project>/spec/spec-<feature>.md`
+    /// - Absolute paths like `/Users/.../autom8/<project>/spec/spec-<feature>.md`
+    ///
+    /// When detected, stores the path in `generated_spec_path`.
+    fn detect_spec_path_in_output(&mut self, text: &str) {
+        // Already found a spec path - don't overwrite
+        if self.generated_spec_path.is_some() {
+            return;
+        }
+
+        // Helper to validate a potential spec path
+        let is_valid_spec_path = |path_str: &str| -> bool {
+            // Must contain the expected path structure
+            if !path_str.contains("/spec/spec-") || !path_str.ends_with(".md") {
+                return false;
+            }
+            // Must not contain control characters or be too long
+            if path_str.chars().any(|c| c.is_control()) || path_str.len() > 500 {
+                return false;
+            }
+            // Must look like a filesystem path (no spaces in filename, reasonable chars)
+            let filename = path_str.rsplit('/').next().unwrap_or("");
+            if filename.contains(' ') || filename.is_empty() {
+                return false;
+            }
+            true
+        };
+
+        // Pattern 1: Tilde-based path (~/.config/autom8/...)
+        if let Some(start) = text.find("~/.config/autom8/") {
+            if let Some(rel_end) = text[start..].find(".md") {
+                let path_str = &text[start..start + rel_end + 3];
+                if is_valid_spec_path(path_str) {
+                    if let Some(home) = dirs::home_dir() {
+                        let expanded = path_str.replacen("~", &home.to_string_lossy(), 1);
+                        self.generated_spec_path = Some(std::path::PathBuf::from(expanded));
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Pattern 2: Absolute paths containing .config/autom8
+        for word in text.split_whitespace() {
+            // Clean up the word (remove quotes, backticks, punctuation)
+            let cleaned = word.trim_matches(|c: char| {
+                c == '"' || c == '\'' || c == '`' || c == '(' || c == ')' || c == ',' || c == ':'
+            });
+
+            if cleaned.contains(".config/autom8/") && is_valid_spec_path(cleaned) {
+                let path = std::path::PathBuf::from(cleaned);
+                if path.is_absolute() {
+                    self.generated_spec_path = Some(path);
+                    return;
+                } else if cleaned.starts_with('~') {
+                    if let Some(home) = dirs::home_dir() {
+                        let expanded = cleaned.replacen("~", &home.to_string_lossy(), 1);
+                        self.generated_spec_path = Some(std::path::PathBuf::from(expanded));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if Claude subprocess is currently running.
+    ///
+    /// Note: This method is prepared for US-006 (User Response Handling).
+    #[allow(dead_code)]
+    fn is_claude_running(&self) -> bool {
+        self.is_waiting_for_claude
+    }
+
+    /// Retry the last Claude operation after an error.
+    ///
+    /// Clears the error and respawns Claude with the first user message.
+    /// Uses spawn_claude_interactive() to ensure multi-turn conversations work
+    /// (stdin handle is retained for subsequent user messages).
+    fn retry_claude(&mut self) {
+        self.claude_error = None;
+
+        // Find the first user message to restart the conversation from the beginning
+        let first_user_message = self
+            .chat_messages
+            .iter()
+            .find(|m| m.sender == ChatMessageSender::User)
+            .map(|m| m.content.clone());
+
+        if let Some(message) = first_user_message {
+            // Always use interactive mode so stdin handle is retained for multi-turn
+            self.spawn_claude_interactive(&message);
+        }
+    }
+
+    // ========================================================================
+    // Spec Completion UI (US-007: Spec Completion and Confirmation)
+    // ========================================================================
+
+    /// Render the spec completion UI when Claude finishes generating a spec.
+    ///
+    /// Shows:
+    /// - Success message with spec file path
+    /// - Green checkmark button to confirm
+    /// - After confirmation: copy-able command to run the spec
+    /// - "Close" button to reset the session
+    ///
+    /// Returns (should_confirm, should_start_new) to handle button clicks outside the closure.
+    fn render_spec_completion_ui(&self, ui: &mut egui::Ui, _max_bubble_width: f32) -> (bool, bool) {
+        let mut should_confirm = false;
+        let mut should_start_new = false;
+
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            // Success-styled frame
+            let frame = egui::Frame::none()
+                .fill(colors::STATUS_SUCCESS_BG)
+                .rounding(Rounding::same(CHAT_BUBBLE_ROUNDING))
+                .inner_margin(egui::Margin::same(CHAT_BUBBLE_PADDING))
+                .stroke(Stroke::new(1.0, colors::STATUS_SUCCESS));
+
+            frame.show(ui, |ui| {
+                ui.vertical(|ui| {
+                    if self.spec_confirmed {
+                        // Post-confirmation: Show command to run
+                        self.render_spec_run_command(ui);
+
+                        ui.add_space(spacing::MD);
+
+                        // "Close" button
+                        let start_new_button = egui::Button::new(
+                            egui::RichText::new("Close")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::SURFACE),
+                        )
+                        .fill(colors::ACCENT)
+                        .rounding(Rounding::same(spacing::SM));
+
+                        if ui.add(start_new_button).clicked() {
+                            should_start_new = true;
+                        }
+                    } else {
+                        // Pre-confirmation: Show spec path and confirm button
+                        ui.label(
+                            egui::RichText::new("Spec Generated!")
+                                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                                .color(colors::STATUS_SUCCESS),
+                        );
+
+                        ui.add_space(spacing::SM);
+
+                        // Show spec file path
+                        if let Some(ref spec_path) = self.generated_spec_path {
+                            let path_display = spec_path.display().to_string();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("File:")
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(colors::TEXT_PRIMARY),
+                                );
+                                ui.add_space(spacing::XS);
+                                // Selectable text for the path
+                                let mut path_text = path_display.clone();
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut path_text)
+                                        .font(typography::font(
+                                            FontSize::Small,
+                                            FontWeight::Regular,
+                                        ))
+                                        .text_color(colors::TEXT_SECONDARY)
+                                        .frame(false)
+                                        .interactive(true)
+                                        .desired_width(f32::INFINITY),
+                                );
+                            });
+                        }
+
+                        ui.add_space(spacing::MD);
+
+                        // Green confirm button
+                        let confirm_button = egui::Button::new(
+                            egui::RichText::new("Confirm & Get Run Command")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::SURFACE),
+                        )
+                        .fill(colors::STATUS_SUCCESS)
+                        .rounding(Rounding::same(spacing::SM));
+
+                        if ui.add(confirm_button).clicked() {
+                            should_confirm = true;
+                        }
+
+                        // Hint that users can continue refining
+                        ui.add_space(spacing::MD);
+                        ui.label(
+                            egui::RichText::new(
+                                "Want changes? Keep chatting below to refine the spec.",
+                            )
+                            .font(typography::font(FontSize::Small, FontWeight::Regular))
+                            .color(colors::TEXT_MUTED),
+                        );
+                    }
+                });
+            });
+        });
+
+        (should_confirm, should_start_new)
+    }
+
+    /// Render the command to run the spec (shown after confirmation).
+    fn render_spec_run_command(&self, ui: &mut egui::Ui) {
+        // Title
+        ui.label(
+            egui::RichText::new("Ready to Run!")
+                .font(typography::font(FontSize::Body, FontWeight::SemiBold))
+                .color(colors::STATUS_SUCCESS),
+        );
+
+        ui.add_space(spacing::SM);
+
+        // Instructions
+        ui.label(
+            egui::RichText::new("Open your terminal and run:")
+                .font(typography::font(FontSize::Body, FontWeight::Regular))
+                .color(colors::TEXT_PRIMARY),
+        );
+
+        ui.add_space(spacing::SM);
+
+        // Build the command
+        let command = self.build_spec_run_command();
+
+        // Command display with copy button
+        ui.horizontal(|ui| {
+            // Code-styled frame for the command
+            let cmd_frame = egui::Frame::none()
+                .fill(colors::SURFACE)
+                .rounding(Rounding::same(spacing::XS))
+                .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                .stroke(Stroke::new(1.0, colors::BORDER));
+
+            cmd_frame.show(ui, |ui| {
+                // Make the command text selectable
+                let mut cmd_text = command.clone();
+                ui.add(
+                    egui::TextEdit::singleline(&mut cmd_text)
+                        .font(egui::FontId::monospace(12.0))
+                        .text_color(colors::TEXT_PRIMARY)
+                        .frame(false)
+                        .interactive(true)
+                        .desired_width(400.0),
+                );
+            });
+
+            ui.add_space(spacing::SM);
+
+            // Copy button
+            let copy_button = egui::Button::new(
+                egui::RichText::new("Copy")
+                    .font(typography::font(FontSize::Small, FontWeight::Medium)),
+            )
+            .fill(colors::SURFACE)
+            .stroke(Stroke::new(1.0, colors::BORDER))
+            .rounding(Rounding::same(spacing::XS));
+
+            if ui
+                .add(copy_button)
+                .on_hover_text("Copy to clipboard")
+                .clicked()
+            {
+                ui.output_mut(|o| o.copied_text = command);
+            }
+        });
+    }
+
+    /// Build the command to run the spec.
+    ///
+    /// Format: `cd "<project-root>" && autom8 "<spec-path>"`
+    /// Paths are quoted to handle spaces correctly.
+    fn build_spec_run_command(&self) -> String {
+        let spec_path = self
+            .generated_spec_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<spec-path>".to_string());
+
+        // Try to find the project root from project metadata
+        let project_root = self.find_project_root_for_selected_project();
+
+        match project_root {
+            Some(root) => format!("cd \"{}\" && autom8 \"{}\"", root.display(), spec_path),
+            None => format!("autom8 \"{}\"", spec_path),
+        }
+    }
+
+    /// Find the project root directory for the selected project.
+    ///
+    /// Uses the project metadata (project.json) which stores the repo path.
+    fn find_project_root_for_selected_project(&self) -> Option<std::path::PathBuf> {
+        let selected_project = self.create_spec_selected_project.as_ref()?;
+        crate::config::get_project_repo_path(selected_project)
+    }
+
+    /// Confirm the spec and show the run command.
+    fn confirm_spec(&mut self) {
+        self.spec_confirmed = true;
+        self.chat_scroll_to_bottom = true;
+    }
+
+    /// Check if there is an active spec creation session (US-008).
+    ///
+    /// A session is considered "active" if any of the following are true:
+    /// - There are chat messages (conversation has started)
+    /// - Claude subprocess is running (stdin handle exists)
+    /// - Waiting for Claude response
+    /// - A spec has been generated (even if not confirmed yet)
+    fn has_active_spec_session(&self) -> bool {
+        !self.chat_messages.is_empty()
+            || self.claude_stdin.is_some()
+            || self.is_waiting_for_claude
+            || self.generated_spec_path.is_some()
+    }
+
+    /// Reset the Create Spec session to start fresh (US-008).
+    ///
+    /// Clears all state related to the current spec creation session:
+    /// - Chat messages
+    /// - Generated spec path
+    /// - Confirmation status
+    /// - Claude process state
+    ///
+    /// Also terminates any running Claude subprocess by closing its stdin.
+    fn reset_create_spec_session(&mut self) {
+        // Kill any running Claude subprocess
+        if let Ok(mut guard) = self.claude_child.lock() {
+            if let Some(mut child) = guard.take() {
+                // Kill the process - ignore errors (process may have already exited)
+                let _ = child.kill();
+                // Wait to avoid zombie process
+                let _ = child.wait();
+            }
+        }
+
+        // Close stdin handle if any (legacy, but keep for safety)
+        if let Some(ref stdin_handle) = self.claude_stdin {
+            stdin_handle.close();
+        }
+
+        // Clear chat state
+        self.chat_messages.clear();
+        self.chat_input_text.clear();
+        self.chat_scroll_to_bottom = false;
+
+        // Clear Claude process state
+        self.claude_stdin = None;
+        self.claude_response_buffer.clear();
+        self.claude_error = None;
+        self.is_waiting_for_claude = false;
+        self.claude_starting = false;
+        self.last_claude_output_time = None;
+        self.claude_response_in_progress = false;
+
+        // Clear spec completion state
+        self.generated_spec_path = None;
+        self.spec_confirmed = false;
+        self.claude_finished = false;
     }
 
     /// Render the run detail view for a specific run.
@@ -6197,7 +8098,11 @@ impl Autom8App {
                 );
                 ui.label(
                     egui::RichText::new(
-                        run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        run_state
+                            .started_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %I:%M:%S %p")
+                            .to_string(),
                     )
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_PRIMARY),
@@ -6212,9 +8117,14 @@ impl Autom8App {
                 );
                 if let Some(finished) = run_state.finished_at {
                     ui.label(
-                        egui::RichText::new(finished.format("%Y-%m-%d %H:%M:%S").to_string())
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_PRIMARY),
+                        egui::RichText::new(
+                            finished
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %I:%M:%S %p")
+                                .to_string(),
+                        )
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_PRIMARY),
                     );
                 } else {
                     ui.label(
@@ -7379,9 +9289,12 @@ impl Autom8App {
                             if let Some(ref run) = session.run {
                                 ui.add_space(spacing::MD);
                                 ui.label(
-                                    egui::RichText::new(format_duration(run.started_at))
-                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                        .color(colors::TEXT_MUTED),
+                                    egui::RichText::new(format_run_duration(
+                                        run.started_at,
+                                        run.finished_at,
+                                    ))
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
                                 );
                             }
 
@@ -7913,7 +9826,11 @@ impl Autom8App {
         // Top row: Date/time and status
         child_ui.horizontal(|ui| {
             // Date/time (left)
-            let datetime_text = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
+            let datetime_text = entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %I:%M %p")
+                .to_string();
             ui.label(
                 egui::RichText::new(datetime_text)
                     .font(typography::font(FontSize::Body, FontWeight::Medium))
@@ -8335,6 +10252,7 @@ mod tests {
                 is_running: true,
                 pause_requested: false,
                 run_mode: crate::state::RunMode::Auto,
+                spec_json_path: None,
             },
             run,
             progress: None,

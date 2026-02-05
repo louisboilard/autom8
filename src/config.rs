@@ -61,6 +61,15 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub pull_request: bool,
 
+    /// Whether to create pull requests in draft mode.
+    ///
+    /// When `true`, PRs are created as drafts (not ready for review).
+    /// When `false`, PRs are created as regular (ready for review) PRs.
+    ///
+    /// Note: Only applies when `pull_request = true`. Has no effect otherwise.
+    #[serde(default = "default_false")]
+    pub pull_request_draft: bool,
+
     /// Whether to automatically create worktrees for runs.
     ///
     /// When `true`, autom8 creates a dedicated worktree for each run,
@@ -114,6 +123,7 @@ impl Default for Config {
             review: true,
             commit: true,
             pull_request: true,
+            pull_request_draft: false,
             worktree: true,
             worktree_path_pattern: default_worktree_path_pattern(),
             worktree_cleanup: false,
@@ -232,6 +242,12 @@ commit = true
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = true
+
+# Pull request draft mode: Create PRs as drafts
+# - true: Create PRs as drafts (not ready for review)
+# - false: Create PRs as regular (ready for review) PRs (default)
+# Note: Only applies when pull_request = true. Has no effect otherwise.
+pull_request_draft = false
 
 # Worktree mode: Automatic worktree creation for parallel runs
 # - true: Create a dedicated worktree for each run (enables parallel sessions, default)
@@ -353,6 +369,12 @@ commit = {}
 # Note: Requires commit = true to work
 pull_request = {}
 
+# Pull request draft mode: Create PRs as drafts
+# - true: Create PRs as drafts (not ready for review)
+# - false: Create PRs as regular (ready for review) PRs (default)
+# Note: Only applies when pull_request = true. Has no effect otherwise.
+pull_request_draft = {}
+
 # Worktree mode: Automatic worktree creation for parallel runs
 # - true: Create a dedicated worktree for each run (enables parallel sessions, default)
 # - false: Run on the current branch (single session per project)
@@ -373,6 +395,7 @@ worktree_cleanup = {}
         config.review,
         config.commit,
         config.pull_request,
+        config.pull_request_draft,
         config.worktree,
         config.worktree_path_pattern,
         config.worktree_cleanup
@@ -558,6 +581,19 @@ const SPEC_SUBDIR: &str = "spec";
 const RUNS_SUBDIR: &str = "runs";
 const SESSIONS_SUBDIR: &str = "sessions";
 
+/// Filename for project metadata
+const PROJECT_METADATA_FILENAME: &str = "project.json";
+
+/// Project metadata stored in `~/.config/autom8/<project>/project.json`.
+///
+/// Contains persistent information about the project that doesn't change
+/// between runs, such as the path to the git repository.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMetadata {
+    /// The absolute path to the git repository root.
+    pub repo_path: PathBuf,
+}
+
 /// Get the autom8 config directory path (~/.config/autom8/).
 ///
 /// Returns the path to the config directory. Does not create the directory.
@@ -622,6 +658,7 @@ pub fn project_config_dir_for(project_name: &str) -> Result<PathBuf> {
 /// - `~/.config/autom8/<project-name>/`
 /// - `~/.config/autom8/<project-name>/spec/`
 /// - `~/.config/autom8/<project-name>/runs/`
+/// - `~/.config/autom8/<project-name>/project.json` (with repo path)
 ///
 /// Returns the project config directory path and whether it was newly created.
 pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
@@ -632,7 +669,39 @@ pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir.join(SPEC_SUBDIR))?;
     fs::create_dir_all(dir.join(RUNS_SUBDIR))?;
 
+    // Save project metadata with repo path (only if it doesn't exist yet)
+    let metadata_path = dir.join(PROJECT_METADATA_FILENAME);
+    if !metadata_path.exists() {
+        if let Ok(repo_path) = crate::worktree::get_main_repo_root() {
+            let metadata = ProjectMetadata { repo_path };
+            if let Ok(content) = serde_json::to_string_pretty(&metadata) {
+                let _ = fs::write(&metadata_path, content);
+            }
+        }
+    }
+
     Ok((dir, created))
+}
+
+/// Get the repository path for a project by name.
+///
+/// Reads the `project.json` file from the project's config directory
+/// and returns the stored `repo_path`.
+///
+/// Returns `None` if the project doesn't exist or has no metadata.
+pub fn get_project_repo_path(project_name: &str) -> Option<PathBuf> {
+    let project_dir = project_config_dir_for(project_name).ok()?;
+    let metadata_path = project_dir.join(PROJECT_METADATA_FILENAME);
+
+    let content = fs::read_to_string(&metadata_path).ok()?;
+    let metadata: ProjectMetadata = serde_json::from_str(&content).ok()?;
+
+    // Only return if the path still exists
+    if metadata.repo_path.exists() {
+        Some(metadata.repo_path)
+    } else {
+        None
+    }
 }
 
 /// Get the spec subdirectory path for the current project.
@@ -3716,6 +3785,118 @@ review = false
         // Deserialize back
         let parsed: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.worktree_cleanup, config.worktree_cleanup);
+    }
+
+    // ========================================================================
+    // US-001 (draft-pr-config): pull_request_draft configuration tests
+    // ========================================================================
+
+    #[test]
+    fn test_pull_request_draft_config_defaults_to_false() {
+        let config = Config::default();
+        assert!(
+            !config.pull_request_draft,
+            "pull_request_draft should default to false for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_can_be_enabled() {
+        let toml_str = r#"
+            pull_request_draft = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            config.pull_request_draft,
+            "pull_request_draft should be true when set in config"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_missing_defaults_to_false() {
+        // Old config files without pull_request_draft field should still work
+        let toml_str = r#"
+            review = true
+            commit = true
+            pull_request = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.pull_request_draft,
+            "missing pull_request_draft field should default to false"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_explicit_false() {
+        let toml_str = r#"
+            pull_request_draft = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.pull_request_draft,
+            "explicit pull_request_draft = false should be respected"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_with_all_pr_fields() {
+        let toml_str = r#"
+            pull_request = true
+            pull_request_draft = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.pull_request);
+        assert!(config.pull_request_draft);
+    }
+
+    #[test]
+    fn test_pull_request_draft_in_generated_comments() {
+        let config = Config {
+            pull_request_draft: true,
+            ..Default::default()
+        };
+        let content = generate_config_with_comments(&config);
+
+        // Verify pull_request_draft is documented
+        assert!(
+            content.contains("pull_request_draft = true"),
+            "generated config should include pull_request_draft setting"
+        );
+        assert!(
+            content.contains("draft mode"),
+            "config comments should document draft mode behavior"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_in_default_config_with_comments() {
+        // Verify DEFAULT_CONFIG_WITH_COMMENTS includes pull_request_draft
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("pull_request_draft"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should include pull_request_draft"
+        );
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("pull_request_draft = false"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should have pull_request_draft = false"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_serialization_roundtrip() {
+        let config = Config {
+            pull_request: true,
+            pull_request_draft: true,
+            ..Default::default()
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("pull_request_draft = true"));
+
+        // Deserialize back
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.pull_request_draft, config.pull_request_draft);
     }
 
     // US-001: Conditional Story Display in Describe View

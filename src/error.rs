@@ -78,6 +78,15 @@ pub enum Autom8Error {
 
     #[error("GUI error: {0}")]
     GuiError(String),
+
+    #[error("Not in a git repository\n\nThe improve command must be run from within a git repository.\n\nTo fix this:\n  1. Navigate to your project directory: cd /path/to/your/project\n  2. Ensure the directory is a git repository (contains .git folder)\n  3. If not initialized, run: git init")]
+    NotInGitRepo,
+
+    #[error("Claude CLI not found\n\nThe 'claude' command could not be found in your PATH.\n\nTo fix this:\n  1. Install Claude Code: https://claude.ai/code\n  2. Ensure 'claude' is in your PATH\n  3. Try running 'claude --version' to verify installation")]
+    ClaudeNotFound,
+
+    #[error("Failed to spawn Claude: {0}\n\nCould not start the Claude CLI process.\n\nTo fix this:\n  1. Check that 'claude' is installed and working\n  2. Ensure you have permissions to run the command\n  3. Try running 'claude' manually to diagnose the issue")]
+    ClaudeSpawnError(String),
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;
@@ -249,6 +258,48 @@ mod tests {
         assert!(
             msg.contains("JSON") || msg.contains("syntax"),
             "Error should mention format"
+        );
+    }
+
+    // ========================================================================
+    // US-009: NotInGitRepo error tests (improve command edge case)
+    // ========================================================================
+
+    #[test]
+    fn test_us009_not_in_git_repo_error_includes_what_happened() {
+        let err = Autom8Error::NotInGitRepo;
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("Not in a git repository"),
+            "Error should describe what happened"
+        );
+    }
+
+    #[test]
+    fn test_us009_not_in_git_repo_error_includes_why() {
+        let err = Autom8Error::NotInGitRepo;
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("must be run from within a git repository"),
+            "Error should explain why"
+        );
+    }
+
+    #[test]
+    fn test_us009_not_in_git_repo_error_includes_fix() {
+        let err = Autom8Error::NotInGitRepo;
+        let msg = err.to_string();
+
+        assert!(msg.contains("To fix"), "Error should include fix steps");
+        assert!(
+            msg.contains("cd") || msg.contains("Navigate"),
+            "Error should suggest changing directory"
+        );
+        assert!(
+            msg.contains(".git") || msg.contains("git init"),
+            "Error should mention git initialization"
         );
     }
 }

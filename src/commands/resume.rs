@@ -326,6 +326,7 @@ mod tests {
                 is_running,
                 pause_requested: false,
                 run_mode: crate::state::RunMode::Auto,
+                spec_json_path: None,
             },
             machine_state,
             current_story: None,

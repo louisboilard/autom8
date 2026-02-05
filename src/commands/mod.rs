@@ -24,6 +24,7 @@ mod config;
 mod default;
 mod describe;
 mod gui;
+mod improve;
 mod init;
 mod list;
 mod monitor;
@@ -44,6 +45,10 @@ pub use config::{
 pub use default::default_command;
 pub use describe::describe_command;
 pub use gui::gui_command;
+pub use improve::{
+    build_improve_prompt, gather_git_context, improve_command, load_follow_up_context,
+    FollowUpContext, GitContext,
+};
 pub use init::init_command;
 pub use list::list_command;
 pub use monitor::monitor_command;

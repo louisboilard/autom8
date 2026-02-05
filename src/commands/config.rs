@@ -420,12 +420,14 @@ fn config_to_toml_string(config: &Config) -> String {
         "review = {}\n\
          commit = {}\n\
          pull_request = {}\n\
+         pull_request_draft = {}\n\
          worktree = {}\n\
          worktree_path_pattern = \"{}\"\n\
          worktree_cleanup = {}",
         config.review,
         config.commit,
         config.pull_request,
+        config.pull_request_draft,
         config.worktree,
         config.worktree_path_pattern,
         config.worktree_cleanup
@@ -464,6 +466,7 @@ mod tests {
             review: false,
             commit: true,
             pull_request: false,
+            pull_request_draft: true,
             worktree: false,
             worktree_path_pattern: "custom-{branch}".to_string(),
             worktree_cleanup: true,
@@ -473,6 +476,7 @@ mod tests {
         assert!(toml_str.contains("review = false"));
         assert!(toml_str.contains("commit = true"));
         assert!(toml_str.contains("pull_request = false"));
+        assert!(toml_str.contains("pull_request_draft = true"));
         assert!(toml_str.contains("worktree = false"));
         assert!(toml_str.contains("worktree_path_pattern = \"custom-{branch}\""));
         assert!(toml_str.contains("worktree_cleanup = true"));

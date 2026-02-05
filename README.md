@@ -172,6 +172,9 @@ commit = true
 
 # Enable/disable automatic PR creation (requires commit = true)
 pull_request = true
+
+# Create PRs as drafts instead of ready for review (only applies when pull_request = true)
+pull_request_draft = false
 ```
 
 **Per-project config:** `~/.config/autom8/<project>/config.toml`
