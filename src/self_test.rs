@@ -665,5 +665,4 @@ mod tests {
             "worktree_deleted should be settable to true"
         );
     }
-
 }
