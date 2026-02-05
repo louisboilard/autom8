@@ -1104,6 +1104,8 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
+                run_mode: crate::state::RunMode::Auto,
             },
             run: None,
             progress: None,
@@ -1289,5 +1291,193 @@ mod tests {
         assert_eq!(history[0].run_id, "running");
         assert_eq!(history[1].run_id, "completed-new");
         assert_eq!(history[2].run_id, "completed-old");
+    }
+
+    // =========================================================================
+    // US-003: Pause Queued Tests
+    // =========================================================================
+
+    /// Test is_pause_queued returns true when pause_requested AND is_running
+    #[test]
+    fn test_us003_is_pause_queued_true_when_requested_and_running() {
+        let mut session = make_test_session(true, true, false);
+        session.metadata.pause_requested = true;
+
+        assert!(is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when not running
+    #[test]
+    fn test_us003_is_pause_queued_false_when_not_running() {
+        let mut session = make_test_session(true, false, false);
+        session.metadata.pause_requested = true;
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when pause not requested
+    #[test]
+    fn test_us003_is_pause_queued_false_when_not_requested() {
+        let session = make_test_session(true, true, false);
+        // pause_requested defaults to false in make_test_session
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when both conditions not met
+    #[test]
+    fn test_us003_is_pause_queued_false_when_neither() {
+        let session = make_test_session(true, false, false);
+        // pause_requested defaults to false, is_running is false
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    // =========================================================================
+    // US-004: Mode Toggle Tests
+    // =========================================================================
+
+    /// Helper to create a test session with a run state
+    fn make_test_session_with_run(
+        is_main: bool,
+        is_running: bool,
+        run_status: RunStatus,
+    ) -> SessionData {
+        SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: if is_main { "main" } else { "abc123" }.to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "test-branch".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running,
+                pause_requested: false,
+                run_mode: RunMode::Auto,
+            },
+            run: Some(RunState {
+                run_id: "test-run".to_string(),
+                status: run_status,
+                machine_state: MachineState::Idle,
+                spec_json_path: PathBuf::from("/path/to/spec.json"),
+                spec_md_path: None,
+                branch: "test-branch".to_string(),
+                current_story: None,
+                iteration: 0,
+                review_iteration: 0,
+                started_at: Utc::now(),
+                finished_at: None,
+                iterations: Vec::new(),
+                config: None,
+                knowledge: Default::default(),
+                pre_story_commit: None,
+                session_id: None,
+                total_usage: None,
+                phase_usage: Default::default(),
+            }),
+            progress: None,
+            load_error: None,
+            is_main_session: is_main,
+            is_stale: false,
+            live_output: None,
+        }
+    }
+
+    /// Test is_mode_toggleable returns true for paused/interrupted sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_true_for_interrupted() {
+        let session = make_test_session_with_run(true, false, RunStatus::Interrupted);
+        assert!(is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns true for failed sessions (can be resumed)
+    #[test]
+    fn test_us004_is_mode_toggleable_true_for_failed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Failed);
+        assert!(is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false for running sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_running() {
+        let session = make_test_session_with_run(true, true, RunStatus::Running);
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false for completed sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_completed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Completed);
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false when no run state
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_no_run() {
+        let session = make_test_session(true, false, false);
+        // No run state in make_test_session
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    // =========================================================================
+    // US-005: Resume Dropdown Tests
+    // =========================================================================
+
+    /// Test is_session_resumable returns true for interrupted sessions
+    #[test]
+    fn test_us005_is_session_resumable_true_for_interrupted() {
+        let session = make_test_session_with_run(true, false, RunStatus::Interrupted);
+        assert!(is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns true for failed sessions
+    #[test]
+    fn test_us005_is_session_resumable_true_for_failed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Failed);
+        assert!(is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false for running sessions
+    #[test]
+    fn test_us005_is_session_resumable_false_for_running() {
+        let session = make_test_session_with_run(true, true, RunStatus::Running);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false for completed sessions
+    #[test]
+    fn test_us005_is_session_resumable_false_for_completed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Completed);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false when no run state
+    #[test]
+    fn test_us005_is_session_resumable_false_for_no_run() {
+        let session = make_test_session(true, false, false);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable is equivalent to is_mode_toggleable
+    #[test]
+    fn test_us005_is_session_resumable_equals_is_mode_toggleable() {
+        // Test with various session configurations - both functions should return same value
+        let configs = vec![
+            (true, false, RunStatus::Interrupted),
+            (true, false, RunStatus::Failed),
+            (true, true, RunStatus::Running),
+            (true, false, RunStatus::Completed),
+            (false, false, RunStatus::Interrupted),
+        ];
+
+        for (is_main, is_running, status) in configs {
+            let session = make_test_session_with_run(is_main, is_running, status);
+            assert_eq!(
+                is_session_resumable(&session),
+                is_mode_toggleable(&session),
+                "is_session_resumable and is_mode_toggleable should match for session with is_main={}, is_running={}, status={:?}",
+                is_main, is_running, status
+            );
+        }
     }
 }
