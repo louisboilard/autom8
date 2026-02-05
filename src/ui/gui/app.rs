@@ -8122,8 +8122,8 @@ ui.label(
                                 .format("%Y-%m-%d %I:%M:%S %p")
                                 .to_string(),
                         )
-                            .font(typography::font(FontSize::Body, FontWeight::Regular))
-                            .color(colors::TEXT_PRIMARY),
+                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                        .color(colors::TEXT_PRIMARY),
                     );
                 } else {
                     ui.label(
