@@ -1074,7 +1074,7 @@ impl MonitorApp {
                 let date_str = entry
                     .started_at
                     .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M")
+                    .format("%Y-%m-%d %I:%M %p")
                     .to_string();
 
                 // Story count
@@ -1214,7 +1214,7 @@ impl MonitorApp {
                     entry
                         .started_at
                         .with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S")
+                        .format("%Y-%m-%d %I:%M:%S %p")
                         .to_string(),
                     Style::default().fg(Color::White),
                 ),
