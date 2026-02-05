@@ -6377,6 +6377,14 @@ ui.label(
                     .color(colors::TEXT_SECONDARY),
             );
 
+            ui.add_space(spacing::SM);
+
+            ui.label(
+                egui::RichText::new("Note that this is in beta, the more reliable way is to use the CLI by simply running autom8 in your project directory.")
+                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                    .color(colors::TEXT_SECONDARY),
+            );
+
             ui.add_space(spacing::LG);
 
             // Registration hint
