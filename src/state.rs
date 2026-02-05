@@ -2204,4 +2204,197 @@ mod tests {
         let planning = state.phase_usage.get("Planning").unwrap();
         assert_eq!(planning.model, Some("claude-sonnet-4".to_string()));
     }
+
+    // =========================================================================
+    // Pause and Run Mode Tests (US-001)
+    // =========================================================================
+
+    #[test]
+    fn test_run_mode_default_is_auto() {
+        assert_eq!(RunMode::default(), RunMode::Auto);
+    }
+
+    #[test]
+    fn test_run_mode_serialization() {
+        assert_eq!(serde_json::to_string(&RunMode::Auto).unwrap(), "\"auto\"");
+        assert_eq!(serde_json::to_string(&RunMode::Step).unwrap(), "\"step\"");
+
+        assert_eq!(
+            serde_json::from_str::<RunMode>("\"auto\"").unwrap(),
+            RunMode::Auto
+        );
+        assert_eq!(
+            serde_json::from_str::<RunMode>("\"step\"").unwrap(),
+            RunMode::Step
+        );
+    }
+
+    #[test]
+    fn test_session_metadata_new_fields_default() {
+        // Simulate deserializing old metadata without the new fields
+        let old_json = r#"{
+            "sessionId": "main",
+            "worktreePath": "/path/to/repo",
+            "branchName": "feature/test",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "lastActiveAt": "2024-01-01T00:00:00Z",
+            "isRunning": true
+        }"#;
+
+        let metadata: SessionMetadata = serde_json::from_str(old_json).unwrap();
+        assert!(!metadata.pause_requested);
+        assert_eq!(metadata.run_mode, RunMode::Auto);
+    }
+
+    #[test]
+    fn test_session_metadata_with_new_fields() {
+        let json = r#"{
+            "sessionId": "main",
+            "worktreePath": "/path/to/repo",
+            "branchName": "feature/test",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "lastActiveAt": "2024-01-01T00:00:00Z",
+            "isRunning": true,
+            "pauseRequested": true,
+            "runMode": "step"
+        }"#;
+
+        let metadata: SessionMetadata = serde_json::from_str(json).unwrap();
+        assert!(metadata.pause_requested);
+        assert_eq!(metadata.run_mode, RunMode::Step);
+    }
+
+    #[test]
+    fn test_request_pause() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Initially no pause
+        assert!(!sm.is_pause_requested());
+
+        // Request pause
+        sm.request_pause().unwrap();
+        assert!(sm.is_pause_requested());
+
+        // Verify it persisted
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert!(metadata.pause_requested);
+    }
+
+    #[test]
+    fn test_clear_pause_request() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Set pause
+        sm.request_pause().unwrap();
+        assert!(sm.is_pause_requested());
+
+        // Clear pause
+        sm.clear_pause_request().unwrap();
+        assert!(!sm.is_pause_requested());
+    }
+
+    #[test]
+    fn test_set_and_get_run_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Default is Auto
+        assert_eq!(sm.get_run_mode(), RunMode::Auto);
+
+        // Set to Step
+        sm.set_run_mode(RunMode::Step).unwrap();
+        assert_eq!(sm.get_run_mode(), RunMode::Step);
+
+        // Set back to Auto
+        sm.set_run_mode(RunMode::Auto).unwrap();
+        assert_eq!(sm.get_run_mode(), RunMode::Auto);
+    }
+
+    #[test]
+    fn test_save_metadata_preserves_pause_requested() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Request pause via the metadata update
+        sm.request_pause().unwrap();
+        assert!(sm.is_pause_requested());
+
+        // Save state again (simulates runner save during operation)
+        sm.save(&state).unwrap();
+
+        // pause_requested should still be true
+        assert!(sm.is_pause_requested());
+    }
+
+    #[test]
+    fn test_save_metadata_preserves_run_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Save initial state
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+
+        // Set run mode to Step
+        sm.set_run_mode(RunMode::Step).unwrap();
+        assert_eq!(sm.get_run_mode(), RunMode::Step);
+
+        // Save state again
+        sm.save(&state).unwrap();
+
+        // run_mode should still be Step
+        assert_eq!(sm.get_run_mode(), RunMode::Step);
+    }
+
+    #[test]
+    fn test_pause_and_mode_independent() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+        sm.ensure_dirs().unwrap();
+
+        // Set both
+        sm.request_pause().unwrap();
+        sm.set_run_mode(RunMode::Step).unwrap();
+
+        assert!(sm.is_pause_requested());
+        assert_eq!(sm.get_run_mode(), RunMode::Step);
+
+        // Clear pause only
+        sm.clear_pause_request().unwrap();
+        assert!(!sm.is_pause_requested());
+        assert_eq!(sm.get_run_mode(), RunMode::Step);
+
+        // Set pause again, change mode
+        sm.request_pause().unwrap();
+        sm.set_run_mode(RunMode::Auto).unwrap();
+        assert!(sm.is_pause_requested());
+        assert_eq!(sm.get_run_mode(), RunMode::Auto);
+    }
+
+    #[test]
+    fn test_is_pause_requested_returns_false_for_missing_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Don't create any files - should return false, not error
+        assert!(!sm.is_pause_requested());
+    }
+
+    #[test]
+    fn test_get_run_mode_returns_auto_for_missing_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Don't create any files - should return Auto, not error
+        assert_eq!(sm.get_run_mode(), RunMode::Auto);
+    }
 }
