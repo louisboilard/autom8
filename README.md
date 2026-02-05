@@ -31,7 +31,7 @@ cargo install autom8
 cargo install --force --path .
 ```
 
-You'll need Rust 1.80+ (install via [rustup](https://rustup.rs/)) and the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated. For automatic PR creation, install the [GitHub CLI](https://cli.github.com/) and run `gh auth login`.
+You'll need Rust 1.88+ (install via [rustup](https://rustup.rs/)) and the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated. For automatic PR creation, install the [GitHub CLI](https://cli.github.com/) and run `gh auth login`.
 
 ## Quick Start
 
