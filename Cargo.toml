@@ -11,7 +11,7 @@ documentation = "https://docs.rs/autom8"
 readme = "README.md"
 keywords = ["cli", "automation", "claude", "ai", "development"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.80"
+rust-version = "1.85"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
