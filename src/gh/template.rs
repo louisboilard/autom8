@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::claude::extract_text_from_stream_line;
-use crate::claude::ClaudeErrorInfo;
+use crate::claude::{build_permission_args, ClaudeErrorInfo};
 use crate::error::{Autom8Error, Result};
 use crate::prompts::PR_TEMPLATE_PROMPT;
 use crate::spec::Spec;
@@ -185,14 +185,14 @@ where
         .replace("{template_content}", template_content)
         .replace("{gh_command}", &gh_command);
 
+    // Get project directory for permission configuration
+    let project_dir = std::env::current_dir()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to get current dir: {}", e)))?;
+    let permission_args = build_permission_args(&project_dir);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&permission_args)
+        .args(["--print", "--output-format", "stream-json", "--verbose"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

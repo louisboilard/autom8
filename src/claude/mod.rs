@@ -12,9 +12,11 @@
 //! - [`review`] - Code review and correction
 //! - [`commit`] - Commit message generation
 //! - [`pr_review`] - PR review analysis
+//! - [`permissions`] - Permission configuration for Claude CLI
 //! - [`utils`] - Utility functions
 
 mod commit;
+mod permissions;
 mod pr_review;
 mod review;
 mod runner;
@@ -25,6 +27,7 @@ mod utils;
 
 // Re-export all public types and functions
 pub use commit::{run_for_commit, CommitOutcome, CommitResult};
+pub use permissions::build_permission_args;
 pub use pr_review::{run_pr_review, PRReviewResult, PRReviewSummary};
 pub use review::{
     run_corrector, run_reviewer, CorrectorOutcome, CorrectorResult, ReviewOutcome, ReviewResult,

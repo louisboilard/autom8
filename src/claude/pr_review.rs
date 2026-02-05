@@ -9,6 +9,7 @@ use crate::error::{Autom8Error, Result};
 use crate::gh::{BranchContext, PRContext};
 use crate::prompts::PR_REVIEW_PROMPT;
 
+use super::permissions::build_permission_args;
 use super::stream::extract_text_from_stream_line;
 use super::types::ClaudeErrorInfo;
 
@@ -86,14 +87,14 @@ where
 {
     let prompt = build_pr_review_prompt(pr_context, branch_context);
 
+    // Get project directory for permission configuration
+    let project_dir = std::env::current_dir()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to get current dir: {}", e)))?;
+    let permission_args = build_permission_args(&project_dir);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&permission_args)
+        .args(["--print", "--output-format", "stream-json", "--verbose"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

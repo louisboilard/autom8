@@ -12,6 +12,7 @@ use crate::knowledge::ProjectKnowledge;
 use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
 
+use super::permissions::build_permission_args;
 use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
 use super::types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeStoryResult, ClaudeUsage};
 use super::utils::{build_knowledge_context, build_previous_context, extract_work_summary};
@@ -138,14 +139,14 @@ impl ClaudeRunner {
             previous_context.as_deref(),
         );
 
+        // Get project directory for permission configuration
+        let project_dir = std::env::current_dir()
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to get current dir: {}", e)))?;
+        let permission_args = build_permission_args(&project_dir);
+
         let mut child = Command::new("claude")
-            .args([
-                "--dangerously-skip-permissions",
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+            .args(&permission_args)
+            .args(["--print", "--output-format", "stream-json", "--verbose"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

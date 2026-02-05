@@ -10,6 +10,7 @@ use crate::error::{Autom8Error, Result};
 use crate::prompts::{CORRECTOR_PROMPT, REVIEWER_PROMPT};
 use crate::spec::Spec;
 
+use super::permissions::build_permission_args;
 use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
 use super::types::{ClaudeErrorInfo, ClaudeUsage};
 
@@ -56,14 +57,14 @@ where
 {
     let prompt = build_reviewer_prompt(spec, iteration, max_iterations);
 
+    // Get project directory for permission configuration
+    let project_dir = std::env::current_dir()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to get current dir: {}", e)))?;
+    let permission_args = build_permission_args(&project_dir);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&permission_args)
+        .args(["--print", "--output-format", "stream-json", "--verbose"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -147,14 +148,14 @@ where
     let max_iterations = 3;
     let prompt = build_corrector_prompt(spec, iteration, max_iterations);
 
+    // Get project directory for permission configuration
+    let project_dir = std::env::current_dir()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to get current dir: {}", e)))?;
+    let permission_args = build_permission_args(&project_dir);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&permission_args)
+        .args(["--print", "--output-format", "stream-json", "--verbose"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
