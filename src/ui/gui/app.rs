@@ -2978,7 +2978,13 @@ impl Autom8App {
         entry: &RunHistoryEntry,
         run_state: Option<crate::state::RunState>,
     ) {
-        let label = format!("Run - {}", entry.started_at.format("%Y-%m-%d %H:%M"));
+        let label = format!(
+            "Run - {}",
+            entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+        );
 
         // Cache the run state if provided
         if let Some(state) = run_state {
@@ -8091,7 +8097,11 @@ ui.label(
                 );
                 ui.label(
                     egui::RichText::new(
-                        run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        run_state
+                            .started_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string(),
                     )
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_PRIMARY),
@@ -9591,7 +9601,11 @@ ui.label(
         // Top row: Date/time and status
         child_ui.horizontal(|ui| {
             // Date/time (left)
-            let datetime_text = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
+            let datetime_text = entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string();
             ui.label(
                 egui::RichText::new(datetime_text)
                     .font(typography::font(FontSize::Body, FontWeight::Medium))
