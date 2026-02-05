@@ -44,6 +44,10 @@ pub struct SessionMetadata {
     /// Used for branch conflict detection - only running sessions "own" their branch.
     #[serde(default)]
     pub is_running: bool,
+    /// Path to the spec JSON file used for this session.
+    /// Enables the improve command to quickly load the spec without searching.
+    #[serde(default)]
+    pub spec_json_path: Option<PathBuf>,
 }
 
 /// Enriched session status for display purposes.
@@ -946,6 +950,7 @@ impl StateManager {
             created_at: state.started_at,
             last_active_at: state.finished_at.unwrap_or_else(Utc::now),
             is_running: state.status == RunStatus::Running,
+            spec_json_path: Some(state.spec_json_path.clone()),
         };
         let metadata_content = serde_json::to_string_pretty(&metadata)?;
         fs::write(main_session_dir.join(METADATA_FILE), metadata_content)?;
@@ -1044,6 +1049,7 @@ impl StateManager {
                 created_at: existing.created_at,
                 last_active_at: Utc::now(),
                 is_running,
+                spec_json_path: Some(state.spec_json_path.clone()),
             }
         } else {
             SessionMetadata {
@@ -1053,6 +1059,7 @@ impl StateManager {
                 created_at: state.started_at,
                 last_active_at: Utc::now(),
                 is_running,
+                spec_json_path: Some(state.spec_json_path.clone()),
             }
         };
 
@@ -1265,6 +1272,36 @@ impl StateManager {
         });
 
         Ok(statuses)
+    }
+
+    /// Find the most recent session that worked on the specified branch.
+    ///
+    /// Searches all sessions in the project and returns the one with the most
+    /// recent `last_active_at` timestamp that matches the branch name. This is
+    /// used by the `improve` command to load accumulated knowledge from previous
+    /// runs on the same branch.
+    ///
+    /// Both worktree sessions and main repo sessions are searched.
+    ///
+    /// # Arguments
+    /// * `branch` - The branch name to search for
+    ///
+    /// # Returns
+    /// * `Ok(Some(metadata))` - Found a session that worked on this branch
+    /// * `Ok(None)` - No session found for this branch (graceful degradation)
+    /// * `Err` - Error reading session data
+    pub fn find_session_for_branch(&self, branch: &str) -> Result<Option<SessionMetadata>> {
+        let sessions = self.list_sessions()?;
+
+        // list_sessions() already returns sessions sorted by last_active_at descending,
+        // so the first match is the most recent
+        for session in sessions {
+            if session.branch_name == branch {
+                return Ok(Some(session));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Check for branch conflicts with other active sessions.
@@ -2080,5 +2117,244 @@ mod tests {
         // Model should be preserved from first call (add() preserves existing model)
         let planning = state.phase_usage.get("Planning").unwrap();
         assert_eq!(planning.model, Some("claude-sonnet-4".to_string()));
+    }
+
+    // ======================================================================
+    // Tests for find_session_for_branch (US-002)
+    // ======================================================================
+
+    #[test]
+    fn test_find_session_for_branch_returns_none_when_no_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let result = sm.find_session_for_branch("feature/test").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_session_for_branch_returns_none_when_no_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-1".to_string(),
+        );
+
+        // Create a session with a different branch
+        let state = RunState::new(PathBuf::from("test.json"), "feature/other".to_string());
+        sm.save(&state).unwrap();
+
+        let result = sm.find_session_for_branch("feature/test").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_session_for_branch_returns_matching_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-1".to_string(),
+        );
+
+        let state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        sm.save(&state).unwrap();
+
+        let result = sm.find_session_for_branch("feature/test").unwrap();
+        assert!(result.is_some());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.branch_name, "feature/test");
+        assert_eq!(metadata.session_id, "session-1");
+    }
+
+    #[test]
+    fn test_find_session_for_branch_returns_most_recent() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two sessions with the same branch, different times
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-old".to_string(),
+        );
+        let state1 = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        sm1.save(&state1).unwrap();
+
+        // Sleep briefly to ensure different timestamps
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-new".to_string(),
+        );
+        let state2 = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        sm2.save(&state2).unwrap();
+
+        // Query should return the most recent session
+        let result = sm1.find_session_for_branch("feature/test").unwrap();
+        assert!(result.is_some());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.session_id, "session-new");
+    }
+
+    #[test]
+    fn test_find_session_for_branch_searches_all_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create sessions with different branches
+        let sm1 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-a".to_string(),
+        );
+        sm1.save(&RunState::new(
+            PathBuf::from("a.json"),
+            "feature/a".to_string(),
+        ))
+        .unwrap();
+
+        let sm2 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-b".to_string(),
+        );
+        sm2.save(&RunState::new(
+            PathBuf::from("b.json"),
+            "feature/b".to_string(),
+        ))
+        .unwrap();
+
+        let sm3 = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            MAIN_SESSION_ID.to_string(),
+        );
+        sm3.save(&RunState::new(
+            PathBuf::from("main.json"),
+            "feature/main".to_string(),
+        ))
+        .unwrap();
+
+        // Query from any session manager should find the right branch
+        let result_a = sm3.find_session_for_branch("feature/a").unwrap();
+        assert!(result_a.is_some());
+        assert_eq!(result_a.unwrap().session_id, "session-a");
+
+        let result_b = sm1.find_session_for_branch("feature/b").unwrap();
+        assert!(result_b.is_some());
+        assert_eq!(result_b.unwrap().session_id, "session-b");
+
+        let result_main = sm2.find_session_for_branch("feature/main").unwrap();
+        assert!(result_main.is_some());
+        assert_eq!(result_main.unwrap().session_id, MAIN_SESSION_ID);
+    }
+
+    // ======================================================================
+    // Tests for spec_json_path in SessionMetadata (US-003)
+    // ======================================================================
+
+    #[test]
+    fn test_session_metadata_spec_json_path_defaults_to_none() {
+        // Simulate a legacy metadata JSON without spec_json_path field
+        let legacy_json = r#"{
+            "sessionId": "test-session",
+            "worktreePath": "/path/to/worktree",
+            "branchName": "feature/test",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "lastActiveAt": "2024-01-01T01:00:00Z",
+            "isRunning": false
+        }"#;
+
+        let metadata: SessionMetadata = serde_json::from_str(legacy_json).unwrap();
+        assert!(metadata.spec_json_path.is_none());
+        assert_eq!(metadata.session_id, "test-session");
+        assert_eq!(metadata.branch_name, "feature/test");
+    }
+
+    #[test]
+    fn test_session_metadata_spec_json_path_serialization_roundtrip() {
+        let metadata = SessionMetadata {
+            session_id: "test-session".to_string(),
+            worktree_path: PathBuf::from("/path/to/worktree"),
+            branch_name: "feature/test".to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+            is_running: false,
+            spec_json_path: Some(PathBuf::from("/path/to/spec.json")),
+        };
+
+        // Serialize
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("\"specJsonPath\""));
+        assert!(json.contains("/path/to/spec.json"));
+
+        // Deserialize
+        let deserialized: SessionMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.spec_json_path,
+            Some(PathBuf::from("/path/to/spec.json"))
+        );
+    }
+
+    #[test]
+    fn test_save_metadata_populates_spec_json_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        let state = RunState::new(
+            PathBuf::from("/config/spec/spec-feature.json"),
+            "feature/test".to_string(),
+        );
+        sm.save(&state).unwrap();
+
+        let metadata = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(
+            metadata.spec_json_path,
+            Some(PathBuf::from("/config/spec/spec-feature.json"))
+        );
+    }
+
+    #[test]
+    fn test_save_metadata_updates_spec_json_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // First save with one spec
+        let state1 = RunState::new(PathBuf::from("spec-v1.json"), "feature/test".to_string());
+        sm.save(&state1).unwrap();
+
+        let metadata1 = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(
+            metadata1.spec_json_path,
+            Some(PathBuf::from("spec-v1.json"))
+        );
+
+        // Second save with different spec
+        let state2 = RunState::new(PathBuf::from("spec-v2.json"), "feature/test".to_string());
+        sm.save(&state2).unwrap();
+
+        let metadata2 = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(
+            metadata2.spec_json_path,
+            Some(PathBuf::from("spec-v2.json"))
+        );
+    }
+
+    #[test]
+    fn test_find_session_for_branch_returns_spec_json_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir_and_session(
+            temp_dir.path().to_path_buf(),
+            "session-1".to_string(),
+        );
+
+        let state = RunState::new(
+            PathBuf::from("spec-feature.json"),
+            "feature/test".to_string(),
+        );
+        sm.save(&state).unwrap();
+
+        let result = sm.find_session_for_branch("feature/test").unwrap();
+        assert!(result.is_some());
+        let metadata = result.unwrap();
+        assert_eq!(
+            metadata.spec_json_path,
+            Some(PathBuf::from("spec-feature.json"))
+        );
     }
 }

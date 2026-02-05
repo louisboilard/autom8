@@ -306,6 +306,12 @@ fn build_cli() -> Command {
                         .default_value("1"),
                 ),
         )
+        .subcommand(Command::new("gui").about("Launch the native GUI to monitor autom8 activity"))
+        .subcommand(
+            Command::new("improve").about(
+                "Continue iterating on a feature with Claude using context from previous runs",
+            ),
+        )
         .subcommand(
             Command::new("config")
                 .about("View, modify, or reset configuration")

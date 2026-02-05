@@ -5,9 +5,9 @@
 use autom8::commands::{
     all_sessions_status_command, clean_command, config_display_command, config_reset_command,
     config_set_command, default_command, describe_command, global_status_command, gui_command,
-    init_command, list_command, monitor_command, pr_review_command, projects_command,
-    resume_command, run_command, run_with_file, status_command, CleanOptions, ConfigScope,
-    ConfigSubcommand,
+    improve_command, init_command, list_command, monitor_command, pr_review_command,
+    projects_command, resume_command, run_command, run_with_file, status_command, CleanOptions,
+    ConfigScope, ConfigSubcommand,
 };
 use autom8::completion::{print_completion_script, ShellType, SUPPORTED_SHELLS};
 use autom8::output::{print_error, print_header};
@@ -253,6 +253,23 @@ Run 'autom8 config <subcommand> --help' for more details on each subcommand.")]
     /// Launch the native GUI to monitor autom8 activity
     Gui,
 
+    /// Continue iterating on a feature with Claude using context from previous runs
+    #[command(after_help = "EXAMPLES:
+    autom8 improve                  # Gather context and spawn Claude session
+    autom8 improve -v               # Same, with verbose output (future use)
+
+BEHAVIOR:
+    The improve command auto-detects everything from the current git branch:
+    1. Gathers git context (branch, commits, file changes)
+    2. Loads spec if found (from session or by branch name)
+    3. Extracts session knowledge (decisions, patterns, files, work summaries)
+    4. Displays a brief summary of loaded context
+    5. Spawns an interactive Claude session with the context
+
+    Context is gathered additively - git context is always available,
+    spec and session knowledge are included when a matching session exists.")]
+    Improve,
+
     /// Output shell completion script to stdout (hidden utility command)
     #[command(hide = true)]
     Completions {
@@ -408,6 +425,8 @@ fn main() {
 
                 (None, Some(Commands::Gui)) => gui_command(),
 
+                (None, Some(Commands::Improve)) => improve_command(cli.verbose),
+
                 // Completions already handled above
                 (None, Some(Commands::Completions { .. })) => unreachable!(),
 
@@ -467,6 +486,7 @@ mod tests {
             ("config", true),
             ("monitor", true),
             ("gui", true),
+            ("improve", true),
             ("pr-review", true),
             ("completions bash", true),
         ];
