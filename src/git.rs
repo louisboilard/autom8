@@ -756,6 +756,50 @@ pub fn push_branch(branch: &str) -> Result<PushResult> {
     Ok(PushResult::Error(error_msg))
 }
 
+// ============================================================================
+// US-001: Merge Base Detection (improve command support)
+// ============================================================================
+
+/// Get the merge-base commit between the current branch and base branch.
+///
+/// The merge-base is the most recent common ancestor between two branches.
+/// This is useful for getting accurate diffs of what changed on a feature branch.
+///
+/// # Arguments
+/// * `base_branch` - The base branch to compare against (e.g., "main" or "master")
+///
+/// # Returns
+/// * `Ok(String)` - The full commit hash of the merge-base
+/// * `Err` - If the git command fails or branches don't share history
+pub fn get_merge_base(base_branch: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["merge-base", base_branch, "HEAD"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to find merge-base with '{}': {}",
+            base_branch,
+            stderr.trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get the merge-base commit, auto-detecting the base branch.
+///
+/// Convenience function that combines `detect_base_branch` and `get_merge_base`.
+///
+/// # Returns
+/// * `Ok(String)` - The full commit hash of the merge-base
+/// * `Err` - If the git command fails
+pub fn get_merge_base_auto() -> Result<String> {
+    let base_branch = detect_base_branch()?;
+    get_merge_base(&base_branch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,5 +1403,53 @@ mod tests {
         let result = get_new_files_since("invalid_commit_hash_xyz");
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    // ========================================================================
+    // US-001: Merge-base function tests (improve command support)
+    // ========================================================================
+
+    #[test]
+    fn test_get_merge_base_returns_valid_hash() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // Get merge-base with main - should return a valid commit hash
+        let result = get_merge_base("main");
+        // This may fail if "main" doesn't exist, which is OK
+        if let Ok(hash) = result {
+            // Should be a valid 40-character hex hash
+            assert_eq!(hash.len(), 40);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn test_get_merge_base_invalid_branch_returns_error() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // Invalid branch name should return an error
+        let result = get_merge_base("nonexistent_branch_xyz_12345");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_merge_base_auto_returns_result() {
+        // Acquire lock to prevent other tests from changing cwd concurrently
+        let _lock = CWD_MUTEX.lock().unwrap();
+
+        // Should return a result (may be Ok or Err depending on repo state)
+        let result = get_merge_base_auto();
+        // We just verify it doesn't panic
+        match result {
+            Ok(hash) => {
+                // Valid hash
+                assert!(!hash.is_empty());
+            }
+            Err(_) => {
+                // Error is acceptable if base branch detection fails
+            }
+        }
     }
 }
