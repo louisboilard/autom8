@@ -581,6 +581,19 @@ const SPEC_SUBDIR: &str = "spec";
 const RUNS_SUBDIR: &str = "runs";
 const SESSIONS_SUBDIR: &str = "sessions";
 
+/// Filename for project metadata
+const PROJECT_METADATA_FILENAME: &str = "project.json";
+
+/// Project metadata stored in `~/.config/autom8/<project>/project.json`.
+///
+/// Contains persistent information about the project that doesn't change
+/// between runs, such as the path to the git repository.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMetadata {
+    /// The absolute path to the git repository root.
+    pub repo_path: PathBuf,
+}
+
 /// Get the autom8 config directory path (~/.config/autom8/).
 ///
 /// Returns the path to the config directory. Does not create the directory.
@@ -645,6 +658,7 @@ pub fn project_config_dir_for(project_name: &str) -> Result<PathBuf> {
 /// - `~/.config/autom8/<project-name>/`
 /// - `~/.config/autom8/<project-name>/spec/`
 /// - `~/.config/autom8/<project-name>/runs/`
+/// - `~/.config/autom8/<project-name>/project.json` (with repo path)
 ///
 /// Returns the project config directory path and whether it was newly created.
 pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
@@ -655,7 +669,39 @@ pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir.join(SPEC_SUBDIR))?;
     fs::create_dir_all(dir.join(RUNS_SUBDIR))?;
 
+    // Save project metadata with repo path (only if it doesn't exist yet)
+    let metadata_path = dir.join(PROJECT_METADATA_FILENAME);
+    if !metadata_path.exists() {
+        if let Ok(repo_path) = crate::worktree::get_main_repo_root() {
+            let metadata = ProjectMetadata { repo_path };
+            if let Ok(content) = serde_json::to_string_pretty(&metadata) {
+                let _ = fs::write(&metadata_path, content);
+            }
+        }
+    }
+
     Ok((dir, created))
+}
+
+/// Get the repository path for a project by name.
+///
+/// Reads the `project.json` file from the project's config directory
+/// and returns the stored `repo_path`.
+///
+/// Returns `None` if the project doesn't exist or has no metadata.
+pub fn get_project_repo_path(project_name: &str) -> Option<PathBuf> {
+    let project_dir = project_config_dir_for(project_name).ok()?;
+    let metadata_path = project_dir.join(PROJECT_METADATA_FILENAME);
+
+    let content = fs::read_to_string(&metadata_path).ok()?;
+    let metadata: ProjectMetadata = serde_json::from_str(&content).ok()?;
+
+    // Only return if the path still exists
+    if metadata.repo_path.exists() {
+        Some(metadata.repo_path)
+    } else {
+        None
+    }
 }
 
 /// Get the spec subdirectory path for the current project.
