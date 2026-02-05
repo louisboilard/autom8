@@ -324,6 +324,7 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running,
+                spec_json_path: None,
             },
             machine_state,
             current_story: None,
