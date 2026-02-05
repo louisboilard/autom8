@@ -19,7 +19,8 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
+    load_project_run_history, load_session_by_id, load_ui_data, ProjectData, RunHistoryEntry,
+    SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
@@ -104,15 +105,6 @@ const SPLIT_DIVIDER_MARGIN: f32 = 12.0; // spacing::MD
 
 /// Minimum width for either panel in the split view.
 const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
-
-/// Breakpoint width below which the expanded session view switches from
-/// side-by-side panels to vertically stacked panels. This ensures content
-/// remains readable at narrow window widths.
-const RESPONSIVE_STACK_BREAKPOINT: f32 = 800.0;
-
-/// Minimum width for each panel in the expanded session view when
-/// in side-by-side layout. Prevents content from becoming unreadable.
-const EXPANDED_PANEL_MIN_WIDTH: f32 = 300.0;
 
 // ============================================================================
 // Sidebar Constants (Sidebar Navigation - US-003)
@@ -1891,6 +1883,8 @@ struct StoryItem {
     title: String,
     /// Current status of the story.
     status: StoryStatus,
+    /// Work summary for completed stories (from most recent successful iteration).
+    work_summary: Option<String>,
 }
 
 /// Load story items from a session's cached user stories and run state.
@@ -1898,6 +1892,8 @@ struct StoryItem {
 /// Returns a list of story items ordered by status: Active first, then Completed,
 /// then Failed, then Pending. The current story is marked as Active, completed
 /// stories are marked based on the spec's `passes` field, and the rest are Pending.
+///
+/// Work summaries from successful iterations are attached to completed stories.
 ///
 /// This function uses cached user stories from `SessionData` to avoid file I/O
 /// on every render frame. The cache is populated during `load_ui_data()`.
@@ -1921,6 +1917,18 @@ fn load_story_items(session: &SessionData) -> Vec<StoryItem> {
         .map(|iter| iter.story_id.as_str())
         .collect();
 
+    // Build map of story_id -> work_summary from successful iterations
+    // Use the most recent (highest iteration number) work summary for each story
+    let mut work_summaries: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
+    for iter in &run.iterations {
+        if iter.status == IterationStatus::Success {
+            if let Some(ref summary) = iter.work_summary {
+                work_summaries.insert(&iter.story_id, summary);
+            }
+        }
+    }
+
     // Build story items from cached user stories
     let mut items: Vec<StoryItem> = user_stories
         .iter()
@@ -1935,10 +1943,18 @@ fn load_story_items(session: &SessionData) -> Vec<StoryItem> {
                 StoryStatus::Pending
             };
 
+            // Attach work summary for completed stories
+            let work_summary = if status == StoryStatus::Completed {
+                work_summaries.get(story.id.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            };
+
             StoryItem {
                 id: story.id.clone(),
                 title: story.title.clone(),
                 status,
+                work_summary,
             }
         })
         .collect();
@@ -1955,45 +1971,6 @@ fn load_story_items(session: &SessionData) -> Vec<StoryItem> {
         };
         order(a).cmp(&order(b))
     });
-
-    items
-}
-
-/// A work summary item for display in the work summaries section.
-#[derive(Debug, Clone)]
-struct WorkSummaryItem {
-    /// Iteration number (1-based).
-    iteration: u32,
-    /// Story ID this iteration worked on.
-    story_id: String,
-    /// The work summary text.
-    summary: String,
-}
-
-/// Load work summary items from a session's run state.
-///
-/// Returns a list of work summary items ordered by most recent first.
-/// Only includes iterations that have a work_summary.
-fn load_work_summaries(session: &SessionData) -> Vec<WorkSummaryItem> {
-    let Some(ref run) = session.run else {
-        return Vec::new();
-    };
-
-    // Filter to iterations with work summaries and map to WorkSummaryItem
-    let mut items: Vec<WorkSummaryItem> = run
-        .iterations
-        .iter()
-        .filter_map(|iter| {
-            iter.work_summary.as_ref().map(|summary| WorkSummaryItem {
-                iteration: iter.number,
-                story_id: iter.story_id.clone(),
-                summary: summary.clone(),
-            })
-        })
-        .collect();
-
-    // Sort by iteration number descending (most recent first)
-    items.sort_by(|a, b| b.iteration.cmp(&a.iteration));
 
     items
 }
@@ -3319,12 +3296,35 @@ impl Autom8App {
         self.sessions = ui_data.sessions;
         self.has_active_runs = ui_data.has_active_runs;
 
+        // Build set of currently running session IDs
+        let current_ids: std::collections::HashSet<&str> = self
+            .sessions
+            .iter()
+            .map(|s| s.metadata.session_id.as_str())
+            .collect();
+
         // Cache all running sessions we see (so tabs persist after completion)
         for session in &self.sessions {
             let session_id = &session.metadata.session_id;
             if !self.closed_session_tabs.contains(session_id) {
                 self.seen_sessions
                     .insert(session_id.clone(), session.clone());
+            }
+        }
+
+        // Reload sessions that are no longer running (to get final state)
+        // These are sessions in seen_sessions that are not in current running sessions
+        let to_reload: Vec<(String, String)> = self
+            .seen_sessions
+            .iter()
+            .filter(|(id, _)| !current_ids.contains(id.as_str()))
+            .filter(|(id, _)| !self.closed_session_tabs.contains(*id))
+            .map(|(id, s)| (s.project_name.clone(), id.clone()))
+            .collect();
+
+        for (project_name, session_id) in to_reload {
+            if let Some(updated) = load_session_by_id(&project_name, &session_id) {
+                self.seen_sessions.insert(session_id, updated);
             }
         }
     }
@@ -6973,8 +6973,10 @@ impl Autom8App {
     ///
     /// This view takes most of the available space and shows:
     /// - Session metadata (project, branch, state, progress) at top
-    /// - Large output section filling remaining space
+    /// - Output section with scrolling content
+    /// - Stories section below (with integrated work summaries)
     ///
+    /// Uses a single outer scroll area so the whole view is scrollable.
     /// Styled to match RunDetail view with Title-sized header and consistent padding.
     fn render_expanded_session_view(&mut self, ui: &mut egui::Ui, session: &SessionData) {
         let available_width = ui.available_width();
@@ -6983,29 +6985,13 @@ impl Autom8App {
         // Use the full available area with padding matching RunDetail style
         let content_padding = spacing::LG;
         let content_width = available_width - content_padding * 2.0;
+        let section_gap = spacing::LG;
 
-        // Determine if we should use stacked (vertical) or side-by-side (horizontal) layout
-        // Stack vertically when content area is too narrow for two readable panels
-        let panel_gap = spacing::LG; // Gap between panels
-        let use_stacked_layout = content_width < RESPONSIVE_STACK_BREAKPOINT;
-
-        // Calculate panel widths based on layout mode
-        // Output panel gets 70% of width (primary focus), details panel gets 30%
-        let (output_panel_width, details_panel_width) = if use_stacked_layout {
-            // In stacked mode, each panel gets the full content width
-            (content_width, content_width)
-        } else {
-            // In side-by-side mode, split 70/30 with gap, ensuring minimum widths
-            let usable_width = content_width - panel_gap;
-            let output_width = (usable_width * 0.7).max(EXPANDED_PANEL_MIN_WIDTH);
-            let details_width = (usable_width * 0.3).max(EXPANDED_PANEL_MIN_WIDTH);
-            (output_width, details_width)
-        };
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(available_width, available_height),
-            egui::Layout::top_down(egui::Align::LEFT),
-            |ui| {
+        // Single outer scroll area for the whole view
+        egui::ScrollArea::vertical()
+            .id_salt(format!("expanded_view_{}", session.metadata.session_id))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
                 ui.add_space(content_padding);
 
                 ui.horizontal(|ui| {
@@ -7147,9 +7133,11 @@ impl Autom8App {
                                 );
                             }
 
-                            // Infinity animation for non-idle states with progress
-                            // Constrain to left panel width (output_panel_width) in side-by-side layout
-                            if state != MachineState::Idle && session.progress.is_some() {
+                            // Infinity animation for non-idle, non-terminal states with progress
+                            if state != MachineState::Idle
+                                && !is_terminal_state(state)
+                                && session.progress.is_some()
+                            {
                                 ui.add_space(spacing::MD);
 
                                 // Calculate the space used so far in this horizontal row
@@ -7157,11 +7145,9 @@ impl Autom8App {
                                 let current_x = ui.cursor().left();
                                 let used_width = current_x - row_start_x;
 
-                                // The animation should fill up to the left panel width, minus what's used
-                                // In stacked layout, output_panel_width == content_width (full width)
-                                // In side-by-side layout, output_panel_width == 70% of usable width
+                                // Animation fills remaining width
                                 let max_animation_width =
-                                    (output_panel_width - used_width - spacing::MD).max(0.0);
+                                    (content_width - used_width - spacing::MD).max(0.0);
 
                                 if max_animation_width > 30.0 {
                                     let animation_height = 12.0;
@@ -7184,187 +7170,55 @@ impl Autom8App {
 
                         ui.add_space(spacing::LG);
 
-                        // === RESPONSIVE SPLIT PANEL LAYOUT ===
-                        // Calculate available space for panels
-                        let available_panel_height = ui.available_height() - content_padding;
+                        // === OUTPUT SECTION ===
+                        // Section header
+                        ui.label(
+                            egui::RichText::new("Output")
+                                .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                .color(colors::TEXT_SECONDARY),
+                        );
 
-                        // In stacked mode, use a scrollable vertical layout with fixed-height sections
-                        // In side-by-side mode, use horizontal layout with panels filling available height
-                        if use_stacked_layout {
-                            // === STACKED LAYOUT (Vertical) ===
-                            // Each section scrolls independently - no outer scroll wrapper
+                        ui.add_space(spacing::SM);
 
-                            // Calculate responsive heights for stacked layout
-                            // Output takes ~50% of available height, remaining split 70/30
-                            let panel_height = available_panel_height;
-                            let section_gap = spacing::MD;
-                            let header_height =
-                                typography::line_height(FontSize::Body) + spacing::SM;
+                        // Output content with fixed height and internal scrolling
+                        let output_height = (available_height * 0.4).max(200.0);
+                        egui::Frame::none()
+                            .fill(colors::SURFACE_HOVER)
+                            .rounding(rounding::CARD)
+                            .inner_margin(egui::Margin::same(spacing::MD))
+                            .show(ui, |ui| {
+                                ui.set_min_height(output_height);
+                                ui.set_max_height(output_height);
+                                ui.set_width(content_width - spacing::MD * 2.0);
 
-                            // Three sections with headers plus two gaps between them
-                            let total_overhead = header_height * 3.0 + section_gap * 2.0;
-                            let available_for_content = panel_height - total_overhead;
-
-                            // Output gets ~50%, remaining 50% split 70/30 for Stories/Summaries
-                            let output_portion = available_for_content * 0.5;
-                            let remaining_portion = available_for_content * 0.5;
-
-                            let stacked_output_height = output_portion.max(250.0);
-                            let stacked_stories_height = (remaining_portion * 0.7).max(150.0);
-                            let stacked_summaries_height = (remaining_portion * 0.3).max(100.0);
-
-                            // === OUTPUT PANEL (Stacked) ===
-                            ui.vertical(|ui| {
-                                ui.set_width(output_panel_width);
-
-                                // Section header
-                                ui.label(
-                                    egui::RichText::new("Output")
-                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                        .color(colors::TEXT_SECONDARY),
-                                );
-
-                                ui.add_space(spacing::SM);
-
-                                egui::Frame::none()
-                                    .fill(colors::SURFACE_HOVER)
-                                    .rounding(rounding::CARD)
-                                    .inner_margin(egui::Margin::same(spacing::MD))
+                                egui::ScrollArea::vertical()
+                                    .id_salt(format!("output_{}", session.metadata.session_id))
+                                    .auto_shrink([false, false])
+                                    .stick_to_bottom(true)
                                     .show(ui, |ui| {
-                                        ui.set_min_height(stacked_output_height);
-                                        ui.set_max_height(stacked_output_height);
-                                        ui.set_width(output_panel_width - spacing::MD * 2.0);
-
-                                        egui::ScrollArea::vertical()
-                                            .id_salt(format!(
-                                                "stacked_output_{}",
-                                                session.metadata.session_id
-                                            ))
-                                            .auto_shrink([false, false])
-                                            .stick_to_bottom(true)
-                                            .show(ui, |ui| {
-                                                let output_source = get_output_for_session(session);
-                                                Self::render_output_content(ui, &output_source);
-                                            });
+                                        let output_source = get_output_for_session(session);
+                                        Self::render_output_content(ui, &output_source);
                                     });
                             });
 
-                            // Gap between stacked panels
-                            ui.add_space(panel_gap);
+                        // Gap between sections
+                        ui.add_space(section_gap);
 
-                            // === DETAIL SECTIONS (Stacked) ===
-                            ui.vertical(|ui| {
-                                ui.set_width(details_panel_width);
+                        // === STORIES SECTION ===
+                        let story_items = load_story_items(session);
+                        Self::render_stories_section(
+                            ui,
+                            &session.metadata.session_id,
+                            &story_items,
+                            content_width,
+                            &mut self.section_collapsed_state,
+                        );
 
-                                // Load data once for display
-                                let story_items = load_story_items(session);
-                                let work_summaries = load_work_summaries(session);
-
-                                // Render detail sections (Stories + Work Summaries)
-                                Self::render_detail_sections(
-                                    ui,
-                                    &session.metadata.session_id,
-                                    &story_items,
-                                    &work_summaries,
-                                    details_panel_width,
-                                    stacked_stories_height,
-                                    stacked_summaries_height,
-                                    &mut self.section_collapsed_state,
-                                );
-                            });
-                        } else {
-                            // === SIDE-BY-SIDE LAYOUT (Horizontal) ===
-                            let panel_height = available_panel_height;
-
-                            ui.horizontal(|ui| {
-                                // === LEFT PANEL: Output ===
-                                ui.vertical(|ui| {
-                                    ui.set_width(output_panel_width);
-
-                                    // Section header
-                                    ui.label(
-                                        egui::RichText::new("Output")
-                                            .font(typography::font(
-                                                FontSize::Body,
-                                                FontWeight::Medium,
-                                            ))
-                                            .color(colors::TEXT_SECONDARY),
-                                    );
-
-                                    ui.add_space(spacing::SM);
-
-                                    // Output card - fills remaining panel height
-                                    let output_card_height = panel_height
-                                        - typography::line_height(FontSize::Body)
-                                        - spacing::SM;
-
-                                    egui::Frame::none()
-                                        .fill(colors::SURFACE_HOVER)
-                                        .rounding(rounding::CARD)
-                                        .inner_margin(egui::Margin::same(spacing::MD))
-                                        .show(ui, |ui| {
-                                            // Fill available height with minimum 200px for usability
-                                            ui.set_min_height(output_card_height.max(200.0));
-                                            ui.set_width(output_panel_width - spacing::MD * 2.0);
-
-                                            egui::ScrollArea::vertical()
-                                                .id_salt(format!(
-                                                    "sidebyside_output_{}",
-                                                    session.metadata.session_id
-                                                ))
-                                                .auto_shrink([false, false])
-                                                .stick_to_bottom(true)
-                                                .show(ui, |ui| {
-                                                    let output_source =
-                                                        get_output_for_session(session);
-                                                    Self::render_output_content(ui, &output_source);
-                                                });
-                                        });
-                                });
-
-                                // Gap between panels
-                                ui.add_space(panel_gap);
-
-                                // === RIGHT PANEL: Detail sections ===
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(details_panel_width, panel_height),
-                                    egui::Layout::top_down(egui::Align::LEFT),
-                                    |ui| {
-                                        ui.set_width(details_panel_width);
-
-                                        // Load data once for display
-                                        let story_items = load_story_items(session);
-                                        let work_summaries = load_work_summaries(session);
-
-                                        // Calculate section heights (70%/30% split)
-                                        let section_gap = spacing::MD;
-                                        let header_height =
-                                            typography::line_height(FontSize::Body) + spacing::SM;
-                                        let total_overhead = header_height * 2.0 + section_gap;
-                                        let available_for_sections = panel_height - total_overhead;
-                                        let stories_height =
-                                            (available_for_sections * 0.7).max(150.0);
-                                        let summaries_height =
-                                            (available_for_sections * 0.3).max(100.0);
-
-                                        Self::render_detail_sections(
-                                            ui,
-                                            &session.metadata.session_id,
-                                            &story_items,
-                                            &work_summaries,
-                                            details_panel_width,
-                                            stories_height,
-                                            summaries_height,
-                                            &mut self.section_collapsed_state,
-                                        );
-                                    },
-                                );
-                            });
-                        } // End of else block (side-by-side layout)
+                        // Bottom padding
+                        ui.add_space(content_padding);
                     });
                 });
-            },
-        );
+            });
     }
 
     /// Render story items content (extracted for reuse in both layouts).
@@ -7429,54 +7283,16 @@ impl Autom8App {
                                 .font(typography::font(FontSize::Small, title_weight))
                                 .color(title_color),
                         );
-                    });
-            }
-        }
-    }
 
-    /// Render work summaries content (extracted for reuse in both layouts).
-    fn render_work_summaries_content(ui: &mut egui::Ui, work_summaries: &[WorkSummaryItem]) {
-        if work_summaries.is_empty() {
-            ui.label(
-                egui::RichText::new("No summaries yet")
-                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                    .color(colors::TEXT_DISABLED),
-            );
-        } else {
-            for (index, summary_item) in work_summaries.iter().enumerate() {
-                if index > 0 {
-                    ui.add_space(spacing::SM);
-                }
-
-                egui::Frame::none()
-                    .fill(colors::SURFACE)
-                    .rounding(rounding::SMALL)
-                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        // Show work summary for completed stories
+                        if let Some(ref summary) = story.work_summary {
+                            ui.add_space(spacing::XS);
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Iteration {}",
-                                    summary_item.iteration
-                                ))
-                                .font(typography::font(FontSize::Small, FontWeight::SemiBold))
-                                .color(colors::TEXT_PRIMARY),
-                            );
-
-                            ui.add_space(spacing::SM);
-
-                            ui.label(
-                                egui::RichText::new(&summary_item.story_id)
+                                egui::RichText::new(summary)
                                     .font(typography::font(FontSize::Small, FontWeight::Regular))
                                     .color(colors::TEXT_MUTED),
                             );
-                        });
-
-                        ui.label(
-                            egui::RichText::new(&summary_item.summary)
-                                .font(typography::font(FontSize::Small, FontWeight::Regular))
-                                .color(colors::TEXT_SECONDARY),
-                        );
+                        }
                     });
             }
         }
@@ -7511,24 +7327,16 @@ impl Autom8App {
         }
     }
 
-    /// Render detail sections (Stories + Work Summaries) with collapsible headers.
-    /// Used by both stacked and side-by-side layouts.
-    #[allow(clippy::too_many_arguments)]
-    fn render_detail_sections(
+    /// Render detail sections (Stories with integrated work summaries) with collapsible headers.
+    fn render_stories_section(
         ui: &mut egui::Ui,
         session_id: &str,
         story_items: &[StoryItem],
-        work_summaries: &[WorkSummaryItem],
         panel_width: f32,
-        stories_height: f32,
-        summaries_height: f32,
         collapsed_state: &mut std::collections::HashMap<String, bool>,
     ) {
-        let section_gap = spacing::MD;
-
-        // Use session-specific IDs to avoid shared state across sessions
+        // Use session-specific ID to avoid shared state across sessions
         let stories_id = format!("{}_stories", session_id);
-        let summaries_id = format!("{}_summaries", session_id);
 
         // === Stories Section ===
         CollapsibleSection::new(&stories_id, "Stories")
@@ -7539,40 +7347,8 @@ impl Autom8App {
                     .rounding(rounding::CARD)
                     .inner_margin(egui::Margin::same(spacing::MD))
                     .show(ui, |ui| {
-                        ui.set_min_height(stories_height);
-                        ui.set_max_height(stories_height);
                         ui.set_width(panel_width - spacing::MD * 2.0);
-
-                        egui::ScrollArea::vertical()
-                            .id_salt(format!("stories_{}", session_id))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                Self::render_story_items_content(ui, story_items);
-                            });
-                    });
-            });
-
-        ui.add_space(section_gap);
-
-        // === Work Summaries Section ===
-        CollapsibleSection::new(&summaries_id, "Work Summaries")
-            .default_expanded(true)
-            .show(ui, collapsed_state, |ui| {
-                egui::Frame::none()
-                    .fill(colors::SURFACE_HOVER)
-                    .rounding(rounding::CARD)
-                    .inner_margin(egui::Margin::same(spacing::MD))
-                    .show(ui, |ui| {
-                        ui.set_min_height(summaries_height);
-                        ui.set_max_height(summaries_height);
-                        ui.set_width(panel_width - spacing::MD * 2.0);
-
-                        egui::ScrollArea::vertical()
-                            .id_salt(format!("summaries_{}", session_id))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                Self::render_work_summaries_content(ui, work_summaries);
-                            });
+                        Self::render_story_items_content(ui, story_items);
                     });
             });
     }

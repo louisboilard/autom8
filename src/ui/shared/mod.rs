@@ -720,6 +720,84 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
     sessions
 }
 
+/// Load a single session by project name and session ID.
+///
+/// Unlike `load_sessions`, this does NOT filter by `is_running`, so it can
+/// retrieve sessions that have completed (where `is_running` became false).
+/// This is useful for updating the GUI's `seen_sessions` cache when a run
+/// completes and disappears from the running sessions list.
+///
+/// # Arguments
+/// * `project_name` - The project to look in
+/// * `session_id` - The session ID to load
+///
+/// # Returns
+/// * `Option<SessionData>` - The session data if found, None otherwise
+pub fn load_session_by_id(project_name: &str, session_id: &str) -> Option<SessionData> {
+    // Get the base config directory (~/.config/autom8/)
+    let base_dir = crate::config::config_dir().ok()?;
+    let session_path = base_dir
+        .join(project_name)
+        .join("sessions")
+        .join(session_id);
+
+    if !session_path.is_dir() {
+        return None;
+    }
+
+    // Read metadata.json directly
+    let metadata_path = session_path.join("metadata.json");
+    let metadata: SessionMetadata = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())?;
+
+    // Check if worktree was deleted (stale session)
+    let is_stale = !metadata.worktree_path.exists();
+    let is_main_session = metadata.session_id == MAIN_SESSION_ID;
+
+    // Read state.json directly
+    let state_path = session_path.join("state.json");
+    let (run, load_error): (Option<RunState>, Option<String>) =
+        match std::fs::read_to_string(&state_path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(state) => (Some(state), None),
+                Err(e) => (None, Some(format!("Corrupted state: {}", e))),
+            },
+            Err(_) => (None, Some("State file not found".to_string())),
+        };
+
+    // Read live.json directly (optional, for output display)
+    let live_path = session_path.join("live.json");
+    let live_output: Option<LiveState> = std::fs::read_to_string(&live_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok());
+
+    // Load spec to get progress information and cache user stories
+    let (progress, cached_user_stories) = run
+        .as_ref()
+        .and_then(|r| Spec::load(&r.spec_json_path).ok())
+        .map(|spec| {
+            let progress = RunProgress {
+                completed: spec.completed_count(),
+                total: spec.total_count(),
+            };
+            (Some(progress), Some(spec.user_stories))
+        })
+        .unwrap_or((None, None));
+
+    Some(SessionData {
+        project_name: project_name.to_string(),
+        metadata,
+        run,
+        progress,
+        load_error,
+        is_main_session,
+        is_stale,
+        live_output,
+        cached_user_stories,
+    })
+}
+
 /// Load run history for display.
 ///
 /// This function loads archived runs and converts them to RunHistoryEntry format.
