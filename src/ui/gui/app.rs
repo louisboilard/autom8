@@ -7253,6 +7253,7 @@ impl Autom8App {
                                                         &session.metadata.session_id,
                                                     );
                                                 }
+                                                response.on_hover_text("Pause after this story");
                                             }
                                         } else if is_resumable {
                                             // Draw play icon (triangle) with green background

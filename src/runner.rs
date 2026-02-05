@@ -594,22 +594,19 @@ impl Runner {
     ///
     /// This method:
     /// 1. Clears the pause request flag
-    /// 2. Sets the run mode to Step (so user stays in control)
-    /// 3. Updates state status to `Interrupted`
-    /// 4. Saves state and session metadata (`is_running: false`)
-    /// 5. Clears the live output file
-    /// 6. Displays pause message to user
+    /// 2. Updates state status to `Interrupted`
+    /// 3. Saves state and session metadata (`is_running: false`)
+    /// 4. Clears the live output file
+    /// 5. Displays pause message to user
+    ///
+    /// The run mode is preserved - if paused from Auto mode, resume will continue
+    /// in Auto mode. If paused from Step mode, resume will run one story then pause.
     ///
     /// Returns `Err(Autom8Error::Interrupted)` to signal the run was paused.
     fn handle_pause(&self, state: &mut RunState) -> Autom8Error {
         // Clear the pause request flag
         if let Err(e) = self.state_manager.clear_pause_request() {
             eprintln!("Warning: failed to clear pause request: {}", e);
-        }
-
-        // Set run mode to Step so user stays in control after resume
-        if let Err(e) = self.state_manager.set_run_mode(RunMode::Step) {
-            eprintln!("Warning: failed to set run mode to Step: {}", e);
         }
 
         // Update state to Interrupted (preserves machine_state)
@@ -2562,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_us002_handle_pause_sets_run_mode_to_step() {
+    fn test_us002_handle_pause_preserves_run_mode() {
         let temp_dir = TempDir::new().unwrap();
         let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
 
@@ -2575,12 +2572,12 @@ mod tests {
 
         let runner = create_test_runner_at(temp_dir.path());
 
-        // Handle pause should set mode to Step
+        // Handle pause should preserve run mode (not change it)
         runner.handle_pause(&mut state);
 
-        // Verify run mode is Step using a fresh StateManager
+        // Verify run mode is still Auto using a fresh StateManager
         let sm_check = StateManager::with_dir(temp_dir.path().to_path_buf());
-        assert_eq!(sm_check.get_run_mode(), RunMode::Step);
+        assert_eq!(sm_check.get_run_mode(), RunMode::Auto);
     }
 
     #[test]
