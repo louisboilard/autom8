@@ -6,9 +6,9 @@
 use crate::error::{Autom8Error, Result};
 use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
-    badge_background_color, format_duration, format_relative_time, format_state, is_terminal_state,
-    state_to_color, strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection,
-    MAX_BRANCH_LENGTH,
+    badge_background_color, format_relative_time, format_run_duration, format_state,
+    is_terminal_state, state_to_color, strip_worktree_prefix, truncate_with_ellipsis,
+    CollapsibleSection, MAX_BRANCH_LENGTH,
 };
 use crate::ui::gui::config::{
     BoolFieldChanges, ConfigBoolField, ConfigEditorActions, ConfigScope, ConfigTabState,
@@ -2978,7 +2978,13 @@ impl Autom8App {
         entry: &RunHistoryEntry,
         run_state: Option<crate::state::RunState>,
     ) {
-        let label = format!("Run - {}", entry.started_at.format("%Y-%m-%d %H:%M"));
+        let label = format!(
+            "Run - {}",
+            entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+        );
 
         // Cache the run state if provided
         if let Some(state) = run_state {
@@ -3611,6 +3617,12 @@ impl Autom8App {
                     }
                 }
             }
+        }
+
+        // Refresh run history for the currently selected project
+        if let Some(ref project) = self.selected_project {
+            let project_name = project.clone();
+            self.load_run_history(&project_name);
         }
     }
 
@@ -8085,7 +8097,11 @@ ui.label(
                 );
                 ui.label(
                     egui::RichText::new(
-                        run_state.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        run_state
+                            .started_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string(),
                     )
                     .font(typography::font(FontSize::Body, FontWeight::Regular))
                     .color(colors::TEXT_PRIMARY),
@@ -9048,9 +9064,12 @@ ui.label(
                             if let Some(ref run) = session.run {
                                 ui.add_space(spacing::MD);
                                 ui.label(
-                                    egui::RichText::new(format_duration(run.started_at))
-                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                        .color(colors::TEXT_MUTED),
+                                    egui::RichText::new(format_run_duration(
+                                        run.started_at,
+                                        run.finished_at,
+                                    ))
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
                                 );
                             }
 
@@ -9582,7 +9601,11 @@ ui.label(
         // Top row: Date/time and status
         child_ui.horizontal(|ui| {
             // Date/time (left)
-            let datetime_text = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
+            let datetime_text = entry
+                .started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string();
             ui.label(
                 egui::RichText::new(datetime_text)
                     .font(typography::font(FontSize::Body, FontWeight::Medium))

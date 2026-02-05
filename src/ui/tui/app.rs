@@ -1071,7 +1071,11 @@ impl MonitorApp {
                 };
 
                 // Format date/time
-                let date_str = entry.started_at.format("%Y-%m-%d %H:%M").to_string();
+                let date_str = entry
+                    .started_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string();
 
                 // Story count
                 let story_str = format!("{}/{}", entry.completed_stories, entry.total_stories);
@@ -1207,7 +1211,11 @@ impl MonitorApp {
             Line::from(vec![
                 Span::styled("Started:    ", Style::default().fg(COLOR_DIM)),
                 Span::styled(
-                    entry.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    entry
+                        .started_at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
                     Style::default().fg(Color::White),
                 ),
             ]),
