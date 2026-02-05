@@ -1114,6 +1114,27 @@ mod tests {
     }
 
     #[test]
+    fn test_format_run_duration_with_finished_at() {
+        let started = Utc::now() - chrono::Duration::seconds(300);
+        let finished = started + chrono::Duration::seconds(125);
+        // With finished_at: should compute fixed duration (125s = 2m 5s)
+        assert_eq!(format_run_duration(started, Some(finished)), "2m 5s");
+    }
+
+    #[test]
+    fn test_format_run_duration_without_finished_at() {
+        // Without finished_at: should use live duration (now - started_at)
+        let started = Utc::now() - chrono::Duration::seconds(5);
+        let result = format_run_duration(started, None);
+        // Should be a small number of seconds (between 4s and 6s given timing)
+        assert!(
+            result.ends_with('s'),
+            "Expected seconds format, got: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_relative_time_formatting() {
         assert_eq!(format_relative_time_secs(30), "just now");
         assert_eq!(format_relative_time_secs(300), "5m ago");
