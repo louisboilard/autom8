@@ -4,6 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
+use crate::state::RunMode;
 use crate::state::{MachineState, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, state_to_color,
@@ -18,7 +19,9 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    load_project_run_history, load_ui_data, ProjectData, RunHistoryEntry, SessionData,
+    is_mode_toggleable, is_pause_queued, is_session_resumable, load_project_run_history,
+    load_ui_data, request_session_pause, set_session_run_mode, spawn_resume_process, ProjectData,
+    RunHistoryEntry, SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
@@ -267,6 +270,28 @@ fn calculate_context_menu_width(ctx: &egui::Context, items: &[ContextMenuItem]) 
         .fold(0.0_f32, |max, width| max.max(width));
 
     calculate_menu_width_from_text_width(max_text_width)
+}
+
+// ============================================================================
+// Card Action Helpers (US-003: Pause, US-004: Mode Toggle)
+// ============================================================================
+
+/// Actions that can be triggered from a session card.
+///
+/// This enum represents user interactions with card controls like the pause button
+/// or mode toggle. The grid renderer collects these actions and handles them
+/// after rendering is complete.
+#[derive(Debug, Clone)]
+enum CardAction {
+    /// No action was triggered.
+    None,
+    /// Pause button was clicked - request pause for the session.
+    Pause,
+    /// Mode toggle was clicked - change run mode for the session.
+    ToggleMode(RunMode),
+    /// Resume button was clicked - spawn resume process.
+    /// The bool indicates whether to set Auto mode before resuming.
+    Resume { auto_mode: bool },
 }
 
 // ============================================================================
@@ -6498,6 +6523,11 @@ impl Autom8App {
         let row_width = (card_width * columns as f32) + (CARD_SPACING * (columns as f32 - 1.0));
         let h_offset = ((available_width - row_width) / 2.0).max(0.0);
 
+        // Collect card actions that need to be handled (US-003: Pause, US-004: Mode Toggle, US-005: Resume)
+        let mut pause_requests: Vec<(String, String)> = Vec::new();
+        let mut mode_changes: Vec<(String, String, RunMode)> = Vec::new();
+        let mut resume_requests: Vec<(SessionData, bool)> = Vec::new(); // (session, auto_mode)
+
         // Scrollable area for the grid with smooth scrolling
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -6515,7 +6545,27 @@ impl Autom8App {
 
                         for i in 0..columns {
                             if let Some(session) = session_iter.next() {
-                                self.render_session_card(ui, session, card_width, card_height);
+                                let card_action =
+                                    self.render_session_card(ui, session, card_width, card_height);
+                                match card_action {
+                                    CardAction::Pause => {
+                                        pause_requests.push((
+                                            session.project_name.clone(),
+                                            session.metadata.session_id.clone(),
+                                        ));
+                                    }
+                                    CardAction::ToggleMode(new_mode) => {
+                                        mode_changes.push((
+                                            session.project_name.clone(),
+                                            session.metadata.session_id.clone(),
+                                            new_mode,
+                                        ));
+                                    }
+                                    CardAction::Resume { auto_mode } => {
+                                        resume_requests.push((session.clone(), auto_mode));
+                                    }
+                                    CardAction::None => {}
+                                }
                                 // Add spacing between cards (but not after the last one in row)
                                 if i < columns - 1 {
                                     ui.add_space(CARD_SPACING);
@@ -6526,23 +6576,65 @@ impl Autom8App {
                     ui.add_space(CARD_SPACING);
                 }
             });
+
+        // Handle pause requests (US-003)
+        // Since we can't mutate self here, we call the standalone function which
+        // writes directly to the metadata file. The UI will refresh on next data load.
+        for (project, session_id) in pause_requests {
+            if let Err(e) = request_session_pause(&project, &session_id) {
+                // Log the error (in a real app, we might show a notification)
+                eprintln!(
+                    "Failed to request pause for {}/{}: {}",
+                    project, session_id, e
+                );
+            }
+        }
+
+        // Handle mode changes (US-004)
+        // Same pattern: write directly to metadata file, UI refreshes on next data load.
+        for (project, session_id, new_mode) in mode_changes {
+            if let Err(e) = set_session_run_mode(&project, &session_id, new_mode) {
+                eprintln!(
+                    "Failed to set run mode for {}/{}: {}",
+                    project, session_id, e
+                );
+            }
+        }
+
+        // Handle resume requests (US-005)
+        // Spawn detached resume process for each request. The process runs independently
+        // so the GUI can continue monitoring via its normal state polling.
+        for (session, auto_mode) in resume_requests {
+            if let Err(e) = spawn_resume_process(&session, auto_mode) {
+                eprintln!(
+                    "Failed to spawn resume process for {}/{}: {}",
+                    session.project_name, session.metadata.session_id, e
+                );
+            }
+        }
     }
 
     /// Render a single session card.
     ///
     /// The card displays:
     /// - Header: Project name, session badge (main/worktree), branch name
-    /// - Status row: Colored indicator dot with state label
+    /// - Status row: Colored indicator dot with state label, Pause button (for running sessions),
+    ///   Mode toggle (for paused/interrupted sessions, US-004)
     /// - Progress row: Story progress (e.g., "Story 2 of 5"), current story ID
     /// - Duration row: Time elapsed since run started
     /// - Output section: Last OUTPUT_LINES_TO_SHOW lines of Claude output in monospace font
+    ///
+    /// # Returns
+    /// A `CardAction` indicating what action was triggered (if any).
     fn render_session_card(
         &self,
         ui: &mut egui::Ui,
         session: &SessionData,
         card_width: f32,
         card_height: f32,
-    ) {
+    ) -> CardAction {
+        // Track the action triggered (if any)
+        let mut action = CardAction::None;
         // Define card dimensions
         let card_size = Vec2::new(card_width, card_height);
 
@@ -6551,7 +6643,7 @@ impl Autom8App {
 
         // Skip if not visible (optimization for scrolling)
         if !ui.is_rect_visible(rect) {
-            return;
+            return CardAction::None;
         }
 
         // Draw card background with elevation and state-specific styling
@@ -6729,27 +6821,146 @@ impl Autom8App {
             Color32::TRANSPARENT,
         );
 
+        // ====================================================================
+        // PAUSE BUTTON (US-003: Right-aligned in status row)
+        // ====================================================================
+        // Show pause button only for running sessions that are not stale
+        let is_actively_running = session.is_actively_running() && !session.is_stale;
+        let pause_queued = is_pause_queued(session);
+
+        // Store button rect for later interaction - we draw first, then detect interaction
+        let pause_button_rect: Option<(Rect, bool)> = if is_actively_running || pause_queued {
+            // Determine button state and text
+            let (button_text, button_enabled) = if pause_queued {
+                ("Pause Queued", false)
+            } else {
+                ("Pause", true)
+            };
+
+            // Calculate button dimensions
+            let button_font = typography::font(FontSize::Small, FontWeight::Medium);
+            let button_galley = painter.layout_no_wrap(
+                button_text.to_string(),
+                button_font.clone(),
+                colors::TEXT_PRIMARY, // Initial color, will be updated based on hover
+            );
+            let button_padding_h = spacing::MD;
+            let button_padding_v = spacing::XS;
+            let button_width = button_galley.rect.width() + button_padding_h * 2.0;
+            let button_height = button_galley.rect.height() + button_padding_v * 2.0;
+
+            // Position button at right edge of content area
+            let button_x = content_rect.max.x - button_width;
+            let button_y = cursor_y + (state_galley.rect.height() - button_height) / 2.0;
+            let button_rect = Rect::from_min_size(
+                Pos2::new(button_x, button_y),
+                Vec2::new(button_width, button_height),
+            );
+
+            Some((button_rect, button_enabled))
+        } else {
+            None
+        };
+
+        // ====================================================================
+        // MODE TOGGLE (US-004: Right-aligned in status row for paused sessions)
+        // ====================================================================
+        // Show mode toggle only for paused/interrupted sessions (not running, not completed)
+        let show_mode_toggle = is_mode_toggleable(session);
+        let current_mode = session.metadata.run_mode;
+
+        // ====================================================================
+        // RESUME DROPDOWN (US-005: Right-aligned in status row for paused sessions)
+        // ====================================================================
+        // Show resume dropdown only for resumable sessions (same as mode toggleable)
+        let show_resume_button = is_session_resumable(session);
+
+        // Resume button dimensions
+        let resume_button_width = 75.0; // "Resume" + dropdown arrow
+        let resume_button_height = 22.0;
+        let resume_button_spacing = spacing::SM;
+
+        // Store toggle rect for later interaction
+        // Position mode toggle to the left of resume button when both are shown
+        let mode_toggle_rect: Option<Rect> = if show_mode_toggle {
+            // Toggle dimensions - kept minimal as per requirements
+            let toggle_width = 50.0;
+            let toggle_height = 20.0;
+
+            // Calculate toggle position - if resume button also showing, shift left
+            let toggle_x = if show_resume_button {
+                content_rect.max.x - resume_button_width - resume_button_spacing - toggle_width
+            } else {
+                content_rect.max.x - toggle_width
+            };
+            let toggle_y = cursor_y + (state_galley.rect.height() - toggle_height) / 2.0;
+            let toggle_rect = Rect::from_min_size(
+                Pos2::new(toggle_x, toggle_y),
+                Vec2::new(toggle_width, toggle_height),
+            );
+
+            Some(toggle_rect)
+        } else {
+            None
+        };
+
+        // Store resume button rect for later interaction
+        let resume_button_rect: Option<Rect> = if show_resume_button {
+            // Position button at right edge of content area
+            let button_x = content_rect.max.x - resume_button_width;
+            let button_y = cursor_y + (state_galley.rect.height() - resume_button_height) / 2.0;
+            let button_rect = Rect::from_min_size(
+                Pos2::new(button_x, button_y),
+                Vec2::new(resume_button_width, resume_button_height),
+            );
+
+            Some(button_rect)
+        } else {
+            None
+        };
+
         // Large infinity animation centered in the available space after status text
+        // For running sessions with pause button, position animation to the left of the button
         if has_progress_bar {
             // Calculate available space after status text
             let status_end_x =
                 content_rect.min.x + dot_radius * 2.0 + spacing::SM + state_galley.rect.width();
-            let available_width = content_rect.max.x - status_end_x - spacing::MD; // respect right padding
 
-            // Make infinity fill most of the available space
-            let infinity_width = (available_width * 0.7).clamp(60.0, 120.0);
-            let infinity_height = (state_galley.rect.height() * 0.9).max(16.0);
+            // If showing pause button, mode toggle, or resume button, reduce available space to avoid overlap
+            let button_space = if is_actively_running || pause_queued {
+                // Approximate pause button width + spacing
+                100.0
+            } else if show_resume_button && show_mode_toggle {
+                // Both mode toggle and resume button
+                resume_button_width + resume_button_spacing + 50.0 + spacing::SM
+            } else if show_resume_button {
+                // Just resume button
+                resume_button_width + spacing::SM
+            } else if show_mode_toggle {
+                // Approximate mode toggle width + spacing
+                60.0
+            } else {
+                spacing::MD // Just right padding
+            };
+            let available_width = content_rect.max.x - status_end_x - button_space;
 
-            let infinity_x = status_end_x + (available_width - infinity_width) / 2.0;
-            let infinity_rect = Rect::from_min_size(
-                Pos2::new(
-                    infinity_x,
-                    cursor_y + (state_galley.rect.height() - infinity_height) / 2.0,
-                ),
-                egui::vec2(infinity_width, infinity_height),
-            );
-            let time = ui.ctx().input(|i| i.time) as f32;
-            super::animation::render_infinity(painter, time, infinity_rect, state_color, 1.0);
+            // Only show if there's enough space for the animation
+            if available_width > 40.0 {
+                // Make infinity fill most of the available space
+                let infinity_width = (available_width * 0.7).clamp(40.0, 100.0);
+                let infinity_height = (state_galley.rect.height() * 0.9).max(16.0);
+
+                let infinity_x = status_end_x + (available_width - infinity_width) / 2.0;
+                let infinity_rect = Rect::from_min_size(
+                    Pos2::new(
+                        infinity_x,
+                        cursor_y + (state_galley.rect.height() - infinity_height) / 2.0,
+                    ),
+                    egui::vec2(infinity_width, infinity_height),
+                );
+                let time = ui.ctx().input(|i| i.time) as f32;
+                super::animation::render_infinity(painter, time, infinity_rect, state_color, 1.0);
+            }
         }
 
         // Progress bar commented out - keeping infinity animation instead
@@ -6979,6 +7190,317 @@ impl Autom8App {
                 );
             }
         }
+
+        // ====================================================================
+        // PAUSE BUTTON INTERACTION (US-003)
+        // ====================================================================
+        // Now that we're done with the painter, handle button interaction
+        // The button rect was calculated earlier and stored in pause_button_rect
+        if let Some((button_rect, button_enabled)) = pause_button_rect {
+            // Determine button state and text
+            let button_text = if pause_queued {
+                "Pause Queued"
+            } else {
+                "Pause"
+            };
+
+            // Get interaction response for the button
+            let button_sense = if button_enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            };
+            let button_response = ui.interact(button_rect, ui.id().with("pause_btn"), button_sense);
+            let is_hovered = button_response.hovered() && button_enabled;
+
+            // Determine button appearance based on state
+            let (bg_color, text_color, border_color) = if pause_queued {
+                // Disabled state: subtle background, muted text
+                (colors::SURFACE_HOVER, colors::TEXT_DISABLED, colors::BORDER)
+            } else if is_hovered {
+                // Hovered: warning colors for pause action
+                (
+                    colors::STATUS_WARNING,
+                    colors::TEXT_PRIMARY,
+                    colors::STATUS_WARNING,
+                )
+            } else {
+                // Normal: subtle warning hint
+                (
+                    colors::SURFACE_HOVER,
+                    colors::TEXT_SECONDARY,
+                    colors::BORDER,
+                )
+            };
+
+            // Draw button background (using painter accessed fresh)
+            ui.painter().rect(
+                button_rect,
+                Rounding::same(rounding::SMALL),
+                bg_color,
+                Stroke::new(1.0, border_color),
+            );
+
+            // Draw button text centered
+            let button_font = typography::font(FontSize::Small, FontWeight::Medium);
+            let text_galley =
+                ui.painter()
+                    .layout_no_wrap(button_text.to_string(), button_font, text_color);
+            let text_pos = button_rect.center() - text_galley.rect.center().to_vec2();
+            ui.painter()
+                .galley(text_pos, text_galley, Color32::TRANSPARENT);
+
+            // Change cursor to pointer when hoverable
+            if button_enabled && is_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            // Handle button click
+            if button_response.clicked() && button_enabled {
+                action = CardAction::Pause;
+            }
+        }
+
+        // ====================================================================
+        // MODE TOGGLE RENDERING AND INTERACTION (US-004)
+        // ====================================================================
+        // Now render and handle the mode toggle for paused/interrupted sessions
+        if let Some(toggle_rect) = mode_toggle_rect {
+            // Get interaction response for the toggle
+            let toggle_response =
+                ui.interact(toggle_rect, ui.id().with("mode_toggle"), Sense::click());
+            let is_hovered = toggle_response.hovered();
+
+            // Determine toggle appearance based on current mode
+            let is_auto = matches!(current_mode, RunMode::Auto);
+
+            // Toggle pill background
+            let pill_bg = if is_hovered {
+                colors::SURFACE_HOVER
+            } else {
+                colors::SURFACE
+            };
+            ui.painter().rect(
+                toggle_rect,
+                Rounding::same(toggle_rect.height() / 2.0),
+                pill_bg,
+                Stroke::new(1.0, colors::BORDER),
+            );
+
+            // Draw the slider knob - position based on mode
+            let knob_size = toggle_rect.height() - 4.0;
+            let knob_x = if is_auto {
+                // Auto mode: knob on the right
+                toggle_rect.max.x - knob_size / 2.0 - 3.0
+            } else {
+                // Step mode: knob on the left
+                toggle_rect.min.x + knob_size / 2.0 + 3.0
+            };
+            let knob_center = Pos2::new(knob_x, toggle_rect.center().y);
+            let knob_color = if is_auto {
+                colors::STATUS_SUCCESS // Green for Auto
+            } else {
+                colors::STATUS_WARNING // Amber for Step
+            };
+            ui.painter()
+                .circle_filled(knob_center, knob_size / 2.0, knob_color);
+
+            // Draw mode labels on each side of the toggle
+            let label_font = typography::font(FontSize::Caption, FontWeight::Medium);
+            let step_color = if is_auto {
+                colors::TEXT_DISABLED
+            } else {
+                colors::TEXT_PRIMARY
+            };
+            let auto_color = if is_auto {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_DISABLED
+            };
+
+            // "S" label on the left (Step)
+            let step_galley =
+                ui.painter()
+                    .layout_no_wrap("S".to_string(), label_font.clone(), step_color);
+            let step_pos = Pos2::new(
+                toggle_rect.min.x + 6.0,
+                toggle_rect.center().y - step_galley.rect.height() / 2.0,
+            );
+            ui.painter()
+                .galley(step_pos, step_galley, Color32::TRANSPARENT);
+
+            // "A" label on the right (Auto)
+            let auto_galley = ui
+                .painter()
+                .layout_no_wrap("A".to_string(), label_font, auto_color);
+            let auto_pos = Pos2::new(
+                toggle_rect.max.x - auto_galley.rect.width() - 6.0,
+                toggle_rect.center().y - auto_galley.rect.height() / 2.0,
+            );
+            ui.painter()
+                .galley(auto_pos, auto_galley, Color32::TRANSPARENT);
+
+            // Change cursor to pointer when hoverable
+            if is_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            // Handle toggle click - switch to the opposite mode
+            if toggle_response.clicked() {
+                let new_mode = if is_auto {
+                    RunMode::Step
+                } else {
+                    RunMode::Auto
+                };
+                action = CardAction::ToggleMode(new_mode);
+            }
+        }
+
+        // ====================================================================
+        // RESUME DROPDOWN RENDERING AND INTERACTION (US-005)
+        // ====================================================================
+        // Render resume dropdown button for paused/interrupted sessions
+        if let Some(button_rect) = resume_button_rect {
+            // Split the button into main area and dropdown arrow area
+            let arrow_width = 20.0;
+            let main_rect = Rect::from_min_max(
+                button_rect.min,
+                Pos2::new(button_rect.max.x - arrow_width, button_rect.max.y),
+            );
+            let dropdown_rect = Rect::from_min_max(
+                Pos2::new(button_rect.max.x - arrow_width, button_rect.min.y),
+                button_rect.max,
+            );
+
+            // Get interaction responses
+            let main_response = ui.interact(main_rect, ui.id().with("resume_main"), Sense::click());
+            let dropdown_response = ui.interact(
+                dropdown_rect,
+                ui.id().with("resume_dropdown"),
+                Sense::click(),
+            );
+
+            let main_hovered = main_response.hovered();
+            let dropdown_hovered = dropdown_response.hovered();
+            let any_hovered = main_hovered || dropdown_hovered;
+
+            // Button colors
+            let button_bg = if any_hovered {
+                colors::STATUS_SUCCESS.linear_multiply(0.9)
+            } else {
+                colors::STATUS_SUCCESS
+            };
+            let button_text_color = Color32::from_rgb(28, 28, 30); // Dark text on green button
+
+            // Draw main button background with rounded left corners only
+            let main_rounding = Rounding {
+                nw: rounding::BUTTON,
+                sw: rounding::BUTTON,
+                ne: 0.0,
+                se: 0.0,
+            };
+            ui.painter()
+                .rect_filled(main_rect, main_rounding, button_bg);
+
+            // Draw divider between main and dropdown
+            let divider_x = main_rect.max.x;
+            ui.painter().line_segment(
+                [
+                    Pos2::new(divider_x, button_rect.min.y + 3.0),
+                    Pos2::new(divider_x, button_rect.max.y - 3.0),
+                ],
+                Stroke::new(1.0, button_text_color.linear_multiply(0.3)),
+            );
+
+            // Draw dropdown background with rounded right corners only
+            let dropdown_bg = if dropdown_hovered {
+                colors::STATUS_SUCCESS.linear_multiply(0.8)
+            } else {
+                button_bg
+            };
+            let dropdown_rounding = Rounding {
+                nw: 0.0,
+                sw: 0.0,
+                ne: rounding::BUTTON,
+                se: rounding::BUTTON,
+            };
+            ui.painter()
+                .rect_filled(dropdown_rect, dropdown_rounding, dropdown_bg);
+
+            // Draw "Resume" text in main area
+            let label_font = typography::font(FontSize::Caption, FontWeight::Medium);
+            let label_galley =
+                ui.painter()
+                    .layout_no_wrap("Resume".to_string(), label_font, button_text_color);
+            let label_pos = Pos2::new(
+                main_rect.center().x - label_galley.rect.width() / 2.0,
+                main_rect.center().y - label_galley.rect.height() / 2.0,
+            );
+            ui.painter()
+                .galley(label_pos, label_galley, Color32::TRANSPARENT);
+
+            // Draw dropdown arrow
+            let arrow_center = dropdown_rect.center();
+            let arrow_size = 4.0;
+            let arrow_points = vec![
+                Pos2::new(
+                    arrow_center.x - arrow_size,
+                    arrow_center.y - arrow_size / 2.0,
+                ),
+                Pos2::new(
+                    arrow_center.x + arrow_size,
+                    arrow_center.y - arrow_size / 2.0,
+                ),
+                Pos2::new(arrow_center.x, arrow_center.y + arrow_size / 2.0),
+            ];
+            ui.painter().add(egui::Shape::convex_polygon(
+                arrow_points,
+                button_text_color,
+                Stroke::NONE,
+            ));
+
+            // Change cursor to pointer when hoverable
+            if any_hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            // Handle main button click - Resume in current mode (Step if paused)
+            if main_response.clicked() {
+                action = CardAction::Resume { auto_mode: false };
+            }
+
+            // Handle dropdown click - show popup menu
+            if dropdown_response.clicked() {
+                ui.memory_mut(|mem| {
+                    let popup_id = ui.id().with("resume_popup");
+                    mem.toggle_popup(popup_id);
+                });
+            }
+
+            // Render dropdown menu if open
+            let popup_id = ui.id().with("resume_popup");
+            egui::popup_below_widget(
+                ui,
+                popup_id,
+                &dropdown_response,
+                egui::PopupCloseBehavior::CloseOnClickOutside,
+                |ui: &mut egui::Ui| {
+                    ui.set_min_width(100.0);
+
+                    if ui.button("Resume").clicked() {
+                        action = CardAction::Resume { auto_mode: false };
+                        ui.memory_mut(|mem: &mut egui::Memory| mem.close_popup());
+                    }
+
+                    if ui.button("Resume (Auto)").clicked() {
+                        action = CardAction::Resume { auto_mode: true };
+                        ui.memory_mut(|mem: &mut egui::Memory| mem.close_popup());
+                    }
+                },
+            );
+        }
+
+        action
     }
 
     // state_to_color is now imported from the components module.
@@ -7691,6 +8213,8 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running: true,
+                pause_requested: false,
+                run_mode: crate::state::RunMode::Auto,
             },
             run,
             progress: None,
