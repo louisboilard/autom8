@@ -843,12 +843,6 @@ impl Runner {
     }
 
     /// Handle PR creation after committing.
-    ///
-    /// # Arguments
-    /// * `state` - The current run state
-    /// * `spec` - The spec containing PR details
-    /// * `commits_were_made` - Whether commits were made in this session
-    /// * `draft` - Whether to create the PR in draft mode
     fn handle_pr_creation(
         &self,
         state: &mut RunState,

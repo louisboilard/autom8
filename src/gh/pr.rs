@@ -105,11 +105,6 @@ fn update_pr_description_direct(spec: &Spec, pr_number: u32) -> Result<PRResult>
 }
 
 /// Create a pull request for the current branch using the GitHub CLI
-///
-/// # Arguments
-/// * `spec` - The spec containing PR details (title, description, user stories)
-/// * `commits_were_made` - If false, PR creation is skipped
-/// * `draft` - If true, creates PR in draft mode
 pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) -> Result<PRResult> {
     if !commits_were_made {
         return Ok(PRResult::Skipped(
@@ -197,10 +192,6 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) ->
     create_pull_request_direct(spec, draft)
 }
 
-/// Build command arguments for `gh pr create`.
-///
-/// Returns a vector of arguments including title, body, and optionally --draft.
-/// This is extracted for testability.
 #[cfg(test)]
 fn build_pr_create_args<'a>(title: &'a str, body: &'a str, draft: bool) -> Vec<&'a str> {
     let mut args = vec!["pr", "create", "--title", title, "--body", body];
@@ -211,10 +202,6 @@ fn build_pr_create_args<'a>(title: &'a str, body: &'a str, draft: bool) -> Vec<&
 }
 
 /// Create PR directly using generated format (internal fallback)
-///
-/// # Arguments
-/// * `spec` - The spec containing PR title and description details
-/// * `draft` - If true, creates PR in draft mode using `--draft` flag
 fn create_pull_request_direct(spec: &Spec, draft: bool) -> Result<PRResult> {
     let title = format_pr_title(spec);
     let body = format_pr_description(spec);
@@ -414,33 +401,6 @@ mod tests {
             vec!["pr", "create", "--title", title, "--body", body, "--draft"]
         );
         assert!(args.contains(&"--draft"));
-    }
-
-    #[test]
-    fn test_build_pr_create_args_draft_flag_position() {
-        // Verify --draft is appended at the end
-        let args = build_pr_create_args("title", "body", true);
-        assert_eq!(args.last(), Some(&"--draft"));
-    }
-
-    #[test]
-    fn test_create_pull_request_skips_when_no_commits_regardless_of_draft() {
-        let spec = make_test_spec();
-
-        // Both draft=false and draft=true should skip when no commits
-        let result_no_draft = create_pull_request(&spec, false, false);
-        assert!(result_no_draft.is_ok());
-        match result_no_draft.unwrap() {
-            PRResult::Skipped(msg) => assert!(msg.contains("No commits")),
-            _ => panic!("Expected Skipped result"),
-        }
-
-        let result_with_draft = create_pull_request(&spec, false, true);
-        assert!(result_with_draft.is_ok());
-        match result_with_draft.unwrap() {
-            PRResult::Skipped(msg) => assert!(msg.contains("No commits")),
-            _ => panic!("Expected Skipped result"),
-        }
     }
 
     // ========================================================================

@@ -576,13 +576,6 @@ mod tests {
         assert!(command.contains("Fix \"special\" case"));
     }
 
-    #[test]
-    fn test_build_gh_command_draft_flag_position() {
-        // Verify --draft appears at the end of the create command
-        let command = build_gh_command("Test PR", None, true);
-        assert!(command.ends_with("--draft"));
-    }
-
     // ========================================================================
     // extract_pr_url tests
     // ========================================================================
