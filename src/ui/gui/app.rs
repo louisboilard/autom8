@@ -19,9 +19,9 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    is_mode_toggleable, is_pause_queued, is_session_resumable, load_project_run_history,
-    load_session_by_id, load_ui_data, request_session_pause, set_session_run_mode,
-    spawn_resume_process, ProjectData, RunHistoryEntry, SessionData,
+    is_pause_queued, is_session_resumable, load_project_run_history, load_session_by_id,
+    load_ui_data, request_session_pause, set_session_run_mode, spawn_resume_process, ProjectData,
+    RunHistoryEntry, SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
@@ -7081,85 +7081,126 @@ impl Autom8App {
                                     );
                                 });
 
-                            // Mode toggle (Auto/Step) - only for paused/interrupted sessions
-                            if is_mode_toggleable(session) {
+                            // Mode toggle (Auto/Step) - always visible
+                            ui.add_space(spacing::SM);
+
+                            let current_mode = session.metadata.run_mode;
+                            let is_auto = matches!(current_mode, RunMode::Auto);
+
+                            // Toggle pill with two options
+                            egui::Frame::none()
+                                .fill(colors::SURFACE_HOVER)
+                                .rounding(rounding::SMALL)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+
+                                        // Auto option
+                                        let auto_bg = if is_auto {
+                                            colors::ACCENT_SUBTLE
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        let auto_color = if is_auto {
+                                            colors::ACCENT
+                                        } else {
+                                            colors::TEXT_MUTED
+                                        };
+                                        let auto_resp = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("Auto")
+                                                    .font(typography::font(
+                                                        FontSize::Small,
+                                                        FontWeight::Medium,
+                                                    ))
+                                                    .color(auto_color),
+                                            )
+                                            .fill(auto_bg)
+                                            .rounding(rounding::SMALL)
+                                            .frame(false),
+                                        );
+                                        if auto_resp.clicked() && !is_auto {
+                                            let _ = set_session_run_mode(
+                                                &session.project_name,
+                                                &session.metadata.session_id,
+                                                RunMode::Auto,
+                                            );
+                                        }
+
+                                        // Step option
+                                        let step_bg = if !is_auto {
+                                            colors::ACCENT_SUBTLE
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        let step_color = if !is_auto {
+                                            colors::ACCENT
+                                        } else {
+                                            colors::TEXT_MUTED
+                                        };
+                                        let step_resp = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("Step")
+                                                    .font(typography::font(
+                                                        FontSize::Small,
+                                                        FontWeight::Medium,
+                                                    ))
+                                                    .color(step_color),
+                                            )
+                                            .fill(step_bg)
+                                            .rounding(rounding::SMALL)
+                                            .frame(false),
+                                        );
+                                        if step_resp.clicked() && is_auto {
+                                            let _ = set_session_run_mode(
+                                                &session.project_name,
+                                                &session.metadata.session_id,
+                                                RunMode::Step,
+                                            );
+                                        }
+                                    });
+                                });
+
+                            // Pause button or Pause Queued badge
+                            let show_pause =
+                                session.metadata.is_running && !is_pause_queued(session);
+                            let show_pause_queued = is_pause_queued(session);
+
+                            if show_pause {
                                 ui.add_space(spacing::SM);
+                                let pause_btn = egui::Button::new(
+                                    egui::RichText::new("Pause")
+                                        .font(typography::font(FontSize::Small, FontWeight::Medium))
+                                        .color(colors::TEXT_PRIMARY),
+                                )
+                                .fill(colors::SURFACE_ELEVATED)
+                                .stroke(Stroke::new(1.0, colors::BORDER))
+                                .rounding(rounding::SMALL);
 
-                                let current_mode = session.metadata.run_mode;
-                                let is_auto = matches!(current_mode, RunMode::Auto);
+                                if ui.add(pause_btn).clicked() {
+                                    let _ = request_session_pause(
+                                        &session.project_name,
+                                        &session.metadata.session_id,
+                                    );
+                                }
+                            }
 
-                                // Toggle pill with two options
+                            if show_pause_queued {
+                                ui.add_space(spacing::SM);
                                 egui::Frame::none()
-                                    .fill(colors::SURFACE_HOVER)
+                                    .fill(colors::SURFACE_ELEVATED)
+                                    .stroke(Stroke::new(1.0, colors::BORDER))
                                     .rounding(rounding::SMALL)
+                                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 0.0;
-
-                                            // Auto option
-                                            let auto_bg = if is_auto {
-                                                colors::ACCENT_SUBTLE
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            };
-                                            let auto_color = if is_auto {
-                                                colors::ACCENT
-                                            } else {
-                                                colors::TEXT_MUTED
-                                            };
-                                            let auto_resp = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("Auto")
-                                                        .font(typography::font(
-                                                            FontSize::Small,
-                                                            FontWeight::Medium,
-                                                        ))
-                                                        .color(auto_color),
-                                                )
-                                                .fill(auto_bg)
-                                                .rounding(rounding::SMALL)
-                                                .frame(false),
-                                            );
-                                            if auto_resp.clicked() && !is_auto {
-                                                let _ = set_session_run_mode(
-                                                    &session.project_name,
-                                                    &session.metadata.session_id,
-                                                    RunMode::Auto,
-                                                );
-                                            }
-
-                                            // Step option
-                                            let step_bg = if !is_auto {
-                                                colors::ACCENT_SUBTLE
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            };
-                                            let step_color = if !is_auto {
-                                                colors::ACCENT
-                                            } else {
-                                                colors::TEXT_MUTED
-                                            };
-                                            let step_resp = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("Step")
-                                                        .font(typography::font(
-                                                            FontSize::Small,
-                                                            FontWeight::Medium,
-                                                        ))
-                                                        .color(step_color),
-                                                )
-                                                .fill(step_bg)
-                                                .rounding(rounding::SMALL)
-                                                .frame(false),
-                                            );
-                                            if step_resp.clicked() && is_auto {
-                                                let _ = set_session_run_mode(
-                                                    &session.project_name,
-                                                    &session.metadata.session_id,
-                                                    RunMode::Step,
-                                                );
-                                            }
-                                        });
+                                        ui.label(
+                                            egui::RichText::new("Pause Queued")
+                                                .font(typography::font(
+                                                    FontSize::Small,
+                                                    FontWeight::Medium,
+                                                ))
+                                                .color(colors::TEXT_SECONDARY),
+                                        );
                                     });
                             }
                         });
@@ -7280,59 +7321,13 @@ impl Autom8App {
                         ui.add_space(spacing::MD);
 
                         // === CONTROLS SECTION ===
-                        // Show pause button for running sessions, or resume for paused sessions
-                        let show_pause = session.metadata.is_running && !is_pause_queued(session);
-                        let show_pause_queued = is_pause_queued(session);
+                        // Show resume button for paused/interrupted sessions
                         let show_resume = is_session_resumable(session);
 
-                        if show_pause || show_pause_queued || show_resume {
+                        if show_resume {
                             ui.horizontal(|ui| {
-                                // Pause button (for running sessions)
-                                if show_pause {
-                                    let pause_btn = egui::Button::new(
-                                        egui::RichText::new("Pause")
-                                            .font(typography::font(
-                                                FontSize::Body,
-                                                FontWeight::Medium,
-                                            ))
-                                            .color(colors::TEXT_PRIMARY),
-                                    )
-                                    .fill(colors::SURFACE_ELEVATED)
-                                    .stroke(Stroke::new(1.0, colors::BORDER))
-                                    .rounding(rounding::BUTTON);
-
-                                    if ui.add(pause_btn).clicked() {
-                                        let _ = request_session_pause(
-                                            &session.project_name,
-                                            &session.metadata.session_id,
-                                        );
-                                    }
-                                }
-
-                                // Pause Queued badge (when pause requested but not yet paused)
-                                if show_pause_queued {
-                                    egui::Frame::none()
-                                        .fill(colors::SURFACE_ELEVATED)
-                                        .stroke(Stroke::new(1.0, colors::BORDER))
-                                        .rounding(rounding::SMALL)
-                                        .inner_margin(egui::Margin::symmetric(
-                                            spacing::SM,
-                                            spacing::XS,
-                                        ))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new("Pause Queued")
-                                                    .font(typography::font(
-                                                        FontSize::Body,
-                                                        FontWeight::Medium,
-                                                    ))
-                                                    .color(colors::TEXT_SECONDARY),
-                                            );
-                                        });
-                                }
-
-                                // Resume split button (GitHub-style) for paused/interrupted sessions
-                                if show_resume {
+                                // Resume split button (GitHub-style)
+                                {
                                     // GitHub-style green color
                                     let btn_green = Color32::from_rgb(35, 134, 54);
                                     let btn_green_hover = Color32::from_rgb(46, 160, 67);
