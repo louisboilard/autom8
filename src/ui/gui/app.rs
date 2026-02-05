@@ -7081,7 +7081,7 @@ impl Autom8App {
                                     );
                                 });
 
-                            // Unified mode/playback control: [[ Auto | Step ] | ⏸/▶]
+                            // Unified mode/playback control: [[ Auto | Step ] | pause/play ]
                             ui.add_space(spacing::SM);
 
                             let current_mode = session.metadata.run_mode;
@@ -7093,15 +7093,16 @@ impl Autom8App {
                             // Colors
                             let step_orange_bg = Color32::from_rgb(255, 237, 213);
                             let play_green = Color32::from_rgb(35, 134, 54);
+                            let play_green_subtle = Color32::from_rgb(220, 252, 231);
 
                             egui::Frame::none()
                                 .fill(colors::SURFACE_HOVER)
                                 .rounding(rounding::SMALL)
-                                .inner_margin(egui::Margin::symmetric(2.0, 2.0))
+                                .inner_margin(egui::Margin::symmetric(3.0, 3.0))
                                 .stroke(Stroke::new(1.0, colors::BORDER))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                        ui.spacing_mut().item_spacing.x = 0.0;
 
                                         // Auto option
                                         let auto_bg = if is_auto {
@@ -7116,7 +7117,7 @@ impl Autom8App {
                                         };
                                         let auto_resp = ui.add(
                                             egui::Button::new(
-                                                egui::RichText::new(" Auto ")
+                                                egui::RichText::new("Auto")
                                                     .font(typography::font(
                                                         FontSize::Small,
                                                         FontWeight::Medium,
@@ -7125,6 +7126,7 @@ impl Autom8App {
                                             )
                                             .fill(auto_bg)
                                             .rounding(rounding::SMALL)
+                                            .min_size(egui::vec2(36.0, 18.0))
                                             .frame(false),
                                         );
                                         if auto_resp.hovered() {
@@ -7139,6 +7141,8 @@ impl Autom8App {
                                             );
                                         }
 
+                                        ui.add_space(2.0);
+
                                         // Step option
                                         let step_bg = if !is_auto {
                                             step_orange_bg
@@ -7152,7 +7156,7 @@ impl Autom8App {
                                         };
                                         let step_resp = ui.add(
                                             egui::Button::new(
-                                                egui::RichText::new(" Step ")
+                                                egui::RichText::new("Step")
                                                     .font(typography::font(
                                                         FontSize::Small,
                                                         FontWeight::Medium,
@@ -7161,6 +7165,7 @@ impl Autom8App {
                                             )
                                             .fill(step_bg)
                                             .rounding(rounding::SMALL)
+                                            .min_size(egui::vec2(36.0, 18.0))
                                             .frame(false),
                                         );
                                         if step_resp.hovered() {
@@ -7175,61 +7180,60 @@ impl Autom8App {
                                             );
                                         }
 
-                                        // Divider between mode toggle and play/pause
-                                        ui.add_space(2.0);
-                                        let divider_rect = ui.available_rect_before_wrap();
-                                        ui.painter().line_segment(
-                                            [
-                                                Pos2::new(
-                                                    divider_rect.min.x,
-                                                    divider_rect.min.y + 4.0,
-                                                ),
-                                                Pos2::new(
-                                                    divider_rect.min.x,
-                                                    divider_rect.min.y + 16.0,
-                                                ),
-                                            ],
-                                            Stroke::new(1.0, colors::BORDER),
+                                        // Divider
+                                        ui.add_space(4.0);
+                                        let (divider_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(1.0, 14.0),
+                                            Sense::hover(),
                                         );
+                                        ui.painter().rect_filled(divider_rect, 0.0, colors::BORDER);
                                         ui.add_space(4.0);
 
-                                        // Play/Pause button
+                                        // Play/Pause button - drawn with shapes
+                                        let icon_size = egui::vec2(20.0, 18.0);
+                                        let (rect, response) =
+                                            ui.allocate_exact_size(icon_size, Sense::click());
+
                                         if is_running {
-                                            // Show pause button (running state)
-                                            let (icon, icon_color, bg_color) = if pause_queued {
-                                                // Pause is queued - show muted/pending state
-                                                ("⏸", colors::TEXT_MUTED, Color32::TRANSPARENT)
+                                            // In Step mode or with pause_queued, show as "pausing"
+                                            let is_pausing = pause_queued || !is_auto;
+                                            let icon_color = if is_pausing {
+                                                colors::TEXT_MUTED
                                             } else {
-                                                // Can pause
-                                                ("⏸", colors::TEXT_PRIMARY, Color32::TRANSPARENT)
+                                                colors::TEXT_PRIMARY
                                             };
 
-                                            let pause_resp = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new(icon)
-                                                        .font(typography::font(
-                                                            FontSize::Small,
-                                                            FontWeight::Medium,
-                                                        ))
-                                                        .color(icon_color),
-                                                )
-                                                .fill(bg_color)
-                                                .rounding(rounding::SMALL)
-                                                .frame(false),
-                                            );
+                                            // Draw pause icon (two vertical bars)
+                                            let center = rect.center();
+                                            let bar_width = 3.0;
+                                            let bar_height = 10.0;
+                                            let gap = 3.0;
 
-                                            if pause_queued {
-                                                // Show tooltip for pause queued
-                                                pause_resp.on_hover_text(
-                                                    "Pausing after current operation...",
+                                            // Left bar
+                                            let left_bar = Rect::from_center_size(
+                                                Pos2::new(center.x - gap, center.y),
+                                                egui::vec2(bar_width, bar_height),
+                                            );
+                                            ui.painter().rect_filled(left_bar, 1.0, icon_color);
+
+                                            // Right bar
+                                            let right_bar = Rect::from_center_size(
+                                                Pos2::new(center.x + gap, center.y),
+                                                egui::vec2(bar_width, bar_height),
+                                            );
+                                            ui.painter().rect_filled(right_bar, 1.0, icon_color);
+
+                                            if is_pausing {
+                                                response.on_hover_text(
+                                                    "Pausing after current story...",
                                                 );
                                             } else {
-                                                if pause_resp.hovered() {
+                                                if response.hovered() {
                                                     ui.ctx().set_cursor_icon(
                                                         egui::CursorIcon::PointingHand,
                                                     );
                                                 }
-                                                if pause_resp.clicked() {
+                                                if response.clicked() {
                                                     let _ = request_session_pause(
                                                         &session.project_name,
                                                         &session.metadata.session_id,
@@ -7237,35 +7241,39 @@ impl Autom8App {
                                                 }
                                             }
                                         } else if is_resumable {
-                                            // Show play button (paused state)
-                                            let play_resp = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("▶")
-                                                        .font(typography::font(
-                                                            FontSize::Small,
-                                                            FontWeight::Medium,
-                                                        ))
-                                                        .color(play_green),
-                                                )
-                                                .fill(Color32::TRANSPARENT)
-                                                .rounding(rounding::SMALL)
-                                                .frame(false),
+                                            // Draw play icon (triangle) with green background
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                rounding::SMALL,
+                                                play_green_subtle,
                                             );
 
-                                            if play_resp.hovered() {
+                                            let center = rect.center();
+                                            let size = 5.0;
+                                            // Triangle pointing right
+                                            let points = vec![
+                                                Pos2::new(center.x - size * 0.6, center.y - size),
+                                                Pos2::new(center.x - size * 0.6, center.y + size),
+                                                Pos2::new(center.x + size, center.y),
+                                            ];
+                                            ui.painter().add(egui::Shape::convex_polygon(
+                                                points,
+                                                play_green,
+                                                Stroke::NONE,
+                                            ));
+
+                                            if response.hovered() {
                                                 ui.ctx().set_cursor_icon(
                                                     egui::CursorIcon::PointingHand,
                                                 );
                                             }
-                                            if play_resp.clicked() {
-                                                // Resume in current mode
+                                            if response.clicked() {
                                                 let force_auto = is_auto;
                                                 let _ = spawn_resume_process(session, force_auto);
                                             }
 
-                                            // Tooltip showing resume mode (must come last as it consumes response)
                                             let mode_text = if is_auto { "Auto" } else { "Step" };
-                                            play_resp.on_hover_text(format!(
+                                            response.on_hover_text(format!(
                                                 "Resume in {} mode",
                                                 mode_text
                                             ));
