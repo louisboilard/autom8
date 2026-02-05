@@ -4,7 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
-use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
+use crate::state::{IterationStatus, MachineState, RunMode, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_duration, format_relative_time, format_state, is_terminal_state,
     state_to_color, strip_worktree_prefix, truncate_with_ellipsis, CollapsibleSection,
@@ -19,8 +19,9 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    load_project_run_history, load_session_by_id, load_ui_data, ProjectData, RunHistoryEntry,
-    SessionData,
+    is_mode_toggleable, is_pause_queued, is_session_resumable, load_project_run_history,
+    load_session_by_id, load_ui_data, request_session_pause, set_session_run_mode,
+    spawn_resume_process, ProjectData, RunHistoryEntry, SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
@@ -7079,6 +7080,88 @@ impl Autom8App {
                                             .color(badge_color),
                                     );
                                 });
+
+                            // Mode toggle (Auto/Step) - only for paused/interrupted sessions
+                            if is_mode_toggleable(session) {
+                                ui.add_space(spacing::SM);
+
+                                let current_mode = session.metadata.run_mode;
+                                let is_auto = matches!(current_mode, RunMode::Auto);
+
+                                // Toggle pill with two options
+                                egui::Frame::none()
+                                    .fill(colors::SURFACE_HOVER)
+                                    .rounding(rounding::SMALL)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 0.0;
+
+                                            // Auto option
+                                            let auto_bg = if is_auto {
+                                                colors::ACCENT_SUBTLE
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            };
+                                            let auto_color = if is_auto {
+                                                colors::ACCENT
+                                            } else {
+                                                colors::TEXT_MUTED
+                                            };
+                                            let auto_resp = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("Auto")
+                                                        .font(typography::font(
+                                                            FontSize::Small,
+                                                            FontWeight::Medium,
+                                                        ))
+                                                        .color(auto_color),
+                                                )
+                                                .fill(auto_bg)
+                                                .rounding(rounding::SMALL)
+                                                .frame(false),
+                                            );
+                                            if auto_resp.clicked() && !is_auto {
+                                                let _ = set_session_run_mode(
+                                                    &session.project_name,
+                                                    &session.metadata.session_id,
+                                                    RunMode::Auto,
+                                                );
+                                            }
+
+                                            // Step option
+                                            let step_bg = if !is_auto {
+                                                colors::ACCENT_SUBTLE
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            };
+                                            let step_color = if !is_auto {
+                                                colors::ACCENT
+                                            } else {
+                                                colors::TEXT_MUTED
+                                            };
+                                            let step_resp = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("Step")
+                                                        .font(typography::font(
+                                                            FontSize::Small,
+                                                            FontWeight::Medium,
+                                                        ))
+                                                        .color(step_color),
+                                                )
+                                                .fill(step_bg)
+                                                .rounding(rounding::SMALL)
+                                                .frame(false),
+                                            );
+                                            if step_resp.clicked() && is_auto {
+                                                let _ = set_session_run_mode(
+                                                    &session.project_name,
+                                                    &session.metadata.session_id,
+                                                    RunMode::Step,
+                                                );
+                                            }
+                                        });
+                                    });
+                            }
                         });
 
                         ui.add_space(spacing::XS);
@@ -7194,7 +7277,215 @@ impl Autom8App {
                             }
                         });
 
-                        ui.add_space(spacing::LG);
+                        ui.add_space(spacing::MD);
+
+                        // === CONTROLS SECTION ===
+                        // Show pause button for running sessions, or resume for paused sessions
+                        let show_pause = session.metadata.is_running && !is_pause_queued(session);
+                        let show_pause_queued = is_pause_queued(session);
+                        let show_resume = is_session_resumable(session);
+
+                        if show_pause || show_pause_queued || show_resume {
+                            ui.horizontal(|ui| {
+                                // Pause button (for running sessions)
+                                if show_pause {
+                                    let pause_btn = egui::Button::new(
+                                        egui::RichText::new("Pause")
+                                            .font(typography::font(
+                                                FontSize::Body,
+                                                FontWeight::Medium,
+                                            ))
+                                            .color(colors::TEXT_PRIMARY),
+                                    )
+                                    .fill(colors::SURFACE_ELEVATED)
+                                    .stroke(Stroke::new(1.0, colors::BORDER))
+                                    .rounding(rounding::BUTTON);
+
+                                    if ui.add(pause_btn).clicked() {
+                                        let _ = request_session_pause(
+                                            &session.project_name,
+                                            &session.metadata.session_id,
+                                        );
+                                    }
+                                }
+
+                                // Pause Queued badge (when pause requested but not yet paused)
+                                if show_pause_queued {
+                                    egui::Frame::none()
+                                        .fill(colors::SURFACE_ELEVATED)
+                                        .stroke(Stroke::new(1.0, colors::BORDER))
+                                        .rounding(rounding::SMALL)
+                                        .inner_margin(egui::Margin::symmetric(
+                                            spacing::SM,
+                                            spacing::XS,
+                                        ))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Pause Queued")
+                                                    .font(typography::font(
+                                                        FontSize::Body,
+                                                        FontWeight::Medium,
+                                                    ))
+                                                    .color(colors::TEXT_SECONDARY),
+                                            );
+                                        });
+                                }
+
+                                // Resume split button (GitHub-style) for paused/interrupted sessions
+                                if show_resume {
+                                    // GitHub-style green color
+                                    let btn_green = Color32::from_rgb(35, 134, 54);
+                                    let btn_green_hover = Color32::from_rgb(46, 160, 67);
+
+                                    let button_height = 28.0;
+                                    let main_width = 80.0;
+                                    let dropdown_width = 24.0;
+                                    let total_width = main_width + dropdown_width;
+
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(total_width, button_height),
+                                        Sense::hover(),
+                                    );
+
+                                    let main_rect = Rect::from_min_size(
+                                        rect.min,
+                                        egui::vec2(main_width, button_height),
+                                    );
+                                    let dropdown_rect = Rect::from_min_size(
+                                        egui::pos2(rect.min.x + main_width, rect.min.y),
+                                        egui::vec2(dropdown_width, button_height),
+                                    );
+
+                                    // Check hover states
+                                    let main_hovered = ui.rect_contains_pointer(main_rect);
+                                    let dropdown_hovered = ui.rect_contains_pointer(dropdown_rect);
+
+                                    // Draw main button background (rounded left corners only)
+                                    let main_bg = if main_hovered {
+                                        btn_green_hover
+                                    } else {
+                                        btn_green
+                                    };
+                                    let main_rounding = Rounding {
+                                        nw: rounding::BUTTON,
+                                        sw: rounding::BUTTON,
+                                        ne: 0.0,
+                                        se: 0.0,
+                                    };
+                                    ui.painter().rect_filled(main_rect, main_rounding, main_bg);
+
+                                    // Draw divider
+                                    let divider_x = main_rect.max.x;
+                                    ui.painter().line_segment(
+                                        [
+                                            Pos2::new(divider_x, rect.min.y + 4.0),
+                                            Pos2::new(divider_x, rect.max.y - 4.0),
+                                        ],
+                                        Stroke::new(1.0, Color32::WHITE.linear_multiply(0.3)),
+                                    );
+
+                                    // Draw dropdown background (rounded right corners only)
+                                    let dropdown_bg = if dropdown_hovered {
+                                        btn_green_hover
+                                    } else {
+                                        btn_green
+                                    };
+                                    let dropdown_rounding = Rounding {
+                                        nw: 0.0,
+                                        sw: 0.0,
+                                        ne: rounding::BUTTON,
+                                        se: rounding::BUTTON,
+                                    };
+                                    ui.painter().rect_filled(
+                                        dropdown_rect,
+                                        dropdown_rounding,
+                                        dropdown_bg,
+                                    );
+
+                                    // Draw "Resume" text
+                                    let text_color = Color32::WHITE;
+                                    let label_galley = ui.painter().layout_no_wrap(
+                                        "Resume".to_string(),
+                                        typography::font(FontSize::Body, FontWeight::Medium),
+                                        text_color,
+                                    );
+                                    let label_pos = Pos2::new(
+                                        main_rect.center().x - label_galley.rect.width() / 2.0,
+                                        main_rect.center().y - label_galley.rect.height() / 2.0,
+                                    );
+                                    ui.painter().galley(
+                                        label_pos,
+                                        label_galley,
+                                        Color32::TRANSPARENT,
+                                    );
+
+                                    // Draw dropdown arrow
+                                    let arrow_center = dropdown_rect.center();
+                                    let arrow_size = 4.0;
+                                    let arrow_points = vec![
+                                        Pos2::new(
+                                            arrow_center.x - arrow_size,
+                                            arrow_center.y - 2.0,
+                                        ),
+                                        Pos2::new(
+                                            arrow_center.x + arrow_size,
+                                            arrow_center.y - 2.0,
+                                        ),
+                                        Pos2::new(arrow_center.x, arrow_center.y + 3.0),
+                                    ];
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        arrow_points,
+                                        text_color,
+                                        Stroke::NONE,
+                                    ));
+
+                                    // Handle main button click - Resume in current mode
+                                    if main_hovered && ui.input(|i| i.pointer.primary_clicked()) {
+                                        let _ = spawn_resume_process(session, false);
+                                    }
+
+                                    // Handle dropdown click - show popup menu
+                                    let popup_id = ui.make_persistent_id(format!(
+                                        "resume_dropdown_{}",
+                                        session.metadata.session_id
+                                    ));
+                                    if dropdown_hovered && ui.input(|i| i.pointer.primary_clicked())
+                                    {
+                                        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                    }
+
+                                    // Dropdown popup
+                                    egui::popup_below_widget(
+                                        ui,
+                                        popup_id,
+                                        &response,
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                        |ui: &mut egui::Ui| {
+                                            ui.set_min_width(140.0);
+                                            if ui.button("Resume").clicked() {
+                                                let _ = spawn_resume_process(session, false);
+                                                ui.memory_mut(|mem: &mut egui::Memory| {
+                                                    mem.close_popup()
+                                                });
+                                            }
+                                            if ui.button("Resume (Auto)").clicked() {
+                                                let _ = spawn_resume_process(session, true);
+                                                ui.memory_mut(|mem: &mut egui::Memory| {
+                                                    mem.close_popup()
+                                                });
+                                            }
+                                        },
+                                    );
+
+                                    // Cursor hint
+                                    if main_hovered || dropdown_hovered {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(spacing::MD);
+                        }
 
                         // === OUTPUT SECTION ===
                         // Section header
