@@ -4994,11 +4994,12 @@ impl Autom8App {
                 self.render_config_group_header(ui, "Pipeline");
                 ui.add_space(spacing::SM);
 
+                // US-004: Updated help text to be more user-friendly
                 if self.render_config_bool_field(
                     ui,
                     "review",
                     &mut review,
-                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                    "Quality gate for your code. Claude reviews changes before they're committed to catch issues early.",
                 ) {
                     bool_changes.push((ConfigBoolField::Review, review));
                 }
@@ -5007,11 +5008,16 @@ impl Autom8App {
 
                 // Commit toggle - when disabling commit while pull_request is true,
                 // cascade by also disabling pull_request (US-008)
-                if self.render_config_bool_field(
+                // US-003: Double font size (28px) to emphasize importance in workflow
+                if self.render_config_bool_field_styled(
                     ui,
                     "commit",
                     &mut commit,
                     "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                    false,      // not disabled
+                    None,       // no disabled tooltip
+                    None,       // default color
+                    Some(28.0), // double the Body size (14px * 2)
                 ) {
                     bool_changes.push((ConfigBoolField::Commit, commit));
                     // Cascade: if commit is now false and pull_request was true, disable pull_request too
@@ -5050,13 +5056,16 @@ impl Autom8App {
 
                 // Pull request draft toggle - disabled when pull_request is false
                 // Shows tooltip explaining why it's disabled
-                if self.render_config_bool_field_with_disabled(
+                // US-002: Red label to visually distinguish as draft/warning-related setting
+                if self.render_config_bool_field_styled(
                     ui,
                     "pull_request_draft",
                     &mut pull_request_draft,
                     "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
                     !pull_request, // disabled when pull_request is false
                     Some("Draft PRs require pull requests to be enabled"),
+                    Some(colors::STATUS_ERROR), // Red label for draft/warning emphasis
+                    None,                       // Default font size
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
@@ -5173,11 +5182,12 @@ impl Autom8App {
                 self.render_config_group_header(ui, "Pipeline");
                 ui.add_space(spacing::SM);
 
+                // US-004: Updated help text to be more user-friendly
                 if self.render_config_bool_field(
                     ui,
                     "review",
                     &mut review,
-                    "Code review before committing. When enabled, changes are reviewed for quality before being committed.",
+                    "Quality gate for your code. Claude reviews changes before they're committed to catch issues early.",
                 ) {
                     bool_changes.push((ConfigBoolField::Review, review));
                 }
@@ -5186,11 +5196,16 @@ impl Autom8App {
 
                 // Commit toggle - when disabling commit while pull_request is true,
                 // cascade by also disabling pull_request (US-008)
-                if self.render_config_bool_field(
+                // US-003: Double font size (28px) to emphasize importance in workflow
+                if self.render_config_bool_field_styled(
                     ui,
                     "commit",
                     &mut commit,
                     "Automatic git commits. When enabled, changes are automatically committed after implementation.",
+                    false,      // not disabled
+                    None,       // no disabled tooltip
+                    None,       // default color
+                    Some(28.0), // double the Body size (14px * 2)
                 ) {
                     bool_changes.push((ConfigBoolField::Commit, commit));
                     // Cascade: if commit is now false and pull_request was true, disable pull_request too
@@ -5229,13 +5244,16 @@ impl Autom8App {
 
                 // Pull request draft toggle - disabled when pull_request is false
                 // Shows tooltip explaining why it's disabled
-                if self.render_config_bool_field_with_disabled(
+                // US-002: Red label to visually distinguish as draft/warning-related setting
+                if self.render_config_bool_field_styled(
                     ui,
                     "pull_request_draft",
                     &mut pull_request_draft,
                     "Create PRs as drafts. When enabled, PRs are created in draft mode (not ready for review). Requires pull_request to be enabled.",
                     !pull_request, // disabled when pull_request is false
                     Some("Draft PRs require pull requests to be enabled"),
+                    Some(colors::STATUS_ERROR), // Red label for draft/warning emphasis
+                    None,                       // Default font size
                 ) {
                     bool_changes.push((ConfigBoolField::PullRequestDraft, pull_request_draft));
                 }
@@ -5356,20 +5374,69 @@ impl Autom8App {
         disabled: bool,
         disabled_tooltip: Option<&str>,
     ) -> bool {
+        // Delegate to the styled version with default styling (US-001)
+        self.render_config_bool_field_styled(
+            ui,
+            name,
+            value,
+            help_text,
+            disabled,
+            disabled_tooltip,
+            None, // custom_color
+            None, // custom_font_size
+        )
+    }
+
+    /// Render a boolean config field with full styling support (US-001).
+    ///
+    /// This is the foundational method that supports custom text color and font size
+    /// for the label, in addition to disabled state handling. Other bool field render
+    /// methods delegate to this one with appropriate defaults.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The egui UI context
+    /// * `name` - The field name to display
+    /// * `value` - The current boolean value (mutable reference for toggle_value)
+    /// * `help_text` - Descriptive help text shown below the field
+    /// * `disabled` - If true, the toggle is greyed out and non-interactive
+    /// * `disabled_tooltip` - Tooltip text shown when hovering over a disabled toggle
+    /// * `custom_color` - Optional override for the label text color
+    /// * `custom_font_size` - Optional override for the label font size
+    ///
+    /// # Returns
+    ///
+    /// `true` if the toggle was clicked and the value changed, `false` otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn render_config_bool_field_styled(
+        &self,
+        ui: &mut egui::Ui,
+        name: &str,
+        value: &mut bool,
+        help_text: &str,
+        disabled: bool,
+        disabled_tooltip: Option<&str>,
+        custom_color: Option<Color32>,
+        custom_font_size: Option<f32>,
+    ) -> bool {
         let original_value = *value;
 
         ui.horizontal(|ui| {
-            // Field name - use disabled color if disabled
+            // Field name - use custom color, disabled color, or default
             let text_color = if disabled {
                 colors::TEXT_DISABLED
             } else {
-                colors::TEXT_PRIMARY
+                custom_color.unwrap_or(colors::TEXT_PRIMARY)
             };
-            ui.label(
-                egui::RichText::new(name)
-                    .font(typography::font(FontSize::Body, FontWeight::Medium))
-                    .color(text_color),
-            );
+
+            // Use custom font size if provided, otherwise use default Body size
+            let font = if let Some(size) = custom_font_size {
+                egui::FontId::new(size, FontWeight::Medium.family())
+            } else {
+                typography::font(FontSize::Body, FontWeight::Medium)
+            };
+
+            ui.label(egui::RichText::new(name).font(font).color(text_color));
 
             ui.add_space(spacing::SM);
 
