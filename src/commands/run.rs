@@ -4,8 +4,13 @@
 
 use std::path::Path;
 
+use crate::config::spec_dir;
 use crate::error::Result;
 use crate::output::{print_header, GREEN, RESET};
+use crate::self_test::{
+    cleanup_self_test, create_self_test_spec, print_cleanup_results, print_failure_details,
+    SELF_TEST_SPEC_FILENAME,
+};
 use crate::Runner;
 
 use super::{detect_input_type, ensure_project_dir, InputType};
@@ -22,6 +27,7 @@ use super::{detect_input_type, ensure_project_dir, InputType};
 /// * `skip_review` - If true, skip the review loop
 /// * `worktree` - If true, enable worktree mode (overrides config)
 /// * `no_worktree` - If true, disable worktree mode (overrides config)
+/// * `self_test` - If true, run a self-test with hardcoded spec (ignores spec argument)
 ///
 /// # Returns
 ///
@@ -33,8 +39,14 @@ pub fn run_command(
     skip_review: bool,
     worktree: bool,
     no_worktree: bool,
+    self_test: bool,
 ) -> Result<()> {
     ensure_project_dir()?;
+
+    // Handle self-test mode
+    if self_test {
+        return run_self_test(verbose, skip_review, worktree, no_worktree);
+    }
 
     let mut runner = Runner::new()?
         .with_verbose(verbose)
@@ -53,6 +65,54 @@ pub fn run_command(
         InputType::Json => runner.run(spec),
         InputType::Markdown => runner.run_from_spec(spec),
     }
+}
+
+/// Run a self-test with the hardcoded spec.
+///
+/// Creates the self-test spec, saves it to the config directory, and runs
+/// the normal implementation flow with commit and PR disabled. Cleans up
+/// all test artifacts afterward (on both success and failure).
+fn run_self_test(
+    verbose: bool,
+    skip_review: bool,
+    worktree: bool,
+    no_worktree: bool,
+) -> Result<()> {
+    // Create and save the self-test spec to the config directory
+    let spec = create_self_test_spec();
+    let spec_path = spec_dir()?.join(SELF_TEST_SPEC_FILENAME);
+    spec.save(&spec_path)?;
+
+    // Configure runner with commit and PR disabled (self-test shouldn't create commits or PRs)
+    let mut runner = Runner::new()?
+        .with_verbose(verbose)
+        .with_skip_review(skip_review)
+        .with_commit(false)
+        .with_pull_request(false);
+
+    // Apply worktree CLI flag override
+    if worktree {
+        runner = runner.with_worktree(true);
+    } else if no_worktree {
+        runner = runner.with_worktree(false);
+    }
+
+    print_header();
+
+    // Run the normal implementation flow with the self-test spec
+    let run_result = runner.run(&spec_path);
+
+    // On failure, print detailed error information before cleanup
+    if let Err(ref e) = run_result {
+        print_failure_details(e);
+    }
+
+    // Always clean up, regardless of success or failure
+    let cleanup_result = cleanup_self_test();
+    print_cleanup_results(&cleanup_result);
+
+    // Return the original run result (cleanup failures are just reported, not propagated)
+    run_result
 }
 
 /// Run implementation from a file argument.

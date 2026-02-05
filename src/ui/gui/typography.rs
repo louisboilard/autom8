@@ -100,6 +100,14 @@ pub fn mono(size: FontSize) -> FontId {
     FontId::new(size.pixels(), FontFamily::Name(FAMILY_GEIST_MONO.into()))
 }
 
+/// Returns the approximate line height for a given font size.
+///
+/// Uses a standard 1.4x multiplier on the font pixel size to account
+/// for line spacing.
+pub fn line_height(size: FontSize) -> f32 {
+    size.pixels() * 1.4
+}
+
 /// Create FontDefinitions with embedded Geist fonts.
 ///
 /// This function configures egui to use the Geist font family as the default

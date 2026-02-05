@@ -5,7 +5,7 @@
 //! indicators, and time formatting utilities.
 
 use crate::state::MachineState;
-use crate::ui::gui::theme::colors;
+use crate::ui::gui::theme::{colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 // Import and re-export shared types and functions for backward compatibility
 use crate::ui::shared::format_state_label;
@@ -177,6 +177,22 @@ pub fn badge_background_color(status_color: Color32) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// Check if a MachineState represents a finished/terminal state.
+///
+/// US-002: Used to determine when the close button should be visible on session tabs.
+/// Terminal states are those where the run has ended (success, failure, or idle):
+/// - `Completed`: Run finished successfully
+/// - `Failed`: Run ended with an error
+/// - `Idle`: No active run (session has never started or was interrupted)
+///
+/// All other states are considered "in progress" and the close button should be hidden.
+pub fn is_terminal_state(state: MachineState) -> bool {
+    matches!(
+        state,
+        MachineState::Completed | MachineState::Failed | MachineState::Idle
+    )
+}
+
 // ============================================================================
 // Progress Components
 // ============================================================================
@@ -316,6 +332,39 @@ pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Strip worktree-related prefixes from branch names for cleaner display.
+///
+/// This removes common prefixes that follow the worktree naming pattern:
+/// - `{project}-wt-` prefix (e.g., "autom8-wt-feature/foo" → "feature/foo")
+/// - `{project}-` prefix if followed by common branch prefixes
+///
+/// The project_name is used to identify project-specific prefixes.
+///
+/// # Examples
+/// ```
+/// use autom8::ui::gui::components::strip_worktree_prefix;
+///
+/// assert_eq!(strip_worktree_prefix("feature/login", "myproject"), "feature/login");
+/// assert_eq!(strip_worktree_prefix("myproject-wt-feature/login", "myproject"), "feature/login");
+/// ```
+pub fn strip_worktree_prefix(branch_name: &str, project_name: &str) -> String {
+    // Try to strip "{project}-wt-" prefix
+    let wt_prefix = format!("{}-wt-", project_name);
+    if let Some(stripped) = branch_name.strip_prefix(&wt_prefix) {
+        return stripped.to_string();
+    }
+
+    // Try lowercase version as well (case-insensitive matching)
+    let wt_prefix_lower = format!("{}-wt-", project_name.to_lowercase());
+    if branch_name.to_lowercase().starts_with(&wt_prefix_lower) {
+        // Return the original case for the rest of the branch name
+        return branch_name[wt_prefix_lower.len()..].to_string();
+    }
+
+    // Return unchanged if no prefix matched
+    branch_name.to_string()
+}
+
 /// Maximum characters for general text truncation.
 pub const MAX_TEXT_LENGTH: usize = 40;
 
@@ -435,6 +484,194 @@ impl StatusLabel {
 
         if ui.is_rect_visible(rect) {
             self.paint(ui, ui.painter(), rect.min, font, text_color);
+        }
+
+        response
+    }
+}
+
+// ============================================================================
+// Collapsible Section Component
+// ============================================================================
+
+/// A reusable collapsible section component for detail panels.
+///
+/// The section has a clickable header that toggles between expanded and collapsed
+/// states. When expanded, the content area is visible. When collapsed, only the
+/// header is shown with an indicator showing the collapsed state.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut collapsed_sections = HashMap::new();
+///
+/// CollapsibleSection::new("work_summaries", "Work Summaries")
+///     .default_expanded(false)
+///     .show(ui, &mut collapsed_sections, |ui| {
+///         // Section content here
+///         ui.label("Content goes here");
+///     });
+/// ```
+pub struct CollapsibleSection<'a> {
+    /// Unique identifier for this section (used for state tracking).
+    id: &'a str,
+    /// Title displayed in the section header.
+    title: &'a str,
+    /// Whether the section should be expanded by default.
+    default_expanded: bool,
+}
+
+impl<'a> CollapsibleSection<'a> {
+    /// Create a new collapsible section with the given ID and title.
+    ///
+    /// The ID should be unique within the context where the section is used,
+    /// as it's used to track the collapsed state in the state map.
+    pub fn new(id: &'a str, title: &'a str) -> Self {
+        Self {
+            id,
+            title,
+            default_expanded: true,
+        }
+    }
+
+    /// Set whether this section should be expanded by default.
+    ///
+    /// When the section is first rendered (or when its state is not in the map),
+    /// this determines whether it starts expanded or collapsed.
+    pub fn default_expanded(mut self, expanded: bool) -> Self {
+        self.default_expanded = expanded;
+        self
+    }
+
+    /// Render the collapsible section and execute the content callback if expanded.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The egui UI context
+    /// * `collapsed_state` - Map of section IDs to their collapsed state (true = collapsed)
+    /// * `add_contents` - Callback to render the section content when expanded
+    ///
+    /// # Returns
+    ///
+    /// The response from the header click interaction.
+    pub fn show<R>(
+        self,
+        ui: &mut egui::Ui,
+        collapsed_state: &mut std::collections::HashMap<String, bool>,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::Response {
+        // Get or initialize the collapsed state for this section
+        let is_collapsed = *collapsed_state
+            .entry(self.id.to_string())
+            .or_insert(!self.default_expanded);
+
+        // Render the header (clickable to toggle)
+        let header_response = self.render_header(ui, is_collapsed);
+
+        // Toggle state on click
+        if header_response.clicked() {
+            collapsed_state.insert(self.id.to_string(), !is_collapsed);
+        }
+
+        // Render content if expanded
+        if !is_collapsed {
+            ui.add_space(spacing::SM);
+            add_contents(ui);
+        }
+
+        header_response
+    }
+
+    /// Render the section header with title and expand/collapse indicator.
+    fn render_header(&self, ui: &mut egui::Ui, is_collapsed: bool) -> egui::Response {
+        let available_width = ui.available_width();
+
+        // Create a clickable header area
+        let header_height = typography::line_height(FontSize::Body) + spacing::XS * 2.0;
+
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(available_width, header_height),
+            egui::Sense::click(),
+        );
+
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+
+            // Draw hover highlight if applicable
+            if response.hovered() {
+                painter.rect_filled(rect, Rounding::same(rounding::SMALL), colors::SURFACE_HOVER);
+            }
+
+            // Draw the chevron indicator
+            let chevron_size = 8.0;
+            let chevron_x = rect.min.x + spacing::XS;
+            let chevron_y = rect.center().y;
+
+            let chevron_color = if response.hovered() {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_SECONDARY
+            };
+
+            if is_collapsed {
+                // Right-pointing chevron (collapsed)
+                // Draw > shape
+                let points = [
+                    Pos2::new(chevron_x, chevron_y - chevron_size / 2.0),
+                    Pos2::new(chevron_x + chevron_size / 2.0, chevron_y),
+                    Pos2::new(chevron_x, chevron_y + chevron_size / 2.0),
+                ];
+                painter.line_segment(
+                    [points[0], points[1]],
+                    egui::Stroke::new(1.5, chevron_color),
+                );
+                painter.line_segment(
+                    [points[1], points[2]],
+                    egui::Stroke::new(1.5, chevron_color),
+                );
+            } else {
+                // Down-pointing chevron (expanded)
+                // Draw v shape
+                let points = [
+                    Pos2::new(chevron_x, chevron_y - chevron_size / 4.0),
+                    Pos2::new(
+                        chevron_x + chevron_size / 2.0,
+                        chevron_y + chevron_size / 4.0,
+                    ),
+                    Pos2::new(chevron_x + chevron_size, chevron_y - chevron_size / 4.0),
+                ];
+                painter.line_segment(
+                    [points[0], points[1]],
+                    egui::Stroke::new(1.5, chevron_color),
+                );
+                painter.line_segment(
+                    [points[1], points[2]],
+                    egui::Stroke::new(1.5, chevron_color),
+                );
+            }
+
+            // Draw the title
+            let title_x = chevron_x + chevron_size + spacing::SM;
+            let title_y = rect.center().y - typography::line_height(FontSize::Body) / 2.0;
+
+            let title_color = if response.hovered() {
+                colors::TEXT_PRIMARY
+            } else {
+                colors::TEXT_SECONDARY
+            };
+
+            let galley = painter.layout_no_wrap(
+                self.title.to_string(),
+                typography::font(FontSize::Body, FontWeight::Medium),
+                title_color,
+            );
+
+            painter.galley(Pos2::new(title_x, title_y), galley, Color32::TRANSPARENT);
+        }
+
+        // Show cursor change on hover
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
         response
@@ -779,6 +1016,42 @@ mod tests {
         // Trailing spaces before truncation point should be trimmed
         let result = truncate_with_ellipsis("hello   world", 10);
         assert_eq!(result, "hello...");
+    }
+
+    // ------------------------------------------------------------------------
+    // strip_worktree_prefix Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_worktree_prefix_no_prefix() {
+        // Branch without worktree prefix should be unchanged
+        assert_eq!(
+            strip_worktree_prefix("feature/login", "myproject"),
+            "feature/login"
+        );
+        assert_eq!(strip_worktree_prefix("main", "myproject"), "main");
+        assert_eq!(
+            strip_worktree_prefix("develop/new-feature", "myproject"),
+            "develop/new-feature"
+        );
+    }
+
+    #[test]
+    fn test_strip_worktree_prefix_standard_wt_prefix() {
+        // Standard "{project}-wt-" prefix should be stripped
+        assert_eq!(
+            strip_worktree_prefix("myproject-wt-feature/login", "myproject"),
+            "feature/login"
+        );
+        assert_eq!(
+            strip_worktree_prefix("autom8-wt-feature/gui-tabs", "autom8"),
+            "feature/gui-tabs"
+        );
+        // Case insensitive matching
+        assert_eq!(
+            strip_worktree_prefix("MyProject-wt-feature/test", "myproject"),
+            "feature/test"
+        );
     }
 
     // ------------------------------------------------------------------------

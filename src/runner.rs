@@ -323,6 +323,12 @@ pub struct Runner {
     /// Override for the worktree config setting.
     /// None = use config value, Some(true/false) = override config.
     worktree_override: Option<bool>,
+    /// Override for the commit config setting.
+    /// None = use config value, Some(true/false) = override config.
+    commit_override: Option<bool>,
+    /// Override for the pull_request config setting.
+    /// None = use config value, Some(true/false) = override config.
+    pull_request_override: Option<bool>,
 }
 
 impl Runner {
@@ -332,6 +338,8 @@ impl Runner {
             verbose: false,
             skip_review: false,
             worktree_override: None,
+            commit_override: None,
+            pull_request_override: None,
         })
     }
 
@@ -355,6 +363,22 @@ impl Runner {
         self
     }
 
+    /// Set the commit mode override.
+    ///
+    /// When set, this overrides the `commit` setting from the config file.
+    pub fn with_commit(mut self, commit: bool) -> Self {
+        self.commit_override = Some(commit);
+        self
+    }
+
+    /// Set the pull_request mode override.
+    ///
+    /// When set, this overrides the `pull_request` setting from the config file.
+    pub fn with_pull_request(mut self, pull_request: bool) -> Self {
+        self.pull_request_override = Some(pull_request);
+        self
+    }
+
     /// Get the effective worktree mode, considering CLI override and config.
     ///
     /// Priority: CLI flag > config file > default (false).
@@ -367,9 +391,21 @@ impl Runner {
         Ok(config.worktree)
     }
 
-    /// Load the effective config.
+    /// Load the effective config, applying any CLI overrides.
     fn load_config_with_override(&self) -> Result<crate::config::Config> {
-        get_effective_config()
+        let mut config = get_effective_config()?;
+
+        // Apply commit override if set
+        if let Some(commit) = self.commit_override {
+            config.commit = commit;
+        }
+
+        // Apply pull_request override if set
+        if let Some(pull_request) = self.pull_request_override {
+            config.pull_request = pull_request;
+        }
+
+        Ok(config)
     }
 
     /// Check if worktree mode is effective (considering CLI override and config).
@@ -1460,6 +1496,8 @@ impl Runner {
             verbose: self.verbose,
             skip_review: self.skip_review,
             worktree_override: self.worktree_override,
+            commit_override: self.commit_override,
+            pull_request_override: self.pull_request_override,
         };
 
         // Mark metadata as saved since the state was just saved above
@@ -1560,6 +1598,8 @@ impl Runner {
             verbose: self.verbose,
             skip_review: self.skip_review,
             worktree_override: self.worktree_override,
+            commit_override: self.commit_override,
+            pull_request_override: self.pull_request_override,
         };
 
         worktree_runner.run_implementation_loop(state, &spec_json_path, worktree_setup_ctx)
@@ -1942,6 +1982,19 @@ mod tests {
         assert!(!runner.skip_review);
         assert!(!runner.verbose);
         assert!(runner.worktree_override.is_none());
+        assert!(runner.commit_override.is_none());
+        assert!(runner.pull_request_override.is_none());
+    }
+
+    #[test]
+    fn test_runner_commit_and_pull_request_overrides() {
+        let runner = Runner::new()
+            .unwrap()
+            .with_commit(false)
+            .with_pull_request(false);
+
+        assert_eq!(runner.commit_override, Some(false));
+        assert_eq!(runner.pull_request_override, Some(false));
     }
 
     // ========================================================================
@@ -2296,6 +2349,8 @@ mod tests {
             verbose: false,
             skip_review: false,
             worktree_override: None,
+            commit_override: None,
+            pull_request_override: None,
         };
 
         let mut state = RunState::new(PathBuf::from("test.json"), "test".to_string());
@@ -2442,6 +2497,8 @@ mod tests {
             verbose: false,
             skip_review: false,
             worktree_override: None,
+            commit_override: None,
+            pull_request_override: None,
         }
     }
 
