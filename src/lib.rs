@@ -35,6 +35,7 @@ pub mod progress;
 pub mod prompt;
 pub mod prompts;
 pub mod runner;
+pub mod self_test;
 pub mod signal;
 pub mod snapshot;
 pub mod spec;

@@ -66,7 +66,7 @@ WORKTREE MODE:
     Each worktree has its own isolated session state.")]
     Run {
         /// Path to the spec JSON or markdown file
-        #[arg(long, default_value = "./spec.json")]
+        #[arg(long, default_value = "./spec.json", conflicts_with = "self_test")]
         spec: PathBuf,
 
         /// Skip the review loop and go directly to committing
@@ -82,6 +82,11 @@ WORKTREE MODE:
         /// Use this to override worktree=true in your config file.
         #[arg(long, conflicts_with = "worktree")]
         no_worktree: bool,
+
+        /// Run a self-test with a hardcoded trivial spec to verify autom8 functionality.
+        /// Bypasses the normal spec file requirement and cleans up all artifacts after completion.
+        #[arg(long, conflicts_with = "spec")]
+        self_test: bool,
     },
 
     /// Check the current run status
@@ -329,8 +334,16 @@ fn main() {
                         skip_review,
                         worktree,
                         no_worktree,
+                        self_test,
                     }),
-                ) => run_command(cli.verbose, spec, *skip_review, *worktree, *no_worktree),
+                ) => run_command(
+                    cli.verbose,
+                    spec,
+                    *skip_review,
+                    *worktree,
+                    *no_worktree,
+                    *self_test,
+                ),
 
                 (
                     None,
@@ -638,6 +651,40 @@ mod tests {
 
         // Cannot use both together
         assert!(Cli::try_parse_from(["autom8", "run", "--worktree", "--no-worktree"]).is_err());
+    }
+
+    // =========================================================================
+    // Self-test flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_self_test_flag() {
+        // --self-test flag works
+        let cli = Cli::try_parse_from(["autom8", "run", "--self-test"]).unwrap();
+        if let Some(Commands::Run { self_test, .. }) = cli.command {
+            assert!(self_test);
+        } else {
+            panic!("Expected Run command");
+        }
+
+        // --self-test conflicts with --spec
+        assert!(
+            Cli::try_parse_from(["autom8", "run", "--self-test", "--spec", "test.json"]).is_err()
+        );
+
+        // --self-test can be combined with other flags
+        let cli = Cli::try_parse_from(["autom8", "run", "--self-test", "--worktree"]).unwrap();
+        if let Some(Commands::Run {
+            self_test,
+            worktree,
+            ..
+        }) = cli.command
+        {
+            assert!(self_test);
+            assert!(worktree);
+        } else {
+            panic!("Expected Run command");
+        }
     }
 
     // =========================================================================
