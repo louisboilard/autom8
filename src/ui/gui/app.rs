@@ -107,6 +107,13 @@ const SPLIT_DIVIDER_MARGIN: f32 = 12.0; // spacing::MD
 const SPLIT_PANEL_MIN_WIDTH: f32 = 200.0;
 
 // ============================================================================
+// Run History View Constants (US-002)
+// ============================================================================
+
+/// Height of each run history card.
+const RUN_HISTORY_CARD_HEIGHT: f32 = 72.0;
+
+// ============================================================================
 // Sidebar Constants (Sidebar Navigation - US-003)
 // ============================================================================
 
@@ -127,6 +134,50 @@ const SIDEBAR_TOGGLE_SIZE: f32 = 34.0;
 
 /// Horizontal padding before the toggle button.
 const SIDEBAR_TOGGLE_PADDING: f32 = 8.0;
+
+// ============================================================================
+// Hamburger Menu Icon Constants (US-002)
+// ============================================================================
+
+/// Width of each horizontal line in the hamburger icon.
+const HAMBURGER_LINE_WIDTH: f32 = 12.0;
+
+/// Vertical spacing between hamburger icon lines.
+const HAMBURGER_LINE_SPACING: f32 = 4.0;
+
+/// Stroke width for hamburger icon lines.
+const HAMBURGER_STROKE_WIDTH: f32 = 1.5;
+
+// ============================================================================
+// Sidebar Icon Constants (US-002)
+// ============================================================================
+
+/// Width of the sidebar icon.
+const SIDEBAR_ICON_WIDTH: f32 = 14.0;
+
+/// Height of the sidebar icon.
+const SIDEBAR_ICON_HEIGHT: f32 = 12.0;
+
+/// X offset for the vertical divider within the sidebar icon.
+const SIDEBAR_ICON_DIVIDER_X_OFFSET: f32 = 5.0;
+
+/// Stroke width for the sidebar icon outer frame.
+const SIDEBAR_ICON_FRAME_STROKE: f32 = 1.5;
+
+/// Stroke width for internal sidebar icon elements.
+const SIDEBAR_ICON_INNER_STROKE: f32 = 1.0;
+
+/// Inset from icon edges for internal elements.
+const SIDEBAR_ICON_EDGE_INSET: f32 = 1.0;
+
+/// Horizontal padding from divider to content lines.
+const SIDEBAR_ICON_LINE_PADDING: f32 = 2.0;
+
+/// Vertical offset from top for first content line.
+const SIDEBAR_ICON_LINE_TOP_OFFSET: f32 = 4.0;
+
+/// Vertical spacing between content lines.
+const SIDEBAR_ICON_LINE_SPACING: f32 = 4.0;
 
 /// Height of each navigation item in the sidebar.
 const SIDEBAR_ITEM_HEIGHT: f32 = 40.0;
@@ -4075,46 +4126,51 @@ impl Autom8App {
 
         if is_collapsed {
             // Hamburger icon (three horizontal lines) - indicates "expand/show"
-            let line_width = 12.0;
-            let line_spacing = 4.0;
-            let half_width = line_width / 2.0;
+            let half_width = HAMBURGER_LINE_WIDTH / 2.0;
 
             for i in -1..=1 {
-                let y = center.y + (i as f32) * line_spacing;
+                let y = center.y + (i as f32) * HAMBURGER_LINE_SPACING;
                 painter.line_segment(
                     [
                         egui::pos2(center.x - half_width, y),
                         egui::pos2(center.x + half_width, y),
                     ],
-                    Stroke::new(1.5, icon_color),
+                    Stroke::new(HAMBURGER_STROKE_WIDTH, icon_color),
                 );
             }
         } else {
             // Sidebar icon (left panel with lines) - indicates "collapse/hide"
             // Draw a rectangle representing the sidebar
-            let icon_rect = Rect::from_center_size(center, egui::vec2(14.0, 12.0));
+            let icon_rect =
+                Rect::from_center_size(center, egui::vec2(SIDEBAR_ICON_WIDTH, SIDEBAR_ICON_HEIGHT));
 
             // Outer frame
-            painter.rect_stroke(icon_rect, Rounding::same(1.0), Stroke::new(1.5, icon_color));
+            painter.rect_stroke(
+                icon_rect,
+                Rounding::same(SIDEBAR_ICON_EDGE_INSET),
+                Stroke::new(SIDEBAR_ICON_FRAME_STROKE, icon_color),
+            );
 
             // Vertical divider (sidebar edge)
-            let divider_x = icon_rect.left() + 5.0;
+            let divider_x = icon_rect.left() + SIDEBAR_ICON_DIVIDER_X_OFFSET;
             painter.line_segment(
                 [
-                    egui::pos2(divider_x, icon_rect.top() + 1.0),
-                    egui::pos2(divider_x, icon_rect.bottom() - 1.0),
+                    egui::pos2(divider_x, icon_rect.top() + SIDEBAR_ICON_EDGE_INSET),
+                    egui::pos2(divider_x, icon_rect.bottom() - SIDEBAR_ICON_EDGE_INSET),
                 ],
-                Stroke::new(1.0, icon_color),
+                Stroke::new(SIDEBAR_ICON_INNER_STROKE, icon_color),
             );
 
             // Content lines on the right side
-            let line_start_x = divider_x + 2.0;
-            let line_end_x = icon_rect.right() - 2.0;
+            let line_start_x = divider_x + SIDEBAR_ICON_LINE_PADDING;
+            let line_end_x = icon_rect.right() - SIDEBAR_ICON_LINE_PADDING;
             for i in 0..2 {
-                let y = icon_rect.top() + 4.0 + (i as f32) * 4.0;
+                let y = icon_rect.top()
+                    + SIDEBAR_ICON_LINE_TOP_OFFSET
+                    + (i as f32) * SIDEBAR_ICON_LINE_SPACING;
                 painter.line_segment(
                     [egui::pos2(line_start_x, y), egui::pos2(line_end_x, y)],
-                    Stroke::new(1.0, icon_color),
+                    Stroke::new(SIDEBAR_ICON_INNER_STROKE, icon_color),
                 );
             }
         }
@@ -4369,8 +4425,11 @@ impl Autom8App {
 
         // Allocate space for the entire tab
         let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
-
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for tab headers
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw tab background on hover (subtle)
         if is_hovered && !is_active {
@@ -4469,7 +4528,7 @@ impl Autom8App {
             );
 
             // Check for close button click
-            if response.clicked() && close_hovered {
+            if was_clicked && close_hovered {
                 close_clicked = true;
             }
         }
@@ -4484,8 +4543,8 @@ impl Autom8App {
                 .rect_filled(underline_rect, Rounding::ZERO, colors::ACCENT);
         }
 
-        // Tab was clicked if response.clicked() and NOT close button clicked
-        let tab_clicked = response.clicked() && !close_clicked;
+        // Tab was clicked if was_clicked and NOT close button clicked
+        let tab_clicked = was_clicked && !close_clicked;
 
         (tab_clicked, close_clicked)
     }
@@ -4622,6 +4681,10 @@ impl Autom8App {
         // Allocate space for the entire tab
         let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for content tabs
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw tab background
         let bg_color = if is_active {
@@ -4730,8 +4793,8 @@ impl Autom8App {
         }
 
         // Close button click takes precedence over tab click
-        let close_clicked = response.clicked() && close_hovered;
-        let tab_clicked = response.clicked() && !close_hovered;
+        let close_clicked = was_clicked && close_hovered;
+        let tab_clicked = was_clicked && !close_hovered;
 
         (tab_clicked, close_clicked)
     }
@@ -4897,12 +4960,17 @@ impl Autom8App {
             Vec2::new(ui.available_width(), CONFIG_SCOPE_ROW_HEIGHT),
             Sense::click(),
         );
+        let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for config scope rows
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw background on hover or selection
         if ui.is_rect_visible(rect) {
             let bg_color = if is_selected {
                 colors::SURFACE_SELECTED
-            } else if response.hovered() {
+            } else if is_hovered {
                 colors::SURFACE_HOVER
             } else {
                 Color32::TRANSPARENT
@@ -4950,7 +5018,7 @@ impl Autom8App {
             );
         }
 
-        response.clicked()
+        was_clicked
     }
 
     /// Render the right panel of the Config view (config editor).
@@ -5087,6 +5155,10 @@ impl Autom8App {
         // Allocate space and get response
         let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for primary buttons
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw button background
         let bg_color = if is_hovered {
@@ -5116,7 +5188,7 @@ impl Autom8App {
             text_color,
         );
 
-        response.clicked()
+        was_clicked
     }
 
     /// Render the "Reset to Defaults" button (US-009).
@@ -5145,6 +5217,10 @@ impl Autom8App {
         // Allocate space and get response
         let (rect, response) = ui.allocate_exact_size(button_size, Sense::click());
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for secondary buttons
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw subtle button background (only visible on hover)
         if is_hovered {
@@ -5171,7 +5247,7 @@ impl Autom8App {
             text_color,
         );
 
-        response.clicked()
+        was_clicked
     }
 
     /// Render the global config editor with all fields (US-003, US-006, US-009).
@@ -5600,6 +5676,9 @@ impl Autom8App {
 
             // Allocate space and handle interaction
             let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click());
+
+            // Set pointer cursor for toggle switches
+            response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
             // Handle click
             if response.clicked() {
@@ -6846,6 +6925,10 @@ impl Autom8App {
         // Allocate space for the tab
         let (rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for session tabs
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw tab background
         let bg_color = if is_active {
@@ -6995,8 +7078,8 @@ impl Autom8App {
 
         // Close button click takes precedence over tab click
         // US-002: close_hovered is always false when button is hidden, so close_clicked will be false
-        let close_clicked = response.clicked() && close_hovered;
-        let tab_clicked = response.clicked() && !close_hovered;
+        let close_clicked = was_clicked && close_hovered;
+        let tab_clicked = was_clicked && !close_hovered;
 
         (tab_clicked, close_clicked)
     }
@@ -7657,12 +7740,15 @@ impl Autom8App {
     fn render_run_history_entry(&self, ui: &mut egui::Ui, entry: &RunHistoryEntry) -> bool {
         // Card background - use consistent height from constants
         let available_width = ui.available_width();
-        let card_height = 72.0; // Fixed height for history cards
+        let card_height = RUN_HISTORY_CARD_HEIGHT;
 
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(available_width, card_height), Sense::click());
-
         let is_hovered = response.hovered();
+        let was_clicked = response.clicked();
+
+        // Set pointer cursor for history cards
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
         // Draw card background with hover state - consistent with project row pattern
         // Uses SURFACE as default, SURFACE_HOVER on hover, and border feedback
@@ -7753,7 +7839,7 @@ impl Autom8App {
             );
         });
 
-        response.clicked()
+        was_clicked
     }
 
     /// Render the empty state for Projects view.
