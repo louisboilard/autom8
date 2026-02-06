@@ -2,7 +2,6 @@
 
 [![Test](https://github.com/louisboilard/autom8/actions/workflows/test.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/test.yml)
 [![Lint](https://github.com/louisboilard/autom8/actions/workflows/lint.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/lint.yml)
-[![Security](https://github.com/louisboilard/autom8/actions/workflows/security.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/security.yml)
 [![Crates.io](https://img.shields.io/crates/v/autom8)](https://crates.io/crates/autom8)
 [![License](https://img.shields.io/crates/l/autom8)](LICENSE)
 
