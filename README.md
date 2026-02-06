@@ -2,8 +2,8 @@
 
 [![Test](https://github.com/louisboilard/autom8/actions/workflows/test.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/test.yml)
 [![Lint](https://github.com/louisboilard/autom8/actions/workflows/lint.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/lint.yml)
-[![Crates.io](https://img.shields.io/crates/v/autom8)](https://crates.io/crates/autom8)
-[![License](https://img.shields.io/crates/l/autom8)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/autom8-cli)](https://crates.io/crates/autom8-cli)
+[![License](https://img.shields.io/crates/l/autom8-cli)](LICENSE)
 
 A simple, fast, and deterministic-when-possible CLI tool for orchestrating Claude-powered development. No external deps or setup required; one binary to rule them all.
 
@@ -14,7 +14,7 @@ either use `cargo` to pull it from crates.io or clone and build from source:
 
 ```bash
 # From crates.io
-cargo install autom8
+cargo install autom8-cli
 
 # Install from source (i.e after cloning this repo)
 cargo install --force --path .
