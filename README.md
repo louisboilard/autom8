@@ -5,8 +5,6 @@
 [![Crates.io](https://img.shields.io/crates/v/autom8)](https://crates.io/crates/autom8)
 [![License](https://img.shields.io/crates/l/autom8)](LICENSE)
 
-![autom8 TUI](assets/monitor.png)
-
 A simple, fast, and deterministic-when-possible CLI tool for orchestrating Claude-powered development. No external deps or setup required; one binary to rule them all.
 
 Run `autom8` from your project, describe what you want to build, and Claude helps you write a structured spec. When you're done going back and forth with Claude and have the spec file generated, exit the Claude session (`/exit` or `ctrl-d`) and autom8 takes over: it drives Claude through implementation story by story, reviews the work, and optionally commit/open a PR when everything passes.
@@ -137,15 +135,27 @@ Primary states: **running-claude** (implementation in progress), **reviewing** (
 
 ## Monitoring
 
-autom8 comes with both a terminal UI and a native desktop GUI for watching your runs.
+autom8 comes with both a terminal UI and a native desktop GUI for watching your runs. Both interfaces update in real-time and work across all your worktrees.
 
-**Terminal UI** (`autom8 monitor`): A ratatui-based dashboard showing active sessions, project list, and run history. Keyboard-navigable and works over SSH.
+### GUI
 
-**Desktop GUI** (`autom8 gui`): A native immediate mode application built with egui. Shows live session output, run history with iteration details, and lets you edit configuration. Useful when you want to keep an eye on multiple projects.
+A native immediate mode application built with egui. Shows live session output, run history with iteration details, and lets you edit configuration. Useful when you want to keep an eye on multiple projects.
+
+```bash
+autom8 gui
+```
 
 https://github.com/user-attachments/assets/7bb179e7-d127-4df7-b179-d1152a4ade06
 
-Both interfaces update in real-time and work across all your worktrees.
+### TUI
+
+A ratatui-based dashboard showing active sessions, project list, and run history. Keyboard-navigable and works over SSH.
+
+```bash
+autom8 monitor
+```
+
+![autom8 TUI](assets/monitor.png)
 
 ## CLI Commands
 
