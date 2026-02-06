@@ -423,14 +423,16 @@ fn config_to_toml_string(config: &Config) -> String {
          pull_request_draft = {}\n\
          worktree = {}\n\
          worktree_path_pattern = \"{}\"\n\
-         worktree_cleanup = {}",
+         worktree_cleanup = {}\n\
+         all_permissions = {}",
         config.review,
         config.commit,
         config.pull_request,
         config.pull_request_draft,
         config.worktree,
         config.worktree_path_pattern,
-        config.worktree_cleanup
+        config.worktree_cleanup,
+        config.all_permissions
     )
 }
 
@@ -470,6 +472,7 @@ mod tests {
             worktree: false,
             worktree_path_pattern: "custom-{branch}".to_string(),
             worktree_cleanup: true,
+            all_permissions: true,
         };
         let toml_str = config_to_toml_string(&config);
 
@@ -480,6 +483,7 @@ mod tests {
         assert!(toml_str.contains("worktree = false"));
         assert!(toml_str.contains("worktree_path_pattern = \"custom-{branch}\""));
         assert!(toml_str.contains("worktree_cleanup = true"));
+        assert!(toml_str.contains("all_permissions = true"));
     }
 
     #[test]
