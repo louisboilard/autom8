@@ -5,6 +5,13 @@
 
 use egui::{Color32, Rect, Rounding, Sense, Stroke, Ui};
 
+/// Minimum glow alpha for the completed session pulse (subtle but visible).
+const COMPLETED_GLOW_ALPHA_MIN: f32 = 0.2;
+/// Maximum glow alpha for the completed session pulse (bright but not harsh).
+const COMPLETED_GLOW_ALPHA_MAX: f32 = 0.7;
+/// Period of the completed glow pulse cycle in seconds.
+const COMPLETED_GLOW_PERIOD: f64 = 2.0;
+
 /// Animation frame interval (~30fps for smooth animation with low CPU).
 const FRAME_INTERVAL_MS: u64 = 33;
 
@@ -15,6 +22,24 @@ const FRAME_INTERVAL_MS: u64 = 33;
 #[inline]
 pub fn schedule_frame(ctx: &egui::Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(FRAME_INTERVAL_MS));
+}
+
+/// Compute the current glow intensity for the completed session pulse animation.
+///
+/// Returns an alpha value (`f32` in `0.0..=1.0`) representing the current pulse
+/// intensity, oscillating smoothly between a subtle glow (~0.2) and a bright glow
+/// (~0.7) on a ~2-second ease-in-out cycle.
+///
+/// This is a pure computation with no side effects. Callers are responsible for
+/// calling [`schedule_frame`] to keep the animation running.
+///
+/// # Arguments
+/// * `time` - Current animation time in seconds (from `ui.ctx().input(|i| i.time)`)
+#[inline]
+pub fn completed_glow_intensity(time: f64) -> f32 {
+    let phase = (time * std::f64::consts::TAU / COMPLETED_GLOW_PERIOD).cos();
+    let t = ((1.0 - phase) * 0.5) as f32;
+    COMPLETED_GLOW_ALPHA_MIN + (COMPLETED_GLOW_ALPHA_MAX - COMPLETED_GLOW_ALPHA_MIN) * t
 }
 
 /// Render rising particles animation.
