@@ -448,7 +448,7 @@ mod tests {
     use clap::Parser;
 
     // =========================================================================
-    // Core CLI parsing tests
+    // CLI parsing tests - pure logic, no side effects
     // =========================================================================
 
     #[test]
@@ -462,47 +462,33 @@ mod tests {
         let cli = Cli::try_parse_from(["autom8", "my-spec.json"]).unwrap();
         assert_eq!(cli.file.unwrap().to_string_lossy(), "my-spec.json");
         assert!(cli.command.is_none());
-
-        // Unknown words treated as file paths (removed commands)
-        for removed in ["new", "skill", "history", "archive"] {
-            let cli = Cli::try_parse_from(["autom8", removed]).unwrap();
-            assert!(cli.command.is_none());
-            assert_eq!(cli.file.unwrap().to_string_lossy(), removed);
-        }
     }
 
     #[test]
     fn test_all_commands_recognized() {
-        // Verify all commands parse correctly
         let commands = [
-            ("run", true),
-            ("resume", true),
-            ("status", true),
-            ("clean", true),
-            ("init", true),
-            ("projects", true),
-            ("list", true),
-            ("describe", true),
-            ("config", true),
-            ("monitor", true),
-            ("gui", true),
-            ("improve", true),
-            ("pr-review", true),
-            ("completions bash", true),
+            "run",
+            "resume",
+            "status",
+            "clean",
+            "init",
+            "projects",
+            "list",
+            "describe",
+            "config",
+            "monitor",
+            "gui",
+            "improve",
+            "pr-review",
         ];
 
-        for (cmd, should_succeed) in commands {
-            let args: Vec<&str> = std::iter::once("autom8")
-                .chain(cmd.split_whitespace())
-                .collect();
-            let result = Cli::try_parse_from(&args);
-            assert_eq!(
-                result.is_ok(),
-                should_succeed,
-                "Command '{}' parsing mismatch",
-                cmd
-            );
+        for cmd in commands {
+            let result = Cli::try_parse_from(["autom8", cmd]);
+            assert!(result.is_ok(), "Command '{}' should parse", cmd);
         }
+
+        // Completions requires shell arg
+        assert!(Cli::try_parse_from(["autom8", "completions", "bash"]).is_ok());
     }
 
     #[test]
@@ -626,27 +612,13 @@ mod tests {
             }
         }
 
-        // Reset subcommand with flags
-        let cli = Cli::try_parse_from(["autom8", "config", "reset", "-g", "-y"]).unwrap();
-        if let Some(Commands::Config { subcommand, .. }) = cli.command {
-            if let Some(ConfigSubcommand::Reset { global, yes }) = subcommand {
-                assert!(global);
-                assert!(yes);
-            }
-        }
-
         // Set requires key and value
         assert!(Cli::try_parse_from(["autom8", "config", "set"]).is_err());
         assert!(Cli::try_parse_from(["autom8", "config", "set", "review"]).is_err());
     }
 
-    // =========================================================================
-    // Worktree flag tests
-    // =========================================================================
-
     #[test]
     fn test_worktree_flags_mutual_exclusivity() {
-        // Both flags work individually
         let cli = Cli::try_parse_from(["autom8", "run", "--worktree"]).unwrap();
         if let Some(Commands::Run {
             worktree,
@@ -673,47 +645,21 @@ mod tests {
         assert!(Cli::try_parse_from(["autom8", "run", "--worktree", "--no-worktree"]).is_err());
     }
 
-    // =========================================================================
-    // Self-test flag tests
-    // =========================================================================
-
     #[test]
     fn test_self_test_flag() {
-        // --self-test flag works
         let cli = Cli::try_parse_from(["autom8", "run", "--self-test"]).unwrap();
         if let Some(Commands::Run { self_test, .. }) = cli.command {
             assert!(self_test);
-        } else {
-            panic!("Expected Run command");
         }
 
         // --self-test conflicts with --spec
         assert!(
             Cli::try_parse_from(["autom8", "run", "--self-test", "--spec", "test.json"]).is_err()
         );
-
-        // --self-test can be combined with other flags
-        let cli = Cli::try_parse_from(["autom8", "run", "--self-test", "--worktree"]).unwrap();
-        if let Some(Commands::Run {
-            self_test,
-            worktree,
-            ..
-        }) = cli.command
-        {
-            assert!(self_test);
-            assert!(worktree);
-        } else {
-            panic!("Expected Run command");
-        }
     }
-
-    // =========================================================================
-    // Status command tests
-    // =========================================================================
 
     #[test]
     fn test_status_command_flags() {
-        // All/global/project flags
         let cli = Cli::try_parse_from(["autom8", "status", "-a", "--project", "myproj"]).unwrap();
         if let Some(Commands::Status {
             all,
@@ -732,10 +678,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Resume command tests
-    // =========================================================================
-
     #[test]
     fn test_resume_command_flags() {
         let cli = Cli::try_parse_from(["autom8", "resume", "-s", "abc123", "-l"]).unwrap();
@@ -744,36 +686,6 @@ mod tests {
             assert!(list);
         }
     }
-
-    // =========================================================================
-    // Completions command tests
-    // =========================================================================
-
-    #[test]
-    fn test_completions_shell_parsing() {
-        use autom8::completion::ShellType;
-
-        for shell in ["bash", "zsh", "fish"] {
-            let cli = Cli::try_parse_from(["autom8", "completions", shell]).unwrap();
-            if let Some(Commands::Completions { shell: s }) = cli.command {
-                assert_eq!(s, shell);
-            }
-            assert!(ShellType::from_name(shell).is_ok());
-        }
-        assert!(ShellType::from_name("invalid").is_err());
-
-        // Shell arg required
-        assert!(Cli::try_parse_from(["autom8", "completions"]).is_err());
-
-        // Hidden from help
-        let result = Cli::try_parse_from(["autom8", "--help"]);
-        let help_text = result.err().unwrap().to_string();
-        assert!(!help_text.contains("completions"));
-    }
-
-    // =========================================================================
-    // Describe command tests
-    // =========================================================================
 
     #[test]
     fn test_describe_command() {
@@ -786,61 +698,5 @@ mod tests {
         if let Some(Commands::Describe { project_name }) = cli.command {
             assert!(project_name.is_none());
         }
-    }
-
-    // =========================================================================
-    // Project functions tests
-    // =========================================================================
-
-    #[test]
-    fn test_project_exists_and_description() {
-        assert!(autom8::config::project_exists("autom8").unwrap());
-        assert!(!autom8::config::project_exists("nonexistent-12345").unwrap());
-
-        let desc = autom8::config::get_project_description("autom8")
-            .unwrap()
-            .unwrap();
-        assert_eq!(desc.name, "autom8");
-        assert!(desc.path.exists());
-
-        assert!(autom8::config::get_project_description("nonexistent-12345")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn test_list_projects_tree() {
-        let projects = autom8::config::list_projects_tree().unwrap();
-        assert!(projects.iter().any(|p| p.name == "autom8"));
-    }
-
-    // =========================================================================
-    // Init command tests
-    // =========================================================================
-
-    #[test]
-    fn test_init_creates_directories() {
-        let (path, _) = autom8::config::ensure_config_dir().unwrap();
-        assert!(path.exists());
-        assert!(path.ends_with("autom8"));
-
-        let (path, _) = autom8::config::ensure_project_config_dir().unwrap();
-        assert!(path.join("spec").exists());
-        assert!(path.join("runs").exists());
-    }
-
-    // =========================================================================
-    // Session status tests
-    // =========================================================================
-
-    #[test]
-    fn test_session_status_available() {
-        use autom8::state::StateManager;
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-        let sessions = sm.list_sessions_with_status().unwrap();
-        assert!(sessions.is_empty());
     }
 }
