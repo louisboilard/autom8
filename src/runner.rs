@@ -21,7 +21,7 @@ use crate::output::{
     YELLOW,
 };
 use crate::progress::{
-    AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
+    AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, SpinnerHandle, VerboseTimer,
 };
 use crate::signal::SignalHandler;
 use crate::spec::{Spec, UserStory};
@@ -226,6 +226,73 @@ where
             spinner.update(line);
             live_flusher.append(line);
         });
+        let outcome = map_outcome(&result);
+        spinner.finish_with_outcome(outcome);
+        result
+    };
+
+    // Ensure any remaining output is flushed
+    live_flusher.final_flush();
+
+    result
+}
+
+/// Runs an operation with progress display, live output streaming, and a spinner handle.
+///
+/// Similar to `with_progress_display_and_live`, but provides a `SpinnerHandle` to the
+/// operation callback. This handle can be used to pause/resume the spinner during
+/// permission prompts, preventing the spinner from overwriting the `[y/N]:` prompt.
+///
+/// # Arguments
+/// * `verbose` - Whether to use verbose mode (timer) or spinner mode
+/// * `state_manager` - StateManager for writing live output
+/// * `machine_state` - Current machine state to include in live.json
+/// * `create_timer` - Factory function to create a VerboseTimer
+/// * `create_spinner` - Factory function to create a ClaudeSpinner
+/// * `run_operation` - The operation to run, receiving a callback for progress updates
+///   and an optional SpinnerHandle (None in verbose mode)
+/// * `map_outcome` - Maps the operation result to an Outcome for display
+///
+/// # Returns
+/// The result of the operation, after the display has been finished with the appropriate outcome.
+fn with_progress_display_and_live_with_handle<T, F, M>(
+    verbose: bool,
+    state_manager: &StateManager,
+    machine_state: MachineState,
+    create_timer: impl FnOnce() -> VerboseTimer,
+    create_spinner: impl FnOnce() -> ClaudeSpinner,
+    run_operation: F,
+    map_outcome: M,
+) -> Result<T>
+where
+    F: FnOnce(&mut dyn FnMut(&str), Option<SpinnerHandle>) -> Result<T>,
+    M: FnOnce(&Result<T>) -> Outcome,
+{
+    let mut live_flusher = LiveOutputFlusher::new(state_manager, machine_state);
+
+    let result = if verbose {
+        let mut timer = create_timer();
+        // In verbose mode, no spinner handle is needed
+        let result = run_operation(
+            &mut |line| {
+                print_claude_output(line);
+                live_flusher.append(line);
+            },
+            None,
+        );
+        let outcome = map_outcome(&result);
+        timer.finish_with_outcome(outcome);
+        result
+    } else {
+        let mut spinner = create_spinner();
+        let handle = spinner.handle();
+        let result = run_operation(
+            &mut |line| {
+                spinner.update(line);
+                live_flusher.append(line);
+            },
+            Some(handle),
+        );
         let outcome = map_outcome(&result);
         spinner.finish_with_outcome(outcome);
         result
@@ -1083,15 +1150,16 @@ impl Runner {
         // Get all_permissions setting for this phase
         let all_permissions = state.effective_config().all_permissions;
 
-        // Run Claude with progress display and live output streaming (US-003)
+        // Run Claude with progress display, live output streaming, and spinner handle (US-003, US-006)
         // Use the provided ClaudeRunner so it can be killed on interrupt
-        let result = with_progress_display_and_live(
+        // The spinner handle allows pausing the spinner during permission prompts
+        let result = with_progress_display_and_live_with_handle(
             self.verbose,
             &self.state_manager,
             MachineState::RunningClaude,
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
-            |callback| {
+            |callback, spinner_handle| {
                 claude_runner.run(
                     spec,
                     story,
@@ -1101,8 +1169,15 @@ impl Runner {
                     all_permissions,
                     callback,
                     // Wire permission callback to DisplayAdapter (US-006)
+                    // Pause spinner before prompt, resume after, to prevent overwriting
                     |tool_name, tool_input| {
+                        // Pause spinner to prevent it from overwriting the permission prompt
+                        if let Some(ref handle) = spinner_handle {
+                            handle.pause();
+                        }
+
                         let result = display.prompt_permission(tool_name, tool_input);
+
                         // Log the permission decision for visibility
                         match &result {
                             PermissionResult::Allow(_) => {
@@ -1118,6 +1193,12 @@ impl Runner {
                                 );
                             }
                         }
+
+                        // Resume spinner after prompt is complete
+                        if let Some(ref handle) = spinner_handle {
+                            handle.resume();
+                        }
+
                         result
                     },
                 )

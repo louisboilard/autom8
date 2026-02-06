@@ -513,11 +513,41 @@ pub struct ClaudeSpinner {
     spinner: Arc<ProgressBar>,
     story_id: String,
     stop_flag: Arc<AtomicBool>,
+    paused_flag: Arc<AtomicBool>,
     timer_thread: Option<JoinHandle<()>>,
     start_time: Instant,
     last_activity: Arc<std::sync::Mutex<String>>,
     iteration_info: Option<IterationInfo>,
     iteration_info_shared: Arc<std::sync::Mutex<Option<IterationInfo>>>,
+}
+
+/// A lightweight handle to a `ClaudeSpinner` that can pause/resume its output.
+///
+/// This is useful when displaying permission prompts - the spinner needs to be
+/// paused so its updates don't overwrite the `[y/N]:` prompt.
+#[derive(Clone)]
+pub struct SpinnerHandle {
+    paused_flag: Arc<AtomicBool>,
+    spinner: Arc<ProgressBar>,
+}
+
+impl SpinnerHandle {
+    /// Pause the spinner, clearing its current line.
+    ///
+    /// Call this before displaying a permission prompt to prevent
+    /// the spinner from overwriting the prompt.
+    pub fn pause(&self) {
+        self.paused_flag.store(true, Ordering::Relaxed);
+        self.spinner.finish_and_clear();
+    }
+
+    /// Resume the spinner after a permission prompt has been answered.
+    ///
+    /// Call this after the user has responded to restore the spinner display.
+    pub fn resume(&self) {
+        self.paused_flag.store(false, Ordering::Relaxed);
+        self.spinner.enable_steady_tick(Duration::from_millis(80));
+    }
 }
 
 impl ClaudeSpinner {
@@ -581,6 +611,7 @@ impl ClaudeSpinner {
         spinner.enable_steady_tick(Duration::from_millis(80));
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let paused_flag = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
         let last_activity = Arc::new(std::sync::Mutex::new("Starting...".to_string()));
         let iteration_info_shared = Arc::new(std::sync::Mutex::new(iteration_info.clone()));
@@ -588,6 +619,7 @@ impl ClaudeSpinner {
         // Clone for timer thread
         let spinner_clone = Arc::clone(&spinner);
         let stop_flag_clone = Arc::clone(&stop_flag);
+        let paused_flag_clone = Arc::clone(&paused_flag);
         let last_activity_clone = Arc::clone(&last_activity);
         let iteration_info_clone = Arc::clone(&iteration_info_shared);
         let story_id_owned = story_id.to_string();
@@ -600,6 +632,11 @@ impl ClaudeSpinner {
                 // Check again after sleep in case we should stop
                 if stop_flag_clone.load(Ordering::Relaxed) {
                     break;
+                }
+
+                // Skip update when paused (e.g., during permission prompts)
+                if paused_flag_clone.load(Ordering::Relaxed) {
+                    continue;
                 }
 
                 let elapsed = start_time.elapsed();
@@ -622,11 +659,23 @@ impl ClaudeSpinner {
             spinner,
             story_id: story_id.to_string(),
             stop_flag,
+            paused_flag,
             timer_thread: Some(timer_thread),
             start_time,
             last_activity,
             iteration_info,
             iteration_info_shared,
+        }
+    }
+
+    /// Get a handle to control the spinner from outside the main loop.
+    ///
+    /// The handle can be used to pause/resume the spinner during permission
+    /// prompts, preventing the spinner from overwriting user input prompts.
+    pub fn handle(&self) -> SpinnerHandle {
+        SpinnerHandle {
+            paused_flag: Arc::clone(&self.paused_flag),
+            spinner: Arc::clone(&self.spinner),
         }
     }
 
@@ -1191,6 +1240,37 @@ mod tests {
 
         spinner.stop_timer();
         assert!(spinner.stop_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_spinner_handle_pause_resume() {
+        let spinner = ClaudeSpinner::new("US-001");
+        let handle = spinner.handle();
+
+        // Initially not paused
+        assert!(!spinner.paused_flag.load(Ordering::Relaxed));
+
+        // Pause
+        handle.pause();
+        assert!(spinner.paused_flag.load(Ordering::Relaxed));
+
+        // Resume
+        handle.resume();
+        assert!(!spinner.paused_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_spinner_handle_clone() {
+        let spinner = ClaudeSpinner::new("US-001");
+        let handle1 = spinner.handle();
+        let handle2 = handle1.clone();
+
+        // Both handles should control the same paused state
+        handle1.pause();
+        assert!(spinner.paused_flag.load(Ordering::Relaxed));
+
+        handle2.resume();
+        assert!(!spinner.paused_flag.load(Ordering::Relaxed));
     }
 
     #[test]

@@ -99,8 +99,8 @@ impl DisplayAdapter for CliDisplay {
         println!();
         println!("{GRAY}{}{RESET}", block_reason);
 
-        // Prompt for confirmation (default: deny)
-        print!("{CYAN}Allow this operation?{RESET} {GRAY}[y/N]:{RESET} ");
+        // Prompt for confirmation (default: allow on Enter)
+        print!("{CYAN}Allow this operation?{RESET} {GRAY}[Y/n]:{RESET} ");
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
@@ -109,8 +109,8 @@ impl DisplayAdapter for CliDisplay {
         }
 
         match input.trim().to_lowercase().as_str() {
-            "y" | "yes" => PermissionResult::Allow(None),
-            _ => PermissionResult::Deny("User declined the operation".to_string()),
+            "n" | "no" => PermissionResult::Deny("User declined the operation".to_string()),
+            _ => PermissionResult::Allow(None), // Empty, "y", "yes", or anything else = allow
         }
     }
 }

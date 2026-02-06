@@ -87,6 +87,9 @@ pub enum Autom8Error {
 
     #[error("Failed to spawn Claude: {0}\n\nCould not start the Claude CLI process.\n\nTo fix this:\n  1. Check that 'claude' is installed and working\n  2. Ensure you have permissions to run the command\n  3. Try running 'claude' manually to diagnose the issue")]
     ClaudeSpawnError(String),
+
+    #[error("Permission denied for '{tool_name}': {reason}\n\nClaude attempted to use a blocked tool and you declined the operation.\n\nThe run has been stopped. To continue:\n  1. Resume the run with 'autom8 resume' and allow the operation, or\n  2. Use --all-permissions to bypass permission checks, or\n  3. Modify the spec to avoid the blocked operation")]
+    PermissionDenied { tool_name: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, Autom8Error>;

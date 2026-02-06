@@ -249,7 +249,17 @@ impl ClaudeRunner {
                     &control_request.request.tool_name,
                     &control_request.request.input,
                 );
-                // Send the response back to Claude
+
+                // If permission was denied, error out immediately
+                // (Claude Code may stall waiting after a deny, so we abort the run)
+                if let PermissionResult::Deny(ref reason) = result {
+                    return Err(Autom8Error::PermissionDenied {
+                        tool_name: control_request.request.tool_name.clone(),
+                        reason: reason.clone(),
+                    });
+                }
+
+                // Send the allow response back to Claude
                 let response = ControlResponse::from_result(&control_request.request_id, result);
                 send_control_response(&mut stdin, &response)?;
                 continue;
