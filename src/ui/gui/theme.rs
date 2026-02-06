@@ -107,6 +107,26 @@ pub mod shadow {
         }
     }
 
+    /// Green-tinted glow shadow for completed sessions.
+    ///
+    /// Takes a configurable `alpha` (0.0–1.0) so callers can animate the
+    /// glow intensity over time (e.g., a pulsing effect). Uses `STATUS_SUCCESS`
+    /// green with zero offset for a centered, non-directional glow.
+    pub fn completed_glow(alpha: f32) -> Shadow {
+        let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+        Shadow {
+            offset: [0.0, 0.0].into(),
+            blur: 10.0,
+            spread: 0.0,
+            color: Color32::from_rgba_premultiplied(
+                super::colors::COMPLETED_GLOW.r(),
+                super::colors::COMPLETED_GLOW.g(),
+                super::colors::COMPLETED_GLOW.b(),
+                a,
+            ),
+        }
+    }
+
     /// Returns the warm shadow base color for testing.
     #[cfg(test)]
     pub fn shadow_warm_color() -> Color32 {
@@ -230,6 +250,37 @@ pub mod colors {
 
     /// Correcting state background - light orange.
     pub const STATUS_CORRECTING_BG: Color32 = Color32::from_rgb(255, 237, 230);
+
+    // ==========================================================================
+    // Completed Session Colors
+    // ==========================================================================
+
+    /// Glow color for the pulsing border on completed sessions.
+    /// Derived from `STATUS_SUCCESS` (`rgb(52, 199, 89)`).
+    pub const COMPLETED_GLOW: Color32 = Color32::from_rgb(52, 199, 89);
+
+    /// Subtle green-tinted fill for completed session card backgrounds.
+    /// Blends `STATUS_SUCCESS_BG` with `SURFACE` for a warm pale green
+    /// that harmonizes with the cream palette.
+    pub const COMPLETED_FILL: Color32 = Color32::from_rgb(244, 252, 247);
+
+    /// Even subtler green tint for the completed session tab background.
+    /// Lower saturation than `COMPLETED_FILL` for the tab bar.
+    pub const COMPLETED_TAB_FILL: Color32 = Color32::from_rgb(247, 253, 249);
+
+    /// Green-tinted hover for completed session tabs.
+    /// Blends `COMPLETED_TAB_FILL` with `SURFACE_HOVER` — slightly more
+    /// saturated green than the default warm hover.
+    pub const COMPLETED_TAB_HOVER: Color32 = Color32::from_rgb(240, 246, 240);
+
+    /// Green-tinted selected/active for completed session tabs.
+    /// Blends `COMPLETED_TAB_FILL` with `SURFACE_SELECTED` — the green tint
+    /// remains perceptible even with the darker selection background.
+    pub const COMPLETED_TAB_ACTIVE: Color32 = Color32::from_rgb(234, 242, 234);
+
+    /// Faint green border color for the static border tint on completed sessions.
+    /// Low-opacity `STATUS_SUCCESS` blended onto white.
+    pub const COMPLETED_BORDER: Color32 = Color32::from_rgb(220, 243, 228);
 }
 
 // Note: The Status enum is defined in the components module to avoid duplication.
