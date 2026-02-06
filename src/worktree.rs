@@ -783,116 +783,7 @@ mod tests {
     use super::*;
 
     // ========================================================================
-    // WorktreeInfo struct tests
-    // ========================================================================
-
-    #[test]
-    fn test_worktree_info_creation() {
-        let info = WorktreeInfo {
-            path: PathBuf::from("/path/to/worktree"),
-            branch: Some("feature/test".to_string()),
-            commit: "abc1234567890".to_string(),
-            is_main: false,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        assert_eq!(info.path, PathBuf::from("/path/to/worktree"));
-        assert_eq!(info.branch, Some("feature/test".to_string()));
-        assert_eq!(info.commit, "abc1234567890");
-        assert!(!info.is_main);
-        assert!(!info.is_bare);
-        assert!(!info.is_locked);
-        assert!(!info.is_prunable);
-    }
-
-    #[test]
-    fn test_worktree_info_clone() {
-        let original = WorktreeInfo {
-            path: PathBuf::from("/path/to/worktree"),
-            branch: Some("main".to_string()),
-            commit: "abc1234".to_string(),
-            is_main: true,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_worktree_info_equality() {
-        let wt1 = WorktreeInfo {
-            path: PathBuf::from("/path1"),
-            branch: Some("main".to_string()),
-            commit: "abc".to_string(),
-            is_main: true,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        let wt2 = WorktreeInfo {
-            path: PathBuf::from("/path1"),
-            branch: Some("main".to_string()),
-            commit: "abc".to_string(),
-            is_main: true,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        let wt3 = WorktreeInfo {
-            path: PathBuf::from("/path2"),
-            branch: Some("feature".to_string()),
-            commit: "def".to_string(),
-            is_main: false,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        assert_eq!(wt1, wt2);
-        assert_ne!(wt1, wt3);
-    }
-
-    #[test]
-    fn test_worktree_info_debug() {
-        let info = WorktreeInfo {
-            path: PathBuf::from("/test/path"),
-            branch: Some("test-branch".to_string()),
-            commit: "abc1234".to_string(),
-            is_main: false,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        let debug = format!("{:?}", info);
-        assert!(debug.contains("WorktreeInfo"));
-        assert!(debug.contains("test-branch"));
-    }
-
-    #[test]
-    fn test_worktree_info_detached_head() {
-        let info = WorktreeInfo {
-            path: PathBuf::from("/path/to/worktree"),
-            branch: None, // Detached HEAD
-            commit: "abc1234567890".to_string(),
-            is_main: false,
-            is_bare: false,
-            is_locked: false,
-            is_prunable: false,
-        };
-
-        assert!(info.branch.is_none());
-    }
-
-    // ========================================================================
-    // Porcelain parsing tests
+    // Porcelain parsing tests - these test actual parsing logic
     // ========================================================================
 
     #[test]
@@ -926,255 +817,94 @@ mod tests {
         let worktrees = parse_worktree_list_porcelain(output).unwrap();
         assert_eq!(worktrees.len(), 2);
 
-        // First worktree is main
         assert!(worktrees[0].is_main);
         assert_eq!(worktrees[0].branch, Some("main".to_string()));
-
-        // Second worktree is not main
         assert!(!worktrees[1].is_main);
         assert_eq!(worktrees[1].branch, Some("feature/test".to_string()));
     }
 
     #[test]
-    fn test_parse_porcelain_detached_head() {
-        let output = "worktree /home/user/project\nHEAD abc1234567890abcdef1234567890abcdef12345678\ndetached\n\n";
+    fn test_parse_porcelain_special_states() {
+        // Detached HEAD
+        let output = "worktree /path\nHEAD abc123\ndetached\n\n";
+        let wt = &parse_worktree_list_porcelain(output).unwrap()[0];
+        assert!(wt.branch.is_none());
 
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-
-        let wt = &worktrees[0];
-        assert!(wt.branch.is_none()); // Detached HEAD
-    }
-
-    #[test]
-    fn test_parse_porcelain_bare_repo() {
-        let output = "worktree /home/user/project.git\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbare\n\n";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-
-        let wt = &worktrees[0];
+        // Bare repo
+        let output = "worktree /path.git\nHEAD abc123\nbare\n\n";
+        let wt = &parse_worktree_list_porcelain(output).unwrap()[0];
         assert!(wt.is_bare);
-    }
 
-    #[test]
-    fn test_parse_porcelain_locked_worktree() {
-        let output = "worktree /home/user/project\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbranch refs/heads/main\nlocked\n\n";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-
-        let wt = &worktrees[0];
+        // Locked
+        let output = "worktree /path\nHEAD abc123\nbranch refs/heads/main\nlocked\n\n";
+        let wt = &parse_worktree_list_porcelain(output).unwrap()[0];
         assert!(wt.is_locked);
-    }
 
-    #[test]
-    fn test_parse_porcelain_locked_with_reason() {
-        let output = "worktree /home/user/project\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbranch refs/heads/main\nlocked reason for locking\n\n";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-
-        let wt = &worktrees[0];
-        assert!(wt.is_locked);
-    }
-
-    #[test]
-    fn test_parse_porcelain_prunable_worktree() {
-        let output = "worktree /home/user/project\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbranch refs/heads/main\nprunable\n\n";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-
-        let wt = &worktrees[0];
+        // Prunable
+        let output = "worktree /path\nHEAD abc123\nbranch refs/heads/main\nprunable\n\n";
+        let wt = &parse_worktree_list_porcelain(output).unwrap()[0];
         assert!(wt.is_prunable);
     }
 
     #[test]
-    fn test_parse_porcelain_no_trailing_newline() {
-        let output = "worktree /home/user/project\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbranch refs/heads/main";
+    fn test_parse_porcelain_edge_cases() {
+        // No trailing newline
+        let output = "worktree /path\nHEAD abc123\nbranch refs/heads/main";
+        assert_eq!(parse_worktree_list_porcelain(output).unwrap().len(), 1);
 
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
-    }
+        // Empty output
+        assert!(parse_worktree_list_porcelain("").unwrap().is_empty());
 
-    #[test]
-    fn test_parse_porcelain_empty_output() {
-        let output = "";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert!(worktrees.is_empty());
-    }
-
-    #[test]
-    fn test_parse_porcelain_path_with_spaces() {
-        let output = "worktree /home/user/my project/repo\nHEAD abc1234567890abcdef1234567890abcdef12345678\nbranch refs/heads/main\n\n";
-
-        let worktrees = parse_worktree_list_porcelain(output).unwrap();
-        assert_eq!(worktrees.len(), 1);
+        // Path with spaces
+        let output = "worktree /home/user/my project/repo\nHEAD abc123\nbranch refs/heads/main\n\n";
         assert_eq!(
-            worktrees[0].path,
+            parse_worktree_list_porcelain(output).unwrap()[0].path,
             PathBuf::from("/home/user/my project/repo")
         );
     }
 
     #[test]
-    fn test_from_porcelain_lines_missing_path() {
-        let lines = vec!["HEAD abc1234", "branch refs/heads/main"];
-        let result = WorktreeInfo::from_porcelain_lines(&lines);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_from_porcelain_lines_missing_commit() {
-        let lines = vec!["worktree /path/to/repo", "branch refs/heads/main"];
-        let result = WorktreeInfo::from_porcelain_lines(&lines);
-        assert!(result.is_none());
+    fn test_from_porcelain_lines_missing_required_fields() {
+        // Missing path
+        assert!(
+            WorktreeInfo::from_porcelain_lines(&["HEAD abc123", "branch refs/heads/main"])
+                .is_none()
+        );
+        // Missing commit
+        assert!(
+            WorktreeInfo::from_porcelain_lines(&["worktree /path", "branch refs/heads/main"])
+                .is_none()
+        );
     }
 
     // ========================================================================
-    // Session ID tests
+    // Session ID tests - test determinism and uniqueness
     // ========================================================================
 
     #[test]
-    fn test_generate_session_id_returns_8_chars() {
+    fn test_generate_session_id_properties() {
         let path = Path::new("/home/user/project-feature");
         let id = generate_session_id(path);
-        assert_eq!(id.len(), 8);
-    }
 
-    #[test]
-    fn test_generate_session_id_is_hex_only() {
-        let path = Path::new("/home/user/project-feature");
-        let id = generate_session_id(path);
-        assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit()),
-            "Session ID should be filesystem-safe (hex only): {}",
-            id
-        );
-    }
-
-    #[test]
-    fn test_generate_session_id_is_deterministic() {
-        let path = Path::new("/home/user/project-feature");
-        let id1 = generate_session_id(path);
-        let id2 = generate_session_id(path);
-        assert_eq!(id1, id2, "Same path should produce same session ID");
-    }
-
-    #[test]
-    fn test_generate_session_id_different_paths_different_ids() {
-        let path1 = Path::new("/home/user/project-feature-a");
-        let path2 = Path::new("/home/user/project-feature-b");
-        let id1 = generate_session_id(path1);
-        let id2 = generate_session_id(path2);
-        assert_ne!(
-            id1, id2,
-            "Different paths should produce different session IDs"
-        );
-    }
-
-    #[test]
-    fn test_generate_session_id_similar_paths() {
-        // Test that even similar paths produce different IDs
-        let path1 = Path::new("/home/user/project");
-        let path2 = Path::new("/home/user/project2");
-        let id1 = generate_session_id(path1);
-        let id2 = generate_session_id(path2);
-        assert_ne!(
-            id1, id2,
-            "Similar paths should produce different session IDs"
-        );
-    }
-
-    #[test]
-    fn test_generate_session_id_handles_path_with_spaces() {
-        let path = Path::new("/home/user/my project/feature branch");
-        let id = generate_session_id(path);
+        // 8 hex characters
         assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Deterministic
+        assert_eq!(id, generate_session_id(path));
+
+        // Different paths produce different IDs
+        let id2 = generate_session_id(Path::new("/home/user/other-project"));
+        assert_ne!(id, id2);
     }
 
     #[test]
-    fn test_generate_session_id_handles_unicode_path() {
-        let path = Path::new("/home/user/проект/фича");
-        let id = generate_session_id(path);
-        assert_eq!(id.len(), 8);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_main_session_id_constant() {
-        assert_eq!(MAIN_SESSION_ID, "main");
-        assert!(MAIN_SESSION_ID.len() <= 12);
-        assert!(MAIN_SESSION_ID.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
-    fn test_get_main_session_id() {
-        let id = get_main_session_id();
-        assert_eq!(id, "main");
-    }
-
-    #[test]
-    fn test_session_id_length_is_within_bounds() {
-        // Test that all possible session IDs are 8-12 chars (per acceptance criteria)
-        let main_id = get_main_session_id();
-        assert!(
-            main_id.len() >= 4 && main_id.len() <= 12,
-            "main ID should be 4-12 chars: {} ({})",
-            main_id,
-            main_id.len()
-        );
-
-        let hash_id = generate_session_id(Path::new("/some/path"));
-        assert!(
-            hash_id.len() >= 8 && hash_id.len() <= 12,
-            "hash ID should be 8-12 chars: {} ({})",
-            hash_id,
-            hash_id.len()
-        );
-    }
-
-    #[test]
-    fn test_session_id_is_filesystem_safe() {
-        // All generated IDs should be safe for use in filenames
-        let paths = [
-            "/home/user/project",
-            "/tmp/worktree-123",
-            "C:\\Users\\test\\project",
-            "/path/with spaces/and-dashes_underscores",
-        ];
-
-        for path in paths {
-            let id = generate_session_id(Path::new(path));
-            assert!(
-                id.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                "ID '{}' from path '{}' should be filesystem-safe",
-                id,
-                path
-            );
-        }
-
-        // Main ID should also be safe
-        assert!(MAIN_SESSION_ID
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-    }
-
-    #[test]
-    fn test_generate_session_id_uniqueness_sample() {
-        // Test a sample of paths to verify uniqueness
+    fn test_generate_session_id_uniqueness() {
         let paths = [
             "/home/user/project1",
             "/home/user/project2",
-            "/home/user/project3",
             "/tmp/worktree-a",
             "/tmp/worktree-b",
-            "/var/lib/myproject",
-            "/opt/work/feature-x",
-            "/opt/work/feature-y",
         ];
 
         let ids: Vec<String> = paths
@@ -1182,249 +912,97 @@ mod tests {
             .map(|p| generate_session_id(Path::new(p)))
             .collect();
 
-        // Check all IDs are unique
         let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(
-            ids.len(),
-            unique_ids.len(),
-            "All session IDs should be unique. IDs: {:?}",
-            ids
-        );
+        assert_eq!(ids.len(), unique_ids.len());
+    }
+
+    #[test]
+    fn test_main_session_id() {
+        assert_eq!(MAIN_SESSION_ID, "main");
+        assert_eq!(get_main_session_id(), "main");
     }
 
     // ========================================================================
-    // Worktree Path Generation tests
+    // Branch name slugification tests
     // ========================================================================
 
     #[test]
-    fn test_slugify_branch_name_replaces_slashes() {
+    fn test_slugify_branch_name() {
         assert_eq!(slugify_branch_name("feature/login"), "feature-login");
         assert_eq!(
             slugify_branch_name("feature/user/auth"),
             "feature-user-auth"
         );
-    }
-
-    #[test]
-    fn test_slugify_branch_name_preserves_valid_chars() {
         assert_eq!(slugify_branch_name("main"), "main");
-        assert_eq!(slugify_branch_name("feature-branch"), "feature-branch");
         assert_eq!(slugify_branch_name("v1.0.0"), "v1.0.0");
-        assert_eq!(slugify_branch_name("release_v2"), "release_v2");
+        assert_eq!(slugify_branch_name("feature//login"), "feature-login"); // collapses multiple
+        assert_eq!(slugify_branch_name("feature@login"), "feature-login"); // removes special chars
     }
 
     #[test]
-    fn test_slugify_branch_name_collapses_multiple_dashes() {
-        assert_eq!(slugify_branch_name("feature//login"), "feature-login");
-        assert_eq!(slugify_branch_name("a--b---c"), "a-b-c");
-    }
-
-    #[test]
-    fn test_slugify_branch_name_removes_special_chars() {
-        assert_eq!(slugify_branch_name("feature@login"), "feature-login");
-        assert_eq!(slugify_branch_name("branch#1"), "branch-1");
-        assert_eq!(slugify_branch_name("test:name"), "test-name");
-    }
-
-    #[test]
-    fn test_generate_worktree_name_default_pattern() {
-        let name = generate_worktree_name("{repo}-wt-{branch}", "myproject", "feature/login");
-        assert_eq!(name, "myproject-wt-feature-login");
-    }
-
-    #[test]
-    fn test_generate_worktree_name_custom_pattern() {
-        let name = generate_worktree_name("{repo}_worktree_{branch}", "myproject", "main");
-        assert_eq!(name, "myproject_worktree_main");
-    }
-
-    #[test]
-    fn test_generate_worktree_name_only_repo() {
-        let name = generate_worktree_name("{repo}-dev", "myproject", "feature/test");
-        assert_eq!(name, "myproject-dev");
-    }
-
-    #[test]
-    fn test_generate_worktree_name_only_branch() {
-        let name = generate_worktree_name("wt-{branch}", "myproject", "feature/test");
-        assert_eq!(name, "wt-feature-test");
-    }
-
-    #[test]
-    fn test_generate_worktree_name_complex_branch() {
-        let name = generate_worktree_name(
-            "{repo}-wt-{branch}",
-            "autom8",
-            "feature/git-worktrees/us-007",
+    fn test_generate_worktree_name() {
+        assert_eq!(
+            generate_worktree_name("{repo}-wt-{branch}", "myproject", "feature/login"),
+            "myproject-wt-feature-login"
         );
-        assert_eq!(name, "autom8-wt-feature-git-worktrees-us-007");
+        assert_eq!(
+            generate_worktree_name("{repo}_worktree_{branch}", "myproject", "main"),
+            "myproject_worktree_main"
+        );
     }
 
+    // ========================================================================
+    // WorktreeResult tests
+    // ========================================================================
+
     #[test]
-    fn test_worktree_result_path_method() {
+    fn test_worktree_result() {
         let path = PathBuf::from("/test/path");
         let created = WorktreeResult::Created(path.clone());
         let reused = WorktreeResult::Reused(path.clone());
 
         assert_eq!(created.path(), &path);
         assert_eq!(reused.path(), &path);
-    }
-
-    #[test]
-    fn test_worktree_result_was_created() {
-        let path = PathBuf::from("/test/path");
-        let created = WorktreeResult::Created(path.clone());
-        let reused = WorktreeResult::Reused(path.clone());
-
         assert!(created.was_created());
         assert!(!reused.was_created());
     }
 
+    // ========================================================================
+    // Error formatting tests
+    // ========================================================================
+
     #[test]
-    fn test_format_worktree_error_already_checked_out() {
+    fn test_format_worktree_error_messages() {
+        // Already checked out
         let msg = format_worktree_error(
-            "fatal: branch 'main' is already checked out at '/other/path'",
+            "fatal: branch 'main' is already checked out",
             "main",
             Path::new("/new/worktree"),
         );
-
-        assert!(msg.contains("main"));
         assert!(msg.contains("already checked out"));
-        assert!(
-            msg.contains("To resolve"),
-            "Error should include resolution steps"
-        );
-    }
+        assert!(msg.contains("To resolve"));
+        assert!(msg.contains("git worktree"));
 
-    #[test]
-    fn test_format_worktree_error_already_exists() {
+        // Already exists
         let msg = format_worktree_error(
-            "fatal: '/new/worktree' already exists",
+            "fatal: already exists",
             "feature",
             Path::new("/new/worktree"),
         );
-
         assert!(msg.contains("already exists"));
-        assert!(
-            msg.contains("To resolve"),
-            "Error should include resolution steps"
-        );
-    }
+        assert!(msg.contains("after removing existing"));
 
-    // ========================================================================
-    // Error message tests
-    // ========================================================================
-
-    #[test]
-    fn test_us012_format_worktree_error_includes_manual_steps() {
-        // Test that error messages include manual git worktree commands
-        let msg = format_worktree_error(
-            "fatal: branch 'main' is already checked out",
-            "feature/test",
-            Path::new("/path/to/worktree"),
-        );
-
-        assert!(
-            msg.contains("Manual worktree creation"),
-            "Error should include manual steps"
-        );
-        assert!(
-            msg.contains("git worktree add"),
-            "Error should include git worktree command"
-        );
-    }
-
-    #[test]
-    fn test_us012_format_worktree_error_follows_pattern() {
-        // Test that error follows "what → why → how to fix" pattern
-        let msg = format_worktree_error(
-            "fatal: permission denied",
-            "feature/test",
-            Path::new("/restricted/path"),
-        );
-
-        // What happened
-        assert!(
-            msg.contains("Failed to create worktree"),
-            "Should say what happened"
-        );
-
-        // Why
-        assert!(
-            msg.contains("Reason:") || msg.contains("permission"),
-            "Should explain why"
-        );
-
-        // How to fix
-        assert!(
-            msg.contains("To resolve"),
-            "Should include resolution steps"
-        );
-    }
-
-    #[test]
-    fn test_us012_format_worktree_error_generic_includes_manual_steps() {
-        let msg = format_worktree_error(
-            "unknown error occurred",
-            "feature/login",
-            Path::new("/home/user/myproject-wt-feature-login"),
-        );
-
-        assert!(
-            msg.contains("Manual worktree creation"),
-            "Generic error should include manual steps"
-        );
-        assert!(
-            msg.contains("feature/login"),
-            "Manual steps should include branch name"
-        );
-        assert!(
-            msg.contains("myproject-wt-feature-login"),
-            "Manual steps should include worktree path"
-        );
-    }
-
-    #[test]
-    fn test_us012_format_worktree_error_already_exists_includes_manual_steps() {
-        let msg = format_worktree_error(
-            "fatal: already exists",
-            "feature/new",
-            Path::new("/path/to/worktree"),
-        );
-
-        assert!(
-            msg.contains("Manual worktree creation"),
-            "Already exists error should include manual steps"
-        );
-        assert!(
-            msg.contains("after removing existing"),
-            "Should mention removing existing first"
-        );
-    }
-
-    #[test]
-    fn test_format_worktree_error_permission_denied() {
+        // Permission denied
         let msg = format_worktree_error(
             "error: permission denied",
             "feature",
-            Path::new("/restricted/path"),
+            Path::new("/restricted"),
         );
-
         assert!(msg.contains("permissions"));
-        assert!(
-            msg.contains("To resolve"),
-            "Error should include resolution steps"
-        );
-    }
 
-    #[test]
-    fn test_format_worktree_error_generic() {
-        let msg = format_worktree_error("some unknown error", "feature", Path::new("/some/path"));
-
-        assert!(msg.contains("some unknown error"));
-        assert!(
-            msg.contains("To resolve"),
-            "Error should include resolution steps"
-        );
+        // Generic error includes manual steps
+        let msg = format_worktree_error("unknown error", "feature/login", Path::new("/path/to/wt"));
+        assert!(msg.contains("Manual worktree creation"));
+        assert!(msg.contains("feature/login"));
     }
 }

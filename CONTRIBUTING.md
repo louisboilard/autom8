@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to autom8!
 
+Please note that this project is released with a [Contributor Code of Conduct](CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
+
 ## Development Environment Setup
 
 ### Prerequisites
@@ -88,33 +90,60 @@ All PRs must pass the following automated checks before merging:
 - Address all Clippy warnings
 - Write tests for new functionality
 
-## Versioning Strategy
+## Releasing
 
-This project follows [Semantic Versioning](https://semver.org/). Since we are pre-1.0, the rules are slightly relaxed:
+This section is primarily for maintainers who publish releases.
 
-### Version Number Format: `MAJOR.MINOR.PATCH`
+### Versioning
 
-- **MAJOR (0.x.x → 1.x.x)**: Reserved for when the project reaches production stability
-- **MINOR (0.x.0)**: Bump for new features, significant changes, or breaking changes (pre-1.0)
-- **PATCH (0.0.x)**: Bump for bug fixes and minor improvements
+This project follows [Semantic Versioning](https://semver.org/). Version numbers are **manually managed** in `Cargo.toml`.
 
-### When to Bump Versions
-
-| Change Type | Version Bump | Example |
-|-------------|--------------|---------|
-| New CLI command | Minor | 0.2.0 → 0.3.0 |
-| New feature | Minor | 0.2.0 → 0.3.0 |
-| Breaking API change | Minor (pre-1.0) | 0.2.0 → 0.3.0 |
-| Bug fix | Patch | 0.2.0 → 0.2.1 |
-| Documentation only | None or Patch | - |
-| Refactoring (no behavior change) | Patch | 0.2.0 → 0.2.1 |
-| Dependency updates | Patch | 0.2.0 → 0.2.1 |
+Since we are pre-1.0, the versioning rules are slightly relaxed:
+- **MAJOR (0.x.x → 1.x.x)**: Reserved for production stability milestone
+- **MINOR (0.x.0)**: New features, significant changes, or breaking changes
+- **PATCH (0.0.x)**: Bug fixes, minor improvements, dependency updates
 
 ### Release Process
 
-1. Update version in `Cargo.toml`
-2. Update `CHANGELOG.md` with release notes
-3. Create a git tag: `git tag v0.x.x`
-4. Push the tag: `git push origin v0.x.x`
+1. **Prepare the release**
+   - Ensure all changes are merged to `main`
+   - Update version in `Cargo.toml`
+   - Update `CHANGELOG.md` with release notes
+   - Commit: `git commit -am "Prepare v0.x.x release"`
 
-The release workflow will automatically build binaries and create a GitHub Release.
+2. **Create and push the tag**
+   ```bash
+   git tag v0.x.x
+   git push origin v0.x.x
+   ```
+
+3. **CI takes over automatically**
+   - The `release.yml` workflow triggers on version tags (`v*`)
+   - Builds binaries for Linux (x86_64), macOS (x86_64, aarch64), and Windows (x86_64)
+   - Creates a GitHub Release with the binaries attached
+   - Publishes the crate to crates.io
+
+4. **Verify the release**
+   - Check the [GitHub Releases page](https://github.com/louisboilard/autom8/releases)
+   - Verify the [crates.io page](https://crates.io/crates/autom8)
+   - Test installation: `cargo install autom8`
+
+### What CI Does Automatically
+
+When you push a version tag (e.g., `v0.2.0`), the release workflow:
+
+| Step | Description |
+|------|-------------|
+| Build | Compiles release binaries for 4 platform targets |
+| Package | Renames binaries to `autom8-<target>` format |
+| Release | Creates GitHub Release and uploads binaries |
+| Publish | Runs `cargo publish` to push to crates.io |
+
+### crates.io Token (Maintainers Only)
+
+To publish to crates.io, the repository needs a `CARGO_REGISTRY_TOKEN` secret:
+
+1. Log in to [crates.io](https://crates.io/) with your GitHub account
+2. Go to [Account Settings → API Tokens](https://crates.io/settings/tokens)
+3. Create a new token with scopes: `publish-new`, `publish-update`
+4. Add the token as a repository secret named `CARGO_REGISTRY_TOKEN` in GitHub Settings → Secrets and variables → Actions
