@@ -143,6 +143,8 @@ autom8 comes with both a terminal UI and a native desktop GUI for watching your 
 
 **Desktop GUI** (`autom8 gui`): A native immediate mode application built with egui. Shows live session output, run history with iteration details, and lets you edit configuration. Useful when you want to keep an eye on multiple projects.
 
+https://github.com/user-attachments/assets/7bb179e7-d127-4df7-b179-d1152a4ade06
+
 Both interfaces update in real-time and work across all your worktrees.
 
 ## CLI Commands
