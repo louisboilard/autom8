@@ -28,6 +28,7 @@ use super::{detect_input_type, ensure_project_dir, InputType};
 /// * `worktree` - If true, enable worktree mode (overrides config)
 /// * `no_worktree` - If true, disable worktree mode (overrides config)
 /// * `self_test` - If true, run a self-test with hardcoded spec (ignores spec argument)
+/// * `all_permissions` - If true, skip all permission restrictions (use --dangerously-skip-permissions)
 ///
 /// # Returns
 ///
@@ -40,12 +41,13 @@ pub fn run_command(
     worktree: bool,
     no_worktree: bool,
     self_test: bool,
+    all_permissions: bool,
 ) -> Result<()> {
     ensure_project_dir()?;
 
     // Handle self-test mode
     if self_test {
-        return run_self_test(verbose, skip_review, worktree, no_worktree);
+        return run_self_test(verbose, skip_review, worktree, no_worktree, all_permissions);
     }
 
     let mut runner = Runner::new()?
@@ -57,6 +59,11 @@ pub fn run_command(
         runner = runner.with_worktree(true);
     } else if no_worktree {
         runner = runner.with_worktree(false);
+    }
+
+    // Apply all_permissions CLI flag override
+    if all_permissions {
+        runner = runner.with_all_permissions(true);
     }
 
     print_header();
@@ -77,6 +84,7 @@ fn run_self_test(
     skip_review: bool,
     worktree: bool,
     no_worktree: bool,
+    all_permissions: bool,
 ) -> Result<()> {
     // Create and save the self-test spec to the config directory
     let spec = create_self_test_spec();
@@ -95,6 +103,11 @@ fn run_self_test(
         runner = runner.with_worktree(true);
     } else if no_worktree {
         runner = runner.with_worktree(false);
+    }
+
+    // Apply all_permissions CLI flag override
+    if all_permissions {
+        runner = runner.with_all_permissions(true);
     }
 
     print_header();

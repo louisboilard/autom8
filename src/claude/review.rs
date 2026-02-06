@@ -10,6 +10,7 @@ use crate::error::{Autom8Error, Result};
 use crate::prompts::{CORRECTOR_PROMPT, REVIEWER_PROMPT};
 use crate::spec::Spec;
 
+use super::permissions::{build_permission_args, ClaudePhase};
 use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
 use super::types::{ClaudeErrorInfo, ClaudeUsage};
 
@@ -49,6 +50,7 @@ pub fn run_reviewer<F>(
     spec: &Spec,
     iteration: u32,
     max_iterations: u32,
+    all_permissions: bool,
     mut on_output: F,
 ) -> Result<ReviewResult>
 where
@@ -56,14 +58,12 @@ where
 {
     let prompt = build_reviewer_prompt(spec, iteration, max_iterations);
 
+    let permission_args = build_permission_args(ClaudePhase::Review, all_permissions);
+    let mut args: Vec<&str> = permission_args;
+    args.extend(["--print", "--output-format", "stream-json", "--verbose"]);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -140,21 +140,24 @@ where
 }
 
 /// Run the corrector agent to fix issues identified by the reviewer.
-pub fn run_corrector<F>(spec: &Spec, iteration: u32, mut on_output: F) -> Result<CorrectorResult>
+pub fn run_corrector<F>(
+    spec: &Spec,
+    iteration: u32,
+    all_permissions: bool,
+    mut on_output: F,
+) -> Result<CorrectorResult>
 where
     F: FnMut(&str),
 {
     let max_iterations = 3;
     let prompt = build_corrector_prompt(spec, iteration, max_iterations);
 
+    let permission_args = build_permission_args(ClaudePhase::Correction, all_permissions);
+    let mut args: Vec<&str> = permission_args;
+    args.extend(["--print", "--output-format", "stream-json", "--verbose"]);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

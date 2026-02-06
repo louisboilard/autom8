@@ -100,6 +100,18 @@ pub struct Config {
     /// Note: Only applies when `worktree = true`. Has no effect otherwise.
     #[serde(default = "default_false")]
     pub worktree_cleanup: bool,
+
+    /// Whether to skip all permission restrictions.
+    ///
+    /// When `true`, autom8 uses `--dangerously-skip-permissions` for all Claude
+    /// subprocess invocations, bypassing all permission checks (old behavior).
+    /// When `false`, autom8 uses the phase-aware permission system that blocks
+    /// only `git push` during story implementation and review phases.
+    ///
+    /// Useful for CI/CD or fully trusted environments where you want unattended
+    /// execution with no restrictions.
+    #[serde(default = "default_false")]
+    pub all_permissions: bool,
 }
 
 /// Default worktree path pattern.
@@ -127,6 +139,7 @@ impl Default for Config {
             worktree: true,
             worktree_path_pattern: default_worktree_path_pattern(),
             worktree_cleanup: false,
+            all_permissions: false,
         }
     }
 }

@@ -1,9 +1,10 @@
 use crate::claude::{
     run_corrector, run_for_commit, run_for_spec_generation, run_reviewer, ClaudeOutcome,
-    ClaudeRunner, ClaudeStoryResult, CommitOutcome, CorrectorOutcome, ReviewOutcome,
+    ClaudeRunner, ClaudeStoryResult, CommitOutcome, CorrectorOutcome, PermissionResult,
+    ReviewOutcome,
 };
 use crate::config::get_effective_config;
-use crate::display::{BannerColor, StoryResult};
+use crate::display::{BannerColor, CliDisplay, DisplayAdapter, StoryResult};
 use crate::error::{Autom8Error, Result};
 use crate::gh::{create_pull_request, PRResult};
 use crate::git;
@@ -20,7 +21,7 @@ use crate::output::{
     YELLOW,
 };
 use crate::progress::{
-    AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, VerboseTimer,
+    AgentDisplay, Breadcrumb, BreadcrumbState, ClaudeSpinner, Outcome, SpinnerHandle, VerboseTimer,
 };
 use crate::signal::SignalHandler;
 use crate::spec::{Spec, UserStory};
@@ -236,6 +237,73 @@ where
     result
 }
 
+/// Runs an operation with progress display, live output streaming, and a spinner handle.
+///
+/// Similar to `with_progress_display_and_live`, but provides a `SpinnerHandle` to the
+/// operation callback. This handle can be used to pause/resume the spinner during
+/// permission prompts, preventing the spinner from overwriting the `[y/N]:` prompt.
+///
+/// # Arguments
+/// * `verbose` - Whether to use verbose mode (timer) or spinner mode
+/// * `state_manager` - StateManager for writing live output
+/// * `machine_state` - Current machine state to include in live.json
+/// * `create_timer` - Factory function to create a VerboseTimer
+/// * `create_spinner` - Factory function to create a ClaudeSpinner
+/// * `run_operation` - The operation to run, receiving a callback for progress updates
+///   and an optional SpinnerHandle (None in verbose mode)
+/// * `map_outcome` - Maps the operation result to an Outcome for display
+///
+/// # Returns
+/// The result of the operation, after the display has been finished with the appropriate outcome.
+fn with_progress_display_and_live_with_handle<T, F, M>(
+    verbose: bool,
+    state_manager: &StateManager,
+    machine_state: MachineState,
+    create_timer: impl FnOnce() -> VerboseTimer,
+    create_spinner: impl FnOnce() -> ClaudeSpinner,
+    run_operation: F,
+    map_outcome: M,
+) -> Result<T>
+where
+    F: FnOnce(&mut dyn FnMut(&str), Option<SpinnerHandle>) -> Result<T>,
+    M: FnOnce(&Result<T>) -> Outcome,
+{
+    let mut live_flusher = LiveOutputFlusher::new(state_manager, machine_state);
+
+    let result = if verbose {
+        let mut timer = create_timer();
+        // In verbose mode, no spinner handle is needed
+        let result = run_operation(
+            &mut |line| {
+                print_claude_output(line);
+                live_flusher.append(line);
+            },
+            None,
+        );
+        let outcome = map_outcome(&result);
+        timer.finish_with_outcome(outcome);
+        result
+    } else {
+        let mut spinner = create_spinner();
+        let handle = spinner.handle();
+        let result = run_operation(
+            &mut |line| {
+                spinner.update(line);
+                live_flusher.append(line);
+            },
+            Some(handle),
+        );
+        let outcome = map_outcome(&result);
+        spinner.finish_with_outcome(outcome);
+        result
+    };
+
+    // Ensure any remaining output is flushed
+    live_flusher.final_flush();
+
+    result
+}
+
 /// Control flow action returned from extracted helper methods
 /// to communicate back to the main implementation loop.
 enum LoopAction {
@@ -327,6 +395,9 @@ pub struct Runner {
     /// Override for the pull_request config setting.
     /// None = use config value, Some(true/false) = override config.
     pull_request_override: Option<bool>,
+    /// Override for the all_permissions config setting.
+    /// None = use config value, Some(true/false) = override config.
+    all_permissions_override: Option<bool>,
 }
 
 impl Runner {
@@ -338,6 +409,7 @@ impl Runner {
             worktree_override: None,
             commit_override: None,
             pull_request_override: None,
+            all_permissions_override: None,
         })
     }
 
@@ -377,6 +449,15 @@ impl Runner {
         self
     }
 
+    /// Set the all_permissions mode override.
+    ///
+    /// When set, this overrides the `all_permissions` setting from the config file.
+    /// When true, uses `--dangerously-skip-permissions` instead of phase-aware permissions.
+    pub fn with_all_permissions(mut self, all_permissions: bool) -> Self {
+        self.all_permissions_override = Some(all_permissions);
+        self
+    }
+
     /// Get the effective worktree mode, considering CLI override and config.
     ///
     /// Priority: CLI flag > config file > default (false).
@@ -401,6 +482,11 @@ impl Runner {
         // Apply pull_request override if set
         if let Some(pull_request) = self.pull_request_override {
             config.pull_request = pull_request;
+        }
+
+        // Apply all_permissions override if set
+        if let Some(all_permissions) = self.all_permissions_override {
+            config.all_permissions = all_permissions;
         }
 
         Ok(config)
@@ -631,13 +717,22 @@ impl Runner {
 
             // Run reviewer with progress display and live output (for heartbeat updates)
             let review_iter = state.review_iteration;
+            let all_permissions = state.effective_config().all_permissions;
             let review_result = with_progress_display_and_live(
                 self.verbose,
                 &self.state_manager,
                 MachineState::Reviewing,
                 || VerboseTimer::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
                 || ClaudeSpinner::new_for_review(review_iter, MAX_REVIEW_ITERATIONS),
-                |callback| run_reviewer(spec, review_iter, MAX_REVIEW_ITERATIONS, callback),
+                |callback| {
+                    run_reviewer(
+                        spec,
+                        review_iter,
+                        MAX_REVIEW_ITERATIONS,
+                        all_permissions,
+                        callback,
+                    )
+                },
                 |res| match res {
                     Ok(r) => {
                         let tokens = r.usage.as_ref().map(|u| u.total_tokens());
@@ -705,7 +800,7 @@ impl Runner {
                         MachineState::Correcting,
                         || VerboseTimer::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
                         || ClaudeSpinner::new_for_correct(review_iter, MAX_REVIEW_ITERATIONS),
-                        |callback| run_corrector(spec, review_iter, callback),
+                        |callback| run_corrector(spec, review_iter, all_permissions, callback),
                         |res| match res {
                             Ok(r) => {
                                 let tokens = r.usage.as_ref().map(|u| u.total_tokens());
@@ -815,13 +910,14 @@ impl Runner {
         print_phase_banner("COMMITTING", BannerColor::Cyan);
 
         // Run commit with progress display and live output (for heartbeat updates)
+        let all_permissions = config.all_permissions;
         let commit_result = with_progress_display_and_live(
             self.verbose,
             &self.state_manager,
             MachineState::Committing,
             VerboseTimer::new_for_commit,
             ClaudeSpinner::new_for_commit,
-            |callback| run_for_commit(spec, callback),
+            |callback| run_for_commit(spec, all_permissions, callback),
             |res| match res {
                 Ok(r) => {
                     let tokens = r.usage.as_ref().map(|u| u.total_tokens());
@@ -875,7 +971,13 @@ impl Runner {
         }
 
         // PR Creation step
-        self.handle_pr_creation(state, spec, commits_were_made, config.pull_request_draft)
+        self.handle_pr_creation(
+            state,
+            spec,
+            commits_were_made,
+            config.pull_request_draft,
+            config.all_permissions,
+        )
     }
 
     /// Handle PR creation after committing.
@@ -885,13 +987,14 @@ impl Runner {
         spec: &Spec,
         commits_were_made: bool,
         draft: bool,
+        all_permissions: bool,
     ) -> Result<()> {
         print_state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
         self.flush_live(MachineState::CreatingPR);
 
-        match create_pull_request(spec, commits_were_made, draft) {
+        match create_pull_request(spec, commits_were_made, draft, all_permissions) {
             Ok(PRResult::Success(url)) => {
                 print_pr_success(&url);
                 print_state_transition(MachineState::CreatingPR, MachineState::Completed);
@@ -1041,22 +1144,63 @@ impl Runner {
         let iterations = state.iterations.clone();
         let knowledge = state.knowledge.clone();
 
-        // Run Claude with progress display and live output streaming (US-003)
+        // Create display adapter for permission prompts (US-006)
+        let display = CliDisplay::new();
+
+        // Get all_permissions setting for this phase
+        let all_permissions = state.effective_config().all_permissions;
+
+        // Run Claude with progress display, live output streaming, and spinner handle (US-003, US-006)
         // Use the provided ClaudeRunner so it can be killed on interrupt
-        let result = with_progress_display_and_live(
+        // The spinner handle allows pausing the spinner during permission prompts
+        let result = with_progress_display_and_live_with_handle(
             self.verbose,
             &self.state_manager,
             MachineState::RunningClaude,
             || VerboseTimer::new_with_story_progress(&story_id, story_index, total_stories),
             || ClaudeSpinner::new_with_story_progress(&story_id, story_index, total_stories),
-            |callback| {
+            |callback, spinner_handle| {
                 claude_runner.run(
                     spec,
                     story,
                     spec_json_path,
                     &iterations,
                     &knowledge,
+                    all_permissions,
                     callback,
+                    // Wire permission callback to DisplayAdapter (US-006)
+                    // Pause spinner before prompt, resume after, to prevent overwriting
+                    |tool_name, tool_input| {
+                        // Pause spinner to prevent it from overwriting the permission prompt
+                        if let Some(ref handle) = spinner_handle {
+                            handle.pause();
+                        }
+
+                        let result = display.prompt_permission(tool_name, tool_input);
+
+                        // Log the permission decision for visibility
+                        match &result {
+                            PermissionResult::Allow(_) => {
+                                println!(
+                                    "{CYAN}✓{RESET} {GRAY}Permission granted for {}{RESET}",
+                                    tool_name
+                                );
+                            }
+                            PermissionResult::Deny(reason) => {
+                                println!(
+                                    "{YELLOW}✗{RESET} {GRAY}Permission denied for {}: {}{RESET}",
+                                    tool_name, reason
+                                );
+                            }
+                        }
+
+                        // Resume spinner after prompt is complete
+                        if let Some(ref handle) = spinner_handle {
+                            handle.resume();
+                        }
+
+                        result
+                    },
                 )
             },
             |res| match res {
@@ -1446,6 +1590,7 @@ impl Runner {
             worktree_override: self.worktree_override,
             commit_override: self.commit_override,
             pull_request_override: self.pull_request_override,
+            all_permissions_override: self.all_permissions_override,
         };
 
         // Mark metadata as saved since the state was just saved above
@@ -1548,6 +1693,7 @@ impl Runner {
             worktree_override: self.worktree_override,
             commit_override: self.commit_override,
             pull_request_override: self.pull_request_override,
+            all_permissions_override: self.all_permissions_override,
         };
 
         worktree_runner.run_implementation_loop(state, &spec_json_path, worktree_setup_ctx)
@@ -2285,6 +2431,7 @@ mod tests {
             worktree_override: None,
             commit_override: None,
             pull_request_override: None,
+            all_permissions_override: None,
         };
 
         let mut state = RunState::new(PathBuf::from("test.json"), "test".to_string());

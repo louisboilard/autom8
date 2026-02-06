@@ -204,6 +204,79 @@ worktree_cleanup = false      # Remove worktrees after completion
 - Completion signals use `<promise>COMPLETE</promise>` tag
 - Error info preserved with exit codes and stderr (`claude/types.rs`)
 
+## Permission System
+
+autom8 uses a minimal, phase-aware permission system that provides a safety net against accidental pushes to remote repositories while staying out of the way during normal operation.
+
+### Design Philosophy
+
+Within the project directory, almost everything is reversible via git. The only truly dangerous operation is pushing to a remote, which is hard to undo. The permission system is designed so that **normal usage should see zero prompts** - it only intervenes when Claude attempts `git push` during story implementation (which is unusual).
+
+### Phase-Aware Permissions
+
+Different phases of autom8's workflow have different permission needs. Permissions are configured in `claude/permissions.rs`:
+
+| Phase | State | Permissions | Rationale |
+|-------|-------|-------------|-----------|
+| Story Implementation | `RunningClaude` | Block `git push` only | Full freedom for coding; safety net for remote |
+| Review | `Reviewing` | Block `git push` only | Read-heavy, no special needs |
+| Correction | `Correcting` | Block `git push` only | Same as story implementation |
+| Commit | `Committing` | Block `git push` only | Needs `git add`, `git commit`; no push |
+| PR Creation | `CreatingPR` | No restrictions | Needs `git push`, `gh pr *` |
+
+All phases use:
+- `--permission-mode acceptEdits` - auto-allow file operations
+- `--allowedTools Bash` - allow most Bash commands
+- `--disallowedTools "Bash(git push *)"` - block push (except PR phase)
+
+### What Triggers Prompts
+
+Prompts are **only** triggered when:
+1. Claude attempts a blocked operation (currently just `git push` during non-PR phases)
+2. The `--all-permissions` flag is **not** set
+
+In practice, this should be rare since `git push` during story implementation is unusual. If triggered, autom8 shows:
+
+```
+⚠️  Claude wants to push to remote:
+
+    git push origin feature-branch
+
+This was blocked because it affects the remote repository.
+Allow this operation? [y/N]:
+```
+
+The default response is "deny" (N) - blocked operations require explicit approval.
+
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--all-permissions` | Bypass phase-aware permissions and use `--dangerously-skip-permissions`. Useful for CI/CD or fully trusted environments where you want unattended execution with no restrictions. |
+
+### Configuration
+
+```toml
+# In config.toml
+all_permissions = false  # Default: use phase-aware permissions
+                         # Set to true for CI/CD or fully trusted environments
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `claude/permissions.rs` | `ClaudePhase` enum and `build_permission_args()` function |
+| `claude/control.rs` | Control protocol types for permission requests/responses |
+| `display.rs` | `DisplayAdapter::prompt_permission()` for user interaction |
+| `runner.rs` | Permission callback wiring in `handle_story_iteration()` |
+
+### Edge Cases
+
+- **Spec generation** (`claude/spec.rs`): Uses `--dangerously-skip-permissions` since it's a one-shot conversion task, not an implementation session.
+- **PR review** (`claude/pr_review.rs`): Uses `--dangerously-skip-permissions` for analyzing and fixing PR comments.
+- **TUI monitoring**: The TUI interface denies all permission requests by default since it's a read-only monitoring interface that doesn't support interactive prompts.
+
 ## Testing
 
 Tests are in `#[cfg(test)]` blocks within modules. Focus areas:

@@ -10,6 +10,7 @@ use crate::git;
 use crate::prompts::COMMIT_PROMPT;
 use crate::spec::Spec;
 
+use super::permissions::{build_permission_args, ClaudePhase};
 use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
 use super::types::{ClaudeErrorInfo, ClaudeUsage};
 
@@ -30,7 +31,11 @@ pub enum CommitOutcome {
 }
 
 /// Run Claude to commit changes after all stories are complete
-pub fn run_for_commit<F>(spec: &Spec, mut on_output: F) -> Result<CommitResult>
+pub fn run_for_commit<F>(
+    spec: &Spec,
+    all_permissions: bool,
+    mut on_output: F,
+) -> Result<CommitResult>
 where
     F: FnMut(&str),
 {
@@ -47,14 +52,12 @@ where
         .replace("{feature_description}", &spec.description)
         .replace("{stories_summary}", &stories_summary);
 
+    let permission_args = build_permission_args(ClaudePhase::Commit, all_permissions);
+    let mut args: Vec<&str> = permission_args;
+    args.extend(["--print", "--output-format", "stream-json", "--verbose"]);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

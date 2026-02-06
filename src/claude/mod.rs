@@ -14,9 +14,13 @@
 //! - [`pr_review`] - PR review analysis
 //! - [`improve`] - Interactive improve sessions
 //! - [`utils`] - Utility functions
+//! - [`permissions`] - Phase-aware permission configuration
+//! - [`control`] - Control protocol types for permission handling
 
 mod commit;
+mod control;
 mod improve;
+mod permissions;
 mod pr_review;
 mod review;
 mod runner;
@@ -27,7 +31,12 @@ mod utils;
 
 // Re-export all public types and functions
 pub use commit::{run_for_commit, CommitOutcome, CommitResult};
+pub use control::{
+    ControlRequest, ControlResponse, PermissionDecision, PermissionResult, ResponseWrapper,
+    ToolUseRequest,
+};
 pub use improve::{run_improve_session, ImproveSessionResult};
+pub use permissions::{build_permission_args, ClaudePhase};
 pub use pr_review::{run_pr_review, PRReviewResult, PRReviewSummary};
 pub use review::{
     run_corrector, run_reviewer, CorrectorOutcome, CorrectorResult, ReviewOutcome, ReviewResult,

@@ -33,7 +33,11 @@ pub fn is_gh_authenticated() -> bool {
 }
 
 /// Update the description of an existing pull request
-pub fn update_pr_description(spec: &Spec, pr_number: u32) -> Result<PRResult> {
+pub fn update_pr_description(
+    spec: &Spec,
+    pr_number: u32,
+    all_permissions: bool,
+) -> Result<PRResult> {
     // Check for PR template in the repository
     let repo_root = std::env::current_dir().unwrap_or_default();
     if let Some(template_content) = detect_pr_template(&repo_root) {
@@ -46,6 +50,7 @@ pub fn update_pr_description(spec: &Spec, pr_number: u32) -> Result<PRResult> {
             &title,
             Some(pr_number),
             false,
+            all_permissions,
             |_| {},
         ) {
             Ok(TemplateAgentResult::Success(url)) => {
@@ -105,7 +110,12 @@ fn update_pr_description_direct(spec: &Spec, pr_number: u32) -> Result<PRResult>
 }
 
 /// Create a pull request for the current branch using the GitHub CLI
-pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) -> Result<PRResult> {
+pub fn create_pull_request(
+    spec: &Spec,
+    commits_were_made: bool,
+    draft: bool,
+    all_permissions: bool,
+) -> Result<PRResult> {
     if !commits_were_made {
         return Ok(PRResult::Skipped(
             "No commits were made in this session".to_string(),
@@ -149,7 +159,7 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) ->
     if pr_exists_for_branch(&branch)? {
         // PR exists - update description instead
         if let Some(pr_number) = get_existing_pr_number(&branch)? {
-            return update_pr_description(spec, pr_number);
+            return update_pr_description(spec, pr_number, all_permissions);
         } else if let Some(url) = get_existing_pr_url(&branch)? {
             return Ok(PRResult::AlreadyExists(url));
         }
@@ -167,7 +177,15 @@ pub fn create_pull_request(spec: &Spec, commits_were_made: bool, draft: bool) ->
     if let Some(template_content) = detect_pr_template(&repo_root) {
         // Template found - use agent path
         let title = format_pr_title(spec);
-        match run_template_agent(spec, &template_content, &title, None, draft, |_| {}) {
+        match run_template_agent(
+            spec,
+            &template_content,
+            &title,
+            None,
+            draft,
+            all_permissions,
+            |_| {},
+        ) {
             Ok(TemplateAgentResult::Success(url)) => {
                 return Ok(PRResult::Success(url));
             }
@@ -304,7 +322,7 @@ mod tests {
     #[test]
     fn test_create_pr_skips_when_no_commits() {
         let spec = make_test_spec();
-        let result = create_pull_request(&spec, false, false);
+        let result = create_pull_request(&spec, false, false, false);
         assert!(result.is_ok());
         match result.unwrap() {
             PRResult::Skipped(msg) => {

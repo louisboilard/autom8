@@ -87,6 +87,12 @@ WORKTREE MODE:
         /// Bypasses the normal spec file requirement and cleans up all artifacts after completion.
         #[arg(long, conflicts_with = "spec")]
         self_test: bool,
+
+        /// Skip all permission restrictions (use --dangerously-skip-permissions).
+        /// Bypasses the phase-aware permission system that normally blocks git push
+        /// during story implementation. Useful for CI/CD or fully trusted environments.
+        #[arg(long)]
+        all_permissions: bool,
     },
 
     /// Check the current run status
@@ -352,6 +358,7 @@ fn main() {
                         worktree,
                         no_worktree,
                         self_test,
+                        all_permissions,
                     }),
                 ) => run_command(
                     cli.verbose,
@@ -360,6 +367,7 @@ fn main() {
                     *worktree,
                     *no_worktree,
                     *self_test,
+                    *all_permissions,
                 ),
 
                 (

@@ -9,8 +9,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::claude::extract_text_from_stream_line;
-use crate::claude::ClaudeErrorInfo;
+use crate::claude::{
+    build_permission_args, extract_text_from_stream_line, ClaudeErrorInfo, ClaudePhase,
+};
 use crate::error::{Autom8Error, Result};
 use crate::prompts::PR_TEMPLATE_PROMPT;
 use crate::spec::Spec;
@@ -172,6 +173,7 @@ pub fn run_template_agent<F>(
     title: &str,
     pr_number: Option<u32>,
     draft: bool,
+    all_permissions: bool,
     mut on_output: F,
 ) -> Result<TemplateAgentResult>
 where
@@ -185,14 +187,12 @@ where
         .replace("{template_content}", template_content)
         .replace("{gh_command}", &gh_command);
 
+    let permission_args = build_permission_args(ClaudePhase::PullRequest, all_permissions);
+    let mut args: Vec<&str> = permission_args;
+    args.extend(["--print", "--output-format", "stream-json", "--verbose"]);
+
     let mut child = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

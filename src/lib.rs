@@ -45,7 +45,7 @@ pub mod test_utils;
 pub mod ui;
 pub mod worktree;
 
-pub use display::{BannerColor, StoryResult};
+pub use display::{BannerColor, CliDisplay, DisplayAdapter, StoryResult, TuiDisplay};
 pub use error::{Autom8Error, Result};
 pub use progress::{Breadcrumb, BreadcrumbState, ProgressContext};
 pub use runner::Runner;
