@@ -194,6 +194,80 @@ pub fn render_infinity(painter: &egui::Painter, time: f32, rect: Rect, color: Co
     );
 }
 
+/// Render a subtle sparkle/twinkle effect for the mascot's hat.
+///
+/// Draws small star-like glints that fade in and out at different rates,
+/// creating a gentle twinkling effect. The sparkles are positioned randomly
+/// within the given rect and cycle smoothly without visible jumps.
+///
+/// Note: This is a pure render function. Call `schedule_frame()` separately.
+///
+/// # Arguments
+/// * `painter` - The egui painter to draw with
+/// * `time` - Current animation time in seconds
+/// * `rect` - The rectangle to draw sparkles within (roughly 30-40px area)
+/// * `color` - The base color for the sparkles
+pub fn render_hat_sparkle(painter: &egui::Painter, time: f32, rect: Rect, color: Color32) {
+    let center = rect.center();
+    let half_width = rect.width() / 2.0;
+    let half_height = rect.height() / 2.0;
+
+    // Sparkle configurations: (x_offset, y_offset, size, speed, phase)
+    // Offsets are relative to center (-1.0 to 1.0 range)
+    // Each sparkle has different timing to create varied twinkling
+    const SPARKLES: [(f32, f32, f32, f32, f32); 5] = [
+        (0.0, -0.3, 3.0, 1.0, 0.0),  // Center-top, medium size
+        (-0.5, 0.1, 2.0, 1.4, 0.25), // Left, small
+        (0.6, -0.1, 2.5, 0.9, 0.5),  // Right, medium-small
+        (-0.2, 0.4, 1.8, 1.2, 0.7),  // Lower-left, tiny
+        (0.3, 0.3, 2.2, 1.1, 0.15),  // Lower-right, small
+    ];
+
+    for (x_off, y_off, size, speed, phase) in SPARKLES.iter() {
+        // Smooth fade cycle using sine wave for seamless looping
+        // Each sparkle fades in and out independently
+        let cycle = ((time * speed * 0.8) + phase * std::f32::consts::TAU).sin();
+        // Map from [-1, 1] to [0, 1] for alpha, with extra power for more "off" time
+        let alpha = ((cycle + 1.0) / 2.0).powf(2.0);
+
+        if alpha < 0.05 {
+            continue; // Skip nearly invisible sparkles
+        }
+
+        let x = center.x + half_width * x_off;
+        let y = center.y + half_height * y_off;
+        let pos = egui::pos2(x, y);
+
+        // Draw a 4-pointed star shape for each sparkle
+        let arm_length = size * (0.8 + alpha * 0.4); // Slightly larger when brighter
+        let sparkle_color = color.linear_multiply(alpha * 0.9);
+
+        // Vertical arm
+        painter.line_segment(
+            [
+                egui::pos2(pos.x, pos.y - arm_length),
+                egui::pos2(pos.x, pos.y + arm_length),
+            ],
+            Stroke::new(1.0, sparkle_color),
+        );
+
+        // Horizontal arm
+        painter.line_segment(
+            [
+                egui::pos2(pos.x - arm_length, pos.y),
+                egui::pos2(pos.x + arm_length, pos.y),
+            ],
+            Stroke::new(1.0, sparkle_color),
+        );
+
+        // Small center dot for extra brightness at peak
+        if alpha > 0.5 {
+            let dot_alpha = (alpha - 0.5) * 2.0; // 0 to 1 as alpha goes 0.5 to 1
+            painter.circle_filled(pos, size * 0.3, color.linear_multiply(dot_alpha * 0.7));
+        }
+    }
+}
+
 /// Render a horizontal progress bar with animated shimmer effect.
 ///
 /// The bar fills from left to right based on progress, with a subtle
