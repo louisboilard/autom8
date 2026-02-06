@@ -4,7 +4,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::error::{Autom8Error, Result};
@@ -12,6 +12,8 @@ use crate::knowledge::ProjectKnowledge;
 use crate::spec::{Spec, UserStory};
 use crate::state::IterationRecord;
 
+use super::control::{ControlRequest, ControlResponse, PermissionResult};
+use super::permissions::{build_permission_args, ClaudePhase};
 use super::stream::{extract_text_from_stream_line, extract_usage_from_result_line};
 use super::types::{ClaudeErrorInfo, ClaudeOutcome, ClaudeStoryResult, ClaudeUsage};
 use super::utils::{build_knowledge_context, build_previous_context, extract_work_summary};
@@ -101,6 +103,44 @@ impl Default for ClaudeRunner {
     }
 }
 
+/// Parse a line for control_request events.
+///
+/// Returns Some(ControlRequest) if the line contains a valid control request.
+fn parse_control_request(line: &str) -> Option<ControlRequest> {
+    let request: ControlRequest = serde_json::from_str(line).ok()?;
+    if request.is_tool_use_request() {
+        Some(request)
+    } else {
+        None
+    }
+}
+
+/// Send a control response to stdin.
+fn send_control_response(stdin: &mut ChildStdin, response: &ControlResponse) -> Result<()> {
+    let json = serde_json::to_string(response)
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to serialize response: {}", e)))?;
+    writeln!(stdin, "{}", json)
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write response: {}", e)))?;
+    stdin
+        .flush()
+        .map_err(|e| Autom8Error::ClaudeError(format!("Failed to flush stdin: {}", e)))?;
+    Ok(())
+}
+
+/// Build the JSON user message format for stream-json input.
+///
+/// When using `--input-format stream-json`, prompts must be sent as JSON messages.
+fn build_json_user_message(prompt: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": prompt
+        }
+    })
+    .to_string()
+}
+
 impl ClaudeRunner {
     /// Runs Claude to implement a user story.
     ///
@@ -115,18 +155,24 @@ impl ClaudeRunner {
     /// * `spec_path` - Path to the spec JSON file
     /// * `previous_iterations` - Previous iteration records for context
     /// * `knowledge` - Project knowledge for context
+    /// * `all_permissions` - If true, use --dangerously-skip-permissions instead of phase-aware permissions
     /// * `on_output` - Callback for streaming output
-    pub fn run<F>(
+    /// * `on_permission` - Callback for handling permission requests (tool_name, tool_input) -> PermissionResult
+    #[allow(clippy::too_many_arguments)]
+    pub fn run<F, P>(
         &self,
         spec: &Spec,
         story: &UserStory,
         spec_path: &Path,
         previous_iterations: &[IterationRecord],
         knowledge: &ProjectKnowledge,
+        all_permissions: bool,
         mut on_output: F,
+        mut on_permission: P,
     ) -> Result<ClaudeStoryResult>
     where
         F: FnMut(&str),
+        P: FnMut(&str, &serde_json::Value) -> PermissionResult,
     {
         let previous_context = build_previous_context(previous_iterations);
         let knowledge_context = build_knowledge_context(knowledge);
@@ -138,27 +184,42 @@ impl ClaudeRunner {
             previous_context.as_deref(),
         );
 
+        let permission_args =
+            build_permission_args(ClaudePhase::StoryImplementation, all_permissions);
+        let mut args: Vec<&str> = permission_args;
+        // Add bidirectional communication flags for permission prompts
+        args.extend([
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--permission-prompt-tool",
+            "stdio",
+        ]);
+
         let mut child = Command::new("claude")
-            .args([
-                "--dangerously-skip-permissions",
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Autom8Error::ClaudeError(format!("Failed to spawn claude: {}", e)))?;
 
-        // Write prompt to stdin - take and drop stdin handle to close it
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(prompt.as_bytes()).map_err(|e| {
-                Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e))
-            })?;
-            // stdin is dropped here, closing the handle
-        }
+        // Take stdin handle - keep it open for permission responses
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Autom8Error::ClaudeError("Failed to capture stdin".into()))?;
+
+        // Send prompt as JSON user message format
+        let json_message = build_json_user_message(&prompt);
+        writeln!(stdin, "{}", json_message)
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to write to stdin: {}", e)))?;
+        stdin
+            .flush()
+            .map_err(|e| Autom8Error::ClaudeError(format!("Failed to flush stdin: {}", e)))?;
 
         // Take stderr handle before storing child
         let stderr = child.stderr.take();
@@ -181,6 +242,19 @@ impl ClaudeRunner {
         for line in reader.lines() {
             let line = line.map_err(|e| Autom8Error::ClaudeError(format!("Read error: {}", e)))?;
 
+            // Check for control_request events (permission prompts)
+            if let Some(control_request) = parse_control_request(&line) {
+                // Invoke the on_permission callback
+                let result = on_permission(
+                    &control_request.request.tool_name,
+                    &control_request.request.input,
+                );
+                // Send the response back to Claude
+                let response = ControlResponse::from_result(&control_request.request_id, result);
+                send_control_response(&mut stdin, &response)?;
+                continue;
+            }
+
             // Parse stream-json output and extract text content
             if let Some(text) = extract_text_from_stream_line(&line) {
                 on_output(&text);
@@ -197,6 +271,9 @@ impl ClaudeRunner {
                 usage = Some(line_usage);
             }
         }
+
+        // Drop stdin to signal end of input
+        drop(stdin);
 
         // Take the child back to wait for completion
         let child = self.take_child()?;
@@ -247,16 +324,31 @@ impl ClaudeRunner {
 /// This maintains backwards compatibility with existing code that uses the
 /// standalone function. For new code that needs to kill the subprocess
 /// (e.g., on signal handling), use `ClaudeRunner` directly.
-pub fn run_claude<F>(
+///
+/// # Arguments
+///
+/// * `spec` - The spec containing project information
+/// * `story` - The user story to implement
+/// * `spec_path` - Path to the spec JSON file
+/// * `previous_iterations` - Previous iteration records for context
+/// * `knowledge` - Project knowledge for context
+/// * `all_permissions` - If true, use --dangerously-skip-permissions instead of phase-aware permissions
+/// * `on_output` - Callback for streaming output
+/// * `on_permission` - Callback for handling permission requests (tool_name, tool_input) -> PermissionResult
+#[allow(clippy::too_many_arguments)]
+pub fn run_claude<F, P>(
     spec: &Spec,
     story: &UserStory,
     spec_path: &Path,
     previous_iterations: &[IterationRecord],
     knowledge: &ProjectKnowledge,
+    all_permissions: bool,
     on_output: F,
+    on_permission: P,
 ) -> Result<ClaudeStoryResult>
 where
     F: FnMut(&str),
+    P: FnMut(&str, &serde_json::Value) -> PermissionResult,
 {
     let runner = ClaudeRunner::new();
     runner.run(
@@ -265,7 +357,9 @@ where
         spec_path,
         previous_iterations,
         knowledge,
+        all_permissions,
         on_output,
+        on_permission,
     )
 }
 
@@ -758,5 +852,79 @@ mod tests {
         // The knowledge section should have the ## Project Knowledge header
         // followed by the content
         assert!(prompt.contains("## Project Knowledge\n\nTest knowledge content"));
+    }
+
+    #[test]
+    fn test_build_json_user_message() {
+        let message = build_json_user_message("Hello, Claude!");
+        let parsed: serde_json::Value = serde_json::from_str(&message).unwrap();
+
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"], "Hello, Claude!");
+    }
+
+    #[test]
+    fn test_build_json_user_message_with_multiline() {
+        let prompt = "Line 1\nLine 2\nLine 3";
+        let message = build_json_user_message(prompt);
+        let parsed: serde_json::Value = serde_json::from_str(&message).unwrap();
+
+        assert_eq!(parsed["message"]["content"], "Line 1\nLine 2\nLine 3");
+    }
+
+    #[test]
+    fn test_build_json_user_message_with_special_chars() {
+        let prompt = r#"Test with "quotes" and \backslashes\"#;
+        let message = build_json_user_message(prompt);
+        let parsed: serde_json::Value = serde_json::from_str(&message).unwrap();
+
+        // Verify it round-trips correctly
+        assert_eq!(
+            parsed["message"]["content"].as_str().unwrap(),
+            r#"Test with "quotes" and \backslashes\"#
+        );
+    }
+
+    #[test]
+    fn test_parse_control_request_valid() {
+        let line = r#"{"type":"control_request","request_id":"req-123","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}"#;
+        let request = parse_control_request(line);
+
+        assert!(request.is_some());
+        let request = request.unwrap();
+        assert_eq!(request.request_id, "req-123");
+        assert_eq!(request.request.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_parse_control_request_wrong_type() {
+        // Not a control_request
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"hello"}}}"#;
+        let request = parse_control_request(line);
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn test_parse_control_request_wrong_subtype() {
+        // control_request but not can_use_tool
+        let line = r#"{"type":"control_request","request_id":"req-123","request":{"subtype":"other_subtype","tool_name":"Bash","input":{}}}"#;
+        let request = parse_control_request(line);
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn test_parse_control_request_invalid_json() {
+        let line = "not valid json";
+        let request = parse_control_request(line);
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn test_parse_control_request_text_output() {
+        // Normal text output should not parse as control request
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Working on task..."}]}}"#;
+        let request = parse_control_request(line);
+        assert!(request.is_none());
     }
 }
