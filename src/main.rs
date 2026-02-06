@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(loaded.branch, "feature/test");
 
         // Clear
-        sm.clear_current().unwrap();
+        sm.clear_current(false).unwrap();
         assert!(sm.load_current().unwrap().is_none());
     }
 

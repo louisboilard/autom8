@@ -257,7 +257,7 @@ fn cleanup_session_state(errors: &mut Vec<String>) -> bool {
         }
     };
 
-    if let Err(e) = state_manager.clear_current() {
+    if let Err(e) = state_manager.clear_current(false) {
         errors.push(format!("Failed to clear session state: {}", e));
         return false;
     }

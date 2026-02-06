@@ -294,7 +294,7 @@ fn clean_specific_session(session_id: &str, options: &CleanOptions) -> Result<()
             // Remove session state
             if let Some(session_sm) = state_manager.get_session(session_id) {
                 summary.bytes_freed += get_session_size(&session_sm);
-                session_sm.clear_current()?;
+                session_sm.clear_current(false)?;
                 summary.sessions_removed += 1;
             }
 
@@ -359,7 +359,7 @@ fn clean_orphaned_sessions(options: &CleanOptions) -> Result<()> {
             }
 
             summary.bytes_freed += get_session_size(&session_sm);
-            if let Err(e) = session_sm.clear_current() {
+            if let Err(e) = session_sm.clear_current(false) {
                 summary.errors.push(format!(
                     "Failed to remove session {}: {}",
                     session.session_id, e
@@ -518,7 +518,7 @@ fn clean_all_sessions(options: &CleanOptions) -> Result<()> {
 
             // Remove session state
             summary.bytes_freed += get_session_size(&session_sm);
-            if let Err(e) = session_sm.clear_current() {
+            if let Err(e) = session_sm.clear_current(false) {
                 summary.errors.push(format!(
                     "Failed to remove session {}: {}",
                     session.session_id, e
@@ -689,7 +689,7 @@ fn clean_completed_sessions(options: &CleanOptions) -> Result<()> {
 
             // Remove session state
             summary.bytes_freed += get_session_size(&session_sm);
-            if let Err(e) = session_sm.clear_current() {
+            if let Err(e) = session_sm.clear_current(false) {
                 summary.errors.push(format!(
                     "Failed to remove session {}: {}",
                     session.session_id, e
@@ -814,7 +814,7 @@ pub fn clean_worktrees_direct(
 
             // Remove session state
             summary.bytes_freed += get_session_size(&session_sm);
-            if let Err(e) = session_sm.clear_current() {
+            if let Err(e) = session_sm.clear_current(false) {
                 summary.errors.push(format!(
                     "Failed to remove session {}: {}",
                     session.session_id, e
@@ -861,7 +861,7 @@ pub fn clean_orphaned_direct(project_name: &str) -> Result<CleanupSummary> {
             }
 
             summary.bytes_freed += get_session_size(&session_sm);
-            if let Err(e) = session_sm.clear_current() {
+            if let Err(e) = session_sm.clear_current(false) {
                 summary.errors.push(format!(
                     "Failed to remove session {}: {}",
                     session.session_id, e
@@ -1372,7 +1372,7 @@ mod tests {
         assert!(archive_path.exists());
 
         // Clear the current state
-        sm.clear_current().unwrap();
+        sm.clear_current(false).unwrap();
 
         // Verify state is cleared but archive remains
         assert!(sm.load_current().unwrap().is_none());

@@ -115,7 +115,7 @@ fn handle_existing_state(state: RunState, verbose: bool) -> Result<()> {
 
             // Archive before deleting
             let archive_path = state_manager.archive(&state)?;
-            state_manager.clear_current()?;
+            state_manager.clear_current(false)?;
 
             println!();
             println!(

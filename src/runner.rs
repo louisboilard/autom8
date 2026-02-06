@@ -1748,8 +1748,9 @@ impl Runner {
                 let spec_json_path = state.spec_json_path.clone();
 
                 // Archive the interrupted/failed run before starting fresh
+                // Preserve metadata so run_mode preference survives resume
                 self.state_manager.archive(&state)?;
-                self.state_manager.clear_current()?;
+                self.state_manager.clear_current(true)?;
 
                 // Start a new run with the same parameters
                 return self.run(&spec_json_path);
@@ -1861,7 +1862,7 @@ impl Runner {
                     let worktree_path = metadata.worktree_path;
 
                     // Clear state before removing worktree (since we're inside it)
-                    self.state_manager.clear_current()?;
+                    self.state_manager.clear_current(false)?;
 
                     // Change to the main repo before removing worktree
                     // We need to get out of the worktree directory first
@@ -1892,7 +1893,7 @@ impl Runner {
         }
 
         // Default path: just clear the state
-        self.state_manager.clear_current()?;
+        self.state_manager.clear_current(false)?;
         Ok(())
     }
 
@@ -2106,7 +2107,7 @@ mod tests {
         assert_eq!(loaded.run_id, state.run_id);
 
         // Clear
-        sm.clear_current().unwrap();
+        sm.clear_current(false).unwrap();
         assert!(sm.load_current().unwrap().is_none());
     }
 
