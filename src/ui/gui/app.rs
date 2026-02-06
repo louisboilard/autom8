@@ -8758,10 +8758,22 @@ ui.label(
         let is_hovered = response.hovered();
 
         // Draw tab background
+        // US-004: Completed session tabs get a subtle green tint
+        let is_completed = state == Some(MachineState::Completed);
         let bg_color = if is_active {
-            colors::SURFACE_SELECTED
+            if is_completed {
+                colors::COMPLETED_TAB_ACTIVE
+            } else {
+                colors::SURFACE_SELECTED
+            }
         } else if is_hovered {
-            colors::SURFACE_HOVER
+            if is_completed {
+                colors::COMPLETED_TAB_HOVER
+            } else {
+                colors::SURFACE_HOVER
+            }
+        } else if is_completed {
+            colors::COMPLETED_TAB_FILL
         } else {
             Color32::TRANSPARENT
         };
@@ -8921,243 +8933,274 @@ ui.label(
     /// Uses a single outer scroll area so the whole view is scrollable.
     /// Styled to match RunDetail view with Title-sized header and consistent padding.
     fn render_expanded_session_view(&mut self, ui: &mut egui::Ui, session: &SessionData) {
-        let available_width = ui.available_width();
-        let available_height = ui.available_height();
+        let is_completed = session
+            .run
+            .as_ref()
+            .is_some_and(|r| r.machine_state == MachineState::Completed);
 
-        // Use the full available area with padding matching RunDetail style
-        let content_padding = spacing::LG;
-        let content_width = available_width - content_padding * 2.0;
-        let section_gap = spacing::LG;
+        // Build Frame: green-tinted for completed sessions, transparent otherwise
+        let frame = if is_completed {
+            let time = ui.ctx().input(|i| i.time);
+            let glow_alpha = super::animation::completed_glow_intensity(time);
+            super::animation::schedule_frame(ui.ctx());
 
-        // Single outer scroll area for the whole view
-        egui::ScrollArea::vertical()
-            .id_salt(format!("expanded_view_{}", session.metadata.session_id))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(content_padding);
+            egui::Frame::none()
+                .fill(colors::COMPLETED_FILL)
+                .stroke(Stroke::new(1.0, colors::COMPLETED_BORDER))
+                .rounding(rounding::CARD)
+                .shadow(theme::shadow::completed_glow(glow_alpha))
+        } else {
+            egui::Frame::none()
+        };
 
-                ui.horizontal(|ui| {
+        frame.show(ui, |ui| {
+            let available_width = ui.available_width();
+            let available_height = ui.available_height();
+
+            // Use the full available area with padding matching RunDetail style
+            let content_padding = spacing::LG;
+            let content_width = available_width - content_padding * 2.0;
+            let section_gap = spacing::LG;
+
+            // Single outer scroll area for the whole view
+            egui::ScrollArea::vertical()
+                .id_salt(format!("expanded_view_{}", session.metadata.session_id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                     ui.add_space(content_padding);
 
-                    ui.vertical(|ui| {
-                        ui.set_width(content_width);
+                    ui.horizontal(|ui| {
+                        ui.add_space(content_padding);
 
-                        // === HEADER: Branch name (primary identifier) with session badge ===
-                        let branch_display = strip_worktree_prefix(
-                            &session.metadata.branch_name,
-                            &session.project_name,
-                        );
+                        ui.vertical(|ui| {
+                            ui.set_width(content_width);
 
-                        ui.horizontal(|ui| {
-                            // Branch name as the prominent title (matches RunDetail header size)
+                            // === HEADER: Branch name (primary identifier) with session badge ===
+                            let branch_display = strip_worktree_prefix(
+                                &session.metadata.branch_name,
+                                &session.project_name,
+                            );
+
+                            ui.horizontal(|ui| {
+                                // Branch name as the prominent title (matches RunDetail header size)
+                                ui.label(
+                                    egui::RichText::new(&branch_display)
+                                        .font(typography::font(
+                                            FontSize::Title,
+                                            FontWeight::SemiBold,
+                                        ))
+                                        .color(colors::TEXT_PRIMARY),
+                                );
+
+                                ui.add_space(spacing::MD);
+
+                                // Session badge
+                                let badge_text = if session.is_main_session {
+                                    "main"
+                                } else {
+                                    &session.metadata.session_id
+                                };
+                                let badge_color = if session.is_main_session {
+                                    colors::ACCENT
+                                } else {
+                                    colors::TEXT_SECONDARY
+                                };
+                                let badge_bg = if session.is_main_session {
+                                    colors::ACCENT_SUBTLE
+                                } else {
+                                    colors::SURFACE_HOVER
+                                };
+
+                                egui::Frame::none()
+                                    .fill(badge_bg)
+                                    .rounding(rounding::SMALL)
+                                    .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(badge_text)
+                                                .font(typography::font(
+                                                    FontSize::Small,
+                                                    FontWeight::Medium,
+                                                ))
+                                                .color(badge_color),
+                                        );
+                                    });
+                            });
+
+                            ui.add_space(spacing::XS);
+
+                            // === PROJECT NAME (secondary info) ===
                             ui.label(
-                                egui::RichText::new(&branch_display)
-                                    .font(typography::font(FontSize::Title, FontWeight::SemiBold))
-                                    .color(colors::TEXT_PRIMARY),
+                                egui::RichText::new(&session.project_name)
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
                             );
 
                             ui.add_space(spacing::MD);
 
-                            // Session badge
-                            let badge_text = if session.is_main_session {
-                                "main"
+                            // === STATUS ROW ===
+                            let appears_stuck = session.appears_stuck();
+                            let (state, state_color) = if let Some(ref run) = session.run {
+                                let base_color = state_to_color(run.machine_state);
+                                let color = if appears_stuck {
+                                    colors::STATUS_WARNING
+                                } else {
+                                    base_color
+                                };
+                                (run.machine_state, color)
                             } else {
-                                &session.metadata.session_id
-                            };
-                            let badge_color = if session.is_main_session {
-                                colors::ACCENT
-                            } else {
-                                colors::TEXT_SECONDARY
-                            };
-                            let badge_bg = if session.is_main_session {
-                                colors::ACCENT_SUBTLE
-                            } else {
-                                colors::SURFACE_HOVER
+                                (MachineState::Idle, colors::STATUS_IDLE)
                             };
 
-                            egui::Frame::none()
-                                .fill(badge_bg)
-                                .rounding(rounding::SMALL)
-                                .inner_margin(egui::Margin::symmetric(spacing::SM, spacing::XS))
-                                .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // Status dot
+                                let dot_size = 8.0;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(dot_size, dot_size),
+                                    Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    rect.center(),
+                                    dot_size / 2.0,
+                                    state_color,
+                                );
+
+                                ui.add_space(spacing::SM);
+
+                                // State text
+                                let state_text = if appears_stuck {
+                                    format!("{} (Not responding)", format_state(state))
+                                } else {
+                                    format_state(state).to_string()
+                                };
+                                ui.label(
+                                    egui::RichText::new(state_text)
+                                        .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                        .color(colors::TEXT_PRIMARY),
+                                );
+
+                                // Progress info
+                                if let Some(ref progress) = session.progress {
+                                    ui.add_space(spacing::MD);
                                     ui.label(
-                                        egui::RichText::new(badge_text)
+                                        egui::RichText::new(progress.as_fraction())
                                             .font(typography::font(
-                                                FontSize::Small,
-                                                FontWeight::Medium,
+                                                FontSize::Body,
+                                                FontWeight::Regular,
                                             ))
-                                            .color(badge_color),
+                                            .color(colors::TEXT_SECONDARY),
                                     );
-                                });
-                        });
 
-                        ui.add_space(spacing::XS);
+                                    // Current story
+                                    if let Some(ref run) = session.run {
+                                        if let Some(ref story_id) = run.current_story {
+                                            ui.add_space(spacing::SM);
+                                            ui.label(
+                                                egui::RichText::new(story_id)
+                                                    .font(typography::font(
+                                                        FontSize::Body,
+                                                        FontWeight::Regular,
+                                                    ))
+                                                    .color(colors::TEXT_MUTED),
+                                            );
+                                        }
+                                    }
+                                }
 
-                        // === PROJECT NAME (secondary info) ===
-                        ui.label(
-                            egui::RichText::new(&session.project_name)
-                                .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                .color(colors::TEXT_MUTED),
-                        );
+                                // Duration
+                                if let Some(ref run) = session.run {
+                                    ui.add_space(spacing::MD);
+                                    ui.label(
+                                        egui::RichText::new(format_run_duration(
+                                            run.started_at,
+                                            run.finished_at,
+                                        ))
+                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                        .color(colors::TEXT_MUTED),
+                                    );
+                                }
 
-                        ui.add_space(spacing::MD);
+                                // Infinity animation for non-idle, non-terminal states with progress
+                                if state != MachineState::Idle
+                                    && !is_terminal_state(state)
+                                    && session.progress.is_some()
+                                {
+                                    ui.add_space(spacing::MD);
 
-                        // === STATUS ROW ===
-                        let appears_stuck = session.appears_stuck();
-                        let (state, state_color) = if let Some(ref run) = session.run {
-                            let base_color = state_to_color(run.machine_state);
-                            let color = if appears_stuck {
-                                colors::STATUS_WARNING
-                            } else {
-                                base_color
-                            };
-                            (run.machine_state, color)
-                        } else {
-                            (MachineState::Idle, colors::STATUS_IDLE)
-                        };
+                                    // Animation is 1/3 of content width, capped at 150px
+                                    let max_animation_width = (content_width / 3.0).min(150.0);
 
-                        ui.horizontal(|ui| {
-                            // Status dot
-                            let dot_size = 8.0;
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(dot_size, dot_size),
-                                Sense::hover(),
+                                    if max_animation_width > 30.0 {
+                                        let animation_height = 12.0;
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(max_animation_width, animation_height),
+                                            Sense::hover(),
+                                        );
+                                        let time = ui.ctx().input(|i| i.time) as f32;
+                                        super::animation::render_infinity(
+                                            ui.painter(),
+                                            time,
+                                            rect,
+                                            state_color,
+                                            1.0,
+                                        );
+                                        super::animation::schedule_frame(ui.ctx());
+                                    }
+                                }
+                            });
+
+                            ui.add_space(spacing::LG);
+
+                            // === OUTPUT SECTION ===
+                            // Section header
+                            ui.label(
+                                egui::RichText::new("Output")
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(colors::TEXT_SECONDARY),
                             );
-                            ui.painter()
-                                .circle_filled(rect.center(), dot_size / 2.0, state_color);
 
                             ui.add_space(spacing::SM);
 
-                            // State text
-                            let state_text = if appears_stuck {
-                                format!("{} (Not responding)", format_state(state))
-                            } else {
-                                format_state(state).to_string()
-                            };
-                            ui.label(
-                                egui::RichText::new(state_text)
-                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                    .color(colors::TEXT_PRIMARY),
+                            // Output content with fixed height and internal scrolling
+                            let output_height = (available_height * 0.4).max(200.0);
+                            egui::Frame::none()
+                                .fill(colors::SURFACE_HOVER)
+                                .rounding(rounding::CARD)
+                                .inner_margin(egui::Margin::same(spacing::MD))
+                                .show(ui, |ui| {
+                                    ui.set_min_height(output_height);
+                                    ui.set_max_height(output_height);
+                                    ui.set_width(content_width - spacing::MD * 2.0);
+
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(format!("output_{}", session.metadata.session_id))
+                                        .auto_shrink([false, false])
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            let output_source = get_output_for_session(session);
+                                            Self::render_output_content(ui, &output_source);
+                                        });
+                                });
+
+                            // Gap between sections
+                            ui.add_space(section_gap);
+
+                            // === STORIES SECTION ===
+                            let story_items = load_story_items(session);
+                            Self::render_stories_section(
+                                ui,
+                                &session.metadata.session_id,
+                                &story_items,
+                                content_width,
+                                &mut self.section_collapsed_state,
                             );
 
-                            // Progress info
-                            if let Some(ref progress) = session.progress {
-                                ui.add_space(spacing::MD);
-                                ui.label(
-                                    egui::RichText::new(progress.as_fraction())
-                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                        .color(colors::TEXT_SECONDARY),
-                                );
-
-                                // Current story
-                                if let Some(ref run) = session.run {
-                                    if let Some(ref story_id) = run.current_story {
-                                        ui.add_space(spacing::SM);
-                                        ui.label(
-                                            egui::RichText::new(story_id)
-                                                .font(typography::font(
-                                                    FontSize::Body,
-                                                    FontWeight::Regular,
-                                                ))
-                                                .color(colors::TEXT_MUTED),
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Duration
-                            if let Some(ref run) = session.run {
-                                ui.add_space(spacing::MD);
-                                ui.label(
-                                    egui::RichText::new(format_run_duration(
-                                        run.started_at,
-                                        run.finished_at,
-                                    ))
-                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                    .color(colors::TEXT_MUTED),
-                                );
-                            }
-
-                            // Infinity animation for non-idle, non-terminal states with progress
-                            if state != MachineState::Idle
-                                && !is_terminal_state(state)
-                                && session.progress.is_some()
-                            {
-                                ui.add_space(spacing::MD);
-
-                                // Animation is 1/3 of content width, capped at 150px
-                                let max_animation_width = (content_width / 3.0).min(150.0);
-
-                                if max_animation_width > 30.0 {
-                                    let animation_height = 12.0;
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(max_animation_width, animation_height),
-                                        Sense::hover(),
-                                    );
-                                    let time = ui.ctx().input(|i| i.time) as f32;
-                                    super::animation::render_infinity(
-                                        ui.painter(),
-                                        time,
-                                        rect,
-                                        state_color,
-                                        1.0,
-                                    );
-                                    super::animation::schedule_frame(ui.ctx());
-                                }
-                            }
+                            // Bottom padding
+                            ui.add_space(content_padding);
                         });
-
-                        ui.add_space(spacing::LG);
-
-                        // === OUTPUT SECTION ===
-                        // Section header
-                        ui.label(
-                            egui::RichText::new("Output")
-                                .font(typography::font(FontSize::Body, FontWeight::Medium))
-                                .color(colors::TEXT_SECONDARY),
-                        );
-
-                        ui.add_space(spacing::SM);
-
-                        // Output content with fixed height and internal scrolling
-                        let output_height = (available_height * 0.4).max(200.0);
-                        egui::Frame::none()
-                            .fill(colors::SURFACE_HOVER)
-                            .rounding(rounding::CARD)
-                            .inner_margin(egui::Margin::same(spacing::MD))
-                            .show(ui, |ui| {
-                                ui.set_min_height(output_height);
-                                ui.set_max_height(output_height);
-                                ui.set_width(content_width - spacing::MD * 2.0);
-
-                                egui::ScrollArea::vertical()
-                                    .id_salt(format!("output_{}", session.metadata.session_id))
-                                    .auto_shrink([false, false])
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        let output_source = get_output_for_session(session);
-                                        Self::render_output_content(ui, &output_source);
-                                    });
-                            });
-
-                        // Gap between sections
-                        ui.add_space(section_gap);
-
-                        // === STORIES SECTION ===
-                        let story_items = load_story_items(session);
-                        Self::render_stories_section(
-                            ui,
-                            &session.metadata.session_id,
-                            &story_items,
-                            content_width,
-                            &mut self.section_collapsed_state,
-                        );
-
-                        // Bottom padding
-                        ui.add_space(content_padding);
                     });
                 });
-            });
+        });
     }
 
     /// Render story items content (extracted for reuse in both layouts).
