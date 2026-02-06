@@ -964,80 +964,21 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
 }
 
 // ============================================================================
-// Session Control Actions (US-003: GUI Pause Button)
+// Session Control Actions
 // ============================================================================
 
-/// Request a pause for a session.
-///
-/// This function sets the `pause_requested` flag in the session's metadata.
-/// The runner will check this flag at checkpoints and stop gracefully.
-///
-/// # Arguments
-/// * `project` - The project name
-/// * `session_id` - The session ID to pause
-///
-/// # Returns
-/// * `Result<()>` - Success or an error if the pause request failed
-///
-/// # Example
-/// ```ignore
-/// // Request pause for the main session
-/// request_session_pause("my-project", "main")?;
-///
-/// // Request pause for a worktree session
-/// request_session_pause("my-project", "abc12345")?;
-/// ```
+/// Request a pause for a session. The runner checks this at checkpoints.
 pub fn request_session_pause(project: &str, session_id: &str) -> Result<()> {
     let sm = StateManager::for_project_session(project, session_id.to_string())?;
     sm.request_pause()
 }
 
-/// Check if a session is in "Pause Queued" state.
-///
-/// A session is in "Pause Queued" state when:
-/// - `pause_requested` is true (pause has been requested)
-/// - `is_running` is true (session is still actively running)
-///
-/// This state indicates that the user has clicked Pause, but the runner
-/// hasn't reached a checkpoint yet to actually pause.
-///
-/// # Arguments
-/// * `session` - The session data to check
-///
-/// # Returns
-/// * `true` if the session is in "Pause Queued" state
+/// Check if pause is queued (requested but runner hasn't reached checkpoint yet).
 pub fn is_pause_queued(session: &SessionData) -> bool {
     session.metadata.pause_requested && session.metadata.is_running
 }
 
-// ============================================================================
-// Session Control Actions (US-004: GUI Mode Toggle)
-// ============================================================================
-
-/// Set the run mode for a session.
-///
-/// This function sets the `run_mode` field in the session's metadata.
-/// The mode determines whether the runner continues automatically (Auto)
-/// or pauses after each story (Step).
-///
-/// # Arguments
-/// * `project` - The project name
-/// * `session_id` - The session ID to modify
-/// * `mode` - The new run mode (Auto or Step)
-///
-/// # Returns
-/// * `Result<()>` - Success or an error if the mode change failed
-///
-/// # Example
-/// ```ignore
-/// use crate::state::RunMode;
-///
-/// // Set mode to Step for the main session
-/// set_session_run_mode("my-project", "main", RunMode::Step)?;
-///
-/// // Set mode to Auto for a worktree session
-/// set_session_run_mode("my-project", "abc12345", RunMode::Auto)?;
-/// ```
+/// Set the run mode (Auto or Step) for a session.
 pub fn set_session_run_mode(
     project: &str,
     session_id: &str,
@@ -1047,80 +988,23 @@ pub fn set_session_run_mode(
     sm.set_run_mode(mode)
 }
 
-/// Check if a session is in a pausable/resumable state.
-///
-/// A session can have its mode toggled when:
-/// - It's not currently running (is_running: false) - i.e., it's paused/interrupted
-/// - The run status is NOT Completed (we don't toggle mode for finished runs)
-///
-/// This function helps determine whether to show the mode toggle in the UI.
-///
-/// # Arguments
-/// * `session` - The session data to check
-///
-/// # Returns
-/// * `true` if the session can have its mode toggled
+/// Check if a session can have its mode toggled (paused but not completed).
 pub fn is_mode_toggleable(session: &SessionData) -> bool {
-    // Must not be running (paused/interrupted state)
-    if session.metadata.is_running {
-        return false;
-    }
-
-    // Check if there's a run and if it's not completed
-    if let Some(ref run) = session.run {
-        // Don't show toggle for completed runs
-        !matches!(run.status, crate::state::RunStatus::Completed)
-    } else {
-        // No run state - can't toggle
-        false
-    }
+    !session.metadata.is_running
+        && session
+            .run
+            .as_ref()
+            .map(|r| !matches!(r.status, crate::state::RunStatus::Completed))
+            .unwrap_or(false)
 }
 
-// ============================================================================
-// Session Control Actions (US-005: GUI Resume Dropdown Button)
-// ============================================================================
-
-/// Check if a session can be resumed.
-///
-/// A session is resumable when:
-/// - It's not currently running (is_running: false)
-/// - The run status is NOT Completed
-///
-/// This is the same condition as `is_mode_toggleable` - sessions that can
-/// have their mode toggled can also be resumed.
-///
-/// # Arguments
-/// * `session` - The session data to check
-///
-/// # Returns
-/// * `true` if the session can be resumed
+/// Check if a session can be resumed (alias for `is_mode_toggleable`).
 pub fn is_session_resumable(session: &SessionData) -> bool {
-    // Resumable = mode toggleable (same conditions)
     is_mode_toggleable(session)
 }
 
 /// Spawn a detached `autom8 resume` process for a session.
-///
-/// This function spawns the resume command as a detached process that will
-/// continue running even if the GUI is closed. The resume happens in the
-/// session's worktree directory.
-///
-/// # Arguments
-/// * `session` - The session data containing worktree path and session ID
-/// * `auto_mode` - If true, set mode to Auto before resuming
-///
-/// # Returns
-/// * `Ok(())` if the process was spawned successfully
-/// * `Err(...)` if spawning failed
-///
-/// # Example
-/// ```ignore
-/// // Resume in current mode
-/// spawn_resume_process(&session, false)?;
-///
-/// // Resume in Auto mode
-/// spawn_resume_process(&session, true)?;
-/// ```
+/// If `auto_mode` is true, sets mode to Auto before resuming.
 pub fn spawn_resume_process(session: &SessionData, auto_mode: bool) -> Result<()> {
     use std::process::{Command, Stdio};
 
