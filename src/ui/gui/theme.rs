@@ -521,6 +521,61 @@ mod tests {
     }
 
     #[test]
+    fn test_completed_colors() {
+        // COMPLETED_GLOW matches STATUS_SUCCESS
+        assert_eq!(colors::COMPLETED_GLOW, colors::STATUS_SUCCESS);
+
+        // COMPLETED_FILL is a warm pale green (green channel dominates slightly)
+        assert!(colors::COMPLETED_FILL.g() > colors::COMPLETED_FILL.r());
+        assert!(colors::COMPLETED_FILL.g() > colors::COMPLETED_FILL.b());
+        // Should be lighter/subtler than STATUS_SUCCESS_BG
+        assert!(colors::COMPLETED_FILL.r() >= colors::STATUS_SUCCESS_BG.r());
+
+        // COMPLETED_TAB_FILL is even subtler than COMPLETED_FILL
+        assert!(colors::COMPLETED_TAB_FILL.r() >= colors::COMPLETED_FILL.r());
+
+        // COMPLETED_TAB_HOVER is darker than TAB_FILL but retains green tint
+        assert!(colors::COMPLETED_TAB_HOVER.g() >= colors::COMPLETED_TAB_HOVER.r());
+        assert!(colors::COMPLETED_TAB_HOVER.r() < colors::COMPLETED_TAB_FILL.r());
+
+        // COMPLETED_TAB_ACTIVE is darker still but retains green tint
+        assert!(colors::COMPLETED_TAB_ACTIVE.g() >= colors::COMPLETED_TAB_ACTIVE.r());
+        assert!(colors::COMPLETED_TAB_ACTIVE.r() < colors::COMPLETED_TAB_HOVER.r());
+
+        // COMPLETED_BORDER has green tint
+        assert!(colors::COMPLETED_BORDER.g() > colors::COMPLETED_BORDER.r());
+        assert!(colors::COMPLETED_BORDER.g() > colors::COMPLETED_BORDER.b());
+    }
+
+    #[test]
+    fn test_completed_glow_shadow() {
+        // Zero alpha produces transparent shadow
+        let glow_zero = shadow::completed_glow(0.0);
+        assert_eq!(glow_zero.color.a(), 0);
+        assert_eq!(glow_zero.offset, [0.0, 0.0].into());
+        assert!(glow_zero.blur >= 8.0 && glow_zero.blur <= 12.0);
+
+        // Full alpha
+        let glow_full = shadow::completed_glow(1.0);
+        assert_eq!(glow_full.color.a(), 255);
+
+        // Mid alpha
+        let glow_mid = shadow::completed_glow(0.5);
+        assert!(glow_mid.color.a() > 100 && glow_mid.color.a() < 140);
+
+        // Color channels match COMPLETED_GLOW / STATUS_SUCCESS
+        assert_eq!(glow_full.color.r(), colors::COMPLETED_GLOW.r());
+        assert_eq!(glow_full.color.g(), colors::COMPLETED_GLOW.g());
+        assert_eq!(glow_full.color.b(), colors::COMPLETED_GLOW.b());
+
+        // Clamping works
+        let glow_over = shadow::completed_glow(2.0);
+        assert_eq!(glow_over.color.a(), 255);
+        let glow_under = shadow::completed_glow(-1.0);
+        assert_eq!(glow_under.color.a(), 0);
+    }
+
+    #[test]
     fn test_status_colors_distinct() {
         // Status colors should be visually distinct
         let status_colors = [

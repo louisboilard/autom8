@@ -280,3 +280,68 @@ pub fn render_progress_bar(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_glow_stays_in_range() {
+        // Sample many points across several cycles
+        for i in 0..1000 {
+            let time = i as f64 * 0.01;
+            let alpha = completed_glow_intensity(time);
+            assert!(
+                alpha >= COMPLETED_GLOW_ALPHA_MIN && alpha <= COMPLETED_GLOW_ALPHA_MAX,
+                "alpha {alpha} out of range at time {time}"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_glow_hits_extremes() {
+        // At time=0 cosine is 1, so t=0 → alpha_min
+        let alpha_at_zero = completed_glow_intensity(0.0);
+        assert!(
+            (alpha_at_zero - COMPLETED_GLOW_ALPHA_MIN).abs() < 1e-5,
+            "expected min at t=0, got {alpha_at_zero}"
+        );
+
+        // At time=period/2, cosine is -1, so t=1 → alpha_max
+        let alpha_at_half = completed_glow_intensity(COMPLETED_GLOW_PERIOD / 2.0);
+        assert!(
+            (alpha_at_half - COMPLETED_GLOW_ALPHA_MAX).abs() < 1e-5,
+            "expected max at t=period/2, got {alpha_at_half}"
+        );
+    }
+
+    #[test]
+    fn completed_glow_is_periodic() {
+        let t = 0.37;
+        let alpha1 = completed_glow_intensity(t);
+        let alpha2 = completed_glow_intensity(t + COMPLETED_GLOW_PERIOD);
+        assert!(
+            (alpha1 - alpha2).abs() < 1e-5,
+            "expected periodic: {alpha1} vs {alpha2}"
+        );
+    }
+
+    #[test]
+    fn completed_glow_is_smooth() {
+        // Check that adjacent samples don't jump too much (smooth, not stepped)
+        let dt = 0.001;
+        let max_delta = (COMPLETED_GLOW_ALPHA_MAX - COMPLETED_GLOW_ALPHA_MIN)
+            * std::f32::consts::PI
+            * (dt as f32 / COMPLETED_GLOW_PERIOD as f32);
+        for i in 0..2000 {
+            let t = i as f64 * dt;
+            let a1 = completed_glow_intensity(t);
+            let a2 = completed_glow_intensity(t + dt);
+            let delta = (a2 - a1).abs();
+            assert!(
+                delta <= max_delta + 1e-5,
+                "jump too large at t={t}: delta={delta}, max={max_delta}"
+            );
+        }
+    }
+}
