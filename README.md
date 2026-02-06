@@ -7,23 +7,6 @@
 
 A simple, fast, and deterministic-when-possible CLI tool for orchestrating Claude-powered development. No external deps or setup required; one binary to rule them all.
 
-Run `autom8` from your project, describe what you want to build, and Claude helps you write a structured spec. When you're done going back and forth with Claude and have the spec file generated, exit the Claude session (`/exit` or `ctrl-d`) and autom8 takes over: it drives Claude through implementation story by story, reviews the work, and optionally commit/open a PR when everything passes.
-
-**Spec to PR in one command.** Run `autom8`, describe your feature to Claude and
-let Claude help you define a spec you're happy with.
-Claude run's as a subprocess, when you're satisfied with the spec, exit the
-claude session and autom8 will pick this up: it finds the newly created spec file based on
-your current project and starts the pipeline. Monitor it via a TUI with `autom8 monitor` or
-with the rich native GUI `autom8 gui`.
-
-**Context and Knowledge accumulation.** As autom8 works through your stories, it builds a knowledge graph of what's been done: which files were touched and why, architectural decisions that were made, patterns to follow, and a summary of each story's changes. Claude sees this context on every iteration, so later agents build coherently on earlier ones.
-
-**Interruptible and resumable.** State persists after every transition. Close your laptop mid-run, come back later, and `autom8 resume` picks up exactly where it left off.
-
-**Review before commit.** After implementation, autom8 runs a review phase where Claude examines the complete work for edge cases and missed requirements. If issues are found, it enters a correction cycle automatically. You get cleaner PRs without manual back-and-forth.
-
-**Deterministic orchestration.** The LLM handles implementation; autom8 handles everything else with predictable logic: state transitions, git operations, branch management, and PR creation.
-
 ## Installation
 
 You can get a binary for your os in the release page. Alternatively you can
@@ -66,6 +49,28 @@ autom8 spec.json    # JSON spec
 ![Running autom8](assets/running.png)
 
 autom8 converts specs to JSON, picks the highest-priority incomplete story, runs Claude to implement it, reviews the work, fixes issues automatically, and commits/open pr's (if you want it to) when all stories pass.
+
+
+## High Level Features
+
+Run `autom8` from your project, describe what you want to build, and Claude helps you write a structured spec.
+When you're done going back and forth with Claude and have the spec file generated, exit the Claude session (`/exit` or `ctrl-d`) and autom8 takes over: it drives Claude through implementation story by story, reviews the work, and optionally commit/open a PR when everything passes.
+
+**Spec to PR in one command.** Run `autom8`, describe your feature to Claude and
+let Claude help you define a spec you're happy with.
+Claude run's as a subprocess, when you're satisfied with the spec, exit the
+claude session and autom8 will pick this up: it finds the newly created spec file based on
+your current project and starts the pipeline. Monitor it via a TUI with `autom8 monitor` or
+with the rich native GUI `autom8 gui`.
+
+**Context and Knowledge accumulation.** As autom8 works through your stories, it builds a knowledge graph of what's been done: which files were touched and why, architectural decisions that were made, patterns to follow, and a summary of each story's changes. Claude sees this context on every iteration, so later agents build coherently on earlier ones.
+
+**Interruptible and resumable.** State persists after every transition. Close your laptop mid-run, come back later, and `autom8 resume` picks up exactly where it left off.
+
+**Review before commit.** After implementation, autom8 runs a review phase where Claude examines the complete work for edge cases and missed requirements. If issues are found, it enters a correction cycle automatically. You get cleaner PRs without manual back-and-forth.
+
+**Deterministic orchestration.** The LLM handles implementation; autom8 handles everything else with predictable logic: state transitions, git operations, branch management, and PR creation.
+
 
 ## How It Works
 
