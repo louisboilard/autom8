@@ -4575,17 +4575,37 @@ impl Autom8App {
                 self.set_active_tab(tab_id);
             }
 
-            // Fill remaining space, leaving room for icon and animation
+            // Fill remaining space, leaving room for icon, sparkle, and animation
             // Icon positioned higher in the sidebar for better visual balance
             let animation_height = 150.0;
-            let icon_section_height = SIDEBAR_ICON_SIZE + spacing::LG * 2.0; // Icon + generous padding
+            let sparkle_height = 30.0;
+            let icon_section_height = sparkle_height + SIDEBAR_ICON_SIZE + spacing::LG * 2.0; // Sparkle + icon + padding
             ui.add_space(ui.available_height() - animation_height - icon_section_height);
 
-            // Decorative mascot icon (US-005)
+            // Decorative mascot icon with hat sparkle animation (US-002, US-005)
             // Centered between the tabs and the animation
             ui.add_space(spacing::LG);
+
+            // Get sidebar width for centering calculations
+            let sidebar_width = ui.available_width();
+
+            // Hat sparkle animation - positioned above the mascot's hat
+            // Animation area is horizontally centered with the icon
+            let sparkle_width = 40.0;
+            let sparkle_offset = (sidebar_width - sparkle_width) / 2.0;
             ui.horizontal(|ui| {
-                let sidebar_width = ui.available_width();
+                ui.add_space(sparkle_offset);
+                let (sparkle_rect, _) = ui
+                    .allocate_exact_size(egui::vec2(sparkle_width, sparkle_height), Sense::hover());
+                let painter = ui.painter();
+                let time = ui.ctx().input(|i| i.time) as f32;
+                // Use a warm pink/coral color that complements the Claude-inspired palette
+                let sparkle_color = Color32::from_rgb(255, 170, 190);
+                super::animation::render_hat_sparkle(painter, time, sparkle_rect, sparkle_color);
+            });
+
+            // Mascot icon
+            ui.horizontal(|ui| {
                 let icon_offset = (sidebar_width - SIDEBAR_ICON_SIZE) / 2.0;
                 ui.add_space(icon_offset);
                 ui.add(
