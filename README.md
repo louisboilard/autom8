@@ -1,5 +1,11 @@
 # autom8
 
+[![Test](https://github.com/louisboilard/autom8/actions/workflows/test.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/test.yml)
+[![Lint](https://github.com/louisboilard/autom8/actions/workflows/lint.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/lint.yml)
+[![Security](https://github.com/louisboilard/autom8/actions/workflows/security.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/security.yml)
+[![Crates.io](https://img.shields.io/crates/v/autom8)](https://crates.io/crates/autom8)
+[![License](https://img.shields.io/crates/l/autom8)](LICENSE)
+
 ![autom8 TUI](assets/monitor.png)
 
 A simple, fast, and deterministic-when-possible CLI tool for orchestrating Claude-powered development. No external deps or setup required; one binary to rule them all.
