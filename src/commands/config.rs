@@ -17,6 +17,7 @@ pub const VALID_CONFIG_KEYS: &[&str] = &[
     "review",
     "commit",
     "pull_request",
+    "pull_request_draft",
     "worktree",
     "worktree_path_pattern",
     "worktree_cleanup",
@@ -46,6 +47,7 @@ VALID KEYS:
     review              - Enable code review step (true/false)
     commit              - Enable auto-commit (true/false)
     pull_request        - Enable auto-PR creation (true/false, requires commit=true)
+    pull_request_draft  - Create PRs as drafts (true/false, requires pull_request=true)
     worktree            - Enable worktree mode (true/false)
     worktree_path_pattern - Pattern for worktree directory names (string)
     worktree_cleanup    - Auto-cleanup worktrees after completion (true/false)
@@ -80,6 +82,7 @@ DEFAULT VALUES:
     review              = true
     commit              = true
     pull_request        = true
+    pull_request_draft  = false
     worktree            = true
     worktree_path_pattern = \"{repo}-wt-{branch}\"
     worktree_cleanup    = false
@@ -274,6 +277,9 @@ fn set_config_value(config: &mut Config, key: &str, value: &str) -> Result<()> {
         "pull_request" => {
             config.pull_request = parse_bool_value(value, key)?;
         }
+        "pull_request_draft" => {
+            config.pull_request_draft = parse_bool_value(value, key)?;
+        }
         "worktree" => {
             config.worktree = parse_bool_value(value, key)?;
         }
@@ -309,6 +315,7 @@ fn format_value_for_display(key: &str, config: &Config) -> String {
         "review" => config.review.to_string(),
         "commit" => config.commit.to_string(),
         "pull_request" => config.pull_request.to_string(),
+        "pull_request_draft" => config.pull_request_draft.to_string(),
         "worktree" => config.worktree.to_string(),
         "worktree_path_pattern" => format!("\"{}\"", config.worktree_path_pattern),
         "worktree_cleanup" => config.worktree_cleanup.to_string(),
@@ -402,6 +409,10 @@ fn print_config_as_toml(config: &Config) {
     println!("{CYAN}review{RESET} = {}", config.review);
     println!("{CYAN}commit{RESET} = {}", config.commit);
     println!("{CYAN}pull_request{RESET} = {}", config.pull_request);
+    println!(
+        "{CYAN}pull_request_draft{RESET} = {}",
+        config.pull_request_draft
+    );
     println!("{CYAN}worktree{RESET} = {}", config.worktree);
     println!(
         "{CYAN}worktree_path_pattern{RESET} = \"{}\"",
@@ -514,13 +525,14 @@ mod tests {
         assert!(VALID_CONFIG_KEYS.contains(&"review"));
         assert!(VALID_CONFIG_KEYS.contains(&"commit"));
         assert!(VALID_CONFIG_KEYS.contains(&"pull_request"));
+        assert!(VALID_CONFIG_KEYS.contains(&"pull_request_draft"));
         assert!(VALID_CONFIG_KEYS.contains(&"worktree"));
         assert!(VALID_CONFIG_KEYS.contains(&"worktree_path_pattern"));
         assert!(VALID_CONFIG_KEYS.contains(&"worktree_cleanup"));
         assert_eq!(
             VALID_CONFIG_KEYS.len(),
-            6,
-            "Should have exactly 6 valid keys"
+            7,
+            "Should have exactly 7 valid keys"
         );
     }
 
