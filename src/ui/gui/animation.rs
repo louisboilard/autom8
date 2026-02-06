@@ -5,10 +5,10 @@
 
 use egui::{Color32, Rect, Rounding, Sense, Stroke, Ui};
 
-/// Minimum glow alpha for the completed session pulse (subtle but visible).
-const COMPLETED_GLOW_ALPHA_MIN: f32 = 0.2;
-/// Maximum glow alpha for the completed session pulse (bright but not harsh).
-const COMPLETED_GLOW_ALPHA_MAX: f32 = 0.7;
+/// Minimum glow alpha for the completed session pulse (always clearly visible).
+const COMPLETED_GLOW_ALPHA_MIN: f32 = 0.45;
+/// Maximum glow alpha for the completed session pulse (full intensity at peak).
+const COMPLETED_GLOW_ALPHA_MAX: f32 = 1.0;
 /// Period of the completed glow pulse cycle in seconds.
 const COMPLETED_GLOW_PERIOD: f64 = 2.0;
 
