@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-06
+
+### Added
+
+- **Native desktop GUI**: Full-featured GUI built with eframe/egui featuring session monitoring, run history, config editing, and project overview with Claude-inspired aesthetic
+- **Terminal UI (TUI)**: Keyboard-navigable dashboard using ratatui showing active runs, project list, and run history (`autom8 monitor` or `--tui` flag)
+- **Git worktree support**: Run multiple parallel sessions for the same project using git worktrees (`--worktree` flag, enabled by default)
+- **`improve` command**: Follow-up work on existing branches with Claude, carrying forward context from previous runs
+- **TOML configuration**: Global and project-level config files (`~/.config/autom8/config.toml`) for persistent settings
+- **Shell completions**: Tab completion for bash, zsh, fish, and PowerShell (`autom8 completions <shell>`)
+- **Self-test mode**: `--self-test` flag for automated testing of the full run cycle
+- **Draft PR option**: `pull_request_draft` config option to create PRs as drafts
+- **Token usage tracking**: Display input/output token counts in CLI completion messages and GUI run details
+- **PR template support**: Automatically uses repository's PR template when creating pull requests
+- **Graceful signal handling**: Clean shutdown on Ctrl+C with state preservation
+- **Heartbeat mechanism**: Robust status tracking for long-running sessions
+- **GUI features**: Create Spec tab, config editor, modal dialogs, context menus, collapsible sections, and particle animations
+
+### Changed
+
+- **MSRV bumped to 1.88**: Minimum supported Rust version increased from 1.80
+- **Security checks weekly**: Security audit workflow now runs on schedule instead of every push
+- **Display adapter pattern**: All output goes through `DisplayAdapter` trait for TUI/CLI abstraction
+- **Session management**: Sessions are now identified by deterministic IDs (main repo uses `"main"`, worktrees use path hash)
+
+### Fixed
+
+- **Phantom session bug**: Fixed state persistence ordering that created phantom sessions in worktree mode
+- **GUI output clipping**: Hardware clipping constrains text within output display areas
+- **Duration counter**: Fixed duration showing incorrectly on completed runs
+- **Branch switch**: Fixed branch switching in markdown spec creation flow
+- **Local timezone**: End times now display in local timezone with 12-hour format
+
 ## [0.2.0] - 2025-01-25
 
 ### Added
