@@ -1,9 +1,25 @@
 [package]
-name = "autom8"
-version = "0.2.0"
+name = "autom8-cli"
+version = "0.3.0"
 edition = "2021"
 description = "CLI automation tool for orchestrating Claude-powered development"
 authors = ["Louis"]
+license = "MIT"
+repository = "https://github.com/louisboilard/autom8"
+homepage = "https://github.com/louisboilard/autom8"
+documentation = "https://docs.rs/autom8-cli"
+readme = "README.md"
+keywords = ["cli", "automation", "claude", "ai", "development"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.88"
+
+[[bin]]
+name = "autom8"
+path = "src/main.rs"
+
+[lib]
+name = "autom8"
+path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -11,6 +27,7 @@ clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+time = "0.3.47"
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 indicatif = "0.18"

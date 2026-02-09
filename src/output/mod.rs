@@ -15,6 +15,7 @@
 pub mod banner;
 pub mod error;
 pub mod header;
+pub mod improve;
 pub mod messages;
 pub mod pr;
 pub mod pr_review;
@@ -44,6 +45,11 @@ pub use header::{
     print_claude_output, print_generating_spec, print_header, print_iteration_complete,
     print_iteration_start, print_proceeding_to_implementation, print_project_info,
     print_spec_generated, print_spec_loaded, print_state_transition,
+};
+pub use improve::{
+    print_branch_info, print_context_banner, print_context_summary, print_files_changed_summary,
+    print_git_history_summary, print_session_knowledge_info, print_spawning_claude,
+    print_spec_info,
 };
 pub use messages::{
     print_error, print_info, print_interrupted, print_paused, print_resuming_interrupted,

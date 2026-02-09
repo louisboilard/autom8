@@ -183,9 +183,10 @@ pub struct Spec { ... }
 
 **Global config:** `~/.config/autom8/config.toml`
 ```toml
-review = true       # Enable review step
-commit = true       # Auto-commit changes
-pull_request = true # Auto-create PR
+review = true            # Enable review step
+commit = true            # Auto-commit changes
+pull_request = true      # Auto-create PR
+pull_request_draft = false  # Create PRs as drafts (only applies when pull_request = true)
 
 # Worktree settings (for parallel sessions)
 worktree = true               # Enable automatic worktree creation (default)

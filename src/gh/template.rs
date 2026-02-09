@@ -105,13 +105,17 @@ pub fn format_spec_for_template(spec: &Spec) -> String {
 ///
 /// * `title` - The PR title
 /// * `pr_number` - If Some, builds an edit command; if None, builds a create command
-pub fn build_gh_command(title: &str, pr_number: Option<u32>) -> String {
+/// * `draft` - If true and creating a new PR, includes the `--draft` flag (ignored for edits)
+pub fn build_gh_command(title: &str, pr_number: Option<u32>, draft: bool) -> String {
     match pr_number {
         Some(num) => format!("gh pr edit {} --body \"<filled template>\"", num),
-        None => format!(
-            "gh pr create --title \"{}\" --body \"<filled template>\"",
-            title
-        ),
+        None => {
+            let draft_flag = if draft { " --draft" } else { "" };
+            format!(
+                "gh pr create --title \"{}\" --body \"<filled template>\"{}",
+                title, draft_flag
+            )
+        }
     }
 }
 
@@ -155,6 +159,7 @@ pub fn extract_pr_url(output: &str) -> Option<String> {
 /// * `template_content` - The raw PR template content
 /// * `title` - The PR title
 /// * `pr_number` - If Some, updates existing PR; if None, creates new PR
+/// * `draft` - If true and creating a new PR, includes the `--draft` flag
 /// * `on_output` - Callback for streaming output
 ///
 /// # Returns
@@ -166,13 +171,14 @@ pub fn run_template_agent<F>(
     template_content: &str,
     title: &str,
     pr_number: Option<u32>,
+    draft: bool,
     mut on_output: F,
 ) -> Result<TemplateAgentResult>
 where
     F: FnMut(&str),
 {
     let spec_data = format_spec_for_template(spec);
-    let gh_command = build_gh_command(title, pr_number);
+    let gh_command = build_gh_command(title, pr_number, draft);
 
     let prompt = PR_TEMPLATE_PROMPT
         .replace("{spec_data}", &spec_data)
@@ -529,23 +535,43 @@ mod tests {
 
     #[test]
     fn test_build_gh_command_for_new_pr() {
-        let command = build_gh_command("Add feature X", None);
+        let command = build_gh_command("Add feature X", None, false);
         assert!(command.contains("gh pr create"));
         assert!(command.contains("--title \"Add feature X\""));
         assert!(command.contains("--body"));
+        assert!(!command.contains("--draft"));
+    }
+
+    #[test]
+    fn test_build_gh_command_for_new_pr_with_draft() {
+        let command = build_gh_command("Add feature X", None, true);
+        assert!(command.contains("gh pr create"));
+        assert!(command.contains("--title \"Add feature X\""));
+        assert!(command.contains("--body"));
+        assert!(command.contains("--draft"));
     }
 
     #[test]
     fn test_build_gh_command_for_existing_pr() {
-        let command = build_gh_command("Add feature X", Some(42));
+        let command = build_gh_command("Add feature X", Some(42), false);
         assert!(command.contains("gh pr edit 42"));
         assert!(command.contains("--body"));
         assert!(!command.contains("--title"));
+        assert!(!command.contains("--draft"));
+    }
+
+    #[test]
+    fn test_build_gh_command_for_existing_pr_ignores_draft() {
+        // Draft flag should be ignored when editing existing PRs
+        let command = build_gh_command("Add feature X", Some(42), true);
+        assert!(command.contains("gh pr edit 42"));
+        assert!(command.contains("--body"));
+        assert!(!command.contains("--draft"));
     }
 
     #[test]
     fn test_build_gh_command_escapes_title_quotes() {
-        let command = build_gh_command("Fix \"special\" case", None);
+        let command = build_gh_command("Fix \"special\" case", None, false);
         // Title should be included (escape handling is agent's responsibility)
         assert!(command.contains("Fix \"special\" case"));
     }

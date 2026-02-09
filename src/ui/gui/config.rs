@@ -59,6 +59,8 @@ pub enum ConfigBoolField {
     Commit,
     /// The `pull_request` field.
     PullRequest,
+    /// The `pull_request_draft` field.
+    PullRequestDraft,
     /// The `worktree` field.
     Worktree,
     /// The `worktree_cleanup` field.
@@ -356,6 +358,7 @@ impl ConfigTabState {
                 ConfigBoolField::Review => config.review = *value,
                 ConfigBoolField::Commit => config.commit = *value,
                 ConfigBoolField::PullRequest => config.pull_request = *value,
+                ConfigBoolField::PullRequestDraft => config.pull_request_draft = *value,
                 ConfigBoolField::Worktree => config.worktree = *value,
                 ConfigBoolField::WorktreeCleanup => config.worktree_cleanup = *value,
             }
@@ -582,6 +585,7 @@ mod tests {
         let _ = ConfigBoolField::Review;
         let _ = ConfigBoolField::Commit;
         let _ = ConfigBoolField::PullRequest;
+        let _ = ConfigBoolField::PullRequestDraft;
         let _ = ConfigBoolField::Worktree;
         let _ = ConfigBoolField::WorktreeCleanup;
     }

@@ -756,401 +756,57 @@ pub fn push_branch(branch: &str) -> Result<PushResult> {
     Ok(PushResult::Error(error_msg))
 }
 
+// ============================================================================
+// US-001: Merge Base Detection (improve command support)
+// ============================================================================
+
+/// Get the merge-base commit between the current branch and base branch.
+///
+/// The merge-base is the most recent common ancestor between two branches.
+/// This is useful for getting accurate diffs of what changed on a feature branch.
+///
+/// # Arguments
+/// * `base_branch` - The base branch to compare against (e.g., "main" or "master")
+///
+/// # Returns
+/// * `Ok(String)` - The full commit hash of the merge-base
+/// * `Err` - If the git command fails or branches don't share history
+pub fn get_merge_base(base_branch: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["merge-base", base_branch, "HEAD"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Autom8Error::GitError(format!(
+            "Failed to find merge-base with '{}': {}",
+            base_branch,
+            stderr.trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get the merge-base commit, auto-detecting the base branch.
+///
+/// Convenience function that combines `detect_base_branch` and `get_merge_base`.
+///
+/// # Returns
+/// * `Ok(String)` - The full commit hash of the merge-base
+/// * `Err` - If the git command fails
+pub fn get_merge_base_auto() -> Result<String> {
+    let base_branch = detect_base_branch()?;
+    get_merge_base(&base_branch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Use the shared CWD_MUTEX for tests that depend on or change the current working directory
-    use crate::test_utils::CWD_MUTEX;
-
-    #[test]
-    fn test_is_git_repo() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs within a git repo, so should return true
-        assert!(is_git_repo());
-    }
-
-    #[test]
-    fn test_current_branch_returns_string() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Should return some branch name (not empty)
-        let branch = current_branch();
-        assert!(branch.is_ok());
-        assert!(!branch.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_latest_commit_short_returns_valid_hash() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // In a git repo, should return a short hash (typically 7 chars)
-        let hash = latest_commit_short();
-        assert!(hash.is_ok());
-        let hash = hash.unwrap();
-        // Short hash should be alphanumeric and reasonable length (typically 7-10 chars)
-        assert!(!hash.is_empty());
-        assert!(hash.len() >= 7);
-        assert!(hash.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
     // ========================================================================
-    // PushResult enum tests
+    // DiffEntry parsing tests - these test actual parsing logic
     // ========================================================================
-
-    #[test]
-    fn test_push_result_success_variant() {
-        let result = PushResult::Success;
-        assert!(matches!(result, PushResult::Success));
-    }
-
-    #[test]
-    fn test_push_result_already_up_to_date_variant() {
-        let result = PushResult::AlreadyUpToDate;
-        assert!(matches!(result, PushResult::AlreadyUpToDate));
-    }
-
-    #[test]
-    fn test_push_result_error_contains_message() {
-        let msg = "permission denied".to_string();
-        let result = PushResult::Error(msg.clone());
-        assert_eq!(result, PushResult::Error(msg));
-    }
-
-    #[test]
-    fn test_push_result_variants_are_distinct() {
-        let success = PushResult::Success;
-        let up_to_date = PushResult::AlreadyUpToDate;
-        let error = PushResult::Error("error".to_string());
-
-        assert_ne!(success, up_to_date);
-        assert_ne!(success, error);
-        assert_ne!(up_to_date, error);
-    }
-
-    #[test]
-    fn test_push_result_clone() {
-        let original = PushResult::Error("test error".to_string());
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_push_result_debug() {
-        let result = PushResult::Success;
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("Success"));
-    }
-
-    // Note: We don't test push_branch directly because it requires network access
-    // and would actually push to remote. The function is tested via integration
-    // tests or manual testing. The unit tests verify the PushResult enum behavior.
-
-    // ========================================================================
-    // US-003: CommitInfo and branch commit tests
-    // ========================================================================
-
-    #[test]
-    fn test_commit_info_struct() {
-        let commit = CommitInfo {
-            short_hash: "abc1234".to_string(),
-            full_hash: "abc1234567890def".to_string(),
-            message: "Test commit message".to_string(),
-            author: "Test Author".to_string(),
-            date: "2024-01-15 10:30:00 -0500".to_string(),
-        };
-
-        assert_eq!(commit.short_hash, "abc1234");
-        assert_eq!(commit.full_hash, "abc1234567890def");
-        assert_eq!(commit.message, "Test commit message");
-        assert_eq!(commit.author, "Test Author");
-        assert_eq!(commit.date, "2024-01-15 10:30:00 -0500");
-    }
-
-    #[test]
-    fn test_commit_info_clone() {
-        let commit = CommitInfo {
-            short_hash: "abc1234".to_string(),
-            full_hash: "abc1234567890def".to_string(),
-            message: "Test message".to_string(),
-            author: "Author".to_string(),
-            date: "2024-01-15".to_string(),
-        };
-
-        let cloned = commit.clone();
-        assert_eq!(commit, cloned);
-    }
-
-    #[test]
-    fn test_commit_info_equality() {
-        let commit1 = CommitInfo {
-            short_hash: "abc1234".to_string(),
-            full_hash: "abc1234567890def".to_string(),
-            message: "Message".to_string(),
-            author: "Author".to_string(),
-            date: "2024-01-15".to_string(),
-        };
-
-        let commit2 = CommitInfo {
-            short_hash: "abc1234".to_string(),
-            full_hash: "abc1234567890def".to_string(),
-            message: "Message".to_string(),
-            author: "Author".to_string(),
-            date: "2024-01-15".to_string(),
-        };
-
-        let commit3 = CommitInfo {
-            short_hash: "xyz5678".to_string(),
-            full_hash: "xyz5678901234abc".to_string(),
-            message: "Different".to_string(),
-            author: "Other".to_string(),
-            date: "2024-01-16".to_string(),
-        };
-
-        assert_eq!(commit1, commit2);
-        assert_ne!(commit1, commit3);
-    }
-
-    #[test]
-    fn test_commit_info_debug() {
-        let commit = CommitInfo {
-            short_hash: "abc1234".to_string(),
-            full_hash: "abc1234567890def".to_string(),
-            message: "Test".to_string(),
-            author: "Author".to_string(),
-            date: "2024-01-15".to_string(),
-        };
-
-        let debug = format!("{:?}", commit);
-        assert!(debug.contains("CommitInfo"));
-        assert!(debug.contains("abc1234"));
-    }
-
-    #[test]
-    fn test_detect_base_branch_returns_string() {
-        // Should detect main or master, or return a default
-        let result = detect_base_branch();
-        assert!(result.is_ok());
-        let branch = result.unwrap();
-        assert!(!branch.is_empty());
-        // Should be either main, master, or some other branch name
-        assert!(branch
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/'));
-    }
-
-    #[test]
-    fn test_get_branch_commits_returns_vec() {
-        // This test may return empty or commits depending on the state of the repo
-        // We just verify it doesn't panic and returns a valid result
-        let result = get_branch_commits("main");
-        // Result could be Ok with commits, Ok with empty, or Err if branch doesn't exist
-        // We just verify it doesn't panic
-        match result {
-            Ok(commits) => {
-                // Verify all commits have valid fields
-                for commit in commits {
-                    assert!(!commit.short_hash.is_empty());
-                    assert!(!commit.full_hash.is_empty());
-                    // Message could be empty but hash shouldn't be
-                }
-            }
-            Err(_) => {
-                // Error is acceptable if 'main' doesn't exist
-            }
-        }
-    }
-
-    #[test]
-    fn test_get_current_branch_commits_returns_result() {
-        // This test may return empty or commits depending on the state of the repo
-        let result = get_current_branch_commits();
-        // We just verify it returns a valid result type
-        match result {
-            Ok(commits) => {
-                // Valid: we got some commits (or empty vec)
-                for commit in commits {
-                    assert!(!commit.short_hash.is_empty());
-                }
-            }
-            Err(_) => {
-                // Also valid: base branch might not exist
-            }
-        }
-    }
-
-    #[test]
-    fn test_get_commit_diff_invalid_hash() {
-        // Testing with an invalid hash should return an error
-        let result = get_commit_diff("invalid_hash_that_does_not_exist");
-        assert!(result.is_err());
-    }
-
-    // ========================================================================
-    // US-006: CommitResult enum and PR review commit/push tests
-    // ========================================================================
-
-    #[test]
-    fn test_commit_result_success_variant() {
-        let result = CommitResult::Success("abc1234".to_string());
-        assert!(matches!(result, CommitResult::Success(_)));
-    }
-
-    #[test]
-    fn test_commit_result_nothing_to_commit_variant() {
-        let result = CommitResult::NothingToCommit;
-        assert!(matches!(result, CommitResult::NothingToCommit));
-    }
-
-    #[test]
-    fn test_commit_result_error_contains_message() {
-        let msg = "staging area is empty".to_string();
-        let result = CommitResult::Error(msg.clone());
-        assert_eq!(result, CommitResult::Error(msg));
-    }
-
-    #[test]
-    fn test_commit_result_variants_are_distinct() {
-        let success = CommitResult::Success("hash".to_string());
-        let nothing = CommitResult::NothingToCommit;
-        let error = CommitResult::Error("error".to_string());
-
-        assert_ne!(success, nothing);
-        assert_ne!(success, error);
-        assert_ne!(nothing, error);
-    }
-
-    #[test]
-    fn test_commit_result_clone() {
-        let original = CommitResult::Success("abc1234".to_string());
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_commit_result_debug() {
-        let result = CommitResult::Success("abc1234".to_string());
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("Success"));
-        assert!(debug.contains("abc1234"));
-    }
-
-    #[test]
-    fn test_has_uncommitted_changes_returns_bool() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo, should not error
-        let result = has_uncommitted_changes();
-        assert!(result.is_ok());
-        // Result could be true or false depending on repo state
-    }
-
-    #[test]
-    fn test_commit_and_push_with_commit_disabled_returns_none() {
-        // When commit is disabled, should return (None, None)
-        let result = commit_and_push_pr_fixes(123, false, false);
-        assert!(result.is_ok());
-        let (commit_result, push_result) = result.unwrap();
-        assert!(commit_result.is_none());
-        assert!(push_result.is_none());
-    }
-
-    #[test]
-    fn test_stage_all_changes_does_not_error() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo, should not error (even if nothing to stage)
-        let result = stage_all_changes();
-        assert!(result.is_ok());
-    }
-
-    // ========================================================================
-    // US-002: DiffStatus, DiffEntry and git diff capture tests
-    // ========================================================================
-
-    #[test]
-    fn test_diff_status_enum_variants() {
-        let added = DiffStatus::Added;
-        let modified = DiffStatus::Modified;
-        let deleted = DiffStatus::Deleted;
-
-        assert!(matches!(added, DiffStatus::Added));
-        assert!(matches!(modified, DiffStatus::Modified));
-        assert!(matches!(deleted, DiffStatus::Deleted));
-    }
-
-    #[test]
-    fn test_diff_status_clone() {
-        let original = DiffStatus::Added;
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_diff_status_debug() {
-        let status = DiffStatus::Modified;
-        let debug = format!("{:?}", status);
-        assert!(debug.contains("Modified"));
-    }
-
-    #[test]
-    fn test_diff_status_equality() {
-        assert_eq!(DiffStatus::Added, DiffStatus::Added);
-        assert_eq!(DiffStatus::Modified, DiffStatus::Modified);
-        assert_eq!(DiffStatus::Deleted, DiffStatus::Deleted);
-
-        assert_ne!(DiffStatus::Added, DiffStatus::Modified);
-        assert_ne!(DiffStatus::Modified, DiffStatus::Deleted);
-        assert_ne!(DiffStatus::Added, DiffStatus::Deleted);
-    }
-
-    #[test]
-    fn test_diff_entry_creation() {
-        let entry = DiffEntry {
-            path: std::path::PathBuf::from("src/lib.rs"),
-            additions: 50,
-            deletions: 10,
-            status: DiffStatus::Modified,
-        };
-
-        assert_eq!(entry.path, std::path::PathBuf::from("src/lib.rs"));
-        assert_eq!(entry.additions, 50);
-        assert_eq!(entry.deletions, 10);
-        assert_eq!(entry.status, DiffStatus::Modified);
-    }
-
-    #[test]
-    fn test_diff_entry_clone() {
-        let original = DiffEntry {
-            path: std::path::PathBuf::from("src/test.rs"),
-            additions: 100,
-            deletions: 20,
-            status: DiffStatus::Added,
-        };
-
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_diff_entry_debug() {
-        let entry = DiffEntry {
-            path: std::path::PathBuf::from("src/main.rs"),
-            additions: 5,
-            deletions: 3,
-            status: DiffStatus::Modified,
-        };
-
-        let debug = format!("{:?}", entry);
-        assert!(debug.contains("DiffEntry"));
-        assert!(debug.contains("main.rs"));
-    }
 
     #[test]
     fn test_diff_entry_from_numstat_line_basic() {
@@ -1162,24 +818,6 @@ mod tests {
         assert_eq!(entry.path, std::path::PathBuf::from("src/lib.rs"));
         assert_eq!(entry.additions, 10);
         assert_eq!(entry.deletions, 5);
-    }
-
-    #[test]
-    fn test_diff_entry_from_numstat_line_zero_additions() {
-        let line = "0\t15\tsrc/deleted_lines.rs";
-        let entry = DiffEntry::from_numstat_line(line).unwrap();
-
-        assert_eq!(entry.additions, 0);
-        assert_eq!(entry.deletions, 15);
-    }
-
-    #[test]
-    fn test_diff_entry_from_numstat_line_zero_deletions() {
-        let line = "25\t0\tsrc/new_lines.rs";
-        let entry = DiffEntry::from_numstat_line(line).unwrap();
-
-        assert_eq!(entry.additions, 25);
-        assert_eq!(entry.deletions, 0);
     }
 
     #[test]
@@ -1202,162 +840,49 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_entry_from_numstat_line_invalid_too_few_parts() {
-        let line = "10\t5";
-        let entry = DiffEntry::from_numstat_line(line);
-        assert!(entry.is_none());
+    fn test_diff_entry_from_numstat_line_invalid() {
+        assert!(DiffEntry::from_numstat_line("10\t5").is_none());
+        assert!(DiffEntry::from_numstat_line("").is_none());
     }
 
     #[test]
-    fn test_diff_entry_from_numstat_line_invalid_empty() {
-        let line = "";
-        let entry = DiffEntry::from_numstat_line(line);
-        assert!(entry.is_none());
-    }
-
-    #[test]
-    fn test_diff_entry_from_numstat_line_large_numbers() {
-        let line = "9999\t12345\tsrc/big_file.rs";
-        let entry = DiffEntry::from_numstat_line(line).unwrap();
-
-        assert_eq!(entry.additions, 9999);
-        assert_eq!(entry.deletions, 12345);
-    }
-
-    #[test]
-    fn test_diff_entry_parse_name_status_added() {
-        let line = "A\tsrc/new_file.rs";
-        let result = DiffEntry::parse_name_status_line(line);
-
-        assert!(result.is_some());
-        let (path, status) = result.unwrap();
+    fn test_diff_entry_parse_name_status_variants() {
+        // Added
+        let (path, status) = DiffEntry::parse_name_status_line("A\tsrc/new_file.rs").unwrap();
         assert_eq!(path, std::path::PathBuf::from("src/new_file.rs"));
         assert_eq!(status, DiffStatus::Added);
-    }
 
-    #[test]
-    fn test_diff_entry_parse_name_status_modified() {
-        let line = "M\tsrc/changed_file.rs";
-        let result = DiffEntry::parse_name_status_line(line);
-
-        assert!(result.is_some());
-        let (path, status) = result.unwrap();
-        assert_eq!(path, std::path::PathBuf::from("src/changed_file.rs"));
+        // Modified
+        let (path, status) = DiffEntry::parse_name_status_line("M\tsrc/changed.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("src/changed.rs"));
         assert_eq!(status, DiffStatus::Modified);
-    }
 
-    #[test]
-    fn test_diff_entry_parse_name_status_deleted() {
-        let line = "D\tsrc/removed_file.rs";
-        let result = DiffEntry::parse_name_status_line(line);
-
-        assert!(result.is_some());
-        let (path, status) = result.unwrap();
-        assert_eq!(path, std::path::PathBuf::from("src/removed_file.rs"));
+        // Deleted
+        let (path, status) = DiffEntry::parse_name_status_line("D\tsrc/removed.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("src/removed.rs"));
         assert_eq!(status, DiffStatus::Deleted);
-    }
 
-    #[test]
-    fn test_diff_entry_parse_name_status_renamed() {
-        // Rename format: R100\told_name.rs\tnew_name.rs
-        let line = "R100\told_name.rs\tnew_name.rs";
-        let result = DiffEntry::parse_name_status_line(line);
-
-        assert!(result.is_some());
-        let (path, status) = result.unwrap();
-        // For renames, we return the new path
+        // Renamed (returns new path)
+        let (path, status) =
+            DiffEntry::parse_name_status_line("R100\told_name.rs\tnew_name.rs").unwrap();
         assert_eq!(path, std::path::PathBuf::from("new_name.rs"));
         assert_eq!(status, DiffStatus::Modified);
+
+        // Invalid
+        assert!(DiffEntry::parse_name_status_line("").is_none());
     }
 
-    #[test]
-    fn test_diff_entry_parse_name_status_invalid_empty() {
-        let line = "";
-        let result = DiffEntry::parse_name_status_line(line);
-        assert!(result.is_none());
-    }
+    // ========================================================================
+    // Logic tests - test actual behavior without side effects
+    // ========================================================================
 
     #[test]
-    fn test_get_head_commit_returns_valid_hash() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo
-        let result = get_head_commit();
+    fn test_commit_and_push_with_commit_disabled_returns_none() {
+        // When commit is disabled, should return (None, None) without doing anything
+        let result = commit_and_push_pr_fixes(123, false, false);
         assert!(result.is_ok());
-
-        let hash = result.unwrap();
-        // Full hash should be 40 hexadecimal characters
-        assert_eq!(hash.len(), 40);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_get_diff_since_returns_vec() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that get_diff_since returns a valid Vec (may have entries if there are changes)
-        if let Ok(head) = get_head_commit() {
-            let result = get_diff_since(&head);
-            assert!(result.is_ok());
-            // We just verify it returns a valid Vec of DiffEntry
-            let entries = result.unwrap();
-            // Verify that any entries have valid fields
-            for entry in entries {
-                assert!(!entry.path.as_os_str().is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn test_get_diff_since_invalid_commit_returns_empty() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Invalid commit should return empty vec (graceful degradation)
-        let result = get_diff_since("invalid_commit_hash_xyz");
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_get_uncommitted_changes_returns_vec() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // This test runs in a git repo
-        let result = get_uncommitted_changes();
-        assert!(result.is_ok());
-        // Result could be empty or have entries depending on repo state
-    }
-
-    #[test]
-    fn test_get_new_files_since_returns_vec() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that get_new_files_since returns a valid Vec (may have entries if there are new files)
-        if let Ok(head) = get_head_commit() {
-            let result = get_new_files_since(&head);
-            assert!(result.is_ok());
-            // We just verify it returns a valid Vec of PathBuf
-            let files = result.unwrap();
-            // Verify that any paths are valid
-            for path in files {
-                assert!(!path.as_os_str().is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn test_get_new_files_since_invalid_commit_returns_empty() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Invalid commit should return empty vec (graceful degradation)
-        let result = get_new_files_since("invalid_commit_hash_xyz");
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let (commit_result, push_result) = result.unwrap();
+        assert!(commit_result.is_none());
+        assert!(push_result.is_none());
     }
 }

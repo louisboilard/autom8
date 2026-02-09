@@ -11,7 +11,7 @@ use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::format_state_label;
 pub use crate::ui::shared::{
     format_duration, format_duration_secs, format_relative_time, format_relative_time_secs,
-    RunProgress, Status,
+    format_run_duration, RunProgress, Status,
 };
 use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Vec2};
 

@@ -1391,6 +1391,7 @@ mod tests {
             is_running: false,
             pause_requested: false,
             run_mode: crate::state::RunMode::Auto,
+            spec_json_path: None,
         };
 
         // Check if the worktree exists (should return false)

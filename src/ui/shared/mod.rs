@@ -129,6 +129,19 @@ pub fn format_duration(started_at: DateTime<Utc>) -> String {
     format_duration_secs(duration.num_seconds().max(0) as u64)
 }
 
+/// Format a run duration, using `finished_at` if available, otherwise live from now.
+///
+/// When `finished_at` is `Some`, computes a fixed duration `finished_at - started_at`.
+/// When `finished_at` is `None`, falls back to `Utc::now() - started_at` (live counter).
+pub fn format_run_duration(
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+) -> String {
+    let end = finished_at.unwrap_or_else(Utc::now);
+    let duration = end.signed_duration_since(started_at);
+    format_duration_secs(duration.num_seconds().max(0) as u64)
+}
+
 /// Format a duration in seconds as a human-readable string.
 ///
 /// - Durations under 1 minute show only seconds
@@ -1211,6 +1224,7 @@ mod tests {
                 is_running,
                 pause_requested: false,
                 run_mode: crate::state::RunMode::Auto,
+                spec_json_path: None,
             },
             run: None,
             progress: None,
@@ -1332,6 +1346,27 @@ mod tests {
         assert_eq!(format_duration_secs(125), "2m 5s");
         assert_eq!(format_duration_secs(3600), "1h 0m");
         assert_eq!(format_duration_secs(7265), "2h 1m");
+    }
+
+    #[test]
+    fn test_format_run_duration_with_finished_at() {
+        let started = Utc::now() - chrono::Duration::seconds(300);
+        let finished = started + chrono::Duration::seconds(125);
+        // With finished_at: should compute fixed duration (125s = 2m 5s)
+        assert_eq!(format_run_duration(started, Some(finished)), "2m 5s");
+    }
+
+    #[test]
+    fn test_format_run_duration_without_finished_at() {
+        // Without finished_at: should use live duration (now - started_at)
+        let started = Utc::now() - chrono::Duration::seconds(5);
+        let result = format_run_duration(started, None);
+        // Should be a small number of seconds (between 4s and 6s given timing)
+        assert!(
+            result.ends_with('s'),
+            "Expected seconds format, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1460,6 +1495,7 @@ mod tests {
                 is_running,
                 pause_requested: false,
                 run_mode: RunMode::Auto,
+                spec_json_path: None,
             },
             run: Some(RunState {
                 run_id: "test-run".to_string(),

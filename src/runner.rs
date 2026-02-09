@@ -943,7 +943,7 @@ impl Runner {
         }
 
         // PR Creation step
-        self.handle_pr_creation(state, spec, commits_were_made)
+        self.handle_pr_creation(state, spec, commits_were_made, config.pull_request_draft)
     }
 
     /// Handle PR creation after committing.
@@ -952,13 +952,14 @@ impl Runner {
         state: &mut RunState,
         spec: &Spec,
         commits_were_made: bool,
+        draft: bool,
     ) -> Result<()> {
         print_state_transition(MachineState::Committing, MachineState::CreatingPR);
         state.transition_to(MachineState::CreatingPR);
         self.state_manager.save(state)?;
         self.flush_live(MachineState::CreatingPR);
 
-        match create_pull_request(spec, commits_were_made) {
+        match create_pull_request(spec, commits_were_made, draft) {
             Ok(PRResult::Success(url)) => {
                 print_pr_success(&url);
                 print_state_transition(MachineState::CreatingPR, MachineState::Completed);
@@ -1475,6 +1476,21 @@ impl Runner {
             // Not in worktree mode, use auto-detected session
             StateManager::new()?
         };
+
+        // Clear any stale live output from a previous crashed run
+        let _ = effective_state_manager.clear_live();
+
+        // If NOT in worktree mode and in a git repo, ensure we're on the correct branch
+        if worktree_context.is_none() && git::is_git_repo() {
+            let current_branch = git::current_branch()?;
+            if current_branch != spec.branch_name {
+                print_info(&format!(
+                    "Switching from '{}' to '{}'",
+                    current_branch, spec.branch_name
+                ));
+                git::ensure_branch(&spec.branch_name)?;
+            }
+        }
 
         // Update state with branch from generated spec and session ID
         state.branch = spec.branch_name.clone();

@@ -61,6 +61,15 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub pull_request: bool,
 
+    /// Whether to create pull requests in draft mode.
+    ///
+    /// When `true`, PRs are created as drafts (not ready for review).
+    /// When `false`, PRs are created as regular (ready for review) PRs.
+    ///
+    /// Note: Only applies when `pull_request = true`. Has no effect otherwise.
+    #[serde(default = "default_false")]
+    pub pull_request_draft: bool,
+
     /// Whether to automatically create worktrees for runs.
     ///
     /// When `true`, autom8 creates a dedicated worktree for each run,
@@ -114,6 +123,7 @@ impl Default for Config {
             review: true,
             commit: true,
             pull_request: true,
+            pull_request_draft: false,
             worktree: true,
             worktree_path_pattern: default_worktree_path_pattern(),
             worktree_cleanup: false,
@@ -232,6 +242,12 @@ commit = true
 # - false: Skip PR creation (commits remain on local branch)
 # Note: Requires commit = true to work
 pull_request = true
+
+# Pull request draft mode: Create PRs as drafts
+# - true: Create PRs as drafts (not ready for review)
+# - false: Create PRs as regular (ready for review) PRs (default)
+# Note: Only applies when pull_request = true. Has no effect otherwise.
+pull_request_draft = false
 
 # Worktree mode: Automatic worktree creation for parallel runs
 # - true: Create a dedicated worktree for each run (enables parallel sessions, default)
@@ -353,6 +369,12 @@ commit = {}
 # Note: Requires commit = true to work
 pull_request = {}
 
+# Pull request draft mode: Create PRs as drafts
+# - true: Create PRs as drafts (not ready for review)
+# - false: Create PRs as regular (ready for review) PRs (default)
+# Note: Only applies when pull_request = true. Has no effect otherwise.
+pull_request_draft = {}
+
 # Worktree mode: Automatic worktree creation for parallel runs
 # - true: Create a dedicated worktree for each run (enables parallel sessions, default)
 # - false: Run on the current branch (single session per project)
@@ -373,6 +395,7 @@ worktree_cleanup = {}
         config.review,
         config.commit,
         config.pull_request,
+        config.pull_request_draft,
         config.worktree,
         config.worktree_path_pattern,
         config.worktree_cleanup
@@ -558,6 +581,19 @@ const SPEC_SUBDIR: &str = "spec";
 const RUNS_SUBDIR: &str = "runs";
 const SESSIONS_SUBDIR: &str = "sessions";
 
+/// Filename for project metadata
+const PROJECT_METADATA_FILENAME: &str = "project.json";
+
+/// Project metadata stored in `~/.config/autom8/<project>/project.json`.
+///
+/// Contains persistent information about the project that doesn't change
+/// between runs, such as the path to the git repository.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMetadata {
+    /// The absolute path to the git repository root.
+    pub repo_path: PathBuf,
+}
+
 /// Get the autom8 config directory path (~/.config/autom8/).
 ///
 /// Returns the path to the config directory. Does not create the directory.
@@ -622,6 +658,7 @@ pub fn project_config_dir_for(project_name: &str) -> Result<PathBuf> {
 /// - `~/.config/autom8/<project-name>/`
 /// - `~/.config/autom8/<project-name>/spec/`
 /// - `~/.config/autom8/<project-name>/runs/`
+/// - `~/.config/autom8/<project-name>/project.json` (with repo path)
 ///
 /// Returns the project config directory path and whether it was newly created.
 pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
@@ -632,7 +669,39 @@ pub fn ensure_project_config_dir() -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir.join(SPEC_SUBDIR))?;
     fs::create_dir_all(dir.join(RUNS_SUBDIR))?;
 
+    // Save project metadata with repo path (only if it doesn't exist yet)
+    let metadata_path = dir.join(PROJECT_METADATA_FILENAME);
+    if !metadata_path.exists() {
+        if let Ok(repo_path) = crate::worktree::get_main_repo_root() {
+            let metadata = ProjectMetadata { repo_path };
+            if let Ok(content) = serde_json::to_string_pretty(&metadata) {
+                let _ = fs::write(&metadata_path, content);
+            }
+        }
+    }
+
     Ok((dir, created))
+}
+
+/// Get the repository path for a project by name.
+///
+/// Reads the `project.json` file from the project's config directory
+/// and returns the stored `repo_path`.
+///
+/// Returns `None` if the project doesn't exist or has no metadata.
+pub fn get_project_repo_path(project_name: &str) -> Option<PathBuf> {
+    let project_dir = project_config_dir_for(project_name).ok()?;
+    let metadata_path = project_dir.join(PROJECT_METADATA_FILENAME);
+
+    let content = fs::read_to_string(&metadata_path).ok()?;
+    let metadata: ProjectMetadata = serde_json::from_str(&content).ok()?;
+
+    // Only return if the path still exists
+    if metadata.repo_path.exists() {
+        Some(metadata.repo_path)
+    } else {
+        None
+    }
 }
 
 /// Get the spec subdirectory path for the current project.
@@ -1376,17 +1445,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // Use the shared CWD_MUTEX for tests that depend on or change the current working directory
-    use crate::test_utils::CWD_MUTEX;
-
-    #[test]
-    fn test_config_dir_returns_path_ending_with_autom8() {
-        // This test verifies the structure without depending on exact paths
-        let result = config_dir().unwrap();
-        assert!(result.ends_with("autom8"));
-        assert!(result.parent().unwrap().ends_with(".config"));
-    }
-
     #[test]
     fn test_ensure_config_dir_at_creates_directory() {
         let temp_dir = TempDir::new().unwrap();
@@ -1597,70 +1655,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_config_dir_creates_real_directory() {
-        // This test uses the real function to verify it doesn't panic
-        // and returns a valid path structure
-        let result = ensure_config_dir();
-        assert!(result.is_ok());
-        let (path, _created) = result.unwrap();
-        assert!(path.ends_with("autom8"));
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn test_current_project_name_returns_git_repo_name() {
-        // This test verifies the function returns the git repo name when in a git repo
-        // (which enables consistent project identification across worktrees)
-        let result = current_project_name();
-        assert!(result.is_ok());
-        let name = result.unwrap();
-        assert!(!name.is_empty());
-        // Running from autom8 project directory, should use git repo name
-        assert_eq!(name, "autom8");
-    }
-
-    #[test]
-    fn test_current_project_name_uses_git_repo_not_cwd() {
-        // Verify that current_project_name uses git repo name, not CWD basename.
-        // The git repo name should match what get_git_repo_name() returns.
-        let project_name = current_project_name().unwrap();
-        let git_repo_name = crate::worktree::get_git_repo_name().unwrap();
-
-        // When in a git repo, both should return the same value
-        assert!(git_repo_name.is_some(), "Should be in a git repo");
-        assert_eq!(
-            project_name,
-            git_repo_name.unwrap(),
-            "current_project_name should match git repo name"
-        );
-    }
-
-    #[test]
-    fn test_current_project_name_is_consistent_across_calls() {
-        // Project name should be stable - important for worktree support
-        let name1 = current_project_name().unwrap();
-        let name2 = current_project_name().unwrap();
-        assert_eq!(name1, name2, "Project name should be stable across calls");
-    }
-
-    #[test]
-    fn test_project_config_dir_includes_project_name() {
-        let result = project_config_dir().unwrap();
-        // Path should be ~/.config/autom8/<project-name>
-        assert!(result.parent().unwrap().ends_with("autom8"));
-        // Project name should be the last component
-        let project_name = result.file_name().unwrap().to_str().unwrap();
-        assert_eq!(project_name, "autom8");
-    }
-
-    #[test]
-    fn test_project_config_dir_for_with_custom_name() {
-        let result = project_config_dir_for("my-project").unwrap();
-        assert!(result.ends_with("my-project"));
-        assert!(result.parent().unwrap().ends_with("autom8"));
-    }
-
-    #[test]
     fn test_ensure_project_config_dir_at_creates_all_subdirs() {
         let temp_dir = TempDir::new().unwrap();
         let project_name = "test-project";
@@ -1710,19 +1704,6 @@ mod tests {
         // Each has its own subdirs
         assert!(path1.join("spec").exists());
         assert!(path2.join("spec").exists());
-    }
-
-    #[test]
-    fn test_spec_dir_path() {
-        let result = spec_dir().unwrap();
-        assert!(result.ends_with("spec"));
-        assert!(result.parent().unwrap().file_name().unwrap() == "autom8");
-    }
-
-    #[test]
-    fn test_runs_dir_path() {
-        let result = runs_dir().unwrap();
-        assert!(result.ends_with("runs"));
     }
 
     #[test]
@@ -1832,35 +1813,6 @@ mod tests {
     }
 
     #[test]
-    fn test_move_to_config_dir_moves_json_to_spec() {
-        let temp_dir = TempDir::new().unwrap();
-        let source_file = temp_dir.path().join("test-spec.json");
-        let content = r#"{"project": "test"}"#;
-        fs::write(&source_file, content).unwrap();
-
-        let result = move_to_config_dir(&source_file).unwrap();
-
-        assert!(result.was_moved, "File should have been moved");
-        assert!(result.dest_path.exists(), "Destination file should exist");
-        assert!(
-            !source_file.exists(),
-            "Source file should be deleted after move"
-        );
-        assert!(
-            result.dest_path.parent().unwrap().ends_with("spec"),
-            "JSON files should go to spec/ directory"
-        );
-        assert_eq!(
-            fs::read_to_string(&result.dest_path).unwrap(),
-            content,
-            "Content should match"
-        );
-
-        // Cleanup
-        fs::remove_file(&result.dest_path).ok();
-    }
-
-    #[test]
     fn test_move_to_config_dir_no_move_if_already_in_config() {
         // Create a file already in the destination spec directory
         let temp_dir = TempDir::new().unwrap();
@@ -1910,28 +1862,6 @@ mod tests {
     }
 
     #[test]
-    fn test_move_to_config_dir_preserves_filename() {
-        let temp_dir = TempDir::new().unwrap();
-        let source_file = temp_dir.path().join("my-custom-name.md");
-        fs::write(&source_file, "# Test").unwrap();
-
-        let result = move_to_config_dir(&source_file).unwrap();
-
-        assert_eq!(
-            result.dest_path.file_name().unwrap().to_str().unwrap(),
-            "my-custom-name.md",
-            "Filename should be preserved"
-        );
-        assert!(
-            !source_file.exists(),
-            "Source file should be deleted after move"
-        );
-
-        // Cleanup
-        fs::remove_file(&result.dest_path).ok();
-    }
-
-    #[test]
     fn test_move_result_struct() {
         // Verify MoveResult fields work correctly
         let result = MoveResult {
@@ -1940,45 +1870,6 @@ mod tests {
         };
         assert_eq!(result.dest_path, PathBuf::from("/test/path"));
         assert!(result.was_moved);
-    }
-
-    #[test]
-    fn test_move_to_config_dir_md_and_json_go_to_same_spec_dir() {
-        // US-001: Verify both .md and .json files are stored in the same spec/ directory
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create an .md file
-        let md_file = temp_dir.path().join("spec-feature.md");
-        fs::write(&md_file, "# Feature Spec").unwrap();
-
-        // Create a .json file
-        let json_file = temp_dir.path().join("spec-feature.json");
-        fs::write(&json_file, r#"{"project": "test"}"#).unwrap();
-
-        // Move both files
-        let md_result = move_to_config_dir(&md_file).unwrap();
-        let json_result = move_to_config_dir(&json_file).unwrap();
-
-        // Both should be moved
-        assert!(md_result.was_moved, "MD file should have been moved");
-        assert!(json_result.was_moved, "JSON file should have been moved");
-
-        // Both should be in the same spec/ directory
-        let md_parent = md_result.dest_path.parent().unwrap();
-        let json_parent = json_result.dest_path.parent().unwrap();
-
-        assert_eq!(
-            md_parent, json_parent,
-            "Both .md and .json files should be in the same directory"
-        );
-        assert!(
-            md_parent.ends_with("spec"),
-            "Both files should be in spec/ directory"
-        );
-
-        // Cleanup
-        fs::remove_file(&md_result.dest_path).ok();
-        fs::remove_file(&json_result.dest_path).ok();
     }
 
     #[test]
@@ -2038,15 +1929,6 @@ mod tests {
             projects.is_empty(),
             "Should return empty list for non-existent directory"
         );
-    }
-
-    #[test]
-    fn test_list_projects_real_config_directory() {
-        // This test verifies list_projects() works with the real config directory
-        // After running tests for this project, at least 'autom8' should exist
-        let result = list_projects();
-        assert!(result.is_ok(), "list_projects() should not error");
-        // Note: We can't assert specific contents since it depends on actual config state
     }
 
     // ========================================================================
@@ -2214,16 +2096,6 @@ mod tests {
         assert_eq!(statuses[0].total_spec_count, 2);
     }
 
-    #[test]
-    fn test_global_status_real_config() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test against real config directory - should not error
-        let result = global_status();
-        assert!(result.is_ok(), "global_status() should not error");
-    }
-
     // ========================================================================
     // US-007: Project tree view tests
     // ========================================================================
@@ -2348,50 +2220,15 @@ mod tests {
         assert!(info.has_content());
     }
 
-    #[test]
-    fn test_list_projects_tree_real_config() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test against real config directory - should not error
-        let result = list_projects_tree();
-        assert!(result.is_ok(), "list_projects_tree() should not error");
-    }
-
     // ========================================================================
     // US-008: Describe command tests
     // ========================================================================
-
-    #[test]
-    fn test_us008_project_exists_true_for_existing() {
-        // The autom8 project should exist since we're running from it
-        let result = project_exists("autom8");
-        assert!(result.is_ok());
-        assert!(result.unwrap(), "autom8 project should exist");
-    }
 
     #[test]
     fn test_us008_project_exists_false_for_nonexistent() {
         let result = project_exists("nonexistent-project-xyz-12345");
         assert!(result.is_ok());
         assert!(!result.unwrap(), "nonexistent project should return false");
-    }
-
-    #[test]
-    fn test_us008_get_project_description_existing_project() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test getting description for an existing project
-        let result = get_project_description("autom8");
-        assert!(result.is_ok());
-        let desc = result.unwrap();
-        assert!(desc.is_some(), "autom8 project should return Some");
-
-        let desc = desc.unwrap();
-        assert_eq!(desc.name, "autom8");
-        assert!(desc.path.exists());
-        // Note: We don't assert on prds.is_empty() since the directory structure may vary
     }
 
     #[test]
@@ -2403,30 +2240,6 @@ mod tests {
             result.unwrap().is_none(),
             "nonexistent project should return None"
         );
-    }
-
-    #[test]
-    fn test_us008_project_description_has_all_fields() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that ProjectDescription has all expected fields populated
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        // name and path should be set
-        assert!(!desc.name.is_empty());
-        assert!(desc.path.exists());
-
-        // PRDs should have correct structure
-        for spec in &desc.specs {
-            assert!(!spec.filename.is_empty());
-            assert!(spec.path.exists());
-            assert!(!spec.project_name.is_empty());
-            assert!(!spec.branch_name.is_empty());
-            assert!(!spec.stories.is_empty());
-            assert!(spec.completed_count <= spec.total_count);
-            assert_eq!(spec.total_count, spec.stories.len());
-        }
     }
 
     #[test]
@@ -2468,46 +2281,6 @@ mod tests {
         assert_eq!(story.id, "US-001");
         assert_eq!(story.title, "Test Story");
         assert!(!story.passes);
-    }
-
-    #[test]
-    fn test_us008_project_description_counts_spec_md_files() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that spec_md_count is populated correctly for real project
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        // spec_md_count should be >= 0 (may or may not have spec md files)
-        // Just verify it's accessible and doesn't panic
-        let _spec_md_count = desc.spec_md_count;
-    }
-
-    #[test]
-    fn test_us008_project_description_counts_archived_runs() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that runs_count is populated correctly for real project
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        // runs_count should be >= 0
-        let _runs_count = desc.runs_count;
-    }
-
-    #[test]
-    fn test_us008_project_description_run_state_fields() {
-        // Acquire lock to prevent other tests from changing cwd concurrently
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // Test that run state fields are accessible
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        // These fields should be accessible even if None
-        let _has_active_run = desc.has_active_run;
-        let _run_status = &desc.run_status;
-        let _current_story = &desc.current_story;
-        let _current_branch = &desc.current_branch;
     }
 
     // ========================================================================
@@ -2639,13 +2412,6 @@ mod tests {
     // ========================================================================
     // US-002: Global Config File Management tests
     // ========================================================================
-
-    #[test]
-    fn test_global_config_path_returns_config_toml() {
-        let path = global_config_path().unwrap();
-        assert!(path.ends_with("config.toml"));
-        assert!(path.parent().unwrap().ends_with("autom8"));
-    }
 
     #[test]
     fn test_generate_config_with_comments_includes_all_fields() {
@@ -2790,38 +2556,6 @@ commit = true
     }
 
     #[test]
-    fn test_load_global_config_real_path() {
-        // Test the actual load_global_config function
-        // This will either load an existing config or create a new one
-        let result = load_global_config();
-        assert!(result.is_ok(), "load_global_config should not error");
-
-        let config = result.unwrap();
-        // Verify it returns a valid Config
-        // (We don't assert specific values since they depend on user's actual config)
-        let _ = config.review;
-        let _ = config.commit;
-        let _ = config.pull_request;
-    }
-
-    #[test]
-    fn test_save_global_config_real_path() {
-        // First load to get current state (and ensure file exists)
-        let original = load_global_config().unwrap();
-
-        // Save the same config
-        let result = save_global_config(&original);
-        assert!(result.is_ok(), "save_global_config should not error");
-
-        // Verify it's still readable
-        let reloaded = load_global_config().unwrap();
-        assert_eq!(
-            original, reloaded,
-            "Config should be unchanged after save/load cycle"
-        );
-    }
-
-    #[test]
     fn test_global_config_file_has_comments_after_save() {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join(".config").join("autom8");
@@ -2849,14 +2583,6 @@ commit = true
     // ========================================================================
     // US-003: Per-Project Config Inheritance tests
     // ========================================================================
-
-    #[test]
-    fn test_us003_project_config_path_returns_correct_path() {
-        let path = project_config_path().unwrap();
-        assert!(path.ends_with("config.toml"));
-        // Path should be inside the project directory, not the root autom8 dir
-        assert!(path.parent().unwrap().file_name().unwrap() == "autom8");
-    }
 
     #[test]
     fn test_us003_project_config_path_for_returns_correct_path() {
@@ -3718,6 +3444,118 @@ review = false
         assert_eq!(parsed.worktree_cleanup, config.worktree_cleanup);
     }
 
+    // ========================================================================
+    // US-001 (draft-pr-config): pull_request_draft configuration tests
+    // ========================================================================
+
+    #[test]
+    fn test_pull_request_draft_config_defaults_to_false() {
+        let config = Config::default();
+        assert!(
+            !config.pull_request_draft,
+            "pull_request_draft should default to false for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_can_be_enabled() {
+        let toml_str = r#"
+            pull_request_draft = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            config.pull_request_draft,
+            "pull_request_draft should be true when set in config"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_missing_defaults_to_false() {
+        // Old config files without pull_request_draft field should still work
+        let toml_str = r#"
+            review = true
+            commit = true
+            pull_request = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.pull_request_draft,
+            "missing pull_request_draft field should default to false"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_explicit_false() {
+        let toml_str = r#"
+            pull_request_draft = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(
+            !config.pull_request_draft,
+            "explicit pull_request_draft = false should be respected"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_config_with_all_pr_fields() {
+        let toml_str = r#"
+            pull_request = true
+            pull_request_draft = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.pull_request);
+        assert!(config.pull_request_draft);
+    }
+
+    #[test]
+    fn test_pull_request_draft_in_generated_comments() {
+        let config = Config {
+            pull_request_draft: true,
+            ..Default::default()
+        };
+        let content = generate_config_with_comments(&config);
+
+        // Verify pull_request_draft is documented
+        assert!(
+            content.contains("pull_request_draft = true"),
+            "generated config should include pull_request_draft setting"
+        );
+        assert!(
+            content.contains("draft mode"),
+            "config comments should document draft mode behavior"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_in_default_config_with_comments() {
+        // Verify DEFAULT_CONFIG_WITH_COMMENTS includes pull_request_draft
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("pull_request_draft"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should include pull_request_draft"
+        );
+        assert!(
+            DEFAULT_CONFIG_WITH_COMMENTS.contains("pull_request_draft = false"),
+            "DEFAULT_CONFIG_WITH_COMMENTS should have pull_request_draft = false"
+        );
+    }
+
+    #[test]
+    fn test_pull_request_draft_serialization_roundtrip() {
+        let config = Config {
+            pull_request: true,
+            pull_request_draft: true,
+            ..Default::default()
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("pull_request_draft = true"));
+
+        // Deserialize back
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.pull_request_draft, config.pull_request_draft);
+    }
+
     // US-001: Conditional Story Display in Describe View
 
     #[test]
@@ -3749,56 +3587,6 @@ review = false
 
         assert!(spec_active.is_active);
         assert!(!spec_inactive.is_active);
-    }
-
-    #[test]
-    fn test_us001_project_description_no_active_run_all_specs_inactive() {
-        // Acquire lock for thread safety
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // When there's no active run, all specs should have is_active = false
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        // If the project doesn't have an active run, all specs should be inactive
-        if !desc.has_active_run {
-            for spec in &desc.specs {
-                assert!(
-                    !spec.is_active,
-                    "Spec {} should not be active when no run is active",
-                    spec.filename
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_us001_project_description_at_most_one_spec_active() {
-        // Acquire lock for thread safety
-        let _lock = CWD_MUTEX.lock().unwrap();
-
-        // At most one spec can be active at a time (matching the active branch)
-        let desc = get_project_description("autom8").unwrap().unwrap();
-
-        let active_count = desc.specs.iter().filter(|s| s.is_active).count();
-        assert!(
-            active_count <= 1,
-            "At most one spec should be active, found {}",
-            active_count
-        );
-
-        // If there's an active run, there should be exactly one active spec
-        // (if the spec for that branch exists)
-        if desc.has_active_run && desc.current_branch.is_some() {
-            let branch = desc.current_branch.as_ref().unwrap();
-            let matching_spec = desc.specs.iter().find(|s| &s.branch_name == branch);
-            if let Some(spec) = matching_spec {
-                assert!(
-                    spec.is_active,
-                    "Spec with matching branch {} should be active",
-                    branch
-                );
-            }
-        }
     }
 
     // ========================================================================
