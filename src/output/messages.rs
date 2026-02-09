@@ -48,6 +48,12 @@ pub fn print_interrupted() {
     println!("{YELLOW}Interrupted.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue.");
 }
 
+/// Print message when the run is paused (via GUI pause button or Step mode).
+pub fn print_paused() {
+    println!();
+    println!("{YELLOW}Paused.{RESET} Run '{CYAN}autom8 resume{RESET}' to continue.");
+}
+
 /// Print message when resuming from an interrupted run.
 pub fn print_resuming_interrupted(machine_state: &str) {
     println!(

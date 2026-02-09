@@ -2,14 +2,59 @@
 
 [![Test](https://github.com/louisboilard/autom8/actions/workflows/test.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/test.yml)
 [![Lint](https://github.com/louisboilard/autom8/actions/workflows/lint.yml/badge.svg)](https://github.com/louisboilard/autom8/actions/workflows/lint.yml)
-[![Crates.io](https://img.shields.io/crates/v/autom8)](https://crates.io/crates/autom8)
-[![License](https://img.shields.io/crates/l/autom8)](LICENSE)
-
-![autom8 TUI](assets/monitor.png)
+[![Crates.io](https://img.shields.io/crates/v/autom8-cli)](https://crates.io/crates/autom8-cli)
+[![License](https://img.shields.io/crates/l/autom8-cli)](LICENSE)
 
 A simple, fast, and deterministic-when-possible CLI tool for orchestrating Claude-powered development. No external deps or setup required; one binary to rule them all.
 
-Run `autom8` from your project, describe what you want to build, and Claude helps you write a structured spec. When you're done going back and forth with Claude and have the spec file generated, exit the Claude session (`/exit` or `ctrl-d`) and autom8 takes over: it drives Claude through implementation story by story, reviews the work, and optionally commit/open a PR when everything passes.
+## Installation
+
+You can get a binary for your os in the release page. Alternatively you can
+either use `cargo` to pull it from crates.io or clone and build from source:
+
+```bash
+# From crates.io
+cargo install autom8-cli
+
+# Install from source (i.e after cloning this repo)
+cargo install --force --path .
+```
+
+Requirements are just the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated + git.
+For automatic PR creation, install the [GitHub CLI](https://cli.github.com/) and run `gh auth login`.
+
+For dev purposes, you'll need Rust 1.88+ (install via [rustup](https://rustup.rs/)).
+
+## Quick Start
+
+### 1. Create and implement your feature
+
+Navigate to the project you want to work on and simply run:
+```bash
+autom8
+```
+
+Build a spec with Claude's help by running `autom8`. Describe your feature, answer Claude's questions, and it'll create a structured spec for you. When you're happy with the spec, exit the session (`/exit` or `Ctrl-d`) and autom8 takes over from there, implementing each work unit (internally called stories) until done.
+
+If you already have a spec file (generated from a previously interupted session
+for example), pass it directly:
+
+```bash
+autom8 spec.md      # Markdown spec
+autom8 spec.json    # JSON spec
+```
+
+### 2. Let it work
+
+![Running autom8](assets/running.png)
+
+autom8 converts specs to JSON, picks the highest-priority incomplete story, runs Claude to implement it, reviews the work, fixes issues automatically, and commits/open pr's (if you want it to) when all stories pass.
+
+
+## High Level Features
+
+Run `autom8` from your project, describe what you want to build, and Claude helps you write a structured spec.
+When you're done going back and forth with Claude and have the spec file generated, exit the Claude session (`/exit` or `ctrl-d`) and autom8 takes over: it drives Claude through implementation story by story, reviews the work, and optionally commit/open a PR when everything passes.
 
 **Spec to PR in one command.** Run `autom8`, describe your feature to Claude and
 let Claude help you define a spec you're happy with.
@@ -26,40 +71,6 @@ with the rich native GUI `autom8 gui`.
 
 **Deterministic orchestration.** The LLM handles implementation; autom8 handles everything else with predictable logic: state transitions, git operations, branch management, and PR creation.
 
-## Installation
-
-```bash
-# From crates.io
-cargo install autom8
-
-# From source
-cargo install --force --path .
-```
-
-You'll need Rust 1.88+ (install via [rustup](https://rustup.rs/)) and the [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated. For automatic PR creation, install the [GitHub CLI](https://cli.github.com/) and run `gh auth login`.
-
-## Quick Start
-
-### 1. Create and implement your feature
-
-```bash
-autom8
-```
-
-Build a spec with Claude's help by running `autom8`. Describe your feature, answer Claude's questions, and it'll create a structured spec for you. When you're happy with the spec, exit the session (`/exit` or `Ctrl-d`) and autom8 takes over from there, implementing each story until you have a PR ready for review.
-
-If you already have a spec file, pass it directly:
-
-```bash
-autom8 spec.md      # Markdown spec
-autom8 spec.json    # JSON spec
-```
-
-### 2. Watch it work
-
-![Running autom8](assets/running.png)
-
-autom8 converts specs to JSON, picks the highest-priority incomplete story, runs Claude to implement it, reviews the work, fixes issues automatically, and commits when all stories pass.
 
 ## How It Works
 
@@ -67,7 +78,7 @@ autom8 converts specs to JSON, picks the highest-priority incomplete story, runs
 
 autom8 maintains a structured knowledge graph throughout the run. After each story, it captures which files were touched (with their purposes and key symbols), architectural decisions that were made, patterns to follow, and a summary of what each story created, modified, or deleted.
 
-This context is injected into every Claude prompt, so later stories see what earlier ones accomplished. It's more than just a git diff; it's semantic understanding of what's been built.
+This context is injected into every Claude prompt, so later stories see what earlier ones accomplished.
 
 ### State Persistence
 
@@ -75,11 +86,11 @@ Run state (current story, iteration count, review status, the knowledge graph) p
 
 ### Review Loops
 
-After all stories pass, autom8 runs a review phase where Claude examines the complete implementation for edge cases, code quality, and missed requirements. If issues are found, it enters a correction cycle: Claude applies fixes, review runs again, up to three iterations. This catches problems before the PR is opened.
+After all stories pass, autom8 runs a review phase where Claude examines the complete implementation for edge cases, code quality, and missed requirements. If issues are found, it enters a correction cycle: Claude applies fixes, review runs again, up to three iterations. There is therefore a concept of a reviewer and a correction agent that work together to fix found issues.
 
 ### Orchestration Design
 
-autom8 keeps the LLM focused on implementation while handling everything else deterministically. The state machine has explicit states with defined completion criteria. Git operations (branch management, commit filtering, PR creation) are predictable. Claude signals completion through structured output tags, and hard iteration limits prevent runaway loops. We do one "agent" per "story" where knowledge graph is passed to each agent via prompt template injection.
+autom8 keeps Claude focused on implementation while handling everything else deterministically. The state machine has explicit states with defined completion criteria. Git operations (branch management, commit filtering, PR creation) are predictable. Claude signals completion through structured output tags, and hard iteration limits prevent runaway loops. We do one "agent" per "story" where knowledge graph is passed to each agent via prompt template injection.
 
 ## State Machine
 
@@ -129,13 +140,27 @@ Primary states: **running-claude** (implementation in progress), **reviewing** (
 
 ## Monitoring
 
-autom8 comes with both a terminal UI and a native desktop GUI for watching your runs.
+autom8 comes with both a terminal UI and a native desktop GUI for watching your runs. Both interfaces update in real-time and work across all your worktrees.
 
-**Terminal UI** (`autom8 monitor`): A ratatui-based dashboard showing active sessions, project list, and run history. Keyboard-navigable and works over SSH.
+### GUI
 
-**Desktop GUI** (`autom8 gui`): A native immediate mode application built with egui. Shows live session output, run history with iteration details, and lets you edit configuration. Useful when you want to keep an eye on multiple projects.
+A native immediate mode application built with egui. Shows live session output, run history with iteration details, and lets you edit configuration. Useful when you want to keep an eye on multiple projects.
 
-Both interfaces update in real-time and work across all your worktrees.
+```bash
+autom8 gui
+```
+
+https://github.com/user-attachments/assets/7bb179e7-d127-4df7-b179-d1152a4ade06
+
+### TUI
+
+A ratatui-based dashboard showing active sessions, project list, and run history. Keyboard-navigable and works over SSH.
+
+```bash
+autom8 monitor
+```
+
+![autom8 TUI](assets/monitor.png)
 
 ## CLI Commands
 
@@ -194,9 +219,13 @@ After committing, autom8 creates a pull request using the GitHub CLI. You need `
 
 If your repository has a PR template (`.github/pull_request_template.md` or similar), autom8 detects it and fills in the template with implementation details from the spec.
 
-## File Storage
+## Persistence
 
 Everything lives under `~/.config/autom8/<project>/`: specs in `spec/`, session state in `sessions/<session-id>/state.json`, and archived runs in `runs/`. In git repositories, autom8 automatically creates or checks out the branch specified in `branchName`.
+
+## Security
+
+**IMPORTANT**: Currently, `autom8` runs claude processes using `--dangerously-skip-permissions`. We recommend you run `autom8` inside a sandboxed/isolated environment.
 
 ## Screenshots
 
