@@ -128,6 +128,26 @@ pub mod shadow {
         }
     }
 
+    /// Green-tinted glow shadow for completed sessions.
+    ///
+    /// Takes a configurable `alpha` (0.0–1.0) so callers can animate the
+    /// glow intensity over time (e.g., a pulsing effect). Uses `STATUS_SUCCESS`
+    /// green with zero offset for a centered, non-directional glow.
+    pub fn completed_glow(alpha: f32) -> Shadow {
+        let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+        Shadow {
+            offset: [0.0, 0.0].into(),
+            blur: 18.0,
+            spread: 4.0,
+            color: Color32::from_rgba_premultiplied(
+                super::colors::COMPLETED_GLOW.r(),
+                super::colors::COMPLETED_GLOW.g(),
+                super::colors::COMPLETED_GLOW.b(),
+                a,
+            ),
+        }
+    }
+
     /// Returns the warm shadow base color for testing.
     #[cfg(test)]
     pub fn shadow_warm_color() -> Color32 {
@@ -251,6 +271,34 @@ pub mod colors {
 
     /// Correcting state background - light orange.
     pub const STATUS_CORRECTING_BG: Color32 = Color32::from_rgb(255, 237, 230);
+
+    // ==========================================================================
+    // Completed Session Colors
+    // ==========================================================================
+
+    /// Glow color for the pulsing border on completed sessions.
+    /// Derived from `STATUS_SUCCESS` (`rgb(52, 199, 89)`).
+    pub const COMPLETED_GLOW: Color32 = Color32::from_rgb(52, 199, 89);
+
+    /// Saturated green fill for completed session card backgrounds.
+    /// Clearly visible green tint — meant to be noticeable at a glance.
+    pub const COMPLETED_FILL: Color32 = Color32::from_rgb(220, 245, 228);
+
+    /// Green tint for the completed session tab background.
+    /// Slightly lighter than `COMPLETED_FILL` but still obviously green.
+    pub const COMPLETED_TAB_FILL: Color32 = Color32::from_rgb(228, 248, 234);
+
+    /// Green hover for completed session tabs.
+    /// Darkens noticeably on hover while staying green.
+    pub const COMPLETED_TAB_HOVER: Color32 = Color32::from_rgb(215, 240, 222);
+
+    /// Green active/selected for completed session tabs.
+    /// Deepest green tab state — unmistakably selected.
+    pub const COMPLETED_TAB_ACTIVE: Color32 = Color32::from_rgb(200, 232, 210);
+
+    /// Bold green border for completed sessions.
+    /// High-saturation green so the card outline pops.
+    pub const COMPLETED_BORDER: Color32 = Color32::from_rgb(80, 210, 120);
 }
 
 // Note: The Status enum is defined in the components module to avoid duplication.
@@ -496,6 +544,61 @@ mod tests {
 
         // BACKGROUND should be the specific warm cream color
         assert_eq!(colors::BACKGROUND, Color32::from_rgb(250, 249, 247));
+    }
+
+    #[test]
+    fn test_completed_colors() {
+        // COMPLETED_GLOW matches STATUS_SUCCESS
+        assert_eq!(colors::COMPLETED_GLOW, colors::STATUS_SUCCESS);
+
+        // COMPLETED_FILL is a saturated green (green channel dominates)
+        assert!(colors::COMPLETED_FILL.g() > colors::COMPLETED_FILL.r());
+        assert!(colors::COMPLETED_FILL.g() > colors::COMPLETED_FILL.b());
+
+        // COMPLETED_TAB_FILL is slightly lighter than COMPLETED_FILL but still green
+        assert!(colors::COMPLETED_TAB_FILL.g() > colors::COMPLETED_TAB_FILL.r());
+        assert!(colors::COMPLETED_TAB_FILL.r() >= colors::COMPLETED_FILL.r());
+
+        // COMPLETED_TAB_HOVER is darker than TAB_FILL but retains green tint
+        assert!(colors::COMPLETED_TAB_HOVER.g() >= colors::COMPLETED_TAB_HOVER.r());
+        assert!(colors::COMPLETED_TAB_HOVER.r() < colors::COMPLETED_TAB_FILL.r());
+
+        // COMPLETED_TAB_ACTIVE is darker still but retains green tint
+        assert!(colors::COMPLETED_TAB_ACTIVE.g() >= colors::COMPLETED_TAB_ACTIVE.r());
+        assert!(colors::COMPLETED_TAB_ACTIVE.r() < colors::COMPLETED_TAB_HOVER.r());
+
+        // COMPLETED_BORDER is a bold green (high saturation)
+        assert!(colors::COMPLETED_BORDER.g() > colors::COMPLETED_BORDER.r());
+        assert!(colors::COMPLETED_BORDER.g() > colors::COMPLETED_BORDER.b());
+        assert!(colors::COMPLETED_BORDER.g() >= 200); // visibly saturated
+    }
+
+    #[test]
+    fn test_completed_glow_shadow() {
+        // Zero alpha produces transparent shadow
+        let glow_zero = shadow::completed_glow(0.0);
+        assert_eq!(glow_zero.color.a(), 0);
+        assert_eq!(glow_zero.offset, [0.0, 0.0].into());
+        assert!(glow_zero.blur >= 16.0 && glow_zero.blur <= 20.0);
+
+        // Full alpha
+        let glow_full = shadow::completed_glow(1.0);
+        assert_eq!(glow_full.color.a(), 255);
+
+        // Mid alpha
+        let glow_mid = shadow::completed_glow(0.5);
+        assert!(glow_mid.color.a() > 100 && glow_mid.color.a() < 140);
+
+        // Color channels match COMPLETED_GLOW / STATUS_SUCCESS
+        assert_eq!(glow_full.color.r(), colors::COMPLETED_GLOW.r());
+        assert_eq!(glow_full.color.g(), colors::COMPLETED_GLOW.g());
+        assert_eq!(glow_full.color.b(), colors::COMPLETED_GLOW.b());
+
+        // Clamping works
+        let glow_over = shadow::completed_glow(2.0);
+        assert_eq!(glow_over.color.a(), 255);
+        let glow_under = shadow::completed_glow(-1.0);
+        assert_eq!(glow_under.color.a(), 0);
     }
 
     #[test]

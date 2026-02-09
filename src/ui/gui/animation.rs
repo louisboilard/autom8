@@ -5,6 +5,12 @@
 
 use egui::{Color32, Rect, Rounding, Sense, Stroke, Ui};
 
+/// Minimum glow alpha for the completed session pulse (always clearly visible).
+const COMPLETED_GLOW_ALPHA_MIN: f32 = 0.45;
+/// Maximum glow alpha for the completed session pulse (full intensity at peak).
+const COMPLETED_GLOW_ALPHA_MAX: f32 = 1.0;
+/// Period of the completed glow pulse cycle in seconds.
+const COMPLETED_GLOW_PERIOD: f64 = 2.0;
 // =============================================================================
 // Animation Constants
 // =============================================================================
@@ -59,6 +65,24 @@ const TRAIL_LENGTH: f32 = 0.35;
 #[inline]
 pub fn schedule_frame(ctx: &egui::Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(FRAME_INTERVAL_MS));
+}
+
+/// Compute the current glow intensity for the completed session pulse animation.
+///
+/// Returns an alpha value (`f32` in `0.0..=1.0`) representing the current pulse
+/// intensity, oscillating smoothly between a subtle glow (~0.2) and a bright glow
+/// (~0.7) on a ~2-second ease-in-out cycle.
+///
+/// This is a pure computation with no side effects. Callers are responsible for
+/// calling [`schedule_frame`] to keep the animation running.
+///
+/// # Arguments
+/// * `time` - Current animation time in seconds (from `ui.ctx().input(|i| i.time)`)
+#[inline]
+pub fn completed_glow_intensity(time: f64) -> f32 {
+    let phase = (time * std::f64::consts::TAU / COMPLETED_GLOW_PERIOD).cos();
+    let t = ((1.0 - phase) * 0.5) as f32;
+    COMPLETED_GLOW_ALPHA_MIN + (COMPLETED_GLOW_ALPHA_MAX - COMPLETED_GLOW_ALPHA_MIN) * t
 }
 
 /// Render rising particles animation.
@@ -291,6 +315,71 @@ pub fn render_progress_bar(
                 let shimmer_color = Color32::from_rgba_unmultiplied(255, 255, 255, SHIMMER_ALPHA);
                 painter.rect_filled(shimmer_rect, rounding, shimmer_color);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_glow_stays_in_range() {
+        // Sample many points across several cycles
+        for i in 0..1000 {
+            let time = i as f64 * 0.01;
+            let alpha = completed_glow_intensity(time);
+            assert!(
+                alpha >= COMPLETED_GLOW_ALPHA_MIN && alpha <= COMPLETED_GLOW_ALPHA_MAX,
+                "alpha {alpha} out of range at time {time}"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_glow_hits_extremes() {
+        // At time=0 cosine is 1, so t=0 → alpha_min
+        let alpha_at_zero = completed_glow_intensity(0.0);
+        assert!(
+            (alpha_at_zero - COMPLETED_GLOW_ALPHA_MIN).abs() < 1e-5,
+            "expected min at t=0, got {alpha_at_zero}"
+        );
+
+        // At time=period/2, cosine is -1, so t=1 → alpha_max
+        let alpha_at_half = completed_glow_intensity(COMPLETED_GLOW_PERIOD / 2.0);
+        assert!(
+            (alpha_at_half - COMPLETED_GLOW_ALPHA_MAX).abs() < 1e-5,
+            "expected max at t=period/2, got {alpha_at_half}"
+        );
+    }
+
+    #[test]
+    fn completed_glow_is_periodic() {
+        let t = 0.37;
+        let alpha1 = completed_glow_intensity(t);
+        let alpha2 = completed_glow_intensity(t + COMPLETED_GLOW_PERIOD);
+        assert!(
+            (alpha1 - alpha2).abs() < 1e-5,
+            "expected periodic: {alpha1} vs {alpha2}"
+        );
+    }
+
+    #[test]
+    fn completed_glow_is_smooth() {
+        // Check that adjacent samples don't jump too much (smooth, not stepped)
+        let dt = 0.001;
+        let max_delta = (COMPLETED_GLOW_ALPHA_MAX - COMPLETED_GLOW_ALPHA_MIN)
+            * std::f32::consts::PI
+            * (dt as f32 / COMPLETED_GLOW_PERIOD as f32);
+        for i in 0..2000 {
+            let t = i as f64 * dt;
+            let a1 = completed_glow_intensity(t);
+            let a2 = completed_glow_intensity(t + dt);
+            let delta = (a2 - a1).abs();
+            assert!(
+                delta <= max_delta + 1e-5,
+                "jump too large at t={t}: delta={delta}, max={max_delta}"
+            );
         }
     }
 }
