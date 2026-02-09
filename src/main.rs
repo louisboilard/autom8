@@ -501,7 +501,7 @@ mod tests {
                 clap::error::ErrorKind::DisplayVersion
             );
         }
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
     }
 
     #[test]
