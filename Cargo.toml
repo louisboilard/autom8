@@ -1,17 +1,25 @@
 [package]
-name = "autom8"
-version = "0.2.0"
+name = "autom8-cli"
+version = "0.3.0"
 edition = "2021"
 description = "CLI automation tool for orchestrating Claude-powered development"
 authors = ["Louis"]
 license = "MIT"
 repository = "https://github.com/louisboilard/autom8"
 homepage = "https://github.com/louisboilard/autom8"
-documentation = "https://docs.rs/autom8"
+documentation = "https://docs.rs/autom8-cli"
 readme = "README.md"
 keywords = ["cli", "automation", "claude", "ai", "development"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
+
+[[bin]]
+name = "autom8"
+path = "src/main.rs"
+
+[lib]
+name = "autom8"
+path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
