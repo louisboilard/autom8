@@ -1101,21 +1101,26 @@ impl StateManager {
         Ok(())
     }
 
-    pub fn clear_current(&self) -> Result<()> {
+    /// Clear current state. If `preserve_metadata` is true, keeps metadata.json
+    /// (used by resume to preserve run_mode preference).
+    pub fn clear_current(&self, preserve_metadata: bool) -> Result<()> {
         let path = self.state_file();
         if path.exists() {
             fs::remove_file(path)?;
         }
-        // Also clear metadata
-        let metadata_path = self.metadata_file();
-        if metadata_path.exists() {
-            fs::remove_file(metadata_path)?;
+        if !preserve_metadata {
+            let metadata_path = self.metadata_file();
+            if metadata_path.exists() {
+                fs::remove_file(metadata_path)?;
+            }
         }
         // Also clear live state
         self.clear_live()?;
-        // Try to remove the session directory if empty
-        let session_dir = self.session_dir();
-        let _ = fs::remove_dir(&session_dir); // Ignore error if not empty
+        // Try to remove the session directory if empty (only if metadata also cleared)
+        if !preserve_metadata {
+            let session_dir = self.session_dir();
+            let _ = fs::remove_dir(&session_dir); // Ignore error if not empty
+        }
         Ok(())
     }
 
@@ -1623,8 +1628,51 @@ mod tests {
         let loaded = sm.load_current().unwrap().unwrap();
         assert_eq!(loaded.branch, "test-branch");
 
-        sm.clear_current().unwrap();
+        sm.clear_current(false).unwrap();
         assert!(sm.load_current().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_clear_current_preserve_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create state and metadata with Step mode
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+        sm.set_run_mode(RunMode::Step).unwrap();
+
+        // Verify metadata exists with Step mode
+        let meta = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(meta.run_mode, RunMode::Step);
+
+        // Clear with preserve_metadata=true
+        sm.clear_current(true).unwrap();
+
+        // State should be cleared
+        assert!(sm.load_current().unwrap().is_none());
+
+        // Metadata should be preserved with Step mode
+        let meta = sm.load_metadata().unwrap().unwrap();
+        assert_eq!(meta.run_mode, RunMode::Step);
+    }
+
+    #[test]
+    fn test_clear_current_deletes_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Create state and metadata
+        let state = RunState::new(PathBuf::from("test.json"), "test-branch".to_string());
+        sm.save(&state).unwrap();
+        sm.set_run_mode(RunMode::Step).unwrap();
+
+        // Clear with preserve_metadata=false
+        sm.clear_current(false).unwrap();
+
+        // Both state and metadata should be gone
+        assert!(sm.load_current().unwrap().is_none());
+        assert!(sm.load_metadata().unwrap().is_none());
     }
 
     #[test]

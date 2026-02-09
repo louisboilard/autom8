@@ -4,7 +4,7 @@
 //! configuration for the autom8 GUI.
 
 use crate::error::{Autom8Error, Result};
-use crate::state::{IterationStatus, MachineState, SessionStatus, StateManager};
+use crate::state::{IterationStatus, MachineState, RunMode, SessionStatus, StateManager};
 use crate::ui::gui::components::{
     badge_background_color, format_relative_time, format_run_duration, format_state,
     is_terminal_state, state_to_color, strip_worktree_prefix, truncate_with_ellipsis,
@@ -19,8 +19,9 @@ use crate::ui::gui::modal::{Modal, ModalAction, ModalButton};
 use crate::ui::gui::theme::{self, colors, rounding, spacing};
 use crate::ui::gui::typography::{self, FontSize, FontWeight};
 use crate::ui::shared::{
-    load_project_run_history, load_session_by_id, load_ui_data, ProjectData, RunHistoryEntry,
-    SessionData,
+    is_pause_queued, is_session_resumable, load_project_run_history, load_session_by_id,
+    load_ui_data, request_session_pause, set_session_run_mode, spawn_resume_process, ProjectData,
+    RunHistoryEntry, SessionData,
 };
 use eframe::egui::{self, Color32, Key, Order, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::sync::Arc;
@@ -9173,64 +9174,299 @@ ui.label(
                                             ))
                                             .color(colors::TEXT_SECONDARY),
                                     );
-
-                                    // Current story
-                                    if let Some(ref run) = session.run {
-                                        if let Some(ref story_id) = run.current_story {
-                                            ui.add_space(spacing::SM);
-                                            ui.label(
-                                                egui::RichText::new(story_id)
-                                                    .font(typography::font(
-                                                        FontSize::Body,
-                                                        FontWeight::Regular,
-                                                    ))
-                                                    .color(colors::TEXT_MUTED),
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // Duration
-                                if let Some(ref run) = session.run {
-                                    ui.add_space(spacing::MD);
-                                    ui.label(
-                                        egui::RichText::new(format_run_duration(
-                                            run.started_at,
-                                            run.finished_at,
-                                        ))
-                                        .font(typography::font(FontSize::Body, FontWeight::Regular))
-                                        .color(colors::TEXT_MUTED),
-                                    );
-                                }
-
-                                // Infinity animation for non-idle, non-terminal states with progress
-                                if state != MachineState::Idle
-                                    && !is_terminal_state(state)
-                                    && session.progress.is_some()
-                                {
-                                    ui.add_space(spacing::MD);
-
-                                    // Animation is 1/3 of content width, capped at 150px
-                                    let max_animation_width = (content_width / 3.0).min(150.0);
-
-                                    if max_animation_width > 30.0 {
-                                        let animation_height = 12.0;
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(max_animation_width, animation_height),
-                                            Sense::hover(),
-                                        );
-                                        let time = ui.ctx().input(|i| i.time) as f32;
-                                        super::animation::render_infinity(
-                                            ui.painter(),
-                                            time,
-                                            rect,
-                                            state_color,
-                                            1.0,
-                                        );
-                                        super::animation::schedule_frame(ui.ctx());
-                                    }
                                 }
                             });
+
+                            // Unified mode/playback control: [[ Auto | Step ] | pause/play ]
+                            ui.add_space(spacing::SM);
+
+                            let current_mode = session.metadata.run_mode;
+                            let is_auto = matches!(current_mode, RunMode::Auto);
+                            let is_running = session.metadata.is_running;
+                            let pause_queued = is_pause_queued(session);
+                            let is_resumable = is_session_resumable(session);
+
+                            // Colors
+                            let step_orange_bg = Color32::from_rgb(255, 237, 213);
+                            let play_green = Color32::from_rgb(35, 134, 54);
+                            let play_green_subtle = Color32::from_rgb(220, 252, 231);
+
+                            egui::Frame::none()
+                                .fill(colors::SURFACE_HOVER)
+                                .rounding(rounding::SMALL)
+                                .inner_margin(egui::Margin::symmetric(3.0, 3.0))
+                                .stroke(Stroke::new(1.0, colors::BORDER))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+
+                                        // Auto option
+                                        let auto_bg = if is_auto {
+                                            colors::ACCENT_SUBTLE
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        let auto_color = if is_auto {
+                                            colors::ACCENT
+                                        } else {
+                                            colors::TEXT_MUTED
+                                        };
+                                        let auto_resp = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("Auto")
+                                                    .font(typography::font(
+                                                        FontSize::Small,
+                                                        FontWeight::Medium,
+                                                    ))
+                                                    .color(auto_color),
+                                            )
+                                            .fill(auto_bg)
+                                            .rounding(rounding::SMALL)
+                                            .min_size(egui::vec2(36.0, 18.0))
+                                            .frame(false),
+                                        );
+                                        if auto_resp.hovered() {
+                                            ui.ctx()
+                                                .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if auto_resp.clicked() && !is_auto {
+                                            let _ = set_session_run_mode(
+                                                &session.project_name,
+                                                &session.metadata.session_id,
+                                                RunMode::Auto,
+                                            );
+                                        }
+
+                                        ui.add_space(2.0);
+
+                                        // Step option
+                                        let step_bg = if !is_auto {
+                                            step_orange_bg
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        let step_color = if !is_auto {
+                                            colors::STATUS_WARNING
+                                        } else {
+                                            colors::TEXT_MUTED
+                                        };
+                                        let step_resp = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("Step")
+                                                    .font(typography::font(
+                                                        FontSize::Small,
+                                                        FontWeight::Medium,
+                                                    ))
+                                                    .color(step_color),
+                                            )
+                                            .fill(step_bg)
+                                            .rounding(rounding::SMALL)
+                                            .min_size(egui::vec2(36.0, 18.0))
+                                            .frame(false),
+                                        );
+                                        if step_resp.hovered() {
+                                            ui.ctx()
+                                                .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if step_resp.clicked() && is_auto {
+                                            let _ = set_session_run_mode(
+                                                &session.project_name,
+                                                &session.metadata.session_id,
+                                                RunMode::Step,
+                                            );
+                                        }
+
+                                        // Divider
+                                        ui.add_space(4.0);
+                                        let (divider_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(1.0, 14.0),
+                                            Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(divider_rect, 0.0, colors::BORDER);
+                                        ui.add_space(4.0);
+
+                                        // Play/Pause button - drawn with shapes
+                                        let icon_size = egui::vec2(20.0, 18.0);
+                                        let (rect, response) =
+                                            ui.allocate_exact_size(icon_size, Sense::click());
+
+                                        if is_running {
+                                            // In Step mode or with pause_queued, show as "pausing"
+                                            let is_pausing = pause_queued || !is_auto;
+                                            let icon_color = if is_pausing {
+                                                colors::TEXT_MUTED
+                                            } else {
+                                                colors::TEXT_PRIMARY
+                                            };
+
+                                            // Draw pause icon (two vertical bars)
+                                            let center = rect.center();
+                                            let bar_width = 3.0;
+                                            let bar_height = 10.0;
+                                            let gap = 3.0;
+
+                                            // Left bar
+                                            let left_bar = Rect::from_center_size(
+                                                Pos2::new(center.x - gap, center.y),
+                                                egui::vec2(bar_width, bar_height),
+                                            );
+                                            ui.painter().rect_filled(left_bar, 1.0, icon_color);
+
+                                            // Right bar
+                                            let right_bar = Rect::from_center_size(
+                                                Pos2::new(center.x + gap, center.y),
+                                                egui::vec2(bar_width, bar_height),
+                                            );
+                                            ui.painter().rect_filled(right_bar, 1.0, icon_color);
+
+                                            // Draw spinning arc when pausing
+                                            if is_pausing {
+                                                let time = ui.input(|i| i.time);
+                                                let rotation = (time * 2.0) as f32; // Rotation speed
+                                                let arc_radius = 9.0;
+                                                let arc_width = 1.5;
+                                                let arc_length = std::f32::consts::PI * 1.5; // 270 degrees
+
+                                                // Draw arc as a series of line segments
+                                                let segments = 20;
+                                                let start_angle = rotation;
+                                                let mut points = Vec::with_capacity(segments + 1);
+                                                for i in 0..=segments {
+                                                    let t = i as f32 / segments as f32;
+                                                    let angle = start_angle + t * arc_length;
+                                                    let x = center.x + arc_radius * angle.cos();
+                                                    let y = center.y + arc_radius * angle.sin();
+                                                    points.push(Pos2::new(x, y));
+                                                }
+
+                                                // Draw the arc with a stroke
+                                                let arc_color = Color32::from_rgba_unmultiplied(
+                                                    colors::ACCENT.r(),
+                                                    colors::ACCENT.g(),
+                                                    colors::ACCENT.b(),
+                                                    180,
+                                                );
+                                                for i in 0..points.len() - 1 {
+                                                    ui.painter().line_segment(
+                                                        [points[i], points[i + 1]],
+                                                        Stroke::new(arc_width, arc_color),
+                                                    );
+                                                }
+
+                                                ui.ctx().request_repaint();
+                                                response.on_hover_text(
+                                                    "Pausing after current story...",
+                                                );
+                                            } else {
+                                                if response.hovered() {
+                                                    ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                }
+                                                if response.clicked() {
+                                                    let _ = request_session_pause(
+                                                        &session.project_name,
+                                                        &session.metadata.session_id,
+                                                    );
+                                                }
+                                                response.on_hover_text("Pause after this story");
+                                            }
+                                        } else if is_resumable {
+                                            // Draw play icon (triangle) with green background
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                rounding::SMALL,
+                                                play_green_subtle,
+                                            );
+
+                                            let center = rect.center();
+                                            let size = 5.0;
+                                            // Triangle pointing right
+                                            let points = vec![
+                                                Pos2::new(center.x - size * 0.6, center.y - size),
+                                                Pos2::new(center.x - size * 0.6, center.y + size),
+                                                Pos2::new(center.x + size, center.y),
+                                            ];
+                                            ui.painter().add(egui::Shape::convex_polygon(
+                                                points,
+                                                play_green,
+                                                Stroke::NONE,
+                                            ));
+
+                                            if response.hovered() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
+                                            if response.clicked() {
+                                                let force_auto = is_auto;
+                                                let _ = spawn_resume_process(session, force_auto);
+                                            }
+
+                                            let mode_text = if is_auto { "Auto" } else { "Step" };
+                                            response.on_hover_text(format!(
+                                                "Resume in {} mode",
+                                                mode_text
+                                            ));
+                                        }
+                                    });
+                                });
+
+                            // Current story
+                            if let Some(ref run) = session.run {
+                                if let Some(ref story_id) = run.current_story {
+                                    ui.add_space(spacing::SM);
+                                    ui.label(
+                                        egui::RichText::new(story_id)
+                                            .font(typography::font(
+                                                FontSize::Body,
+                                                FontWeight::Regular,
+                                            ))
+                                            .color(colors::TEXT_MUTED),
+                                    );
+                                }
+                            }
+
+                            // Duration
+                            if let Some(ref run) = session.run {
+                                ui.add_space(spacing::MD);
+                                ui.label(
+                                    egui::RichText::new(format_run_duration(
+                                        run.started_at,
+                                        run.finished_at,
+                                    ))
+                                    .font(typography::font(FontSize::Body, FontWeight::Regular))
+                                    .color(colors::TEXT_MUTED),
+                                );
+                            }
+
+                            // Infinity animation for non-idle, non-terminal states with progress
+                            if state != MachineState::Idle
+                                && !is_terminal_state(state)
+                                && session.progress.is_some()
+                            {
+                                ui.add_space(spacing::MD);
+
+                                // Animation is 1/3 of content width, capped at 150px
+                                let max_animation_width = (content_width / 3.0).min(150.0);
+
+                                if max_animation_width > 30.0 {
+                                    let animation_height = 12.0;
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(max_animation_width, animation_height),
+                                        Sense::hover(),
+                                    );
+                                    let time = ui.ctx().input(|i| i.time) as f32;
+                                    super::animation::render_infinity(
+                                        ui.painter(),
+                                        time,
+                                        rect,
+                                        state_color,
+                                        1.0,
+                                    );
+                                    super::animation::schedule_frame(ui.ctx());
+                                }
+                            }
 
                             ui.add_space(spacing::LG);
 
@@ -9240,6 +9476,24 @@ ui.label(
                                 egui::RichText::new("Output")
                                     .font(typography::font(FontSize::Body, FontWeight::Medium))
                                     .color(colors::TEXT_SECONDARY),
+                            );
+
+                            ui.add_space(spacing::SM);
+
+                            // State text
+                            let is_paused_step_mode = is_session_resumable(session)
+                                && matches!(session.metadata.run_mode, RunMode::Step);
+                            let state_text = if appears_stuck {
+                                format!("{} (Not responding)", format_state(state))
+                            } else if is_paused_step_mode {
+                                format!("{} (Step)", format_state(state))
+                            } else {
+                                format_state(state).to_string()
+                            };
+                            ui.label(
+                                egui::RichText::new(state_text)
+                                    .font(typography::font(FontSize::Body, FontWeight::Medium))
+                                    .color(colors::TEXT_PRIMARY),
                             );
 
                             ui.add_space(spacing::SM);

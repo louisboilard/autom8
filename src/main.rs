@@ -493,11 +493,104 @@ mod tests {
 
     #[test]
     fn test_version_flag() {
-        let result = Cli::try_parse_from(["autom8", "--version"]);
-        assert_eq!(
-            result.err().unwrap().kind(),
-            clap::error::ErrorKind::DisplayVersion
-        );
+        for flag in ["--version", "-V"] {
+            let result = Cli::try_parse_from(["autom8", flag]);
+            assert!(result.is_err());
+            assert_eq!(
+                result.err().unwrap().kind(),
+                clap::error::ErrorKind::DisplayVersion
+            );
+        }
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
+    }
+
+    #[test]
+    fn test_removed_flags_error() {
+        // --tui flag removed
+        assert!(Cli::try_parse_from(["autom8", "--tui"]).is_err());
+        assert!(Cli::try_parse_from(["autom8", "-t"]).is_err());
+
+        // --project flag removed from monitor and gui
+        assert!(Cli::try_parse_from(["autom8", "monitor", "--project", "x"]).is_err());
+        assert!(Cli::try_parse_from(["autom8", "gui", "-p", "x"]).is_err());
+    }
+
+    // =========================================================================
+    // State management tests
+    // =========================================================================
+
+    #[test]
+    fn test_state_manager_load_save_clear() {
+        use autom8::state::{RunState, StateManager};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // No state initially
+        assert!(sm.load_current().unwrap().is_none());
+
+        // Save and load
+        let state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        sm.save(&state).unwrap();
+        let loaded = sm.load_current().unwrap().unwrap();
+        assert_eq!(loaded.branch, "feature/test");
+
+        // Clear
+        sm.clear_current(false).unwrap();
+        assert!(sm.load_current().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_state_archive_workflow() {
+        use autom8::state::{RunState, StateManager};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
+
+        // Archive multiple states
+        let state1 = RunState::new(PathBuf::from("spec1.json"), "feature/first".to_string());
+        let state2 = RunState::new(PathBuf::from("spec2.json"), "feature/second".to_string());
+
+        let archive1 = sm.archive(&state1).unwrap();
+        let archive2 = sm.archive(&state2).unwrap();
+
+        assert!(archive1.exists());
+        assert!(archive2.exists());
+
+        let archived = sm.list_archived().unwrap();
+        assert_eq!(archived.len(), 2);
+    }
+
+    #[test]
+    fn test_run_state_fields() {
+        use autom8::state::RunState;
+
+        let mut state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
+        assert_eq!(state.branch, "feature/test");
+        assert!(state.current_story.is_none());
+
+        state.current_story = Some("US-001".to_string());
+        assert_eq!(state.current_story, Some("US-001".to_string()));
+    }
+
+    // =========================================================================
+    // Config tests
+    // =========================================================================
+
+    #[test]
+    fn test_config_defaults_and_paths() {
+        let default_config = autom8::config::Config::default();
+        assert!(default_config.review);
+        assert!(default_config.commit);
+        assert!(default_config.pull_request);
+        assert!(default_config.worktree);
+
+        let global_path = autom8::config::global_config_path().unwrap();
+        let project_path = autom8::config::project_config_path().unwrap();
+        assert!(global_path.ends_with("config.toml"));
+        assert_ne!(global_path, project_path);
     }
 
     #[test]
@@ -605,60 +698,5 @@ mod tests {
         if let Some(Commands::Describe { project_name }) = cli.command {
             assert!(project_name.is_none());
         }
-    }
-
-    // =========================================================================
-    // State management tests - properly isolated with TempDir
-    // =========================================================================
-
-    #[test]
-    fn test_state_manager_load_save_clear() {
-        use autom8::state::{RunState, StateManager};
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        assert!(sm.load_current().unwrap().is_none());
-
-        let state = RunState::new(PathBuf::from("test.json"), "feature/test".to_string());
-        sm.save(&state).unwrap();
-        let loaded = sm.load_current().unwrap().unwrap();
-        assert_eq!(loaded.branch, "feature/test");
-
-        sm.clear_current().unwrap();
-        assert!(sm.load_current().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_state_archive_workflow() {
-        use autom8::state::{RunState, StateManager};
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let sm = StateManager::with_dir(temp_dir.path().to_path_buf());
-
-        let state1 = RunState::new(PathBuf::from("spec1.json"), "feature/first".to_string());
-        let state2 = RunState::new(PathBuf::from("spec2.json"), "feature/second".to_string());
-
-        let archive1 = sm.archive(&state1).unwrap();
-        let archive2 = sm.archive(&state2).unwrap();
-
-        assert!(archive1.exists());
-        assert!(archive2.exists());
-        assert_eq!(sm.list_archived().unwrap().len(), 2);
-    }
-
-    // =========================================================================
-    // Config defaults test - pure logic, no filesystem access
-    // =========================================================================
-
-    #[test]
-    fn test_config_defaults() {
-        let config = autom8::config::Config::default();
-        assert!(config.review);
-        assert!(config.commit);
-        assert!(config.pull_request);
-        assert!(config.worktree);
     }
 }
