@@ -590,30 +590,47 @@ impl Runner {
         Autom8Error::Interrupted
     }
 
-    /// Handle pause request: clear flag, set Interrupted status, save, and display message.
+    /// Handle pause request (from GUI or Step mode).
+    ///
+    /// This method:
+    /// 1. Clears the pause request flag
+    /// 2. Updates state status to `Interrupted`
+    /// 3. Saves state and session metadata (`is_running: false`)
+    /// 4. Clears the live output file
+    /// 5. Displays pause message to user
+    ///
     /// Run mode is preserved for resume.
+    ///
+    /// Returns `Err(Autom8Error::Interrupted)` to signal the run was paused.
     fn handle_pause(&self, state: &mut RunState) -> Autom8Error {
+        // Clear the pause request flag
         if let Err(e) = self.state_manager.clear_pause_request() {
             eprintln!("Warning: failed to clear pause request: {}", e);
         }
 
+        // Update state to Interrupted (preserves machine_state)
         state.status = RunStatus::Interrupted;
         state.finished_at = Some(chrono::Utc::now());
 
+        // Save state and session metadata
         if let Err(e) = self.state_manager.save(state) {
             eprintln!("Warning: failed to save state: {}", e);
         }
 
+        // Clear live output file
         if let Err(e) = self.state_manager.clear_live() {
             eprintln!("Warning: failed to clear live output: {}", e);
         }
 
+        // Display message to user
         print_paused();
 
         Autom8Error::Interrupted
     }
 
-    /// Check for pause request at checkpoint. Returns error if paused.
+    /// Check if a pause is requested and handle it if so.
+    ///
+    /// Returns `Some(Autom8Error::Interrupted)` if paused, `None` otherwise.
     fn check_pause(&self, state: &mut RunState) -> Option<Autom8Error> {
         if self.state_manager.is_pause_requested() {
             Some(self.handle_pause(state))
@@ -622,9 +639,13 @@ impl Runner {
         }
     }
 
-    /// In Step mode, request pause after story completion.
+    /// Check if Step mode requires a pause after story completion.
+    ///
+    /// In Step mode, the runner automatically pauses after each story completes.
+    /// This sets the pause_requested flag which will be picked up at the next checkpoint.
     fn check_step_mode_pause(&self) {
         if self.state_manager.get_run_mode() == RunMode::Step {
+            // Set pause_requested so the next checkpoint will pause
             if let Err(e) = self.state_manager.request_pause() {
                 eprintln!("Warning: failed to request pause for Step mode: {}", e);
             }

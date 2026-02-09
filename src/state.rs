@@ -1315,14 +1315,20 @@ impl StateManager {
     // Pause and Run Mode Methods
     // =========================================================================
 
-    /// Request a pause for this session. Runner checks this at checkpoints.
+    /// Request a pause for this session.
+    ///
+    /// Sets `pause_requested: true` in the session metadata. The runner
+    /// will check this flag at checkpoints and stop gracefully.
     pub fn request_pause(&self) -> Result<()> {
         self.update_metadata_field(|metadata| {
             metadata.pause_requested = true;
         })
     }
 
-    /// Check if a pause has been requested. Returns false if metadata doesn't exist.
+    /// Check if a pause has been requested for this session.
+    ///
+    /// Returns `true` if `pause_requested` is set in metadata, `false` otherwise.
+    /// Returns `false` if metadata doesn't exist.
     pub fn is_pause_requested(&self) -> bool {
         self.load_metadata()
             .ok()
@@ -1332,20 +1338,27 @@ impl StateManager {
     }
 
     /// Clear the pause request for this session.
+    ///
+    /// Resets `pause_requested: false` in the session metadata.
     pub fn clear_pause_request(&self) -> Result<()> {
         self.update_metadata_field(|metadata| {
             metadata.pause_requested = false;
         })
     }
 
-    /// Set the run mode (Auto or Step) for this session.
+    /// Set the run mode for this session.
+    ///
+    /// # Arguments
+    /// * `mode` - The run mode to set (Auto or Step)
     pub fn set_run_mode(&self, mode: RunMode) -> Result<()> {
         self.update_metadata_field(|metadata| {
             metadata.run_mode = mode;
         })
     }
 
-    /// Get the run mode. Returns Auto if metadata doesn't exist.
+    /// Get the run mode for this session.
+    ///
+    /// Returns `RunMode::Auto` if metadata doesn't exist or can't be read.
     pub fn get_run_mode(&self) -> RunMode {
         self.load_metadata()
             .ok()
@@ -1354,7 +1367,10 @@ impl StateManager {
             .unwrap_or(RunMode::Auto)
     }
 
-    /// Update a single metadata field without affecting others.
+    /// Helper to update a single field in metadata without affecting other fields.
+    ///
+    /// Loads existing metadata (or creates default), applies the update function,
+    /// and saves it back.
     fn update_metadata_field<F>(&self, update_fn: F) -> Result<()>
     where
         F: FnOnce(&mut SessionMetadata),
