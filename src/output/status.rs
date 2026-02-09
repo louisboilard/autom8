@@ -641,6 +641,8 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
+                run_mode: crate::state::RunMode::Auto,
                 spec_json_path: None,
             },
             machine_state,

@@ -658,11 +658,6 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
                 Err(_) => continue, // Skip if can't read
             };
 
-            // Skip non-running sessions
-            if !metadata.is_running {
-                continue;
-            }
-
             // Check if worktree was deleted (stale session)
             let is_stale = !metadata.worktree_path.exists();
             let is_main_session = metadata.session_id == MAIN_SESSION_ID;
@@ -699,6 +694,30 @@ fn load_sessions(project_filter: Option<&str>) -> Vec<SessionData> {
             let live_output: Option<LiveState> = std::fs::read_to_string(&live_path)
                 .ok()
                 .and_then(|content| serde_json::from_str(&content).ok());
+
+            // Determine if this session should be included in the Active Runs view.
+            // Include sessions that are:
+            // 1. Currently running (is_running: true) - shows Pause button
+            // 2. Interrupted/paused (has run with status Interrupted or Running but not is_running)
+            //    - shows mode toggle and Resume button
+            // Exclude sessions with completed/failed runs that aren't running.
+            let should_include = if metadata.is_running {
+                // Running sessions are always included
+                true
+            } else if let Some(ref run_state) = run {
+                // Include interrupted sessions (paused) that can be resumed
+                matches!(
+                    run_state.status,
+                    RunStatus::Interrupted | RunStatus::Running
+                )
+            } else {
+                // No run state - skip
+                false
+            };
+
+            if !should_include {
+                continue;
+            }
 
             // Load spec to get progress information and cache user stories
             let (progress, cached_user_stories) = run
@@ -944,9 +963,223 @@ pub fn load_project_run_history(project_name: &str) -> Result<Vec<RunHistoryEntr
     Ok(history)
 }
 
+// ============================================================================
+// Session Control Actions (US-003: GUI Pause Button)
+// ============================================================================
+
+/// Request a pause for a session.
+///
+/// This function sets the `pause_requested` flag in the session's metadata.
+/// The runner will check this flag at checkpoints and stop gracefully.
+///
+/// # Arguments
+/// * `project` - The project name
+/// * `session_id` - The session ID to pause
+///
+/// # Returns
+/// * `Result<()>` - Success or an error if the pause request failed
+///
+/// # Example
+/// ```ignore
+/// // Request pause for the main session
+/// request_session_pause("my-project", "main")?;
+///
+/// // Request pause for a worktree session
+/// request_session_pause("my-project", "abc12345")?;
+/// ```
+pub fn request_session_pause(project: &str, session_id: &str) -> Result<()> {
+    let sm = StateManager::for_project_session(project, session_id.to_string())?;
+    sm.request_pause()
+}
+
+/// Check if a session is in "Pause Queued" state.
+///
+/// A session is in "Pause Queued" state when:
+/// - `pause_requested` is true (pause has been requested)
+/// - `is_running` is true (session is still actively running)
+///
+/// This state indicates that the user has clicked Pause, but the runner
+/// hasn't reached a checkpoint yet to actually pause.
+///
+/// # Arguments
+/// * `session` - The session data to check
+///
+/// # Returns
+/// * `true` if the session is in "Pause Queued" state
+pub fn is_pause_queued(session: &SessionData) -> bool {
+    session.metadata.pause_requested && session.metadata.is_running
+}
+
+// ============================================================================
+// Session Control Actions (US-004: GUI Mode Toggle)
+// ============================================================================
+
+/// Set the run mode for a session.
+///
+/// This function sets the `run_mode` field in the session's metadata.
+/// The mode determines whether the runner continues automatically (Auto)
+/// or pauses after each story (Step).
+///
+/// # Arguments
+/// * `project` - The project name
+/// * `session_id` - The session ID to modify
+/// * `mode` - The new run mode (Auto or Step)
+///
+/// # Returns
+/// * `Result<()>` - Success or an error if the mode change failed
+///
+/// # Example
+/// ```ignore
+/// use crate::state::RunMode;
+///
+/// // Set mode to Step for the main session
+/// set_session_run_mode("my-project", "main", RunMode::Step)?;
+///
+/// // Set mode to Auto for a worktree session
+/// set_session_run_mode("my-project", "abc12345", RunMode::Auto)?;
+/// ```
+pub fn set_session_run_mode(
+    project: &str,
+    session_id: &str,
+    mode: crate::state::RunMode,
+) -> Result<()> {
+    let sm = StateManager::for_project_session(project, session_id.to_string())?;
+    sm.set_run_mode(mode)
+}
+
+/// Check if a session is in a pausable/resumable state.
+///
+/// A session can have its mode toggled when:
+/// - It's not currently running (is_running: false) - i.e., it's paused/interrupted
+/// - The run status is NOT Completed (we don't toggle mode for finished runs)
+///
+/// This function helps determine whether to show the mode toggle in the UI.
+///
+/// # Arguments
+/// * `session` - The session data to check
+///
+/// # Returns
+/// * `true` if the session can have its mode toggled
+pub fn is_mode_toggleable(session: &SessionData) -> bool {
+    // Must not be running (paused/interrupted state)
+    if session.metadata.is_running {
+        return false;
+    }
+
+    // Check if there's a run and if it's not completed
+    if let Some(ref run) = session.run {
+        // Don't show toggle for completed runs
+        !matches!(run.status, crate::state::RunStatus::Completed)
+    } else {
+        // No run state - can't toggle
+        false
+    }
+}
+
+// ============================================================================
+// Session Control Actions (US-005: GUI Resume Dropdown Button)
+// ============================================================================
+
+/// Check if a session can be resumed.
+///
+/// A session is resumable when:
+/// - It's not currently running (is_running: false)
+/// - The run status is NOT Completed
+///
+/// This is the same condition as `is_mode_toggleable` - sessions that can
+/// have their mode toggled can also be resumed.
+///
+/// # Arguments
+/// * `session` - The session data to check
+///
+/// # Returns
+/// * `true` if the session can be resumed
+pub fn is_session_resumable(session: &SessionData) -> bool {
+    // Resumable = mode toggleable (same conditions)
+    is_mode_toggleable(session)
+}
+
+/// Spawn a detached `autom8 resume` process for a session.
+///
+/// This function spawns the resume command as a detached process that will
+/// continue running even if the GUI is closed. The resume happens in the
+/// session's worktree directory.
+///
+/// # Arguments
+/// * `session` - The session data containing worktree path and session ID
+/// * `auto_mode` - If true, set mode to Auto before resuming
+///
+/// # Returns
+/// * `Ok(())` if the process was spawned successfully
+/// * `Err(...)` if spawning failed
+///
+/// # Example
+/// ```ignore
+/// // Resume in current mode
+/// spawn_resume_process(&session, false)?;
+///
+/// // Resume in Auto mode
+/// spawn_resume_process(&session, true)?;
+/// ```
+pub fn spawn_resume_process(session: &SessionData, auto_mode: bool) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    // If auto mode requested, set the mode first
+    if auto_mode {
+        set_session_run_mode(
+            &session.project_name,
+            &session.metadata.session_id,
+            crate::state::RunMode::Auto,
+        )?;
+    }
+
+    // Get the current executable path
+    let exe = std::env::current_exe().map_err(|e| {
+        crate::error::Autom8Error::StateError(format!("Failed to get current executable: {}", e))
+    })?;
+
+    // Build the resume command
+    let mut cmd = Command::new(&exe);
+    cmd.arg("resume");
+    cmd.arg("--session");
+    cmd.arg(&session.metadata.session_id);
+
+    // Set the working directory to the worktree path
+    cmd.current_dir(&session.metadata.worktree_path);
+
+    // Detach the process so it continues running after GUI closes
+    // Redirect stdin/stdout/stderr to null to fully detach
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
+    // Platform-specific detachment
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Create a new process group so the process doesn't die with the parent
+        cmd.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+        cmd.creation_flags(0x00000200 | 0x00000008);
+    }
+
+    // Spawn the process
+    cmd.spawn().map_err(|e| {
+        crate::error::Autom8Error::StateError(format!("Failed to spawn resume process: {}", e))
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RunMode;
     use chrono::Utc;
     use std::path::PathBuf;
 
@@ -989,6 +1222,8 @@ mod tests {
                 created_at: Utc::now(),
                 last_active_at: Utc::now(),
                 is_running,
+                pause_requested: false,
+                run_mode: crate::state::RunMode::Auto,
                 spec_json_path: None,
             },
             run: None,
@@ -1197,5 +1432,195 @@ mod tests {
         assert_eq!(history[0].run_id, "running");
         assert_eq!(history[1].run_id, "completed-new");
         assert_eq!(history[2].run_id, "completed-old");
+    }
+
+    // =========================================================================
+    // US-003: Pause Queued Tests
+    // =========================================================================
+
+    /// Test is_pause_queued returns true when pause_requested AND is_running
+    #[test]
+    fn test_us003_is_pause_queued_true_when_requested_and_running() {
+        let mut session = make_test_session(true, true, false);
+        session.metadata.pause_requested = true;
+
+        assert!(is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when not running
+    #[test]
+    fn test_us003_is_pause_queued_false_when_not_running() {
+        let mut session = make_test_session(true, false, false);
+        session.metadata.pause_requested = true;
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when pause not requested
+    #[test]
+    fn test_us003_is_pause_queued_false_when_not_requested() {
+        let session = make_test_session(true, true, false);
+        // pause_requested defaults to false in make_test_session
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    /// Test is_pause_queued returns false when both conditions not met
+    #[test]
+    fn test_us003_is_pause_queued_false_when_neither() {
+        let session = make_test_session(true, false, false);
+        // pause_requested defaults to false, is_running is false
+
+        assert!(!is_pause_queued(&session));
+    }
+
+    // =========================================================================
+    // US-004: Mode Toggle Tests
+    // =========================================================================
+
+    /// Helper to create a test session with a run state
+    fn make_test_session_with_run(
+        is_main: bool,
+        is_running: bool,
+        run_status: RunStatus,
+    ) -> SessionData {
+        SessionData {
+            project_name: "test-project".to_string(),
+            metadata: SessionMetadata {
+                session_id: if is_main { "main" } else { "abc123" }.to_string(),
+                worktree_path: PathBuf::from("/path/to/repo"),
+                branch_name: "test-branch".to_string(),
+                created_at: Utc::now(),
+                last_active_at: Utc::now(),
+                is_running,
+                pause_requested: false,
+                run_mode: RunMode::Auto,
+                spec_json_path: None,
+            },
+            run: Some(RunState {
+                run_id: "test-run".to_string(),
+                status: run_status,
+                machine_state: MachineState::Idle,
+                spec_json_path: PathBuf::from("/path/to/spec.json"),
+                spec_md_path: None,
+                branch: "test-branch".to_string(),
+                current_story: None,
+                iteration: 0,
+                review_iteration: 0,
+                started_at: Utc::now(),
+                finished_at: None,
+                iterations: Vec::new(),
+                config: None,
+                knowledge: Default::default(),
+                pre_story_commit: None,
+                session_id: None,
+                total_usage: None,
+                phase_usage: Default::default(),
+            }),
+            progress: None,
+            load_error: None,
+            is_main_session: is_main,
+            is_stale: false,
+            live_output: None,
+            cached_user_stories: None,
+        }
+    }
+
+    /// Test is_mode_toggleable returns true for paused/interrupted sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_true_for_interrupted() {
+        let session = make_test_session_with_run(true, false, RunStatus::Interrupted);
+        assert!(is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns true for failed sessions (can be resumed)
+    #[test]
+    fn test_us004_is_mode_toggleable_true_for_failed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Failed);
+        assert!(is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false for running sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_running() {
+        let session = make_test_session_with_run(true, true, RunStatus::Running);
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false for completed sessions
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_completed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Completed);
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    /// Test is_mode_toggleable returns false when no run state
+    #[test]
+    fn test_us004_is_mode_toggleable_false_for_no_run() {
+        let session = make_test_session(true, false, false);
+        // No run state in make_test_session
+        assert!(!is_mode_toggleable(&session));
+    }
+
+    // =========================================================================
+    // US-005: Resume Dropdown Tests
+    // =========================================================================
+
+    /// Test is_session_resumable returns true for interrupted sessions
+    #[test]
+    fn test_us005_is_session_resumable_true_for_interrupted() {
+        let session = make_test_session_with_run(true, false, RunStatus::Interrupted);
+        assert!(is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns true for failed sessions
+    #[test]
+    fn test_us005_is_session_resumable_true_for_failed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Failed);
+        assert!(is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false for running sessions
+    #[test]
+    fn test_us005_is_session_resumable_false_for_running() {
+        let session = make_test_session_with_run(true, true, RunStatus::Running);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false for completed sessions
+    #[test]
+    fn test_us005_is_session_resumable_false_for_completed() {
+        let session = make_test_session_with_run(true, false, RunStatus::Completed);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable returns false when no run state
+    #[test]
+    fn test_us005_is_session_resumable_false_for_no_run() {
+        let session = make_test_session(true, false, false);
+        assert!(!is_session_resumable(&session));
+    }
+
+    /// Test is_session_resumable is equivalent to is_mode_toggleable
+    #[test]
+    fn test_us005_is_session_resumable_equals_is_mode_toggleable() {
+        // Test with various session configurations - both functions should return same value
+        let configs = vec![
+            (true, false, RunStatus::Interrupted),
+            (true, false, RunStatus::Failed),
+            (true, true, RunStatus::Running),
+            (true, false, RunStatus::Completed),
+            (false, false, RunStatus::Interrupted),
+        ];
+
+        for (is_main, is_running, status) in configs {
+            let session = make_test_session_with_run(is_main, is_running, status);
+            assert_eq!(
+                is_session_resumable(&session),
+                is_mode_toggleable(&session),
+                "is_session_resumable and is_mode_toggleable should match for session with is_main={}, is_running={}, status={:?}",
+                is_main, is_running, status
+            );
+        }
     }
 }
