@@ -40,7 +40,7 @@ crossterm = "0.29"
 sha2 = "0.10"
 hex = "0.4"
 ctrlc = "3"
-eframe = "0.30"
+eframe = "0.33"
 egui = "0.30"
 egui_extras = { version = "0.30", features = ["all_loaders"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
